@@ -76,15 +76,13 @@ std::vector<int32_t> mask_from_logits(const float* logits, int32_t logit_height,
         throw std::invalid_argument("birefnet mask target size must be positive");
 
     std::vector<int32_t> mask(static_cast<std::size_t>(out_height) * out_width);
-    const float scale_y = static_cast<float>(logit_height) / static_cast<float>(out_height);
-    const float scale_x = static_cast<float>(logit_width) / static_cast<float>(out_width);
+    // Match the official reference's floor-based nearest-neighbor coordinates.
     for (int32_t row = 0; row < out_height; ++row) {
-        const auto source_row = std::min(
-            logit_height - 1, static_cast<int32_t>((static_cast<float>(row) + 0.5F) * scale_y));
+        const auto source_row =
+            static_cast<int32_t>(static_cast<int64_t>(row) * logit_height / out_height);
         for (int32_t column = 0; column < out_width; ++column) {
             const auto source_column =
-                std::min(logit_width - 1,
-                         static_cast<int32_t>((static_cast<float>(column) + 0.5F) * scale_x));
+                static_cast<int32_t>(static_cast<int64_t>(column) * logit_width / out_width);
             const float logit =
                 logits[static_cast<std::size_t>(source_row) * logit_width + source_column];
             const float probability = 1.0F / (1.0F + std::exp(-logit));

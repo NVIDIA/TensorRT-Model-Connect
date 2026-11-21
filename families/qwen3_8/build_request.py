@@ -37,6 +37,8 @@ class BuildRequest:
     context_parallel_size: ClassVar[int] = 1
     quantization: str | None = None
     fp32_layers: tuple[int, ...] = ()
+    mtp_seq_len: int | None = None
+    prefill_chunk_len: int | None = None
     dynamic_kv_cache: ClassVar[bool] = False
     verbose: bool = False
     graph_transform: GraphTransform | None = None
@@ -64,6 +66,16 @@ class BuildRequest:
             raise ValueError("quantization must be non-empty when provided")
         if any(layer < 0 for layer in self.fp32_layers):
             raise ValueError("fp32_layers must contain non-negative indices")
+        if self.mtp_seq_len is not None and self.mtp_seq_len < 2:
+            raise ValueError("mtp_seq_len must be >= 2 when provided")
+        if self.prefill_chunk_len is not None and self.prefill_chunk_len != 0 and (
+            self.prefill_chunk_len < 2
+            or (self.prefill_chunk_len < 64 and self.prefill_chunk_len & (self.prefill_chunk_len - 1))
+            or (self.prefill_chunk_len >= 64 and self.prefill_chunk_len % 64)
+        ):
+            raise ValueError(
+                "prefill_chunk_len must be 0 (single-token prefill), a power of two below 64, "
+                "or a multiple of 64")
         if not isinstance(self.dynamic_kv_cache, bool):
             raise ValueError("dynamic_kv_cache must be a bool")
         if self.graph_transform is not None and not callable(self.graph_transform):
@@ -91,4 +103,10 @@ def coerce_request(request: object) -> BuildRequest:
     names = {field.name for field in fields(BuildRequest)}
     if unknown := set(vars(request)) - names - set(unsupported):
         raise ValueError(f"unknown qwen3_8 build inputs: {sorted(unknown)}")
-    return BuildRequest(**{name: getattr(request, name) for name in names})
+    # Knobs only this family owns are absent from the shared core request.
+    family_defaults = {"prefill_chunk_len": None}
+    return BuildRequest(**{
+        name: getattr(request, name, family_defaults[name]) if name in family_defaults
+        else getattr(request, name)
+        for name in names
+    })

@@ -6,6 +6,13 @@
 The graph is a direct inference-only implementation of LeRobot's ACTPolicy:
 mean/std preprocessing, ResNet-18 image features, four post-norm transformer
 encoder layers, one post-norm decoder layer, and action unnormalization.
+
+``precision`` selects the work type of the graph: ``fp32`` (the default of the
+family) or ``fp16``. The engine I/O is float32 in both: an fp16 engine
+normalizes the observation in float32, runs the backbone, the transformer and
+the action head in fp16, and unnormalizes the actions in float32. The one other
+float32 island of an fp16 engine is the attention core of the decoder
+cross-attention (see ``_ActGraph.attention``).
 """
 
 from __future__ import annotations
@@ -33,6 +40,8 @@ _STATE_DIM = 14
 _LATENT_DIM = 32
 _FROZEN_BATCH_NORM_EPS = 1.0e-5
 _LAYER_NORM_EPS = 1.0e-5
+# Work type per build precision: (numpy, TensorRT).
+_WORK_TYPES = {"fp32": (np.float32, trt.float32), "fp16": (np.float16, trt.float16)}
 
 
 def _position_embedding_2d(height: int, width: int, dimension: int) -> np.ndarray:
@@ -57,11 +66,24 @@ def _position_embedding_2d(height: int, width: int, dimension: int) -> np.ndarra
 
 
 class _ActGraph:
-    def __init__(self, trt: Any, network: Any, weights: dict[str, np.ndarray]) -> None:
+    def __init__(
+        self,
+        trt: Any,
+        network: Any,
+        weights: dict[str, np.ndarray],
+        precision: str = "fp32",
+    ) -> None:
         self.trt = trt
         self.network = network
         self.weights = weights
         self._host_weights: list[np.ndarray] = []
+        self.work_np, self.work_trt = _WORK_TYPES[precision]
+
+    def cast(self, tensor: Any, dtype: Any, name: str) -> Any:
+        """Cast ``tensor`` to ``dtype``; no layer is added when it already has that type."""
+        if tensor.dtype == dtype:
+            return tensor
+        return self.layer(self.network.add_cast(tensor, dtype), "cast", name).get_output(0)
 
     def layer(self, value: Any, kind: str, name: str) -> Any:
         if value is None:
@@ -81,8 +103,9 @@ class _ActGraph:
         self._host_weights.append(value)
         return value
 
-    def constant(self, value: Any, name: str) -> Any:
-        array = np.ascontiguousarray(value, dtype=np.float32)
+    def constant(self, value: Any, name: str, dtype: Any = None) -> Any:
+        """A constant in the work type, or in ``dtype`` when given."""
+        array = np.ascontiguousarray(value, dtype=self.work_np if dtype is None else dtype)
         self._host_weights.append(array)
         return self.layer(
             self.network.add_constant(array.shape, self.trt.Weights(array)), "constant", name
@@ -203,8 +226,8 @@ class _ActGraph:
         stride: int = 1,
         padding: int = 0,
     ) -> Any:
-        weight = np.ascontiguousarray(weight, dtype=np.float32)
-        bias = np.ascontiguousarray(bias, dtype=np.float32)
+        weight = np.ascontiguousarray(weight, dtype=self.work_np)
+        bias = np.ascontiguousarray(bias, dtype=self.work_np)
         self._host_weights.extend((weight, bias))
         conv = self.layer(
             self.network.add_convolution_nd(
@@ -292,11 +315,17 @@ class _ActGraph:
         )
         mean = self.array("normalize_inputs.buffer_observation_images_top.mean", (3, 1, 1))
         std = self.array("normalize_inputs.buffer_observation_images_top.std", (3, 1, 1))
+        # The observation is normalized in float32 (the input type), then cast to the work type.
         image = self.div(
-            self.sub(image, self.constant(mean.reshape(1, 3, 1, 1), "image.mean"), "image.center"),
-            self.constant((std + np.float32(1.0e-8)).reshape(1, 3, 1, 1), "image.std"),
+            self.sub(
+                image,
+                self.constant(mean.reshape(1, 3, 1, 1), "image.mean", np.float32),
+                "image.center",
+            ),
+            self.constant((std + np.float32(1.0e-8)).reshape(1, 3, 1, 1), "image.std", np.float32),
             "image.normalize",
         )
+        image = self.cast(image, self.work_trt, "image.work_type")
         image = self.frozen_batch_norm_conv(
             image,
             "model.backbone.conv1",
@@ -341,7 +370,20 @@ class _ActGraph:
         *,
         query_tokens: int,
         key_tokens: int,
+        float32_core: bool = False,
     ) -> Any:
+        """Multi-head attention with the projections in the work type.
+
+        ``float32_core`` runs the scores, the softmax and the context product in
+        float32 (the projections stay in the work type). The fp16 decoder
+        cross-attention needs it: TensorRT 11.4 computes this fp16
+        matmul-softmax-matmul wrongly (its query, key and value projections
+        are right, its output is not), and the actions of such an engine are
+        off by up to 1.46 against LeRobot (mean 0.085) on B200 and B300.
+        TensorRT 11.1 computes it correctly, and the encoder self-attention is
+        correct in fp16 on both. A float32 core costs 3 to 5 percent of the fp16
+        latency. In an fp32 build it adds no layer.
+        """
         in_weight = self.array(f"{prefix}.in_proj_weight", (3 * _HIDDEN, _HIDDEN))
         in_bias = self.array(f"{prefix}.in_proj_bias", (3 * _HIDDEN,))
         q = self.linear_arrays(query, in_weight[:_HIDDEN], in_bias[:_HIDDEN], f"{name}.query")
@@ -379,6 +421,10 @@ class _ActGraph:
             ),
             f"{name}.scaled_query",
         )
+        if float32_core:
+            q = self.cast(q, self.trt.float32, f"{name}.query_core")
+            k = self.cast(k, self.trt.float32, f"{name}.key_core")
+            v = self.cast(v, self.trt.float32, f"{name}.value_core")
         scores = self.layer(
             self.network.add_matrix_multiply(
                 q,
@@ -401,6 +447,7 @@ class _ActGraph:
             "attention context",
             f"{name}.context_heads",
         ).get_output(0)
+        context = self.cast(context, self.work_trt, f"{name}.context_work_type")
         context = self.reshape(
             context,
             (query_tokens, _HIDDEN),
@@ -470,6 +517,7 @@ class _ActGraph:
             "decoder.cross_attention",
             query_tokens=_CHUNK_SIZE,
             key_tokens=_ENCODER_TOKENS,
+            float32_core=True,
         )
         hidden = self.layer_norm(
             self.add(hidden, cross_attention, "decoder.cross_attention_residual"),
@@ -490,12 +538,15 @@ class _ActGraph:
         normalized_state = self.div(
             self.sub(
                 state,
-                self.constant(state_mean.reshape(1, _STATE_DIM), "state.mean"),
+                self.constant(state_mean.reshape(1, _STATE_DIM), "state.mean", np.float32),
                 "state.center",
             ),
-            self.constant((state_std + np.float32(1.0e-8)).reshape(1, _STATE_DIM), "state.std"),
+            self.constant(
+                (state_std + np.float32(1.0e-8)).reshape(1, _STATE_DIM), "state.std", np.float32
+            ),
             "state.normalize",
         )
+        normalized_state = self.cast(normalized_state, self.work_trt, "state.work_type")
         latent = self.linear(
             self.constant(np.zeros((1, _LATENT_DIM), dtype=np.float32), "latent.zeros"),
             "model.encoder_latent_input_proj",
@@ -514,19 +565,42 @@ class _ActGraph:
         )
         encoder_hidden = self.encoder(hidden, positions)
         decoder_hidden = self.decoder(encoder_hidden, positions)
-        normalized_actions = self.linear(decoder_hidden, "model.action_head", "action.head")
+        normalized_actions = self.cast(
+            self.linear(decoder_hidden, "model.action_head", "action.head"),
+            self.trt.float32,
+            "action.float32",
+        )
         action_mean = self.array("unnormalize_outputs.buffer_action.mean", (_ACTION_DIM,))
         action_std = self.array("unnormalize_outputs.buffer_action.std", (_ACTION_DIM,))
         actions = self.add(
             self.mul(
                 normalized_actions,
-                self.constant(action_std.reshape(1, _ACTION_DIM), "action.std"),
+                self.constant(action_std.reshape(1, _ACTION_DIM), "action.std", np.float32),
                 "action.scale",
             ),
-            self.constant(action_mean.reshape(1, _ACTION_DIM), "action.mean"),
+            self.constant(action_mean.reshape(1, _ACTION_DIM), "action.mean", np.float32),
             "action.unnormalize",
         )
         return self.reshape(actions, (1, _CHUNK_SIZE, _ACTION_DIM), "action.output_shape")
+
+
+def define_act_network(network: Any, weights: dict[str, np.ndarray], precision: str) -> Any:
+    """Add the ACT graph to a strongly typed ``network``; returns the graph that owns the weights.
+
+    The returned object holds the host arrays that back the network constants: keep it alive
+    until the engine is built.
+    """
+    if precision not in _WORK_TYPES:
+        raise ValueError("The LeRobot ACT accuracy contract supports fp32 and fp16 builds only")
+    image = network.add_input("observation_image", trt.float32, (1, _IMAGE_HEIGHT, _IMAGE_WIDTH, 3))
+    state = network.add_input("observation_state", trt.float32, (1, _STATE_DIM))
+    if image is None or state is None:
+        raise RuntimeError("TensorRT rejected the LeRobot ACT observation inputs")
+    graph = _ActGraph(trt, network, weights, precision)
+    actions = graph.outputs(image, state)
+    actions.name = "actions"
+    network.mark_output(actions)
+    return graph
 
 
 def build_act_engine(
@@ -537,21 +611,15 @@ def build_act_engine(
     verbose: bool = False,
 ) -> bytes:
     del raw_config
-    if precision != "fp32":
-        raise ValueError("The LeRobot ACT accuracy contract supports fp32 builds only")
+    if precision not in _WORK_TYPES:
+        raise ValueError("The LeRobot ACT accuracy contract supports fp32 and fp16 builds only")
     logger = trt.Logger(trt.Logger.INFO if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     if network is None:
         raise RuntimeError("TensorRT failed to create the LeRobot ACT network")
-    image = network.add_input("observation_image", trt.float32, (1, _IMAGE_HEIGHT, _IMAGE_WIDTH, 3))
-    state = network.add_input("observation_state", trt.float32, (1, _STATE_DIM))
-    if image is None or state is None:
-        raise RuntimeError("TensorRT rejected the LeRobot ACT observation inputs")
-    graph = _ActGraph(trt, network, weights)
-    actions = graph.outputs(image, state)
-    actions.name = "actions"
-    network.mark_output(actions)
+    # The graph owns the host arrays behind the network constants; it lives until the build ends.
+    _graph = define_act_network(network, weights, precision)
 
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
@@ -566,7 +634,8 @@ def build_act_engine(
     if verbose:
         print(
             "[trtmc build] Building LeRobot ACT TensorRT graph "
-            f"({network.num_layers} layers, input=480x640, actions=100x14, precision=fp32) ...",
+            f"({network.num_layers} layers, input=480x640, actions=100x14, "
+            f"precision={precision}) ...",
             file=sys.stderr,
         )
     plan = builder.build_serialized_network(network, config)

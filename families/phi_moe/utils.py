@@ -12,7 +12,18 @@ import tensorrt as trt
 
 from . import graph_ops
 
+# TensorRT builder optimization level of the single-GPU engines. Level 3 (the TensorRT default)
+# makes the fp16 decode step 1.04x to 1.08x and prefill 1.04x to 1.09x faster than level 1 on
+# B200 and B300 (TensorRT 11.4), for a longer build.
+BUILDER_OPTIMIZATION_LEVEL = 3
 
+
+def decode_builder_optimization_level(quantized: bool) -> int:
+    """Optimization level of the single-token decode engine.
+
+    The FP8 decode engine stays at level 1: at level 3 it is 1.07x slower on B300.
+    """
+    return 1 if quantized else BUILDER_OPTIMIZATION_LEVEL
 
 
 @dataclass(frozen=True)
@@ -40,7 +51,7 @@ def create_builder_context(
         flags |= 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
     network = builder.create_network(flags)
     config = builder.create_builder_config()
-    config.builder_optimization_level = 1
+    config.builder_optimization_level = BUILDER_OPTIMIZATION_LEVEL
     if workspace_bytes is not None:
         config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)
     if disable_tf32:

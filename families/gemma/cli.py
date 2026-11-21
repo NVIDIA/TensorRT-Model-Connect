@@ -26,6 +26,7 @@ def build_bundle(request: BuildRequest, output: Path) -> None:
     from .model import build as build_model
 
     writer = BundleWriter(output)
+    writer.record_build(request)
     try:
         with graph_transform(request.graph_transform):
             build_model(request, writer)
@@ -36,22 +37,33 @@ def build_bundle(request: BuildRequest, output: Path) -> None:
 
 def build(
     *, model: str, output: Path, revision: str | None = None,
-    task: str = "text_generation", precision: str | None = None, backend: str = "trt",
+    task: str | None = None, precision: str | None = None, backend: str = "trt",
     max_sequence_length: int | None = None, tensor_parallel_size: int = 1,
     verbose: bool = False,
+    quantization: str | None = None,
     execution_variant: str | None = None, companion: list[str] | tuple[str, ...] = (),
 ) -> int:
     """Run the declared owner command; help never imports this handler."""
     execution = execution_inputs(execution_variant, companion)
-    if precision is None:
-        precision = "fp16" if execution is not None else "fp32"
     model_dir = resolve_model(model, revision)
-    resolve_family(load_model_metadata(model_dir), "gemma")
+    metadata = load_model_metadata(model_dir)
+    resolve_family(metadata, "gemma")
+    from .support import describe
+
+    support = describe(metadata)
+    task = task or ("text_generation" if execution is not None else support.default_task)
+    if task not in support.tasks:
+        raise ValueError(f"Gemma checkpoint does not support task={task!r}")
+    if precision is None:
+        edge_default = execution is not None or metadata.config.get("model_type") in {
+            "gemma4", "gemma4_unified",
+        }
+        precision = "fp16" if edge_default else "fp32"
     request = BuildRequest(
         model_dir=model_dir, output_path=output, family="gemma",
         task=task, precision=precision, backend=backend,
         max_sequence_length=max_sequence_length, tensor_parallel_size=tensor_parallel_size,
-        verbose=verbose,
+        verbose=verbose, quantization=quantization,
     )
     if execution is not None:
         request = with_execution(request, execution)

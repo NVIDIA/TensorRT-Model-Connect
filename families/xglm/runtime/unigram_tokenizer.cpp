@@ -395,7 +395,7 @@ class UnigramTokenizer final : public ITokenizer {
         if (mBosId >= 0)
             result.push_back(mBosId);
         result.insert(result.end(), ids.begin(), ids.end());
-        if (mEosId >= 0)
+        if (mAppendEos && mEosId >= 0)
             result.push_back(mEosId);
         return result;
     }
@@ -547,8 +547,10 @@ class UnigramTokenizer final : public ITokenizer {
                 continue;
             if (!seen_sequence && mBosId < 0)
                 mBosId = it->second;
-            else
+            else {
                 mEosId = it->second;
+                mAppendEos = true;
+            }
         }
     }
 
@@ -570,6 +572,7 @@ class UnigramTokenizer final : public ITokenizer {
         if (ptype == "RobertaProcessing") {
             mBosId = extract_pp_id(pp, "cls");
             mEosId = extract_pp_id(pp, "sep");
+            mAppendEos = true;
         }
     }
 
@@ -607,6 +610,7 @@ class UnigramTokenizer final : public ITokenizer {
     int32_t mUnkId = 0;
     float mUnkScore = -100.0f;
     bool mAddSpecialTokens = true;
+    bool mAppendEos = false;
     bool mUsePrecompiled = false;
     bool mLowercase = false;
     bool mAddPrefixSpace = true;

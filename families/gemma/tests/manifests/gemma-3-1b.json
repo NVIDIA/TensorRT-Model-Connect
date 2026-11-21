@@ -1,6 +1,7 @@
 {
   "name": "gemma-3-1b",
   "hf_id": "google/gemma-3-1b-it",
+  "hf_revision": "dcc83ea841ab6100d6b47a070329e1ba4cf78752",
   "bundle": "gemma-3-1b.bundle",
   "family": "gemma",
   "task": "text_generation",

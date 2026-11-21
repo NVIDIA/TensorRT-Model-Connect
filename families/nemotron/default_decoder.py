@@ -28,10 +28,12 @@ from . import graph_ops
 from . import graph_blocks
 from .config import ModelConfig
 from .default_dual_profile_decoder import build_dual_profile_decoder_engine
+from .quantization import configure_fp8_build
 from .utils import const_in_work_dtype, create_builder_context
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
+    from typing import Any as QuantContext
 
 
 def _mark_debug_output(
@@ -53,6 +55,7 @@ def build_standard_decoder_engine(
     max_cache_length: int,
     *,
     precision: str = "fp32",
+    quant_ctx: QuantContext | None = None,
     norm_type: str = "rmsnorm",
     mlp_type: str = "swiglu",
     position_type: str = "rope",
@@ -121,6 +124,7 @@ def build_standard_decoder_engine(
         return build_dual_profile_decoder_engine(
             config, weights, max_cache_length,
             precision=precision,
+            quant_ctx=quant_ctx,
             norm_type=norm_type,
             mlp_type=mlp_type,
             position_type=position_type,
@@ -151,6 +155,7 @@ def build_standard_decoder_engine(
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config
+    configure_fp8_build(trt_config, quant_ctx)
 
     # Precision configuration
     if precision == "fp16":
@@ -366,6 +371,7 @@ def build_standard_decoder_engine(
             alibi_slopes_tensor=alibi_slopes_tensor,
             alibi_indices_tensor=alibi_indices_tensor,
             dtype=work_np_dtype,
+            quant_ctx=quant_ctx,
             cos_half_tensor=cos_half_tensor,
             sin_half_tensor=sin_half_tensor,
             rotary_embedding_dim=rotary_embedding_dim,
@@ -495,6 +501,7 @@ def _add_decoder_layer(
     alibi_slopes_tensor: trt.ITensor | None = None,
     alibi_indices_tensor: trt.ITensor | None = None,
     dtype: np.dtype = np.float32,
+    quant_ctx: QuantContext | None = None,
     cos_half_tensor: trt.ITensor | None = None,
     sin_half_tensor: trt.ITensor | None = None,
     rotary_embedding_dim: int = 0,
@@ -517,6 +524,7 @@ def _add_decoder_layer(
         alibi_slopes_tensor=alibi_slopes_tensor,
         alibi_indices_tensor=alibi_indices_tensor,
         dtype=dtype,
+        quant_ctx=quant_ctx,
         layer_prefix=prefix,
         cos_half_tensor=cos_half_tensor,
         sin_half_tensor=sin_half_tensor,
@@ -553,12 +561,12 @@ def _add_decoder_layer(
             network, norm2, weights=weights, prefix=prefix,
             hidden_size=hidden_size, mlp_size=mlp_size,
             activation=activation, dtype=dtype,
-            layer_prefix=prefix)
+            quant_ctx=quant_ctx, layer_prefix=prefix)
     else:
         mlp_out = graph_blocks.add_swiglu_mlp(
             network, norm2, weights=weights, prefix=prefix,
             hidden_size=hidden_size, mlp_size=mlp_size, dtype=dtype,
-            layer_prefix=prefix)
+            quant_ctx=quant_ctx, layer_prefix=prefix)
 
     # Final residual connection
     if parallel_residual:

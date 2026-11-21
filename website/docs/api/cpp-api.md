@@ -115,11 +115,27 @@ has no known space identifier. Its vectors, pooling and normalization are still
 available; two empty identifiers do not imply cross-model compatibility. Families
 must not fabricate identifiers or require a hash just to compute an embedding.
 
+`PointsToEmbedding` takes one point cloud as row-major `[num_points, input_dim]`
+float32 values and returns the same embedding result. The C++ wrapper rejects a
+span that does not hold exactly `num_points * input_dim` floats; the C request
+carries no float count, so a C caller must supply that many. The Core rejects a
+zero `input_dim`, a `num_points` beyond the uint32 range and a null pointer for
+a nonempty cloud. Which columns the model expects (for example XYZ plus color),
+which point counts it accepts and any normalization or sampling are the
+family's to define and validate.
+
 `SeriesToRegressionValues` consumes one `SeriesHistory` and returns finite
 predictions indexed by target, with optional target names and units. It has no
 forecast horizon or probability-distribution parameters. It uses the existing
 `forecast --input` CLI and `regress` benchmark operation; independent-series
 batching is not implied by the scalar Task.
+
+`SpatialFeaturesToClassScores` in `trtmc/features.hpp` accepts named host FP32
+CHW feature maps and returns an owned class-major score grid with ordered class
+names and an explicit score kind. The loaded family defines input names, feature
+dimensions and coordinate meaning. Independent class probabilities may overlap;
+Core does not normalize them or reduce them to one label per cell. The C table
+is declared in `trtmc/features.h`.
 
 Family Runtime returns `IModel::task_bindings()` records built with
 `bind<SharedTaskInterface>(*this, fields)`. Core Runtime retains the correctly
@@ -143,6 +159,11 @@ this does not add a shared scheduler or promise multi-tenant execution.
 An `ImageStateActionQueue` permits a serial `ImageStateToActionChunk` call on the
 same model without consuming or replacing its buffered actions. Overlapping or
 reentrant action calls still return `TRTMC_BUSY`; other session exclusions remain.
+`ImagesStateTextToActionChunk` follows the same rule as `ImageStateToActionChunk`.
+It takes named camera images, one state vector and a UTF-8 instruction: camera
+names are keys the loaded family defines, their order carries no meaning, and the
+Core checks only that names are present, unique and paired with valid images.
+Which cameras, state size and text the model requires is the family's to validate.
 Session release must not race another call.
 
 ## Versions and extension

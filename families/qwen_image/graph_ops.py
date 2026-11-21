@@ -883,8 +883,13 @@ def _add_attention_core_with_logit_softcap(
     head_dim: int,
     mask: trt.ITensor | None,
     scale: float,
-    logit_softcap: float,
+    logit_softcap: float | None,
 ) -> trt.ITensor:
+    """Primitive attention with FP32 scores, mask, and softmax.
+
+    Probabilities return to the working dtype for the value product, as fused
+    SDPA kernels do. ``logit_softcap`` (when set) caps the scaled scores.
+    """
     output_dtype = q_4d.dtype
     k_4d = _repeat_kv_heads_4d(
         network, k_4d, num_heads=num_heads, num_kv_heads=num_kv_heads, head_dim=head_dim
@@ -908,7 +913,8 @@ def _add_attention_core_with_logit_softcap(
     ).get_output(0)
     scores = network.add_elementwise(scores, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
 
-    scores = add_tanh_softcap(network, scores, logit_softcap, scalar_shape=(1, 1, 1, 1))
+    if logit_softcap is not None:
+        scores = add_tanh_softcap(network, scores, logit_softcap, scalar_shape=(1, 1, 1, 1))
 
     if score_mask is not None:
         scores = network.add_elementwise(
@@ -943,6 +949,7 @@ def add_attention_from_rows(
     scale: float | None = None,
     logit_softcap: float | None = None,
     fp32_accumulation: bool = False,
+    fp32_scores: bool = False,
     tag: str | None = None,
 ) -> trt.ITensor:
     """Native IAttention for row-major [S, H * D] Q/K/V tensors.
@@ -950,6 +957,9 @@ def add_attention_from_rows(
     ``num_kv_heads`` can be smaller than ``num_heads`` for GQA/MQA. TRT
     native IAttention supports this directly, so callers should not expand K/V
     heads unless the model semantics require per-query-head K/V values.
+    ``fp32_scores`` builds the attention from primitives with FP32 scores and
+    softmax, for logits too large for reduced-precision scores; it requires
+    an explicit additive mask.
     """
     attention_size = num_heads * head_dim
     kv_heads = num_heads if num_kv_heads is None else num_kv_heads
@@ -979,9 +989,14 @@ def add_attention_from_rows(
     )
     if scale is None:
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
-    if logit_softcap is not None and float(logit_softcap) > 0.0:
+    softcap = (
+        float(logit_softcap) if logit_softcap is not None and float(logit_softcap) > 0.0 else None
+    )
+    if softcap is not None or fp32_scores:
         if causal:
-            raise NotImplementedError("logit_softcap attention requires an explicit additive mask")
+            raise NotImplementedError(
+                "primitive FP32-score attention requires an explicit additive mask"
+            )
         ctx_4d = _add_attention_core_with_logit_softcap(
             network,
             q_4d,
@@ -992,7 +1007,7 @@ def add_attention_from_rows(
             head_dim=head_dim,
             mask=mask,
             scale=scale,
-            logit_softcap=float(logit_softcap),
+            logit_softcap=softcap,
         )
     else:
         ctx_4d = add_attention_core(

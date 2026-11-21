@@ -12,6 +12,7 @@ import signal
 import socket
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import ExitStack, contextmanager
@@ -45,6 +46,10 @@ def _serve_env(environment: Environment) -> dict[str, str]:
            "PYTHONPATH": f"{repo}/apps/perf_serving:{repo}/apps/benchmark:{repo}/core/builder:{repo}"}
     if environment.values.get("hf_hub_cache"):  # the cache that checkpoint retention manages
         env["HF_HUB_CACHE"] = str(environment["hf_hub_cache"])
+        # Remote-code modules are generated Python, separate from immutable checkpoint snapshots.
+        env.setdefault("HF_MODULES_CACHE", str(Path(environment["hf_hub_cache"]).parent / "hf-modules"))
+    # The machine's own additions, for example the cuDNN a Jetson Thor's serving interpreter must load.
+    env.update({key: str(value) for key, value in (environment.values.get("serve_env") or {}).items()})
     return env
 
 
@@ -112,11 +117,14 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
             mode: str = "eager", precision: str | None = None, deterministic: bool = False,
             isolate_requests: bool = False, python: str | None = None, keep_artifacts: bool = False, memory_probe: bool = False,
             port: int | None = None, extra_env: Mapping[str, str] | None = None,
-            service: str = "perf-serving", model_name: str = "trtmc") -> Iterator[dict[str, Any]]:
+            service: str = "perf-serving", model_name: str = "trtmc",
+            compile_fallback: str | None = None) -> Iterator[dict[str, Any]]:
     """Run one server for the model; yields its URL and /v1/serving/info.
 
     backend: ``trtmc`` (candidate) or ``reference`` (generic HF adapters, run in ``python``: the model's
-    reference environment).
+    reference environment). A ``compile`` mode reference that stopped serving (torch.compile failed on some
+    request) fails the work it served when that work ends. ``compile_fallback``: why this eager server replaces a
+    compile one (recorded with its evidence).
     """
     if service == "trtmc-server":
         if backend != "trtmc" or isolate_requests or memory_probe or keep_artifacts:
@@ -138,6 +146,8 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
                "--backend", backend, "--port", str(port), "--full-observations",
                "--records", str(out / "records.jsonl"), "--scratch", str(out / "scratch")]
     reference = model["reference"]
+    if reference.get("latent_adapter"):
+        command += ["--latent-replay-adapter", str(repo / reference["latent_adapter"])]
     if model["candidate"].get("revision"):  # the pinned checkpoint (tokenizer, latent replay, reference)
         command += ["--revision", str(model["candidate"]["revision"])]
     if backend == "trtmc":
@@ -159,6 +169,8 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
             command += ["--reference-options", json.dumps(reference["options"])]
         if reference.get("adapter"):  # the family's own native pipeline
             command += ["--reference-adapter", str(repo / reference["adapter"])]
+    if environment.media_root() is not None:  # requests name their media by digest
+        command += ["--media-root", str(environment.media_root())]
     if keep_artifacts:  # checks that read output artifacts (audio, images) after the run
         command.append("--keep-artifacts")
     if memory_probe:  # peak GPU memory per call; only meaningful while this server is alone on the GPU
@@ -185,9 +197,12 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
 
         identity = {**info, "side": "candidate" if backend == "trtmc" else "reference", "mode": mode,
                     "precision": model["candidate"]["precision"] if backend == "trtmc" else
-                    info.get("precision", precision or reference.get("precision", "fp32"))}
+                    info.get("precision", precision or reference.get("precision", "fp32")),
+                    **({"compile_fallback": compile_fallback} if compile_fallback else {})}
         with execution_service(identity):
             yield {"url": url, "info": info, "records": out / "records.jsonl"}
+        if backend != "trtmc" and mode == "compile" and (reason := _stopped_serving(url)):
+            raise ServiceError(f"the torch.compile reference stopped serving: {reason}")
     finally:
         try:  # the record never keeps a server from stopping
             (out / MEMORY_NODES).write_text(json.dumps(memory_nodes(process.pid), indent=2) + "\n")
@@ -502,6 +517,22 @@ def serving_replicas(environment: Environment, model: dict[str, Any], backend: s
                "footprint_mib": max(after[0] - before[0], 0) if before and after else None}
 
 
+def _stopped_serving(url: str) -> str | None:
+    """Why a running server answers ``/health/ready`` unavailable (its backend stopped serving), or None."""
+    try:
+        urllib.request.urlopen(f"{url}/health/ready", timeout=30)
+        return None
+    except urllib.error.HTTPError as error:
+        if error.code != 503:
+            return None
+        try:
+            return str(json.loads(error.read() or b"{}").get("reason") or "unavailable")
+        except ValueError:
+            return "unavailable"
+    except OSError as error:  # no longer answering at all
+        return f"{type(error).__name__}: {error}"
+
+
 def _wait_ready(process: subprocess.Popen, url: str, out: Path, timeout_s: float = 1800) -> dict[str, Any]:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
@@ -549,6 +580,8 @@ def text_serving(environment: Environment, settings: Mapping[str, Any], out: Pat
         command += ["--runtime-root", str(settings["runtime_root"])]
     if settings.get("cuda_graphs"):
         command.append("--cuda-graphs")
+    if settings.get("max_body_bytes") is not None:
+        command += ["--max-body-bytes", str(settings["max_body_bytes"])]
     env = {**_serve_env(environment), **dict(extra_env or {})}
     env["PYTHONPATH"] = f"{repo}/apps/server/python:" + env["PYTHONPATH"]
     (out / "command.json").write_text(json.dumps(command, indent=2) + "\n")

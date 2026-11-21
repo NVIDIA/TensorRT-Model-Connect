@@ -6,6 +6,7 @@
 #include "families/qwen/runtime/chat_templates.h"
 
 #include <cstdio>
+#include <stdexcept>
 #include <string>
 
 namespace {
@@ -62,7 +63,46 @@ int main() {
     check_render("{{ messages[0]['content'] }}", false, "Q",
                  "unsupported template preserves the prompt");
 
+    const std::vector<std::pair<std::string, std::string>> history{
+        {"system", "  system\n"},
+        {"user", "Remember ORCHID."},
+        {"assistant", "<think>\nreasoning\n</think>\n\nOK"},
+        {"user", "What word?"}};
+    const std::string history_prefix = "<|im_start|>system\n  system\n<|im_end|>\n"
+                                       "<|im_start|>user\nRemember ORCHID.<|im_end|>\n";
+    const std::string history_suffix =
+        "<|im_end|>\n<|im_start|>user\nWhat word?<|im_end|>\n<|im_start|>assistant\n";
+    if (trtmc::qwen_apply_conversation_template("chatml_thinking", history, false) !=
+        history_prefix + "<|im_start|>assistant\nOK" + history_suffix + empty_think) {
+        std::fprintf(
+            stderr,
+            "FAIL: hybrid conversation retains roles/history and removes prior reasoning\n");
+        ++failures;
+    }
+    if (trtmc::qwen_apply_conversation_template("chatml", history, false) !=
+        history_prefix + "<|im_start|>assistant\n<think>\nreasoning\n</think>\n\nOK" +
+            history_suffix) {
+        std::fprintf(stderr, "FAIL: ordinary ChatML preserves assistant content\n");
+        ++failures;
+    }
+    for (const auto& invalid : std::vector<std::vector<std::pair<std::string, std::string>>>{
+             {},
+             {{"assistant", "unfinished"}},
+             {{"tool", "unsupported"}, {"user", "Q"}},
+             {{"user", "Q"}, {"system", "misplaced"}, {"user", "Q"}}}) {
+        bool rejected = false;
+        try {
+            trtmc::qwen_apply_conversation_template("chatml_thinking", invalid, false);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        if (!rejected) {
+            std::fprintf(stderr, "FAIL: invalid conversation accepted\n");
+            ++failures;
+        }
+    }
+
     if (failures == 0)
-        std::fprintf(stderr, "All 13 Qwen chat template cases passed.\n");
+        std::fprintf(stderr, "All Qwen single-turn and conversation template cases passed.\n");
     return failures;
 }

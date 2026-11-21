@@ -256,6 +256,8 @@ def build(request, writer) -> None:
         raise NotImplementedError("yolos does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("yolos does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("yolos does not support MTP speculative decoding")
 
     model_dir = Path(request.model_dir)
     model_config = config_module.ModelConfig.from_dir(model_dir)

@@ -1,0 +1,23 @@
+{
+  "name": "siglip-base-patch16-224-fp8",
+  "hf_id": "google/siglip-base-patch16-224",
+  "hf_revision": "7fd15f0689c79d79e38b1c2e2e2370a7bf2761ed",
+  "bundle": "siglip-base-patch16-224-fp8.bundle",
+  "family": "siglip",
+  "task": "text_image_to_relevance",
+  "precision": "fp32",
+  "quantization": "fp8",
+  "testcases": [
+    {
+      "name": "siglip-base-patch16-224-fp8",
+      "premerge": true,
+      "test_image": "data/test_img.png",
+      "query": "a photo of a car",
+      "negative_query": "a photo of a cat",
+      "embedding_tolerance": 0.02,
+      "logit_tolerance": 0.5,
+      "cosine_floor": 0.995
+    }
+  ],
+  "tensor_parallel_size": 1
+}

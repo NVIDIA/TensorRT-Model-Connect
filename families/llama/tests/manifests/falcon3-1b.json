@@ -1,6 +1,7 @@
 {
   "name": "falcon3-1b",
   "hf_id": "tiiuae/Falcon3-1B-Base",
+  "hf_revision": "cb37ef3559b157b5c9d9226296ba01a5162da1f7",
   "bundle": "falcon3-1b.bundle",
   "family": "llama",
   "task": "text_generation",

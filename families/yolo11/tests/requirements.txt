@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Eager reference and image preprocessing; no upstream model package.
+torch>=2.6
+torchvision
+Pillow
+numpy

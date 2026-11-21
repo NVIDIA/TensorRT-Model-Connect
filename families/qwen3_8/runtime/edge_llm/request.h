@@ -42,13 +42,20 @@ inline std::string source_user_content(std::string text) {
 }
 
 /// Map Model Connect text arguments to the pinned Edge API; rejects unmapped controls.
-inline trt_edgellm::rt::LLMGenerationRequest
-make_request(const std::string& prompt, const TextGenerationConfig& config, int default_length) {
+inline trt_edgellm::rt::LLMGenerationRequest make_request(const std::string& prompt,
+                                                          const TextGenerationConfig& config,
+                                                          int default_length,
+                                                          bool has_image = false) {
     validate_generation(config);
     trt_edgellm::rt::LLMGenerationRequest request{};
     request.requests.resize(1);
-    request.requests.front().messages.push_back({"user", {{"text", prompt}}});
-    request.applyChatTemplate = config.use_chat_template;
+    auto& message = request.requests.front().messages.emplace_back();
+    message.role = "user";
+    if (has_image)
+        message.contents = {{"image", ""}, {"text", prompt}};
+    else
+        message.contents = {{"text", prompt}};
+    request.applyChatTemplate = has_image || config.use_chat_template;
     request.enableThinking = config.enable_thinking;
     request.temperature = config.temperature;
     request.topK = config.top_k;

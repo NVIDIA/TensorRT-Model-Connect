@@ -21,8 +21,9 @@ class Adapter:
 
         self.spec = spec
         self.processor = Sam3Processor.from_pretrained(spec.model, **spec.pretrained_kwargs())
-        self.model = Sam3Model.from_pretrained(spec.model, dtype=spec.dtype,
-                                               **spec.pretrained_kwargs()).to(spec.device).eval()
+        self.model = host.maybe_compile(Sam3Model.from_pretrained(spec.model, dtype=spec.dtype,
+                                                                  **spec.pretrained_kwargs()).to(spec.device).eval(),
+                                        spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         image = self.host.load_image(str(self.host.required(request, "image_path"))).convert("RGB")

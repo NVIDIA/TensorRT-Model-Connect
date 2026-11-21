@@ -1,0 +1,27 @@
+{
+  "name": "qwen35-9b-fp8",
+  "hf_id": "Qwen/Qwen3.5-9B",
+  "hf_revision": "c202236235762e1c871ad0ccb60c8ee5ba337b9a",
+  "bundle": "qwen35-9b-fp8.bundle",
+  "family": "qwen3_5",
+  "task": "text_generation",
+  "trust_remote_code": false,
+  "precision": "fp16",
+  "quantization": "fp8",
+  "testcases": [
+    {
+      "name": "qwen35-9b-fp8",
+      "premerge": true,
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "reference": "none",
+      "expected_answers": [
+        "Paris"
+      ]
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

@@ -667,6 +667,36 @@ def _build_bart_encoder(
     return bytes(plan)
 
 
+def _add_bart_decoder_attention(network, q, k, v, *, num_heads, head_dim, kv_seq, mask):
+    """Apply scaled, masked attention to a single decoder query."""
+    query = graph_ops.reshape_rows_to_heads_4d(network, q, num_heads, head_dim, sequence_length=1)
+    key = graph_ops.reshape_rows_to_heads_4d(
+        network, k, num_heads, head_dim, sequence_length=kv_seq
+    )
+    value = graph_ops.reshape_rows_to_heads_4d(
+        network, v, num_heads, head_dim, sequence_length=kv_seq
+    )
+    dtype = np.float16 if query.dtype == trt.float16 else np.float32
+    scale = graph_ops.add_constant(
+        network, (1, 1, 1, 1), np.array([head_dim**-0.5], dtype=dtype), dtype=dtype
+    )
+    query = network.add_elementwise(query, scale, trt.ElementWiseOperation.PROD).get_output(0)
+    scores = network.add_matrix_multiply(
+        query, trt.MatrixOperation.NONE, key, trt.MatrixOperation.TRANSPOSE
+    ).get_output(0)
+    # Express the additive mask explicitly: native attention can return incorrect
+    # results with long, masked fixed KV sequences, even for finite inputs.
+    scores = network.add_elementwise(scores, mask, trt.ElementWiseOperation.SUM).get_output(0)
+    softmax = network.add_softmax(scores)
+    softmax.axes = 1 << 3
+    context = network.add_matrix_multiply(
+        softmax.get_output(0), trt.MatrixOperation.NONE, value, trt.MatrixOperation.NONE
+    ).get_output(0)
+    return graph_ops.reshape_heads_4d_to_rows(
+        network, context, num_heads * head_dim, sequence_length=1
+    )
+
+
 def _add_bart_decoder_layer(
     *,
     network,
@@ -733,14 +763,13 @@ def _add_bart_decoder_layer(
 
     m4 = network.add_shuffle(attention_mask)
     m4.reshape_dims = (1, 1, 1, attention_window)
-    cf = graph_ops.add_attention_from_rows(
+    cf = _add_bart_decoder_attention(
         network,
         q,
         ak.get_output(0),
         av.get_output(0),
         num_heads=num_heads,
         head_dim=head_dim,
-        q_seq=1,
         kv_seq=attention_window,
         mask=m4.get_output(0),
     )
@@ -806,14 +835,13 @@ def _add_bart_decoder_layer(
 
     cross_mask_4d = network.add_shuffle(cross_attention_mask)
     cross_mask_4d.reshape_dims = (1, 1, 1, max_enc_seq)
-    ccf = graph_ops.add_attention_from_rows(
+    ccf = _add_bart_decoder_attention(
         network,
         cq,
         ck_proj,
         cv_proj,
         num_heads=num_heads,
         head_dim=head_dim,
-        q_seq=1,
         kv_seq=max_enc_seq,
         mask=cross_mask_4d.get_output(0),
     )
@@ -964,6 +992,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("BART does not support quantized builds")
     if request.fp32_layers:
         raise NotImplementedError("BART does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("BART does not support MTP speculative decoding")
 
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")

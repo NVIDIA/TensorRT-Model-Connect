@@ -6,7 +6,7 @@
 #include "families/gemma/runtime/sampler.h"
 #include "trtmc/task.h"
 #ifdef TRTMC_HAS_EDGE_LLM
-#include "families/gemma/runtime/edge_llm/request.h"
+#include "families/gemma/runtime/edge_llm/media.h"
 #endif
 
 #include <iostream>
@@ -62,19 +62,22 @@ int main() {
     config.use_chat_template = true;
     config.enable_thinking = false;
     const auto chat = trtmc::gemma::edge_llm::make_request("\xe2\x80\x83hello \n", config, 128);
-    check(!chat.applyChatTemplate &&
+    check(chat.applyChatTemplate && !chat.enableThinking &&
               chat.requests.front().messages.front().contents.front().content ==
-                  "<bos><|turn>user\nhello<turn|>\n<|turn>model\n<|channel>thought\n<channel|>",
-          "Gemma4 disabled thinking must match checkpoint prompt before tokenization");
+                  "\xe2\x80\x83hello \n",
+          "Edge provider template receives the original prompt and disabled thinking");
     config.enable_thinking = true;
     const auto thought = trtmc::gemma::edge_llm::make_request("hello", config, 128);
-    check(thought.requests.front().messages.front().contents.front().content ==
-              "<bos><|turn>system\n<|think|>\n<turn|>\n<|turn>user\nhello<turn|>\n<|turn>model\n",
-          "Gemma4 enabled thinking must match checkpoint system prefix");
+    check(thought.applyChatTemplate && thought.enableThinking &&
+              thought.requests.front().messages.front().contents.front().content == "hello",
+          "Edge provider template owns enabled thinking formatting");
     config.use_chat_template = false;
     const auto raw = trtmc::gemma::edge_llm::make_request(" hello ", config, 128);
     check(raw.requests.front().messages.front().contents.front().content == " hello ",
           "Raw Gemma4 text must remain unmodified");
+    config.seed = 17;
+    const auto seeded = trtmc::gemma::edge_llm::make_request("hello", config, 128);
+    check(seeded.samplingSeed == 17, "Gemma4 forwards an explicit supported seed");
     config.top_k = 50;
     bool rejected = false;
     try {
@@ -82,10 +85,44 @@ int main() {
     } catch (const std::invalid_argument&) {
         rejected = true;
     }
-    check(rejected, "MTP must not silently replace sampling with greedy");
+    check(rejected, "MTP retains its unexecuted sampled-mode restriction");
+    for (const auto* variant : {"eagle3", "dflash"}) {
+        check(trtmc::gemma::edge_llm::allows_sampling(variant),
+              "Command-successful requests must not be blocked by failed activity validation");
+        check(trtmc::gemma::edge_llm::sampling_uses_vanilla(variant),
+              "Sampled EAGLE3/DFlash must disclose Edge vanilla fallback");
+        const auto forwarded = trtmc::gemma::edge_llm::make_request(
+            "hello", config, 128, trtmc::gemma::edge_llm::allows_sampling(variant));
+        check(forwarded.topK == 50 && forwarded.temperature == config.temperature &&
+                  forwarded.samplingSeed == 17,
+              "Forward sampling without forcing a quality-failing request to greedy");
+    }
+    check(!trtmc::gemma::edge_llm::allows_sampling("mtp"),
+          "Do not introduce an unexecuted MTP sampled mode");
     const auto sampled = trtmc::gemma::edge_llm::make_request("hello", config, 128, true);
     check(sampled.topK == 50 && sampled.temperature == config.temperature,
           "DSpark must preserve supported sampling controls");
+
+    const auto media = trtmc::gemma::edge_llm::generation_config({}, true, 128);
+    check(media.use_chat_template && media.max_new_tokens == 128,
+          "Typed media defaults require the provider template and preserve the budget");
+    const trtmc::internal::ConfigEntry raw_media[]{{"use_chat_template", false}};
+    rejected = false;
+    try {
+        (void)trtmc::gemma::edge_llm::generation_config(raw_media, true, 128);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "Typed media must reject bypassing the provider template");
+    const trtmc::internal::ConfigEntry oversized_seed[]{{"seed", std::int64_t{2147483648}}};
+    rejected = false;
+    try {
+        (void)trtmc::gemma::edge_llm::generation_config(oversized_seed, false, 128);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    check(rejected, "Typed seed mapping must reject int32 overflow rather than truncate");
+
 #endif
 
     if (failures > 0) {

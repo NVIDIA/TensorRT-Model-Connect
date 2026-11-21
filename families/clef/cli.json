@@ -10,7 +10,9 @@
         {"name": "max_sequence_length", "flags": ["--max-sequence-length"], "type": "int", "default": 16384},
         {"name": "max_questions", "flags": ["--max-questions"], "type": "int", "default": 64},
         {"name": "max_options", "flags": ["--max-options"], "type": "int", "default": 512},
-        {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false}
+        {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false},
+        {"name": "quantization", "flags": ["--quantization"], "type": "string", "choices": ["none", "fp8"],
+         "help": "Self-quantize the BF16 backbone projections to FP8"}
       ]
     },
     {

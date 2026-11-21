@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prepare the native reference environment: the pinned official Fast-FoundationStereo source and its
-serialized checkpoint under ``<environment>/trtmc-reference/Fast-FoundationStereo``."""
+"""Prepare the pinned official Fast-FoundationStereo source and a link to its cached checkpoint.
+
+Keep the shared HF cache mounted when reusing the environment.
+"""
 
 from __future__ import annotations
 
@@ -36,7 +38,7 @@ def main() -> int:
         checkpoint = Path(hf_hub_download(repo_id=CHECKPOINT, revision=CHECKPOINT_REVISION,
                                           filename="model_best_bp2_serialize.pth"))
         (temporary / WEIGHTS).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(checkpoint, temporary / WEIGHTS)
+        (temporary / WEIGHTS).symlink_to(checkpoint.resolve(strict=True))
         temporary.rename(destination)
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)

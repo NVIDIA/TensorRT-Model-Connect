@@ -87,24 +87,31 @@ def add_resize_nearest(network, inp, size):
 
 
 def add_layer_norm(network, inp, gamma, beta, eps, dtype=np.float32):
+    # Swin has sparse activations whose squares overflow FP16. Keep the
+    # normalization in FP32, then restore the surrounding graph's dtype.
+    output_dtype = inp.dtype
+    if output_dtype != trt.float32:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
     axis = len(inp.shape) - 1
     mean = network.add_reduce(inp, trt.ReduceOperation.AVG, 1 << axis, True).get_output(0)
     centred = network.add_elementwise(inp, mean, trt.ElementWiseOperation.SUB).get_output(0)
     square = network.add_elementwise(centred, centred, trt.ElementWiseOperation.PROD).get_output(0)
     variance = network.add_reduce(square, trt.ReduceOperation.AVG, 1 << axis, True).get_output(0)
     width = int(inp.shape[-1])
-    epsilon = add_constant(network, tuple([1] * len(inp.shape)), np.full((1,), eps), dtype=dtype)
+    epsilon = add_constant(network, tuple([1] * len(inp.shape)), np.full((1,), eps), dtype=np.float32)
     shifted = network.add_elementwise(variance, epsilon, trt.ElementWiseOperation.SUM).get_output(0)
     deviation = network.add_unary(shifted, trt.UnaryOperation.SQRT).get_output(0)
     normed = network.add_elementwise(
         centred, deviation, trt.ElementWiseOperation.DIV).get_output(0)
     shape = tuple([1] * (len(inp.shape) - 1) + [width])
     scaled = network.add_elementwise(
-        normed, add_constant(network, shape, gamma, dtype=dtype),
+        normed, add_constant(network, shape, gamma, dtype=np.float32),
         trt.ElementWiseOperation.PROD).get_output(0)
-    return network.add_elementwise(
-        scaled, add_constant(network, shape, beta, dtype=dtype),
+    out = network.add_elementwise(
+        scaled, add_constant(network, shape, beta, dtype=np.float32),
         trt.ElementWiseOperation.SUM).get_output(0)
+    return out if output_dtype == trt.float32 else network.add_cast(
+        out, output_dtype).get_output(0)
 
 
 def add_linear(network, inp, weight, bias=None, dtype=np.float32):

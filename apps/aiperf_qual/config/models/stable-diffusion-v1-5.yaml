@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Explicit controls from the family premerge testcase, identical on both sides.
+request: {num_steps: 10, guidance_scale: 7.5, cfg_scale: 7.5}
+
+reference:
+  adapter: families/stable_diffusion/reference/adapter.py
+  latent_adapter: families/stable_diffusion/reference/adapter.py

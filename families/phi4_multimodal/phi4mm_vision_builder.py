@@ -22,16 +22,31 @@ if TYPE_CHECKING:
 _CROP_SIZE = 448
 _PATCH_SIZE = 14
 _GRID_SIZE = _CROP_SIZE // _PATCH_SIZE
-_NUM_CROPS = 3  # global crop followed by the two 2x1 Dynamic-HD tiles
+_NUM_PATCHES = _GRID_SIZE * _GRID_SIZE
 _EMBED_DIM = 1152
 _MLP_DIM = 4304
 _NUM_HEADS = 16
 _HEAD_DIM = _EMBED_DIM // _NUM_HEADS
 _NUM_EXECUTED_LAYERS = 26  # hidden_states[-2] from the 27-layer SigLIP tower
 _POOLED_GRID = _GRID_SIZE // 2
-_SECOND_CROP_VALID_PATCH_COLS = 22
-_SUB_IMAGE_VALID_COLS = 27
-_NUM_IMAGE_TOKENS = 721
+_POOLED_PER_ENTRY = _POOLED_GRID * _POOLED_GRID
+_TEXT_HIDDEN = 3072
+# Dynamic-HD: the global view plus up to 36 crops (Phi4MMImageProcessor
+# dynamic_hd). Image tokens: crop rows with separators, the global separator
+# and the 16 x 17 global view.
+MAX_CROPS = 36
+MAX_ENTRIES = 1 + MAX_CROPS
+MIN_IMAGE_TOKENS = 1 * (1 + 1) + 1 + _POOLED_GRID * (_POOLED_GRID + 1)
+MAX_IMAGE_TOKENS = max(
+    (_POOLED_GRID * rows) * (_POOLED_GRID * cols + 1)
+    for rows in range(1, MAX_CROPS + 1)
+    for cols in range(1, MAX_CROPS // rows + 1)
+) + 1 + _POOLED_GRID * (_POOLED_GRID + 1)
+_OPT_ENTRIES = 2
+_OPT_IMAGE_TOKENS = 545  # one full 448x448 crop
+# Rows the image-token gather reads: [sub_GN, glb_GN, pooled features...].
+_FIRST_FEATURE_ROW = 2
+_MASKED_KEY = -1.0e4
 
 
 def _require(weights: WeightDict, key: str) -> np.ndarray:
@@ -41,44 +56,23 @@ def _require(weights: WeightDict, key: str) -> np.ndarray:
     return np.asarray(value)
 
 
-def _position_ids(valid_cols: int) -> np.ndarray:
-    """Match SiglipVisionEmbeddings' NaViT position remapping."""
-    ids = np.zeros((_GRID_SIZE, _GRID_SIZE), dtype=np.int64)
-    row_ids = np.floor(
-        np.arange(_GRID_SIZE, dtype=np.float64) * _GRID_SIZE / _GRID_SIZE
-    ).astype(np.int64)
-    col_ids = np.floor(
-        np.arange(valid_cols, dtype=np.float64) * _GRID_SIZE / valid_cols
-    ).astype(np.int64)
-    ids[:, :valid_cols] = row_ids[:, None] * _GRID_SIZE + col_ids[None, :]
-    return ids.reshape(-1)
+def navit_bucket_table() -> np.ndarray:
+    """SiglipVisionEmbeddings' bucketized patch coordinates by valid patch count.
 
+    Ported from the checkpoint's vision_siglip_navit.py (Apache-2.0); see
+    families/phi4_multimodal/NOTICE.
 
-def _static_position_embeddings(position_weight: np.ndarray) -> np.ndarray:
-    position_weight = np.asarray(position_weight, dtype=np.float32)
-    if position_weight.shape != (_GRID_SIZE * _GRID_SIZE, _EMBED_DIM):
-        raise ValueError(
-            "Unexpected Phi-4 SigLIP position embedding shape: "
-            f"{position_weight.shape}")
-    position_ids = np.stack([
-        _position_ids(_GRID_SIZE),
-        _position_ids(_GRID_SIZE),
-        _position_ids(_SECOND_CROP_VALID_PATCH_COLS),
-    ])
-    return position_weight[position_ids]
-
-
-def _static_attention_mask() -> np.ndarray:
-    """Additive key mask for the padded columns in the second HD tile."""
-    valid = np.ones((_NUM_CROPS, _GRID_SIZE, _GRID_SIZE), dtype=bool)
-    valid[2, :, _SECOND_CROP_VALID_PATCH_COLS:] = False
-    key_mask = valid.reshape(_NUM_CROPS, -1)
-    mask = np.zeros(
-        (_NUM_CROPS, 1, _GRID_SIZE * _GRID_SIZE, _GRID_SIZE * _GRID_SIZE),
-        dtype=np.float32,
-    )
-    mask[~key_mask[:, None, None, :].repeat(_GRID_SIZE * _GRID_SIZE, axis=2)] = -1.0e4
-    return mask
+    Row ``n`` holds ``bucketize(arange(0, 1 - 1e-6, 1 / n), arange(1/32, 1, 1/32),
+    right=True)`` for ``n`` valid patches, evaluated in the checkpoint's float32
+    arithmetic; row 0 (no valid patches) stays zero.
+    """
+    boundaries = (np.arange(1, _GRID_SIZE, dtype=np.float64) / _GRID_SIZE).astype(np.float32)
+    table = np.zeros((_GRID_SIZE + 1, _GRID_SIZE), dtype=np.int32)
+    for count in range(1, _GRID_SIZE + 1):
+        step = np.float32(1.0) / np.float32(count)
+        coords = (np.arange(count, dtype=np.float64) * np.float64(step)).astype(np.float32)
+        table[count, :count] = np.searchsorted(boundaries, coords, side="right")
+    return table
 
 
 def _cast(network, tensor, dtype):
@@ -99,6 +93,14 @@ def _linear(network, inp, weight, bias, work_np_dtype):
             network, result, out_features, np.asarray(bias),
             dtype=work_np_dtype)
     return result
+
+
+def _gelu_tanh(network, inp):
+    """SigLIP's gelu_pytorch_tanh, evaluated in FP32 like PyTorch's half kernels."""
+    output_dtype = inp.dtype
+    value = _cast(network, inp, trt.float32)
+    value = network.add_activation(value, trt.ActivationType.GELU_TANH).get_output(0)
+    return _cast(network, value, output_dtype)
 
 
 def _build_encoder_layer(
@@ -134,8 +136,8 @@ def _build_encoder_layer(
 
     def as_heads(tensor):
         layer = network.add_shuffle(tensor)
-        layer.reshape_dims = (_NUM_CROPS, _GRID_SIZE * _GRID_SIZE,
-                              _NUM_HEADS, _HEAD_DIM)
+        # 0 keeps the dynamic vision batch (global view + crops).
+        layer.reshape_dims = (0, _NUM_PATCHES, _NUM_HEADS, _HEAD_DIM)
         layer.second_transpose = trt.Permutation([0, 2, 1, 3])
         return layer.get_output(0)
 
@@ -146,8 +148,7 @@ def _build_encoder_layer(
     )
     context_rows = network.add_shuffle(context)
     context_rows.first_transpose = trt.Permutation([0, 2, 1, 3])
-    context_rows.reshape_dims = (
-        _NUM_CROPS, _GRID_SIZE * _GRID_SIZE, _EMBED_DIM)
+    context_rows.reshape_dims = (0, _NUM_PATCHES, _EMBED_DIM)
     attention_out = _linear(
         network, context_rows.get_output(0),
         _require(weights, f"{prefix}.self_attn.out_proj.weight"),
@@ -166,7 +167,7 @@ def _build_encoder_layer(
         _require(weights, f"{prefix}.mlp.fc1.weight"),
         _require(weights, f"{prefix}.mlp.fc1.bias"),
         work_np_dtype)
-    mlp = graph_ops.add_gelu_erf(network, mlp, dtype=work_np_dtype)
+    mlp = _gelu_tanh(network, mlp)
     mlp = _linear(
         network, mlp,
         _require(weights, f"{prefix}.mlp.fc2.weight"),
@@ -176,70 +177,80 @@ def _build_encoder_layer(
         hidden, mlp, trt.ElementWiseOperation.SUM).get_output(0)
 
 
-def _pool_and_apply_hd_layout(network, hidden, weights, work_np_dtype,
-                              work_trt_dtype):
+def _pool_and_gather_image_tokens(network, hidden, weights, token_rows,
+                                  work_np_dtype, work_trt_dtype):
+    """AvgPool2d(2) every entry to 16 x 16, then gather the sub_glb image tokens.
+
+    ``token_rows`` index ``[sub_GN, glb_GN, pooled features of every entry]``;
+    the runtime derives them from the image's crop grid and padding mask.
+    """
     image_grid = network.add_shuffle(hidden)
-    image_grid.reshape_dims = (
-        _NUM_CROPS, _GRID_SIZE, _GRID_SIZE, _EMBED_DIM)
+    image_grid.reshape_dims = (0, _GRID_SIZE, _GRID_SIZE, _EMBED_DIM)
     image_grid.second_transpose = trt.Permutation([0, 3, 1, 2])
     pool = network.add_pooling_nd(
         image_grid.get_output(0), trt.PoolingType.AVERAGE, (2, 2))
     pool.stride_nd = (2, 2)
     pooled = network.add_shuffle(pool.get_output(0))
     pooled.first_transpose = trt.Permutation([0, 2, 3, 1])
-    pooled.reshape_dims = (
-        _NUM_CROPS, _POOLED_GRID, _POOLED_GRID, _EMBED_DIM)
+    pooled.reshape_dims = (-1, _EMBED_DIM)
 
-    global_crop = network.add_slice(
-        pooled.get_output(0), start=(0, 0, 0, 0),
-        shape=(1, _POOLED_GRID, _POOLED_GRID, _EMBED_DIM),
-        stride=(1, 1, 1, 1)).get_output(0)
-    sub_crops = network.add_slice(
-        pooled.get_output(0), start=(1, 0, 0, 0),
-        shape=(2, _POOLED_GRID, _POOLED_GRID, _EMBED_DIM),
-        stride=(1, 1, 1, 1)).get_output(0)
-
-    global_rows = network.add_shuffle(global_crop)
-    global_rows.reshape_dims = (
-        _POOLED_GRID, _POOLED_GRID, _EMBED_DIM)
-    sub_grid = network.add_shuffle(sub_crops)
-    sub_grid.reshape_dims = (1, 2, _POOLED_GRID, _POOLED_GRID, _EMBED_DIM)
-    sub_grid.second_transpose = trt.Permutation([0, 2, 1, 3, 4])
-    sub_rows_grid = network.add_shuffle(sub_grid.get_output(0))
-    sub_rows_grid.reshape_dims = (
-        _POOLED_GRID, 2 * _POOLED_GRID, _EMBED_DIM)
-    valid_sub = network.add_slice(
-        sub_rows_grid.get_output(0), start=(0, 0, 0),
-        shape=(_POOLED_GRID, _SUB_IMAGE_VALID_COLS, _EMBED_DIM),
-        stride=(1, 1, 1)).get_output(0)
-
-    sub_separator = const_in_work_dtype(
-        network, (_POOLED_GRID, 1, _EMBED_DIM),
-        np.broadcast_to(
-            _require(weights, "sub_GN").reshape(1, 1, _EMBED_DIM),
-            (_POOLED_GRID, 1, _EMBED_DIM)),
+    separators = const_in_work_dtype(
+        network, (2, _EMBED_DIM),
+        np.concatenate([
+            _require(weights, "sub_GN").reshape(1, _EMBED_DIM),
+            _require(weights, "glb_GN").reshape(1, _EMBED_DIM),
+        ]),
         work_np_dtype, work_trt_dtype)
-    global_separator = const_in_work_dtype(
-        network, (1, _EMBED_DIM),
-        _require(weights, "glb_GN").reshape(1, _EMBED_DIM),
-        work_np_dtype, work_trt_dtype)
+    table = network.add_concatenation([separators, pooled.get_output(0)])
+    table.axis = 0
+    return network.add_gather(table.get_output(0), token_rows, 0).get_output(0)
 
-    sub_with_separators = network.add_concatenation([valid_sub, sub_separator])
-    sub_with_separators.axis = 1
-    sub_rows = network.add_shuffle(sub_with_separators.get_output(0))
-    sub_rows.reshape_dims = (
-        _POOLED_GRID * (_SUB_IMAGE_VALID_COLS + 1), _EMBED_DIM)
-    global_with_separators = network.add_concatenation(
-        [global_rows.get_output(0), sub_separator])
-    global_with_separators.axis = 1
-    global_flat = network.add_shuffle(global_with_separators.get_output(0))
-    global_flat.reshape_dims = (
-        _POOLED_GRID * (_POOLED_GRID + 1), _EMBED_DIM)
 
-    hd = network.add_concatenation([
-        sub_rows.get_output(0), global_separator, global_flat.get_output(0)])
-    hd.axis = 0
-    return hd.get_output(0)
+def _navit_positions_and_key_mask(network, crop_valid, work_np_dtype,
+                                  work_trt_dtype):
+    """Per-entry NaViT position ids and the additive key mask of padded patches.
+
+    ``crop_valid`` is ``[entries, 2]`` int32 valid patch rows/cols; padded
+    patches keep position 0, as in SiglipVisionEmbeddings.
+    """
+    def const(values):
+        values = np.ascontiguousarray(values, dtype=np.int32)
+        return graph_ops.add_constant(network, values.shape, values, dtype=np.int32)
+
+    def gather(data, indices, axis):
+        return network.add_gather(data, indices, axis).get_output(0)
+
+    def rows(tensor):
+        layer = network.add_shuffle(tensor)
+        layer.reshape_dims = (-1, _NUM_PATCHES)
+        return layer.get_output(0)
+
+    def binary(lhs, rhs, operation):
+        return network.add_elementwise(lhs, rhs, operation).get_output(0)
+
+    patch = np.arange(_NUM_PATCHES)
+    buckets = const(navit_bucket_table())
+    ids, valid = [], None
+    for axis, coordinate in enumerate((patch // _GRID_SIZE, patch % _GRID_SIZE)):
+        count = gather(crop_valid, const(np.array([axis])), 1)  # [entries, 1]
+        bucket = gather(gather(buckets, count, 0), const(coordinate), 2)  # [entries, 1, 1024]
+        ids.append(rows(bucket))
+        inside = binary(const(coordinate.reshape(1, -1)), count, trt.ElementWiseOperation.LESS)
+        valid = inside if valid is None else binary(valid, inside, trt.ElementWiseOperation.AND)
+    positions = binary(
+        binary(ids[0], const(np.array([[_GRID_SIZE]])), trt.ElementWiseOperation.PROD),
+        ids[1], trt.ElementWiseOperation.SUM)
+    positions = binary(
+        positions, network.add_cast(valid, trt.int32).get_output(0),
+        trt.ElementWiseOperation.PROD)
+
+    masked = const_in_work_dtype(
+        network, (1, 1), np.full((1, 1), _MASKED_KEY), work_np_dtype, work_trt_dtype)
+    zero = const_in_work_dtype(
+        network, (1, 1), np.zeros((1, 1)), work_np_dtype, work_trt_dtype)
+    key_mask = network.add_shuffle(network.add_select(valid, zero, masked).get_output(0))
+    key_mask.reshape_dims = (-1, 1, 1, _NUM_PATCHES)
+    return positions, key_mask.get_output(0)
 
 
 def build_phi4mm_vision_engine(
@@ -248,11 +259,12 @@ def build_phi4mm_vision_engine(
     precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
-    """Build the canonical Phi-4 Dynamic-HD vision engine.
+    """Build the Phi-4 Dynamic-HD vision engine.
 
-    The engine is fixed to the 2x1 crop topology used by the checked-in E2E
-    image. Its input is the concatenated global/left/right crop tensor
-    ``[9, 448, 448]`` and its output is ``[721, 3072]``.
+    Inputs are the global view followed by the image's 448px crops
+    ``pixel_values[entries, 3, 448, 448]`` (2..37 entries), their valid patch
+    rows/cols ``crop_valid[entries, 2]`` and the image-token rows
+    ``image_token_rows[tokens]``; the output is ``image_features[tokens, 3072]``.
     """
     if precision not in {"fp32", "fp16"}:
         raise ValueError(f"Phi-4 vision precision must be fp32 or fp16, got {precision}")
@@ -263,12 +275,19 @@ def build_phi4mm_vision_engine(
         verbose=verbose, workspace_bytes=8 << 30, disable_tf32=True)
     builder, network, config = context.builder, context.network, context.config
     pixel_values = network.add_input(
-        "pixel_values", trt.float32, (9, _CROP_SIZE, _CROP_SIZE))
-    work_input = _cast(network, pixel_values, work_trt_dtype)
-    batched = network.add_shuffle(work_input)
-    batched.reshape_dims = (_NUM_CROPS, 3, _CROP_SIZE, _CROP_SIZE)
+        "pixel_values", trt.float32, (-1, 3, _CROP_SIZE, _CROP_SIZE))
+    crop_valid = network.add_input("crop_valid", trt.int32, (-1, 2))
+    token_rows = network.add_input("image_token_rows", trt.int32, (-1,))
+    profile = builder.create_optimization_profile()
+    profile.set_shape(
+        "pixel_values", (2, 3, _CROP_SIZE, _CROP_SIZE),
+        (_OPT_ENTRIES, 3, _CROP_SIZE, _CROP_SIZE), (MAX_ENTRIES, 3, _CROP_SIZE, _CROP_SIZE))
+    profile.set_shape("crop_valid", (2, 2), (_OPT_ENTRIES, 2), (MAX_ENTRIES, 2))
+    profile.set_shape(
+        "image_token_rows", (MIN_IMAGE_TOKENS,), (_OPT_IMAGE_TOKENS,), (MAX_IMAGE_TOKENS,))
+    config.add_optimization_profile(profile)
 
-    patch_input = batched.get_output(0)
+    patch_input = _cast(network, pixel_values, work_trt_dtype)
     patch_np_dtype = work_np_dtype
     if precision == "fp16":
         patch_input = _cast(network, patch_input, trt.float32)
@@ -286,28 +305,30 @@ def build_phi4mm_vision_engine(
     patch.stride_nd = (_PATCH_SIZE, _PATCH_SIZE)
     rows = network.add_shuffle(patch.get_output(0))
     rows.first_transpose = trt.Permutation([0, 2, 3, 1])
-    rows.reshape_dims = (
-        _NUM_CROPS, _GRID_SIZE * _GRID_SIZE, _EMBED_DIM)
+    rows.reshape_dims = (0, _NUM_PATCHES, _EMBED_DIM)
     patch_rows = _cast(network, rows.get_output(0), work_trt_dtype)
 
-    position = const_in_work_dtype(
-        network, (_NUM_CROPS, _GRID_SIZE * _GRID_SIZE, _EMBED_DIM),
-        _static_position_embeddings(_require(
-            weights, "img_processor.embeddings.position_embedding.weight")),
-        work_np_dtype, work_trt_dtype)
+    positions, attention_mask = _navit_positions_and_key_mask(
+        network, crop_valid, work_np_dtype, work_trt_dtype)
+    position_table = np.asarray(
+        _require(weights, "img_processor.embeddings.position_embedding.weight"),
+        dtype=np.float32)
+    if position_table.shape != (_NUM_PATCHES, _EMBED_DIM):
+        raise ValueError(
+            f"Unexpected Phi-4 SigLIP position embedding shape: {position_table.shape}")
+    position = network.add_gather(
+        const_in_work_dtype(network, position_table.shape, position_table,
+                            work_np_dtype, work_trt_dtype),
+        positions, 0).get_output(0)
     hidden = network.add_elementwise(
         patch_rows, position, trt.ElementWiseOperation.SUM).get_output(0)
-    attention_mask = const_in_work_dtype(
-        network,
-        (_NUM_CROPS, 1, _GRID_SIZE * _GRID_SIZE, _GRID_SIZE * _GRID_SIZE),
-        _static_attention_mask(), work_np_dtype, work_trt_dtype)
     for layer_idx in range(_NUM_EXECUTED_LAYERS):
         hidden = _build_encoder_layer(
             network, hidden, weights, layer_idx, attention_mask,
             work_np_dtype)
 
-    hidden = _pool_and_apply_hd_layout(
-        network, hidden, weights, work_np_dtype, work_trt_dtype)
+    hidden = _pool_and_gather_image_tokens(
+        network, hidden, weights, token_rows, work_np_dtype, work_trt_dtype)
     hidden = _linear(
         network, hidden,
         _require(weights, "img_projection.0.weight"),
@@ -320,7 +341,7 @@ def build_phi4mm_vision_engine(
         _require(weights, "img_projection.2.bias"),
         work_np_dtype)
     hidden = _cast(network, hidden, trt.float32)
-    if tuple(hidden.shape) != (_NUM_IMAGE_TOKENS, 3072):
+    if tuple(hidden.shape)[1:] != (_TEXT_HIDDEN,):
         raise RuntimeError(
             f"Unexpected Phi-4 vision output shape: {tuple(hidden.shape)}")
     hidden.name = "image_features"
@@ -329,7 +350,8 @@ def build_phi4mm_vision_engine(
     if verbose:
         print(
             "[trtmc build] Building Phi-4 Dynamic-HD vision engine "
-            f"({_NUM_EXECUTED_LAYERS} SigLIP layers, precision={precision}) ...",
+            f"({_NUM_EXECUTED_LAYERS} SigLIP layers, up to {MAX_ENTRIES} entries / "
+            f"{MAX_IMAGE_TOKENS} image tokens, precision={precision}) ...",
             file=sys.stderr)
     plan = builder.build_serialized_network(network, config)
     if plan is None:

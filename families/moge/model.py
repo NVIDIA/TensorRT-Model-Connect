@@ -24,6 +24,10 @@ _HEAD_DIM = 64
 _PATCH = 14
 _POSITION_GRID = 37
 _NUM_TOKENS = 1800
+# Match MogePipeline's supported image aspect ratio [1/2, 2].
+_MAX_IMAGE_ASPECT_RATIO = 2.0
+_MIN_BASE_GRID = round(np.sqrt(_NUM_TOKENS / _MAX_IMAGE_ASPECT_RATIO))
+_MAX_BASE_GRID = round(np.sqrt(_NUM_TOKENS * _MAX_IMAGE_ASPECT_RATIO))
 _FOCAL_RECOVERY_SIZE = 64
 _MIN_IMAGE_SIZE = 64
 _OPT_IMAGE_SIZE = 518
@@ -34,34 +38,6 @@ _FAST_OPT_IMAGE_HEIGHT = 1080
 _FAST_OPT_IMAGE_WIDTH = 1920
 _FAST_MAX_IMAGE_HEIGHT = 2160
 _FAST_MAX_IMAGE_WIDTH = 3840
-_ZERO_PAD_SELECTION = frozenset(
-    {
-        "mask_head.res_blocks.1.0.layers.5",
-        "mask_head.res_blocks.2.0.layers.2",
-        "mask_head.res_blocks.2.0.layers.5",
-        "mask_head.res_blocks.3.0.layers.2",
-        "mask_head.res_blocks.3.0.layers.5",
-        "mask_head.resamplers.1.1",
-        "mask_head.resamplers.2.1",
-        "neck.res_blocks.2.0.layers.2",
-        "neck.res_blocks.2.0.layers.5",
-        "neck.res_blocks.2.1.layers.2",
-        "neck.res_blocks.2.1.layers.5",
-        "neck.res_blocks.3.0.layers.2",
-        "neck.res_blocks.3.0.layers.5",
-        "neck.res_blocks.3.1.layers.2",
-        "neck.res_blocks.3.1.layers.5",
-        "points_head.res_blocks.1.0.layers.2",
-        "points_head.res_blocks.1.0.layers.5",
-        "points_head.res_blocks.2.0.layers.2",
-        "points_head.res_blocks.2.0.layers.5",
-        "points_head.res_blocks.3.0.layers.2",
-        "points_head.res_blocks.3.0.layers.5",
-        "points_head.resamplers.0.1",
-        "points_head.resamplers.1.1",
-        "points_head.resamplers.2.1",
-    }
-)
 
 
 def _fuse_half_pixel_x2_conv_weight(weight: np.ndarray) -> np.ndarray:
@@ -332,19 +308,7 @@ class _NativeMogeGraph:
         elif compute_dtype != self.trt.float32:
             raise ValueError(f"Unsupported MoGe convolution compute dtype: {compute_dtype}")
         tensor = self.cast(tensor, compute_dtype, f"{name}.input_cast")
-        zero_pad = module in _ZERO_PAD_SELECTION
-        if zero_pad and (
-            replicate_padding != 1
-            or stride != 1
-            or tuple(int(value) for value in weight.shape[2:]) != (3, 3)
-        ):
-            raise ValueError(
-                f"MoGe selected zero-pad convolution {module!r} must be stride-1 3x3 "
-                "with one pixel of source replicate padding"
-            )
-        padded = (
-            tensor if zero_pad else self.replicate_pad(tensor, replicate_padding, f"{name}.pad")
-        )
+        padded = self.replicate_pad(tensor, replicate_padding, f"{name}.pad")
         layer = self._layer(
             self.network.add_convolution_nd(
                 padded,
@@ -357,7 +321,7 @@ class _NativeMogeGraph:
             name,
         )
         layer.stride_nd = (stride, stride)
-        layer.padding_nd = (1, 1) if zero_pad else (0, 0)
+        layer.padding_nd = (0, 0)
         return layer.get_output(0)
 
     def deconvolution(
@@ -831,6 +795,12 @@ class _NativeMogeGraph:
         )
         return projected, class_token
 
+    def bounded_grid_dimension(self, value: Any, name: str) -> Any:
+        lower = self.shape_value(_MIN_BASE_GRID, f"{name}.minimum")
+        upper = self.shape_value(_MAX_BASE_GRID, f"{name}.maximum")
+        bounded = self.binary(value, upper, self.trt.ElementWiseOperation.MIN, f"{name}.upper")
+        return self.binary(bounded, lower, self.trt.ElementWiseOperation.MAX, name)
+
     def encoder(self, image: Any) -> tuple[Any, Any, Any, Any, Any]:
         input_shape = self.shape(image, "input.shape")
         input_h = self.shape_index(input_shape, 2, "input.height")
@@ -877,6 +847,14 @@ class _NativeMogeGraph:
             self.trt.int64,
             "input.base_w",
         )
+        if not self.fast_path:
+            # Independent H/W profiles cannot express the accepted aspect range.
+            # Expose its exact grid bounds for unfused FP32 attention; every
+            # accepted Native grid is unchanged. MogePipeline rejects other
+            # aspect ratios before executing the engine. Keep the fused FP16
+            # path's original shape expressions and numerical behavior.
+            base_h = self.bounded_grid_dimension(base_h, "input.bounded_base_h")
+            base_w = self.bounded_grid_dimension(base_w, "input.bounded_base_w")
         fourteen = self.shape_value(_PATCH, "input.patch_size")
         resized_h = self.binary(
             base_h, fourteen, self.trt.ElementWiseOperation.PROD, "input.resized_h"
@@ -1333,9 +1311,9 @@ def _build_native_engine(
         network.mark_output(tensor)
 
     config = builder.create_builder_config()
-    # Level 3 enables the FP16 fused-attention fast path. Level 0 keeps the
-    # broad dynamic FP32 attention graph decomposed for reliable builds.
-    config.builder_optimization_level = 3 if fast_path else 0
+    # The bounded FP32 patch grid supports tactic search at level 3,
+    # matching the existing FP16 setting without changing either precision.
+    config.builder_optimization_level = 3
     tf32 = getattr(trt.BuilderFlag, "TF32", None)
     if tf32 is not None:
         if fast_path:
@@ -1415,6 +1393,8 @@ def build_moge_engine(
 
 def build(request, writer) -> None:
     """Build one native MoGe-2 bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("MoGe does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("moge does not support dynamic_kv_cache")
 

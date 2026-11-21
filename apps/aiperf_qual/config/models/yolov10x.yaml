@@ -2,6 +2,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
 reference:
-  adapter: families/yolov10/reference/adapter.py  # the Ultralytics archive (no generic adapter)
-  prepare: families/yolov10/reference/prepare.py
-  requirements: families/yolov10/requirements.txt  # the family's dependencies, layered on the serving interpreter
+  adapter: families/yolov10/tests/reference/adapter.py  # the family-owned PyTorch reference
+  requirements: families/yolov10/tests/requirements.txt  # the family's dependencies, layered on the serving interpreter

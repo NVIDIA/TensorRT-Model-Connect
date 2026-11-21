@@ -32,6 +32,7 @@ class FeaturesFixture final : public IModel,
                               public IImageToPooledFeatures,
                               public IImageToEmbedding,
                               public IImageTextToEmbedding,
+                              public IPointsToEmbedding,
                               public ITextPairToRelevance,
                               public ITextImageToRelevance,
                               public ITextImageTextToRelevance,
@@ -80,6 +81,7 @@ class FeaturesFixture final : public IModel,
             bind<IImageToPooledFeatures>(*this, fields_for(IImageToPooledFeatures::kTask)),
             bind<IImageToEmbedding>(*this, fields_for(IImageToEmbedding::kTask)),
             bind<IImageTextToEmbedding>(*this, fields_for(IImageTextToEmbedding::kTask)),
+            bind<IPointsToEmbedding>(*this, fields_for(IPointsToEmbedding::kTask)),
             bind<ITextPairToRelevance>(*this, fields_for(ITextPairToRelevance::kTask)),
             bind<ITextImageToRelevance>(*this, fields_for(ITextImageToRelevance::kTask)),
             bind<ITextImageTextToRelevance>(*this, fields_for(ITextImageTextToRelevance::kTask)),
@@ -298,6 +300,20 @@ class FeaturesFixture final : public IModel,
                                 ConfigView config) override {
         auto result = embedding(float(14 * scale(config)), pixel(request.image));
         result.values.push_back(float(request.text.size()));
+        return result;
+    }
+    // Returns the last point's first value plus both extents so tests can see
+    // exactly which floats Core handed to the family and how they were split.
+    SemanticEmbeddingResult run(const PointsToEmbeddingRequest& request,
+                                ConfigView config) override {
+        if (request.points.size() != static_cast<size_t>(request.num_points) * request.input_dim)
+            throw std::runtime_error("Core handed the family a mis-sized point span");
+        if (request.num_points == 0)
+            throw std::invalid_argument("fixture requires at least one point");
+        const auto last_point = static_cast<size_t>(request.num_points - 1) * request.input_dim;
+        auto result = embedding(float(19 * scale(config)), request.points[last_point]);
+        result.values.push_back(float(request.num_points));
+        result.values.push_back(float(request.input_dim));
         return result;
     }
     RelevanceResult run(const TextPairToRelevanceRequest& request, ConfigView config) override {
@@ -587,10 +603,163 @@ class FeaturesFixture final : public IModel,
     size_t query_document_calls_{0};
 };
 
+class SpatialModel final : public IModel, public ISpatialFeaturesToClassScores {
+  public:
+    explicit SpatialModel(std::string mode) : mode_(std::move(mode)) {}
+    const char* task() const noexcept override { return mode_.c_str(); }
+    std::vector<TaskInstance> task_bindings() override {
+        return {bind<ISpatialFeaturesToClassScores>(*this)};
+    }
+    SpatialClassScoresResult run(const SpatialFeaturesToClassScoresRequest& request,
+                                 ConfigView) override {
+        if (request.inputs.size() != 2 || request.inputs[0].name != "first" ||
+            request.inputs[1].name != "second")
+            throw std::invalid_argument("fixture expects two named operands in order");
+        SpatialClassScoresResult result{{}, 2, 1, 2, {"a", "b"}, ScoreKind::Probability};
+        for (const auto& item : request.inputs)
+            result.values.insert(result.values.end(), item.values.begin(), item.values.end());
+        if (mode_ == "spatial_bad_shape")
+            result.width = 3;
+        if (mode_ == "spatial_bad_names")
+            result.class_names.pop_back();
+        if (mode_ == "spatial_bad_probability")
+            result.values[0] = 2;
+        return result;
+    }
+
+  private:
+    std::string mode_;
+};
+
+class SpectralFeaturesFixture final : public IModel, public ISpectrogramToFrameFeatures {
+  public:
+    explicit SpectralFeaturesFixture(std::string mode) : mode_(std::move(mode)) {}
+    const char* task() const noexcept override { return mode_.c_str(); }
+    std::vector<TaskInstance> task_bindings() override {
+        return {bind<ISpectrogramToFrameFeatures>(*this)};
+    }
+    SpectrogramFrameFeaturesResult run(const SpectrogramToFrameFeaturesRequest& input,
+                                       ConfigView config) override {
+        validate_config({}, config);
+        SpectrogramFrameFeaturesResult result;
+        result.source_frame_count = input.spectrogram.rows;
+        result.features.columns = 2;
+        for (uint64_t index = 0; index < input.spectrogram.rows; index += 2) {
+            result.input_frame_indices.push_back(index);
+            const auto begin = index * input.spectrogram.columns;
+            result.features.values.push_back(input.spectrogram.values[begin]);
+            result.features.values.push_back(
+                input.spectrogram.values[begin + input.spectrogram.columns - 1]);
+        }
+        result.features.rows = result.input_frame_indices.size();
+        if (mode_ == "spectral_bad_source")
+            ++result.source_frame_count;
+        if (mode_ == "spectral_bad_index")
+            result.input_frame_indices[0] = result.source_frame_count;
+        if (mode_ == "spectral_bad_count")
+            result.input_frame_indices.pop_back();
+        if (mode_ == "spectral_bad_shape")
+            result.features.values.pop_back();
+        return result;
+    }
+
+  private:
+    std::string mode_;
+};
+
+class DocumentFeaturesFixture final : public IModel, public IDocumentWordsToTokenFeatures {
+  public:
+    explicit DocumentFeaturesFixture(std::string mode) : mode_(std::move(mode)) {}
+    const char* task() const noexcept override { return mode_.c_str(); }
+    std::vector<TaskInstance> task_bindings() override {
+        return {bind<IDocumentWordsToTokenFeatures>(*this)};
+    }
+    DocumentTokenFeaturesResult run(const DocumentWordsToTokenFeaturesRequest& input,
+                                    ConfigView config) override {
+        validate_config({}, config);
+        DocumentTokenFeaturesResult result;
+        result.source_word_count = input.words.size();
+        result.features.rows = 4;
+        result.features.columns = 2;
+        result.features.values = {
+            9,
+            8,
+            input.words[0].box.x_min,
+            static_cast<float>(input.words[0].text.size()),
+            input.words[input.words.size() - 1].box.y_max,
+            static_cast<float>(input.words[input.words.size() - 1].text.size()),
+            0,
+            0};
+        result.tokens = {{0, -1, 0},
+                         {17, 0, 1},
+                         {18, static_cast<int64_t>(input.words.size() - 1), 2},
+                         {1, -2, 3}};
+        if (mode_ == "document_bad_word")
+            result.tokens[1].word_index = input.words.size();
+        if (mode_ == "document_bad_source")
+            ++result.source_word_count;
+        if (mode_ == "document_bad_count")
+            result.tokens.pop_back();
+        return result;
+    }
+
+  private:
+    std::string mode_;
+};
+
 class MissingFixture final : public IModel {
   public:
     const char* task() const noexcept override { return "missing"; }
     std::vector<TaskInstance> task_bindings() override { return {}; }
+};
+class VideoFeaturesFixture final : public IModel, public IVideoToTokenFeatures {
+  public:
+    explicit VideoFeaturesFixture(std::string mode) : mode_(std::move(mode)) {}
+    const char* task() const noexcept override { return mode_.c_str(); }
+    std::vector<TaskInstance> task_bindings() override {
+        return {bind<IVideoToTokenFeatures>(*this)};
+    }
+    VideoTokenFeaturesResult run(const VideoToTokenFeaturesRequest& input,
+                                 ConfigView config) override {
+        validate_config({}, config);
+        VideoTokenFeaturesResult result;
+        result.grid_frames = input.video.frames.size();
+        result.grid_rows = result.grid_columns = 1;
+        result.source_frame_count = input.video.frames.size();
+        result.features.rows = input.video.frames.size() + 1;
+        result.features.columns = 2;
+        VideoFeatureToken cls;
+        cls.role = VideoFeatureTokenRole::Class;
+        result.tokens.push_back(cls);
+        result.features.values = {7, 9};
+        for (size_t i = 0; i < input.video.frames.size(); ++i) {
+            VideoFeatureToken token;
+            token.grid_frame = i;
+            token.frame_begin = i;
+            token.frame_end = i + 1;
+            token.x_max = token.y_max = 1;
+            result.tokens.push_back(token);
+            const auto& image = input.video.frames[i];
+            const auto value = image.format == ImageFormat::Float32
+                                   ? static_cast<const float*>(image.data)[0]
+                                   : static_cast<const uint8_t*>(image.data)[0] / 255.0F;
+            result.features.values.push_back(value);
+            result.features.values.push_back(
+                input.video.timestamps_seconds.empty()
+                    ? -1
+                    : static_cast<float>(input.video.timestamps_seconds[i]));
+        }
+        if (mode_ == "video_bad_span")
+            result.tokens.back().frame_end = result.source_frame_count + 1;
+        if (mode_ == "video_bad_grid")
+            result.tokens.back().grid_frame = result.grid_frames;
+        if (mode_ == "video_bad_count")
+            ++result.source_frame_count;
+        return result;
+    }
+
+  private:
+    std::string mode_;
 };
 
 } // namespace
@@ -598,7 +767,16 @@ class MissingFixture final : public IModel {
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.reader.info().family != "features_fixture")
         throw std::runtime_error("wrong feature fixture family");
+    if (context.reader.info().task.rfind("spatial_", 0) == 0)
+        return new SpatialModel(context.reader.info().task);
+    if (context.reader.info().task.rfind("spectral_", 0) == 0)
+        return new SpectralFeaturesFixture(context.reader.info().task);
+
+    if (context.reader.info().task.rfind("document_", 0) == 0)
+        return new DocumentFeaturesFixture(context.reader.info().task);
     if (context.reader.info().task == "missing")
         return new MissingFixture;
+    if (context.reader.info().task.rfind("video_", 0) == 0)
+        return new VideoFeaturesFixture(context.reader.info().task);
     return new FeaturesFixture(context.reader.info().task);
 }

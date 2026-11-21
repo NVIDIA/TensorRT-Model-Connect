@@ -4,6 +4,8 @@
  */
 
 #include "families/phi4_multimodal/runtime/image_preprocessor.h"
+#include "families/phi4_multimodal/runtime/phi4_longrope.h"
+#include "families/phi4_multimodal/runtime/sampler.h"
 
 #include <cmath>
 #include <iostream>
@@ -32,6 +34,32 @@ void rejects(const std::string& text, const std::string& message) {
 } // namespace
 
 int main() {
+    trtmc::Phi4MultimodalSamplingParams sampling;
+    sampling.eos_token_id = 199999;
+    sampling.additional_eos_token_ids = {200020, 199999};
+    check(sampling.is_eos(199999), "checkpoint EOS");
+    check(sampling.is_eos(200020), "checkpoint end-of-turn EOS");
+    check(!sampling.is_eos(7), "ordinary token is not EOS");
+    sampling.eos_token_id = 7;
+    sampling.additional_eos_token_ids.clear();
+    check(sampling.is_eos(7) && !sampling.is_eos(200020),
+          "explicit request EOS overrides defaults");
+    for (const int seed : {-1, 19}) {
+        trtmc::Phi4MultimodalSamplingParams params;
+        params.seed = seed;
+        params.top_k = seed < 0 ? 1 : 3;
+        params.eos_token_id = 1;
+        params.additional_eos_token_ids = {2};
+        auto sampler = trtmc::create_phi4_multimodal_sampler(params);
+        const float eos_logits[] = {-1000.0F, -1000.0F, 1000.0F};
+        auto result = sampler->sample(eos_logits, 3, params);
+        check(result.token_id == 2 && result.is_eos,
+              "sampler recognizes additional checkpoint EOS");
+        params.additional_eos_token_ids.clear();
+        sampler->reset();
+        result = sampler->sample(eos_logits, 3, params);
+        check(result.token_id == 2 && !result.is_eos, "sampler honors explicit EOS override");
+    }
     // runtime.json contains the promoted preprocessing fields, not the HF decoder config.
     // Keep nested decoys first to catch a first-occurrence scan of the JSON text.
     const std::string text = R"({
@@ -119,6 +147,10 @@ int main() {
     rejects(invalid.dump(), "unsupported interpolation");
     rejects("{", "malformed JSON");
     rejects("[]", "non-object JSON");
+    // LongRoPE: short factors up to the threshold, long factors beyond it.
+    check(trtmc::phi4_multimodal_rope_long_factor(4096, 4096) == 0, "4096 tokens stay short");
+    check(trtmc::phi4_multimodal_rope_long_factor(4097, 4096) == 1, "4097 tokens use long");
+    check(trtmc::phi4_multimodal_rope_long_factor(100000, 0) == 0, "threshold 0 has one regime");
     if (failures == 0)
         std::cout << "PASS: Phi4 runtime preprocessing config contract\n";
     return failures == 0 ? 0 : 1;

@@ -135,6 +135,7 @@ def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
             max_sequence_length=manifest.get("max_sequence_length"),
             tensor_parallel_size=int(manifest["tensor_parallel_size"]),
             fp32_layers=tuple((int(layer) for layer in manifest.get("fp32_layers", ()))),
+            quantization=manifest.get("quantization"),
         ),
         bundle,
     )

@@ -38,6 +38,7 @@ class Adapter:
         self.processor = Qwen3OmniMoeProcessor.from_pretrained(spec.model, **options)
         self.model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
             spec.model, torch_dtype=spec.dtype, device_map=spec.device, enable_audio_output=False, **options).eval()
+        host.maybe_compile(self.model.thinker, spec)  # the text answer is the thinker's generation
         templates = (getattr(self.processor, "chat_template", None),
                      getattr(getattr(self.processor, "tokenizer", None), "chat_template", None))
         self.template = next((value for value in templates if isinstance(value, str) and value.strip()), CHAT_TEMPLATE)

@@ -5,6 +5,7 @@
 
 #include "families/phi4_multimodal/runtime/image_preprocessor.h"
 
+#include "families/phi4_multimodal/runtime/phi4_dynamic_hd.h"
 #include "image_transform_helper.h"
 #define STB_IMAGE_RESIZE_STATIC
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
@@ -274,168 +275,76 @@ load_pad_center_resize_normalize(const runtime::adapters::io::DecodedImage& imag
     return loaded;
 }
 
-struct Phi4HdResizeGeometry {
-    int width{0};
-    int height{0};
-    bool ok{false};
-};
-
-static Phi4HdResizeGeometry
-resolve_phi4_hd_resize_geometry(const runtime::adapters::io::DecodedImage& image, int crop) {
-    const int crop_cols = (image.width + crop - 1) / crop;
-    const int crop_rows = (image.height + crop - 1) / crop;
-    if (crop_cols != 2 || crop_rows != 1) {
-        return {};
-    }
-
-    const int canvas_width = 2 * crop;
-    const float ratio_width = static_cast<float>(canvas_width) / image.width;
-    const float ratio_height = static_cast<float>(crop) / image.height;
-    int new_width = canvas_width;
-    int new_height = static_cast<int>(image.height * ratio_width);
-    if (ratio_width >= ratio_height) {
-        new_width = static_cast<int>(image.width * ratio_height);
-        new_height = crop;
-    }
-
-    const int padding_width = canvas_width - new_width;
-    const int padding_height = crop - new_height;
-    if (padding_height >= 14 || padding_width / 14 != 10) {
-        return {};
-    }
-    return {new_width, new_height, true};
-}
-
-static runtime::adapters::io::DecodedImage
-canonicalize_phi4_hd_input(const runtime::adapters::io::DecodedImage& image, int crop) {
-    runtime::adapters::io::DecodedImage canonical;
-    if (image.empty()) {
-        return canonical;
-    }
-
-    // The static vision engine consumes 54 valid patch columns followed by ten
-    // padded columns: 32 columns in the left crop and 22 in the right crop.
-    const int content_width = crop + 22 * 14;
-    const int content_height = crop;
-    const float scale =
-        std::min(static_cast<float>(content_width) / static_cast<float>(image.width),
-                 static_cast<float>(content_height) / static_cast<float>(image.height));
-    const int resized_width =
-        std::max(1, std::min(content_width, static_cast<int>(std::lround(image.width * scale))));
-    const int resized_height =
-        std::max(1, std::min(content_height, static_cast<int>(std::lround(image.height * scale))));
-    std::vector<unsigned char> resized(static_cast<std::size_t>(resized_width) * resized_height *
-                                       3);
-    if (stbir_resize(image.pixels.data(), image.width, image.height, image.width * 3,
-                     resized.data(), resized_width, resized_height, resized_width * 3, STBIR_RGB,
-                     STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, STBIR_FILTER_TRIANGLE) == nullptr) {
-        return canonical;
-    }
-
-    canonical.width = content_width;
-    canonical.height = content_height;
-    canonical.channels = 3;
-    canonical.pixels.assign(static_cast<std::size_t>(content_width) * content_height * 3, 255);
-    const int x_offset = (content_width - resized_width) / 2;
-    const int y_offset = (content_height - resized_height) / 2;
-    for (int y = 0; y < resized_height; ++y) {
-        const auto* source = resized.data() + static_cast<std::size_t>(y) * resized_width * 3;
-        auto* destination = canonical.pixels.data() +
-                            (static_cast<std::size_t>(y + y_offset) * content_width + x_offset) * 3;
-        std::memcpy(destination, source, static_cast<std::size_t>(resized_width) * 3);
-    }
-    return canonical;
-}
-
-static bool normalize_phi4_hd_crops(const std::vector<unsigned char>& global,
-                                    const std::vector<unsigned char>& left,
-                                    const std::vector<unsigned char>& right, int crop,
-                                    const Phi4MultimodalPreprocessConfig& config,
-                                    std::vector<float>& output) {
-    std::vector<float> global_chw;
-    std::vector<float> left_chw;
-    std::vector<float> right_chw;
-    if (global.empty() || !normalize_to_chw(global, crop, config, global_chw) ||
-        !normalize_to_chw(left, crop, config, left_chw) ||
-        !normalize_to_chw(right, crop, config, right_chw)) {
-        return false;
-    }
-    output.reserve(global_chw.size() + left_chw.size() + right_chw.size());
-    output.insert(output.end(), global_chw.begin(), global_chw.end());
-    output.insert(output.end(), left_chw.begin(), left_chw.end());
-    output.insert(output.end(), right_chw.begin(), right_chw.end());
-    return true;
-}
-
-// Phi-4's canonical Dynamic-HD profile: global crop + two 448px horizontal tiles.
-static LoadedImage load_phi4_hd_normalize(const runtime::adapters::io::DecodedImage& image,
-                                          const Phi4MultimodalPreprocessConfig& config) {
-    LoadedImage loaded;
-    constexpr int crop = 448;
-    constexpr int canvas_width = 2 * crop;
-    constexpr int canvas_height = crop;
-    if (image.empty() || config.fixed_image_size != crop) {
+// Phi-4's Dynamic-HD: the global view followed by the image's 448px crops, with
+// the per-entry valid patch counts and image-token rows the vision engine uses.
+static Phi4MultimodalPreprocessedImage
+preprocess_phi4_dynamic_hd(const runtime::adapters::io::DecodedImage& image,
+                           const Phi4MultimodalPreprocessConfig& config) {
+    namespace hd = phi4_multimodal;
+    Phi4MultimodalPreprocessedImage result;
+    if (image.empty() || image.channels != 3 || config.fixed_image_size != hd::kHdCropSize) {
         std::cerr << "[trtmc] Invalid image for Phi-4 Dynamic-HD preprocessing" << std::endl;
-        return loaded;
+        return result;
     }
-
-    const runtime::adapters::io::DecodedImage* source = &image;
-    auto canonical = runtime::adapters::io::DecodedImage{};
-    auto geometry = resolve_phi4_hd_resize_geometry(*source, crop);
-    if (!geometry.ok) {
-        canonical = canonicalize_phi4_hd_input(image, crop);
-        geometry = resolve_phi4_hd_resize_geometry(canonical, crop);
-        if (!geometry.ok) {
-            std::cerr << "[trtmc] Failed to canonicalize Phi-4 image to the static "
-                         "2x1 Dynamic-HD profile"
-                      << std::endl;
-            return loaded;
+    try {
+        const auto layout = hd::hd_layout(image.width, image.height);
+        const int32_t canvas_width = hd::kHdCropSize * layout.crop_cols;
+        const int32_t canvas_height = hd::kHdCropSize * layout.crop_rows;
+        const auto resized = hd::pillow_bilinear_resize_rgb(
+            image.pixels, image.height, image.width, layout.resized_height, layout.resized_width);
+        // White right/bottom padding, then ToTensor + Normalize in float.
+        std::vector<float> canvas(static_cast<std::size_t>(3) * canvas_height * canvas_width);
+        for (int32_t c = 0; c < 3; ++c) {
+            const float white = (255.0F / 255.0F - config.image_mean[c]) / config.image_std[c];
+            float* plane =
+                canvas.data() + static_cast<std::size_t>(c) * canvas_height * canvas_width;
+            for (int32_t y = 0; y < canvas_height; ++y) {
+                for (int32_t x = 0; x < canvas_width; ++x) {
+                    float value = white;
+                    if (y < layout.resized_height && x < layout.resized_width) {
+                        const auto pixel =
+                            resized[(static_cast<std::size_t>(y) * layout.resized_width + x) * 3U +
+                                    c];
+                        value = (static_cast<float>(pixel) / 255.0F - config.image_mean[c]) /
+                                config.image_std[c];
+                    }
+                    plane[static_cast<std::size_t>(y) * canvas_width + x] = value;
+                }
+            }
         }
-        source = &canonical;
-        std::cerr << "[trtmc] Canonicalized Phi-4 image from " << image.width << "x" << image.height
-                  << " to " << canonical.width << "x" << canonical.height
-                  << " for the static 2x1 Dynamic-HD profile" << std::endl;
+        const auto global = hd::torch_bicubic_resize_chw(canvas, 3, canvas_height, canvas_width,
+                                                         hd::kHdCropSize, hd::kHdCropSize);
+        const std::size_t crop_values =
+            static_cast<std::size_t>(3) * hd::kHdCropSize * hd::kHdCropSize;
+        result.pixel_values.reserve(crop_values * (1 + layout.num_crops()));
+        result.pixel_values.insert(result.pixel_values.end(), global.begin(), global.end());
+        for (int32_t row = 0; row < layout.crop_rows; ++row) {
+            for (int32_t col = 0; col < layout.crop_cols; ++col) {
+                for (int32_t c = 0; c < 3; ++c) {
+                    const float* plane =
+                        canvas.data() + static_cast<std::size_t>(c) * canvas_height * canvas_width;
+                    for (int32_t y = 0; y < hd::kHdCropSize; ++y) {
+                        const float* line =
+                            plane +
+                            static_cast<std::size_t>(row * hd::kHdCropSize + y) * canvas_width +
+                            col * hd::kHdCropSize;
+                        result.pixel_values.insert(result.pixel_values.end(), line,
+                                                   line + hd::kHdCropSize);
+                    }
+                }
+            }
+        }
+        result.hd_crop_valid = layout.crop_valid;
+        result.hd_token_rows = layout.token_rows;
+    } catch (const std::exception& error) {
+        std::cerr << "[trtmc] Phi-4 Dynamic-HD preprocessing failed: " << error.what() << std::endl;
+        return result;
     }
-    const int new_width = geometry.width;
-    const int new_height = geometry.height;
-
-    std::vector<unsigned char> resized(static_cast<std::size_t>(new_width) * new_height * 3);
-    if (stbir_resize(source->pixels.data(), source->width, source->height, source->width * 3,
-                     resized.data(), new_width, new_height, new_width * 3, STBIR_RGB,
-                     STBIR_TYPE_UINT8, STBIR_EDGE_CLAMP, STBIR_FILTER_TRIANGLE) == nullptr) {
-        std::cerr << "[trtmc] Failed to resize Phi-4 Dynamic-HD image" << std::endl;
-        return loaded;
-    }
-
-    std::vector<unsigned char> canvas(static_cast<std::size_t>(canvas_width) * canvas_height * 3,
-                                      255);
-    for (int y = 0; y < new_height; ++y) {
-        std::memcpy(canvas.data() + static_cast<std::size_t>(y) * canvas_width * 3,
-                    resized.data() + static_cast<std::size_t>(y) * new_width * 3,
-                    static_cast<std::size_t>(new_width) * 3);
-    }
-
-    auto global =
-        resize_raw(canvas.data(), canvas_width, canvas_height, crop, STBIR_FILTER_CATMULLROM);
-    std::vector<unsigned char> left(static_cast<std::size_t>(crop) * crop * 3);
-    std::vector<unsigned char> right(static_cast<std::size_t>(crop) * crop * 3);
-    for (int y = 0; y < crop; ++y) {
-        const auto* source = canvas.data() + static_cast<std::size_t>(y) * canvas_width * 3;
-        std::memcpy(left.data() + static_cast<std::size_t>(y) * crop * 3, source,
-                    static_cast<std::size_t>(crop) * 3);
-        std::memcpy(right.data() + static_cast<std::size_t>(y) * crop * 3,
-                    source + static_cast<std::size_t>(crop) * 3,
-                    static_cast<std::size_t>(crop) * 3);
-    }
-
-    if (!normalize_phi4_hd_crops(global, left, right, crop, config, loaded.img_chw)) {
-        std::cerr << "[trtmc] Failed to normalize Phi-4 Dynamic-HD crops" << std::endl;
-        return loaded;
-    }
-    loaded.target_size = crop;
-    loaded.channels = 9;
-    loaded.ok = true;
-    return loaded;
+    result.channels = 3;
+    result.height = hd::kHdCropSize;
+    result.width = hd::kHdCropSize;
+    result.ok = true;
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -546,8 +455,6 @@ struct PreprocessDispatch {
 };
 
 static PreprocessDispatch resolve_preprocess_dispatch(const std::string& preprocessor_type) {
-    if (preprocessor_type == "phi4_hd_chw")
-        return {load_phi4_hd_normalize, preprocess_simple_chw, false};
     if (preprocessor_type == "center_crop_chw")
         return {load_crop_resize_normalize, preprocess_simple_chw, false};
     if (preprocessor_type == "aspect_preserve_chw")
@@ -577,6 +484,8 @@ run_preprocess_dispatch(const runtime::adapters::io::DecodedImage& image,
 Phi4MultimodalPreprocessedImage
 phi4_multimodal_preprocess_decoded_image(const runtime::adapters::io::DecodedImage& image,
                                          const Phi4MultimodalPreprocessConfig& config) {
+    if (config.preprocessor_type == "phi4_hd_chw")
+        return preprocess_phi4_dynamic_hd(image, config);
     const auto dispatch = resolve_preprocess_dispatch(config.preprocessor_type);
     if (dispatch.warn_unknown_type) {
         std::cerr << "[trtmc] WARNING: Unknown preprocessor_type \"" << config.preprocessor_type
@@ -588,11 +497,16 @@ phi4_multimodal_preprocess_decoded_image(const runtime::adapters::io::DecodedIma
 
 std::string phi4_multimodal_format_prompt(const std::string& user_prompt,
                                           const Phi4MultimodalPreprocessConfig& config) {
-    // Build image_pads string: repeat image_token_str num_image_pad_tokens times
+    return phi4_multimodal_format_prompt(user_prompt, config, config.num_image_pad_tokens);
+}
+
+std::string phi4_multimodal_format_prompt(const std::string& user_prompt,
+                                          const Phi4MultimodalPreprocessConfig& config,
+                                          int32_t num_image_tokens) {
+    // Build image_pads string: repeat image_token_str once per image token
     std::string image_pads;
-    image_pads.reserve(static_cast<std::size_t>(config.num_image_pad_tokens) *
-                       config.image_token_str.size());
-    for (int32_t i = 0; i < config.num_image_pad_tokens; ++i) {
+    image_pads.reserve(static_cast<std::size_t>(num_image_tokens) * config.image_token_str.size());
+    for (int32_t i = 0; i < num_image_tokens; ++i) {
         image_pads += config.image_token_str;
     }
 

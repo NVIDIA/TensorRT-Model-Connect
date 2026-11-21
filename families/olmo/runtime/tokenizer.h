@@ -20,10 +20,14 @@ class ITokenizer {
     virtual std::string decode(const std::vector<std::int32_t>& ids) const = 0;
     virtual std::int32_t id_for_token(std::string_view token) const = 0;
     virtual std::string token_for_id(std::int32_t id) const = 0;
+    virtual std::int32_t eos_token_id() const = 0;
 };
 
 std::unique_ptr<ITokenizer> CreateBpeTokenizer(const char* tokenizer_json_data,
                                                std::size_t tokenizer_json_size,
                                                bool add_special_tokens = false);
+
+std::vector<int32_t> olmo_encode_causal_prompt(const ITokenizer& tokenizer,
+                                               const std::string& text);
 
 } // namespace trtmc

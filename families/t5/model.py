@@ -21,6 +21,7 @@ from .checkpoint_mapper import (
 from .config import ModelConfig
 from . import graph_ops
 from .parallel import ParallelConfig, normalize_parallel_config
+from .quantization import calibrate_t5_fp8, configure_fp8_build, reject_quantized_checkpoint
 
 
 if TYPE_CHECKING:
@@ -154,9 +155,12 @@ class _T5Model:
         debug_layer_outputs=False,
         parallel_config=None,
         precision="fp32",
+        quant_ctx=None,
     ):
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
+            if quant_ctx is not None:
+                raise NotImplementedError("T5 FP8 builds do not support tensor parallelism")
             if precision != "fp32":
                 raise NotImplementedError(
                     "T5 tensor-parallel decoder builds currently require fp32"
@@ -199,6 +203,7 @@ class _T5Model:
         tc = builder.create_builder_config()
         tc.builder_optimization_level = 1
         tc.clear_flag(trt.BuilderFlag.TF32)
+        configure_fp8_build(tc, quant_ctx)
         token_id = network.add_input("token_id", trt.int32, (1,))
         position_id = network.add_input("position_id", trt.int32, (1,))
         attn_mask = network.add_input("attention_mask", trt.float32, (1, aw))
@@ -235,7 +240,7 @@ class _T5Model:
         emb = graph_ops.add_constant(
             network, (vs, h), weights["shared_embedding"], dtype=work_np_dtype
         )
-        hs = network.add_gather(emb, token_id, 0).get_output(0)
+        hs = _as_dtype(network, network.add_gather(emb, token_id, 0).get_output(0), trt.float32)
         ck_work = [
             network.add_cast(value, work_trt_dtype).get_output(0)
             if value.dtype != work_trt_dtype
@@ -297,6 +302,7 @@ class _T5Model:
                 max_distance=md,
                 enc_mask=enc_mask_3d,
                 dtype=work_np_dtype,
+                quant_ctx=quant_ctx,
             )
             hs = r["hidden"]
             pk_out.append(r["present_k"])
@@ -304,6 +310,7 @@ class _T5Model:
             if debug_layer_outputs:
                 _mark_debug_output(network, hs, f"debug_hidden_{li}")
         hs = graph_ops.add_rms_norm(network, hs, h, weights["final_norm"], et, dtype=work_np_dtype)
+        hs = _as_dtype(network, hs, work_trt_dtype)
         logits = graph_ops.add_matmul_rhs_constant(
             network, hs, h, vs, weights["w_out"], dtype=work_np_dtype
         )
@@ -341,8 +348,11 @@ class _T5Model:
         *,
         verbose=False,
         precision="fp32",
+        quant_ctx=None,
     ):
-        return _build_t5_encoder(config, weights, verbose=verbose, precision=precision)
+        return _build_t5_encoder(
+            config, weights, verbose=verbose, precision=precision, quant_ctx=quant_ctx
+        )
 
     def get_vl_config(self, config):
         raw = config.raw
@@ -360,7 +370,25 @@ class _T5Model:
         }
 
 
-def _build_t5_encoder(config, weights, *, verbose=False, precision="fp32"):
+def _project(network, lhs, lhs_width, rhs_width, weights, name, dtype, quant_ctx):
+    """Projection ``lhs @ weights[name]``; FP8 Q/DQ when ``quant_ctx`` quantizes ``name``."""
+    if quant_ctx is None:
+        return graph_ops.add_matmul_rhs_constant(
+            network, lhs, lhs_width, rhs_width, weights[name], dtype=dtype
+        )
+    return quant_ctx.maybe_quantized_matmul(
+        network, lhs, lhs_width, rhs_width, weights[name], name, dtype=dtype
+    )
+
+
+def _as_dtype(network, tensor, dtype):
+    """Cast only when a T5 precision boundary changes the tensor dtype."""
+    if tensor.dtype == dtype:
+        return tensor
+    return network.add_cast(tensor, dtype).get_output(0)
+
+
+def _build_t5_encoder(config, weights, *, verbose=False, precision="fp32", quant_ctx=None):
     el = weights["_enc_layers"]
     nh = weights["_num_heads"]
     dkv = weights["_d_kv"]
@@ -385,6 +413,7 @@ def _build_t5_encoder(config, weights, *, verbose=False, precision="fp32"):
     tc = builder.create_builder_config()
     tc.builder_optimization_level = 1
     tc.clear_flag(trt.BuilderFlag.TF32)
+    configure_fp8_build(tc, quant_ctx)
     et = graph_ops.add_constant(
         network, (1, 1), np.array([eps], dtype=work_np_dtype), dtype=work_np_dtype
     )
@@ -398,7 +427,8 @@ def _build_t5_encoder(config, weights, *, verbose=False, precision="fp32"):
     if enc_mask_broadcast.dtype != work_trt_dtype:
         enc_mask_broadcast = network.add_cast(enc_mask_broadcast, work_trt_dtype).get_output(0)
     emb = graph_ops.add_constant(network, (vs, h), weights["shared_embedding"], dtype=work_np_dtype)
-    hs = network.add_gather(emb, ids, 0).get_output(0)
+    # T5 residuals can exceed FP16 even when all projection inputs are finite.
+    hs = _as_dtype(network, network.add_gather(emb, ids, 0).get_output(0), trt.float32)
     rpb = None
     if "enc_rel_attn_bias" in weights:
         bt = weights["enc_rel_attn_bias"]
@@ -414,13 +444,12 @@ def _build_t5_encoder(config, weights, *, verbose=False, precision="fp32"):
         normed = graph_ops.add_rms_norm(
             network, hs, h, weights[f"{pfx}.attn_norm"], et, dtype=work_np_dtype
         )
+        normed = _as_dtype(network, normed, work_trt_dtype)
         attn = _add_t5_enc_sa(
             network,
             normed,
-            weights[f"{pfx}.w_q"],
-            weights[f"{pfx}.w_k"],
-            weights[f"{pfx}.w_v"],
-            weights[f"{pfx}.w_o"],
+            weights,
+            pfx,
             h,
             nh,
             hd,
@@ -429,17 +458,26 @@ def _build_t5_encoder(config, weights, *, verbose=False, precision="fp32"):
             rpb,
             enc_mask_broadcast,
             dtype=work_np_dtype,
+            quant_ctx=quant_ctx,
         )
-        hs = network.add_elementwise(hs, attn, trt.ElementWiseOperation.SUM).get_output(0)
+        hs = network.add_elementwise(
+            hs, _as_dtype(network, attn, hs.dtype), trt.ElementWiseOperation.SUM
+        ).get_output(0)
         fn = graph_ops.add_rms_norm(
             network, hs, h, weights[f"{pfx}.ffn_norm"], et, dtype=work_np_dtype
         )
-        f1 = graph_ops.add_matmul_rhs_constant(
-            network, fn, h, dff, weights[f"{pfx}.w_fc1"], dtype=work_np_dtype
-        )
+        fn = _as_dtype(network, fn, work_trt_dtype)
+        f1 = _project(network, fn, h, dff, weights, f"{pfx}.w_fc1", work_np_dtype, quant_ctx)
         a = network.add_activation(f1, trt.ActivationType.RELU)
-        f2 = graph_ops.add_matmul_rhs_constant(
-            network, a.get_output(0), dff, h, weights[f"{pfx}.w_fc2"], dtype=work_np_dtype
+        f2 = _project(
+            network,
+            _as_dtype(network, a.get_output(0), trt.float32),
+            dff,
+            h,
+            weights,
+            f"{pfx}.w_fc2",
+            np.float32,
+            quant_ctx,
         )
         hs = network.add_elementwise(hs, f2, trt.ElementWiseOperation.SUM).get_output(0)
     hs = graph_ops.add_rms_norm(network, hs, h, weights["enc_final_norm"], et, dtype=work_np_dtype)
@@ -462,10 +500,8 @@ def _build_t5_encoder(config, weights, *, verbose=False, precision="fp32"):
 def _add_t5_enc_sa(
     network,
     hidden,
-    wq,
-    wk,
-    wv,
-    wo,
+    weights,
+    prefix,
     h,
     nh,
     hd,
@@ -474,10 +510,11 @@ def _add_t5_enc_sa(
     rpb=None,
     attn_mask=None,
     dtype=np.float32,
+    quant_ctx=None,
 ):
-    q = graph_ops.add_matmul_rhs_constant(network, hidden, h, asz, wq, dtype=dtype)
-    k = graph_ops.add_matmul_rhs_constant(network, hidden, h, asz, wk, dtype=dtype)
-    v = graph_ops.add_matmul_rhs_constant(network, hidden, h, asz, wv, dtype=dtype)
+    q = _project(network, hidden, h, asz, weights, f"{prefix}.w_q", dtype, quant_ctx)
+    k = _project(network, hidden, h, asz, weights, f"{prefix}.w_k", dtype, quant_ctx)
+    v = _project(network, hidden, h, asz, weights, f"{prefix}.w_v", dtype, quant_ctx)
     mask = None
     if rpb is not None:
         mask = rpb
@@ -495,7 +532,7 @@ def _add_t5_enc_sa(
     cf = graph_ops.add_attention_from_rows(
         network, q, k, v, num_heads=nh, head_dim=hd, q_seq=sl, kv_seq=sl, mask=mask, scale=1.0
     )
-    return graph_ops.add_matmul_rhs_constant(network, cf, asz, h, wo, dtype=dtype)
+    return _project(network, cf, asz, h, weights, f"{prefix}.w_o", dtype, quant_ctx)
 
 
 def _add_t5_decoder_layer(
@@ -524,6 +561,7 @@ def _add_t5_decoder_layer(
     max_distance,
     enc_mask=None,
     dtype=np.float32,
+    quant_ctx=None,
 ):
     h, nh, hd, asz = hidden_size, num_heads, head_dim, attention_size
     aw = max_cache_length + 1
@@ -531,15 +569,11 @@ def _add_t5_decoder_layer(
     normed = graph_ops.add_rms_norm(
         network, hidden, h, weights[f"{prefix}.input_norm"], eps_tensor, dtype=dtype
     )
-    q = graph_ops.add_matmul_rhs_constant(
-        network, normed, h, asz, weights[f"{prefix}.w_q"], dtype=dtype
-    )
-    k = graph_ops.add_matmul_rhs_constant(
-        network, normed, h, asz, weights[f"{prefix}.w_k"], dtype=dtype
-    )
-    v = graph_ops.add_matmul_rhs_constant(
-        network, normed, h, asz, weights[f"{prefix}.w_v"], dtype=dtype
-    )
+    work_trt_dtype = trt.float16 if dtype == np.float16 else trt.float32
+    normed = _as_dtype(network, normed, work_trt_dtype)
+    q = _project(network, normed, h, asz, weights, f"{prefix}.w_q", dtype, quant_ctx)
+    k = _project(network, normed, h, asz, weights, f"{prefix}.w_k", dtype, quant_ctx)
+    v = _project(network, normed, h, asz, weights, f"{prefix}.w_v", dtype, quant_ctx)
     present_k, present_v = k, v
     kr = network.add_shuffle(k)
     kr.reshape_dims = (1, asz)
@@ -576,22 +610,17 @@ def _add_t5_decoder_layer(
         mask=self_mask,
         scale=1.0,
     )
-    sa = graph_ops.add_matmul_rhs_constant(
-        network, cf, asz, h, weights[f"{prefix}.w_o"], dtype=dtype
-    )
-    psa = network.add_elementwise(hidden, sa, trt.ElementWiseOperation.SUM).get_output(0)
+    sa = _project(network, cf, asz, h, weights, f"{prefix}.w_o", dtype, quant_ctx)
+    psa = network.add_elementwise(
+        hidden, _as_dtype(network, sa, hidden.dtype), trt.ElementWiseOperation.SUM
+    ).get_output(0)
     cn = graph_ops.add_rms_norm(
         network, psa, h, weights[f"{prefix}.cross_attn_norm"], eps_tensor, dtype=dtype
     )
-    cq = graph_ops.add_matmul_rhs_constant(
-        network, cn, h, asz, weights[f"{prefix}.cross_w_q"], dtype=dtype
-    )
-    ckp = graph_ops.add_matmul_rhs_constant(
-        network, cross_k, h, asz, weights[f"{prefix}.cross_w_k"], dtype=dtype
-    )
-    cvp = graph_ops.add_matmul_rhs_constant(
-        network, cross_v, h, asz, weights[f"{prefix}.cross_w_v"], dtype=dtype
-    )
+    cn = _as_dtype(network, cn, work_trt_dtype)
+    cq = _project(network, cn, h, asz, weights, f"{prefix}.cross_w_q", dtype, quant_ctx)
+    ckp = _project(network, cross_k, h, asz, weights, f"{prefix}.cross_w_k", dtype, quant_ctx)
+    cvp = _project(network, cross_v, h, asz, weights, f"{prefix}.cross_w_v", dtype, quant_ctx)
     if dec_cross_rel_bias is not None:
         xbi = _make_t5_cross_buckets(aw, msp, num_buckets, max_distance)
         xbv = dec_cross_rel_bias[xbi.flatten()].reshape(aw, msp, nh).transpose(2, 0, 1)
@@ -623,19 +652,25 @@ def _add_t5_decoder_layer(
         mask=cross_mask,
         scale=1.0,
     )
-    ca = graph_ops.add_matmul_rhs_constant(
-        network, ccf, asz, h, weights[f"{prefix}.cross_w_o"], dtype=dtype
-    )
-    pca = network.add_elementwise(psa, ca, trt.ElementWiseOperation.SUM).get_output(0)
+    ca = _project(network, ccf, asz, h, weights, f"{prefix}.cross_w_o", dtype, quant_ctx)
+    pca = network.add_elementwise(
+        psa, _as_dtype(network, ca, psa.dtype), trt.ElementWiseOperation.SUM
+    ).get_output(0)
     fn = graph_ops.add_rms_norm(
         network, pca, h, weights[f"{prefix}.post_attn_norm"], eps_tensor, dtype=dtype
     )
-    f1 = graph_ops.add_matmul_rhs_constant(
-        network, fn, h, ffn_dim, weights[f"{prefix}.w_fc1"], dtype=dtype
-    )
+    fn = _as_dtype(network, fn, work_trt_dtype)
+    f1 = _project(network, fn, h, ffn_dim, weights, f"{prefix}.w_fc1", dtype, quant_ctx)
     act = network.add_activation(f1, trt.ActivationType.RELU)
-    f2 = graph_ops.add_matmul_rhs_constant(
-        network, act.get_output(0), ffn_dim, h, weights[f"{prefix}.w_fc2"], dtype=dtype
+    f2 = _project(
+        network,
+        _as_dtype(network, act.get_output(0), trt.float32),
+        ffn_dim,
+        h,
+        weights,
+        f"{prefix}.w_fc2",
+        np.float32,
+        quant_ctx,
     )
     out = network.add_elementwise(pca, f2, trt.ElementWiseOperation.SUM).get_output(0)
     return {"hidden": out, "present_k": present_k, "present_v": present_v}
@@ -751,21 +786,31 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("T5 max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("T5 does not support quantized builds")
+    quantization = str(request.quantization or "none").lower()
+    if quantization not in {"none", "fp8"}:
+        raise NotImplementedError(
+            f"T5 supports quantization 'fp8' or none; got quantization={request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("T5 does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("T5 does not support MTP speculative decoding")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
     parallel.validate()
     if parallel.enabled and precision != "fp32":
         raise NotImplementedError("T5 tensor-parallel builds require fp32")
+    if parallel.enabled and quantization == "fp8":
+        raise NotImplementedError("T5 FP8 quantization does not support tensor parallelism")
+    if quantization == "fp8":
+        reject_quantized_checkpoint(model_dir, config)
     model = _T5Model()
     config.raw["_model_dir"] = str(model_dir)
     if not (model_dir / "tokenizer.json").is_file():
         model.ensure_tokenizer_json(model_dir)
     weights = model.load_weights(str(model_dir), config)
+    quant_ctx = calibrate_t5_fp8(config, weights, graph_ops) if quantization == "fp8" else None
     writer.set_header(family="t5", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -788,6 +833,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
+            quant_ctx=quant_ctx,
         )
         writer.add_bytes("engine.plan", plan)
     encoder_plan = model.build_vision_engine(
@@ -796,6 +842,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         weights,
         precision=precision,
         verbose=bool(request.verbose),
+        quant_ctx=quant_ctx,
     )
     if encoder_plan is None:
         raise RuntimeError("T5 encoder build returned no engine")

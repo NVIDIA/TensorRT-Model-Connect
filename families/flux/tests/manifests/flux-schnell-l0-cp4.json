@@ -1,6 +1,7 @@
 {
   "name": "flux-schnell-l0-cp4",
   "hf_id": "black-forest-labs/FLUX.1-schnell",
+  "hf_revision": "741f7c3ce8b383c54771c7003378a50191e9efe9",
   "bundle": "flux-schnell-l0-cp4.bundle",
   "family": "flux",
   "task": "image_generation",

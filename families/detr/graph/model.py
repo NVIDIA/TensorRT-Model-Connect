@@ -172,24 +172,44 @@ def add_attention_core(network, q_4d, k_4d, v_4d, scale: float | None = None,
     return _cast_back_to_trt_dtype(network, attn.get_output(0), output_dtype)
 
 
-def make_sine_position_embedding(height: int, width: int, hidden_size: int,
-                                 temperature: int = 10000, normalize: bool = True,
-                                 scale: float | None = None):
-    """Return [1, height*width, hidden_size] DETR sine position embeddings."""
-    if scale is None:
-        scale = 2.0 * np.pi
-    y_embed = np.arange(1, height + 1, dtype=np.float32)[:, None].repeat(width, axis=1)
-    x_embed = np.arange(1, width + 1, dtype=np.float32)[None, :].repeat(height, axis=0)
-    if normalize:
-        eps = 1e-6
-        y_embed = y_embed / (y_embed[-1:, :] + eps) * scale
-        x_embed = x_embed / (x_embed[:, -1:] + eps) * scale
+def add_sine_position_embedding(network, feature_map, hidden_size: int,
+                                temperature: int = 10000):
+    """DETR positions for the actual, unpadded feature grid; output [H*W, C]."""
+    spatial_shape = network.add_slice(
+        network.add_shape(feature_map).get_output(0), (2,), (2,), (1,)).get_output(0)
     num_pos_feats = hidden_size // 2
     dim_t = np.arange(num_pos_feats, dtype=np.float32)
     dim_t = temperature ** (2.0 * np.floor(dim_t / 2.0) / num_pos_feats)
-    pos_x = x_embed[:, :, None] / dim_t
-    pos_y = y_embed[:, :, None] / dim_t
-    pos_x = np.stack((np.sin(pos_x[:, :, 0::2]), np.cos(pos_x[:, :, 1::2])), axis=3).reshape(height, width, num_pos_feats)
-    pos_y = np.stack((np.sin(pos_y[:, :, 0::2]), np.cos(pos_y[:, :, 1::2])), axis=3).reshape(height, width, num_pos_feats)
-    pos = np.concatenate((pos_y, pos_x), axis=2)  # [H, W, hidden_size]
-    return np.ascontiguousarray(pos.reshape(1, height * width, hidden_size))
+    frequencies = add_constant(network, (1, 1, num_pos_feats), dim_t)
+    even = add_constant(network, (1, 1, num_pos_feats),
+                        np.arange(num_pos_feats) % 2 == 0, dtype=np.bool_)
+    start = add_constant(network, (), np.array(1.0))
+    epsilon = add_constant(network, (1,), np.array([1e-6]))
+    scale = add_constant(network, (1, 1), np.array([[2.0 * np.pi]]))
+    positions = []
+    for axis, step in ((0, [1.0, 0.0]), (1, [0.0, 1.0])):
+        grid = network.add_fill((1, 1), trt.FillOperation.LINSPACE, trt.float32)
+        grid.set_input(0, spatial_shape)
+        grid.set_input(1, start)
+        grid.set_input(2, add_constant(network, (2,), np.array(step)))
+        length = network.add_slice(spatial_shape, (axis,), (1,), (1,)).get_output(0)
+        length = network.add_cast(length, trt.float32).get_output(0)
+        denominator = add_sum(network, length, epsilon)
+        scalar = network.add_shuffle(denominator)
+        scalar.reshape_dims = (1, 1)
+        normalized = network.add_elementwise(
+            grid.get_output(0), scalar.get_output(0), trt.ElementWiseOperation.DIV).get_output(0)
+        normalized = network.add_elementwise(
+            normalized, scale, trt.ElementWiseOperation.PROD).get_output(0)
+        expanded = network.add_shuffle(normalized)
+        expanded.reshape_dims = (0, 0, 1)
+        angles = network.add_elementwise(
+            expanded.get_output(0), frequencies, trt.ElementWiseOperation.DIV).get_output(0)
+        sine = network.add_unary(angles, trt.UnaryOperation.SIN).get_output(0)
+        cosine = network.add_unary(angles, trt.UnaryOperation.COS).get_output(0)
+        positions.append(network.add_select(even, sine, cosine).get_output(0))
+    pos = network.add_concatenation(positions)
+    pos.axis = 2
+    rows = network.add_shuffle(pos.get_output(0))
+    rows.reshape_dims = (-1, hidden_size)
+    return rows.get_output(0)

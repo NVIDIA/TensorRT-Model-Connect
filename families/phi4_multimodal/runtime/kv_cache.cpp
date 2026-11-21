@@ -71,12 +71,14 @@ void Phi4MultimodalKvCache::write_position_input(TensorMap& inputs, int32_t seq_
 }
 
 void Phi4MultimodalKvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
-    // Batched prefill mask: (seq_len, max_length + seq_len). Columns
-    // [0, valid) are visible cache, [valid, max_length) are stale slots,
-    // [max_length, max_length+seq_len) are the new tokens — causal so
-    // token i sees tokens 0..i.
-    const int32_t valid = std::max(0, std::min(position_, max_length_));
-    const int32_t kv_len = max_length_ + seq_len;
+    // Batched prefill mask: (seq_len, cache_rows + seq_len), cache_rows the
+    // bound cache prefix (max_length for a static engine). Columns [0, valid)
+    // are visible cache, [valid, cache_rows) are stale slots, and
+    // [cache_rows, cache_rows+seq_len) are the new tokens — causal so token i
+    // sees tokens 0..i.
+    const int32_t cache_rows = prefill_cache_rows();
+    const int32_t valid = std::max(0, std::min(position_, cache_rows));
+    const int32_t kv_len = cache_rows + seq_len;
     const std::size_t total = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(kv_len);
     mask_buf_.assign(total, kMaskedScore);
     for (int32_t i = 0; i < seq_len; ++i) {
@@ -84,7 +86,7 @@ void Phi4MultimodalKvCache::write_batched_mask(TensorMap& inputs, int32_t seq_le
         for (int32_t j = 0; j < valid; ++j)
             mask_buf_[row + static_cast<std::size_t>(j)] = 0.0f;
         for (int32_t j = 0; j <= i; ++j)
-            mask_buf_[row + static_cast<std::size_t>(max_length_) + static_cast<std::size_t>(j)] =
+            mask_buf_[row + static_cast<std::size_t>(cache_rows) + static_cast<std::size_t>(j)] =
                 0.0f;
     }
     Tensor mask_t;
@@ -98,8 +100,9 @@ void Phi4MultimodalKvCache::write_bidirectional_mask(TensorMap& inputs, int32_t 
     // Diffusion block mask: all valid prefix cache rows are visible, stale cache
     // rows are hidden, and every token in the current block can see every other
     // token in the current block.
-    const int32_t valid = std::max(0, std::min(position_, max_length_));
-    const int32_t kv_len = max_length_ + seq_len;
+    const int32_t cache_rows = prefill_cache_rows();
+    const int32_t valid = std::max(0, std::min(position_, cache_rows));
+    const int32_t kv_len = cache_rows + seq_len;
     const std::size_t total = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(kv_len);
     mask_buf_.assign(total, kMaskedScore);
     for (int32_t i = 0; i < seq_len; ++i) {
@@ -107,7 +110,7 @@ void Phi4MultimodalKvCache::write_bidirectional_mask(TensorMap& inputs, int32_t 
         for (int32_t j = 0; j < valid; ++j)
             mask_buf_[row + static_cast<std::size_t>(j)] = 0.0f;
         for (int32_t j = 0; j < seq_len; ++j)
-            mask_buf_[row + static_cast<std::size_t>(max_length_) + static_cast<std::size_t>(j)] =
+            mask_buf_[row + static_cast<std::size_t>(cache_rows) + static_cast<std::size_t>(j)] =
                 0.0f;
     }
     Tensor mask_t;
@@ -124,8 +127,16 @@ void Phi4MultimodalKvCache::write_decode_mask(TensorMap& inputs) {
     if (mask_rank != 2)
         throw std::runtime_error("phi4_multimodal decoder has an invalid attention-mask rank");
 
+    // Columns [0, valid) are the cached prefix, [valid, cache_rows) stale rows
+    // and the last column the new token; a runtime-sized decode engine binds
+    // only the bucketed prefix instead of all max_length rows.
     const int32_t valid = std::max(0, std::min(position_, max_length_));
-    const int32_t mask_width = max_length_ + 1;
+    int32_t cache_rows = max_length_;
+    if (decode_dynamic_rows_) {
+        cache_rows = bucketed_cache_rows();
+        bind_decode_cache_rows(cache_rows);
+    }
+    const int32_t mask_width = cache_rows + 1;
     if (mask_buf_.size() != static_cast<std::size_t>(mask_width))
         mask_buf_.resize(static_cast<std::size_t>(mask_width));
     std::fill(mask_buf_.begin(), mask_buf_.end(), kMaskedScore);
@@ -162,10 +173,12 @@ void Phi4MultimodalKvCache::bind_to(ITrtModule& module) {
         throw std::runtime_error("phi4_multimodal KV cache has no cache tensor names");
     const auto cache_shape = module.tensor_shape(names_.cache_k.front());
     const std::vector<int64_t> expected_cache_shape{max_length_, kv_dim_};
-    if (module.input_rank(names_.cache_k.front()) != 2 ||
-        module.input_is_dynamic(names_.cache_k.front()) || cache_shape != expected_cache_shape) {
-        throw std::runtime_error(
-            "phi4_multimodal decoder does not match its fixed KV-cache contract");
+    const bool dynamic_rows = module.input_is_dynamic(names_.cache_k.front());
+    const bool shape_matches = dynamic_rows
+                                   ? cache_shape.size() == 2 && cache_shape.back() == kv_dim_
+                                   : cache_shape == expected_cache_shape;
+    if (module.input_rank(names_.cache_k.front()) != 2 || !shape_matches) {
+        throw std::runtime_error("phi4_multimodal decoder does not match its KV-cache contract");
     }
     const int32_t mask_rank = module.input_rank(names_.attention_mask);
     if (mask_rank != 2)
@@ -180,15 +193,50 @@ void Phi4MultimodalKvCache::bind_to(ITrtModule& module) {
         module.bind_external(names_.present_k[layer], present_k_[layer].data());
         module.bind_external(names_.present_v[layer], present_v_[layer].data());
     }
+    decode_dynamic_rows_ = dynamic_rows;
+    decode_cache_rows_ = 0;
+    if (decode_dynamic_rows_)
+        bind_decode_cache_rows(bucketed_cache_rows());
+}
+
+int32_t Phi4MultimodalKvCache::bucketed_cache_rows() const {
+    const int32_t used = std::max(0, std::min(position_, max_length_));
+    const int32_t bucketed = (used + kCacheRowBucket - 1) / kCacheRowBucket * kCacheRowBucket;
+    return std::max(1, std::min(bucketed, max_length_));
+}
+
+void Phi4MultimodalKvCache::bind_decode_cache_rows(int32_t rows) {
+    if (rows == decode_cache_rows_)
+        return;
+    const std::vector<int64_t> cache_shape{rows, kv_dim_};
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        const auto layer = static_cast<std::size_t>(i);
+        bound_module_->bind_external(names_.cache_k[layer], cache_k_[layer].data(), cache_shape);
+        bound_module_->bind_external(names_.cache_v[layer], cache_v_[layer].data(), cache_shape);
+    }
+    decode_cache_rows_ = rows;
 }
 
 void Phi4MultimodalKvCache::bind_cache_inputs(ITrtModule& module) {
     has_position_input_ = module.has_input(names_.position_id);
+    prefill_cache_rows_ = 0;
+    if (!names_.cache_k.empty() && module.input_is_dynamic(names_.cache_k.front()))
+        prefill_cache_rows_ = bucketed_cache_rows();
+    const std::vector<int64_t> cache_shape{prefill_cache_rows_, kv_dim_};
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
-        module.bind_external(names_.cache_k[li], cache_k_[li].data());
-        module.bind_external(names_.cache_v[li], cache_v_[li].data());
+        if (prefill_cache_rows_ > 0) {
+            module.bind_external(names_.cache_k[li], cache_k_[li].data(), cache_shape);
+            module.bind_external(names_.cache_v[li], cache_v_[li].data(), cache_shape);
+        } else {
+            module.bind_external(names_.cache_k[li], cache_k_[li].data());
+            module.bind_external(names_.cache_v[li], cache_v_[li].data());
+        }
     }
+}
+
+int32_t Phi4MultimodalKvCache::prefill_cache_rows() const {
+    return prefill_cache_rows_ > 0 ? prefill_cache_rows_ : max_length_;
 }
 
 void Phi4MultimodalKvCache::write_prefill_kv(const std::vector<const void*>& prefill_k,
@@ -290,6 +338,7 @@ void Phi4MultimodalKvCache::reset() {
     // Reset only the logical sequence length. Attention masks hide every
     // stale cache row, and each present row is overwritten before use.
     position_ = 0;
+    prefill_cache_rows_ = 0;
 }
 
 std::size_t Phi4MultimodalKvCache::device_memory_bytes() const {

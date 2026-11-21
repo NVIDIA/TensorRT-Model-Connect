@@ -5,6 +5,7 @@
 
 #include "cli/cli.h"
 
+#include "bundle_provenance.h"
 #include "cli/family_cli.h"
 #include "cli/io.h"
 #include "cli/sdk_dispatch.h"
@@ -31,6 +32,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -95,8 +97,9 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
          {CommandKind::kEmbed,
           {"--text", "--token-ids", "--image", "--title", "--body", "--role"}}},
         {"rerank", {CommandKind::kRerank, {"--query", "--document", "--image", "--documents"}}},
-        {"classify", {CommandKind::kClassify, {"--image"}}},
+        {"classify", {CommandKind::kClassify, {"--image", "--audio"}}},
         {"detect", {CommandKind::kDetect, {"--image", "--prompt"}}},
+        {"layout", {CommandKind::kLayout, {"--image"}}},
         {"extract-features", {CommandKind::kExtractFeatures, {"--image"}}},
         {"predict-structure",
          {CommandKind::kPredictStructure,
@@ -111,8 +114,8 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"video-segment", {CommandKind::kVideoSegment, {"--frame", "--prompt"}}},
         {"generate-audio",
          {CommandKind::kGenerateAudio,
-          {"--prompt", "--output", "--max-new-tokens", "--talker-max-new-tokens", "--seed",
-           "--stream", "--chunk-frames", "--language"}}},
+          {"--prompt", "--description", "--output", "--max-new-tokens", "--talker-max-new-tokens",
+           "--seed", "--stream", "--chunk-frames", "--language"}}},
         {"transcribe",
          {CommandKind::kTranscribe,
           {"--input", "--max-output-tokens", "--source-language", "--target-language",
@@ -395,6 +398,8 @@ void require_finite(const std::vector<float>& values, const std::string& field) 
 void write_json(std::ostream& output, const nlohmann::json& value) {
     output << value.dump() << '\n';
 }
+
+using app::read_provenance;
 
 nlohmann::json text_json(const TextResult& result) {
     nlohmann::json value{{"text", result.text},
@@ -912,6 +917,27 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
                             {"image_width", result.image_width}});
         return EXIT_SUCCESS;
     }
+    case CommandKind::kLayout: {
+        const io::LoadedImage image = read_image(require_option(command, "--image"));
+        const auto result = require_interface<IDocumentLayout>(task).analyze_layout(
+            image.pixels.data(), image.height, image.width);
+        nlohmann::json regions = nlohmann::json::array();
+        for (const auto& region : result.regions) {
+            const auto& box = region.box;
+            require_finite({box.x_min, box.y_min, box.x_max, box.y_max, box.score},
+                           "layout region");
+            for (const auto& vertex : region.polygon)
+                require_finite({vertex[0], vertex[1]}, "layout polygon");
+            regions.push_back({{"box", {box.x_min, box.y_min, box.x_max, box.y_max}},
+                               {"score", box.score},
+                               {"class_id", box.class_id},
+                               {"polygon", region.polygon}});
+        }
+        write_json(output, {{"regions", regions},
+                            {"image_height", result.image_height},
+                            {"image_width", result.image_width}});
+        return EXIT_SUCCESS;
+    }
     case CommandKind::kExtractFeatures: {
         const io::LoadedImage image = read_image(require_option(command, "--image"));
         const auto result = require_interface<IImageFeatureExtractor>(task).extract_image_features(
@@ -1138,6 +1164,8 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
         config.max_new_tokens = int_option(command, "--max-new-tokens", 128, 1);
         config.talker_max_new_tokens = int_option(command, "--talker-max-new-tokens", 0, 0);
         config.seed = int_option(command, "--seed", -1);
+        if (has_option(command, "--description"))
+            config.description = command.options.at("--description");
         const bool streaming = has_option(command, "--stream") &&
                                parse_bool(command.options.at("--stream"), "--stream");
         if (!streaming && has_option(command, "--chunk-frames"))
@@ -1608,7 +1636,7 @@ void print_usage(std::ostream& output) {
               "  trtmc inspect BUNDLE\n"
               "  trtmc COMMAND BUNDLE [--runtime-root DIR] [OPTIONS]\n\n"
               "Execution commands:\n"
-              "  run, encode, embed, rerank, classify, detect, extract-features,\n"
+              "  run, encode, embed, rerank, classify, detect, layout, extract-features,\n"
               "  predict-structure, disparity, depth, geometry,\n"
               "  segment,\n"
               "  segment-prompted, video-segment, generate-audio, transcribe,\n"
@@ -1632,6 +1660,9 @@ void print_usage(std::ostream& output) {
               "  predict-structure BUNDLE --input REQUEST [--input-encoding ENCODING]\n"
               "  .yaml/.yml, .json and .b2rq select their declared encodings.\n"
               "  SDK output defaults to prediction.cif or prediction.pdb.\n\n"
+              "Audio classification input:\n"
+              "  classify BUNDLE --audio WAV scores an audio model's own classes;\n"
+              "  classify BUNDLE --image FILE stays the image path.\n\n"
               "BYOK options:\n"
               "  --byok-library DSO --byok-function FUNCTION --byok-name KERNEL\n\n"
               "Runtime-sized KV cache:\n"
@@ -1639,8 +1670,7 @@ void print_usage(std::ostream& output) {
               "TensorRT-RTX runtime options:\n"
               "  [--runtime-cache PATH] [--cuda-graphs]\n\n"
               "Task SDK options: [--task TASK_ID] [--set NAME=VALUE]...\n"
-              "Task SDK families default to the installed runtime directory.\n"
-              "Existing bundle modes still require an explicit --runtime-root.\n";
+              "Without --runtime-root, plugins load from the installed runtime directory.\n";
 }
 
 int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
@@ -1670,7 +1700,8 @@ int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
                                 {"family", bundle.family},
                                 {"task", bundle.task},
                                 {"backend", bundle.backend},
-                                {"sections", std::move(sections)}});
+                                {"sections", std::move(sections)},
+                                {"provenance", read_provenance(command.bundle)}});
             return EXIT_SUCCESS;
         }
         const bool has_byok_library = has_option(command, "--byok-library");
@@ -1690,8 +1721,7 @@ int run(int argc, char** argv, std::ostream& output, std::ostream& error) {
             const auto model = Model::load(command.bundle, options);
             return dispatch(command, model, output);
         }
-        if (command.runtime_root.empty())
-            throw std::invalid_argument("--runtime-root is required for an existing bundle mode");
+        // An empty runtime root selects the directory containing libtrtmc_runtime.
         std::unique_ptr<ITask> task =
             load_task(command.bundle, command.runtime_root, command.kv_cache_size_bytes,
                       command.runtime_cache_path, command.cuda_graphs);

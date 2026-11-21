@@ -102,3 +102,64 @@ def test_anchors_cover_every_cell_at_each_stride() -> None:
 def test_batch_norm_uses_the_ultralytics_epsilon() -> None:
     """Ultralytics builds with 1e-3, not the PyTorch default of 1e-5."""
     assert model._BATCH_NORM_EPSILON == 1e-3
+
+
+class _Writer:
+    def __init__(self) -> None:
+        self.sections: dict[str, object] = {}
+
+    def set_header(self, **header) -> None:
+        self.sections["header"] = header
+
+    def add_bytes(self, name: str, value: bytes) -> None:
+        self.sections[name] = value
+
+    def add_json(self, name: str, value: object) -> None:
+        self.sections[name] = value
+
+
+def _request(tmp_path: Path, task: str):
+    from tensorrt_model_connect.build import BuildRequest
+
+    return BuildRequest(
+        model_dir=tmp_path,
+        output_path=tmp_path / "yolov8.bundle",
+        family="yolov8",
+        task=task,
+        precision="fp16",
+    )
+
+
+def test_build_rejects_the_retired_task(tmp_path: Path) -> None:
+    """The old task name is not an alias for the new one."""
+    with pytest.raises(ValueError, match="yolov8 supports only task=image_to_boxes"):
+        model.build(_request(tmp_path, "object_detection"), _Writer())
+
+
+def test_build_records_the_semantic_task(tmp_path: Path, monkeypatch) -> None:
+    runtime = {
+        "image_height": 640,
+        "image_width": 640,
+        "mean": [0.0, 0.0, 0.0],
+        "std": [1.0, 1.0, 1.0],
+        "pad_value": 114.0 / 255.0,
+        "max_detections": 300,
+    }
+    monkeypatch.setattr(Checkpoint, "open", lambda *args, **kwargs: _checkpoint())
+    monkeypatch.setattr(model, "_build_engine", lambda *args, **kwargs: (b"plan", runtime))
+    writer = _Writer()
+    model.build(_request(tmp_path, "image_to_boxes"), writer)
+    assert writer.sections["header"] == {
+        "family": "yolov8",
+        "task": "image_to_boxes",
+        "backend": "trt",
+    }
+    assert writer.sections["engine.plan"] == b"plan"
+    assert writer.sections["runtime.json"] == {
+        "input_image_h": 640,
+        "input_image_w": 640,
+        "image_mean": [0.0, 0.0, 0.0],
+        "image_std": [1.0, 1.0, 1.0],
+        "pad_value": 114.0 / 255.0,
+        "max_detections": 300,
+    }

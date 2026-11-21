@@ -68,7 +68,9 @@ This example describes `trtmc <family> prepare INPUT --output OUTPUT`. The
 Python handler is `families.<family>.cli.prepare`, called with keyword arguments
 named by the declaration. It returns an integer exit status. Import heavy
 dependencies inside the selected handler; a build handler selects its backend
-before importing a model module that imports TensorRT.
+before importing a model module that imports TensorRT. A build handler that
+creates its own `BundleWriter` calls `writer.record_build(request)` so the bundle
+carries the core [build provenance](../architecture/bundle-format.md#build-provenance).
 
 An argument without `flags` is positional. Supported scalar types are `string`,
 `path`, `int`, `float` and `bool`. Integers use the signed 64-bit range and

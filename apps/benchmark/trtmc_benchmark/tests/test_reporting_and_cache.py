@@ -119,10 +119,13 @@ def test_family_cli_default_change_invalidates_managed_bundle(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize(
-    "change", ["manifest", "options", "source", "checkpoint", "bundle", "bundle_preserved_mtime"]
+    "change",
+    ["manifest", "options", "source", "data", "checkpoint", "bundle", "bundle_preserved_mtime"],
 )
 def test_changed_inputs_cannot_reuse_managed_bundle(tmp_path, monkeypatch, change):
     builder, case, source, checkpoint, calls = _cache_fixture(tmp_path, monkeypatch)
+    scales = source.parent / "fp8_activation_scales.json"
+    scales.write_text('{"layer": 0.5}')
     builder.prepare([case], allow_build=True, rebuild=False, dry_run=False)
     if change == "manifest":
         case.model.manifest_path.write_text('{"name":"example","precision":"fp32"}')
@@ -130,6 +133,9 @@ def test_changed_inputs_cannot_reuse_managed_bundle(tmp_path, monkeypatch, chang
         case = replace(case, model=replace(case.model, build_settings={"max_sequence_length": 128}))
     elif change == "source":
         source.write_text("BUILD_VERSION = 2\n")
+    elif change == "data":
+        # A family data file the build reads, such as an FP8 scale table.
+        scales.write_text('{"layer": null}')
     elif change == "checkpoint":
         checkpoint = checkpoint.parent / ("b" * 40)
         checkpoint.mkdir()
@@ -150,6 +156,17 @@ def test_changed_inputs_cannot_reuse_managed_bundle(tmp_path, monkeypatch, chang
     _, rebuilt = builder.prepare([case], allow_build=True, rebuild=False, dry_run=False)
     assert rebuilt[0].status == "built"
     assert len(calls) == 2
+
+
+def test_family_tests_and_docs_do_not_invalidate_managed_bundle(tmp_path, monkeypatch):
+    builder, case, source, _, calls = _cache_fixture(tmp_path, monkeypatch)
+    builder.prepare([case], allow_build=True, rebuild=False, dry_run=False)
+    (source.parent / "README.md").write_text("notes\n")
+    (source.parent / "tests").mkdir()
+    (source.parent / "tests" / "thresholds.json").write_text("{}")
+    _, reused = builder.prepare([case], allow_build=False, rebuild=False, dry_run=False)
+    assert reused[0].status == "reused"
+    assert len(calls) == 1
 
 
 def test_unreceipted_managed_bundle_does_not_silently_pass_no_build(tmp_path, monkeypatch):
@@ -251,7 +268,11 @@ def test_dry_run_does_not_claim_bundle_identity_was_verified(tmp_path, monkeypat
     assert calls == []
 
 
-@pytest.mark.parametrize("stdout", ["not json", "{}", "[]", "null"])
+@pytest.mark.parametrize("stdout", [
+    "not json", "{}", "[]", "null",
+    '{"family": "example", "task": "text_generation", "provenance": []}',
+    '{"family": "example", "task": "text_generation", "provenance": "recorded"}',
+])
 def test_invalid_inspection_cannot_validate_an_explicit_bundle(tmp_path, monkeypatch, stdout):
     builder, case, _, _, _ = _cache_fixture(tmp_path, monkeypatch)
     case.bundle_path.parent.mkdir(parents=True)
@@ -265,6 +286,109 @@ def test_invalid_inspection_cannot_validate_an_explicit_bundle(tmp_path, monkeyp
             [case.with_values(bundle_is_explicit=True)],
             allow_build=False, rebuild=False, dry_run=False,
         )
+
+
+_RECORDED = {
+    "version": 1,
+    "checkpoint": {"hf_id": "example/model", "revision": "a" * 40},
+    "build": {"precision": "fp16", "max_sequence_length": 64},
+}
+_OMITTED = object()
+
+
+def _inspection_reports(monkeypatch, provenance):
+    """Report `provenance` from `trtmc inspect`; _OMITTED models an older inspector."""
+    build = builder_module.subprocess.run
+
+    def run(command, **options):
+        if "inspect" not in command:
+            return build(command, **options)
+        info = {"family": "example", "task": "text_generation"}
+        if provenance is not _OMITTED:
+            info["provenance"] = provenance
+        return subprocess.CompletedProcess(command, 0, json.dumps(info), "")
+
+    monkeypatch.setattr(builder_module.subprocess, "run", run)
+
+
+def _pinned(case):
+    return replace(case, model=replace(case.model, hf_revision="a" * 40))
+
+
+def test_prepared_bundles_carry_their_recorded_provenance(tmp_path, monkeypatch):
+    builder, case, _, _, calls = _cache_fixture(tmp_path, monkeypatch)
+    _inspection_reports(monkeypatch, _RECORDED)
+    case = _pinned(case)
+    _, built = builder.prepare([case], allow_build=True, rebuild=False, dry_run=False)
+    _, reused = builder.prepare([case], allow_build=False, rebuild=False, dry_run=False)
+    _, chosen = builder.prepare(
+        [case.with_values(bundle_is_explicit=True)], allow_build=False, rebuild=False, dry_run=False
+    )
+    records = (*built, *reused, *chosen)
+    assert [record.status for record in records] == ["built", "reused", "reused"]
+    assert all(record.to_json()["provenance"] == _RECORDED for record in records)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("checkpoint", [
+    {"hf_id": "example/model", "revision": "b" * 40},
+    {"hf_id": "example/other", "revision": "a" * 40},
+])
+def test_bundle_recording_another_checkpoint_is_rejected(tmp_path, monkeypatch, checkpoint):
+    builder, case, _, _, calls = _cache_fixture(tmp_path, monkeypatch)
+    case = _pinned(case)
+    case.bundle_path.parent.mkdir(parents=True)
+    case.bundle_path.write_bytes(b"previous bundle")
+    _inspection_reports(monkeypatch, {**_RECORDED, "checkpoint": checkpoint})
+    with pytest.raises(BenchmarkError, match="bundle checkpoint mismatch"):
+        builder.prepare([case], allow_build=True, rebuild=True, dry_run=False)
+    assert case.bundle_path.read_bytes() == b"previous bundle"
+    assert not case.bundle_path.with_suffix(".bundle.benchmark.json").exists()
+    with pytest.raises(BenchmarkError, match="bundle checkpoint mismatch"):
+        builder.prepare(
+            [case.with_values(bundle_is_explicit=True)],
+            allow_build=False, rebuild=False, dry_run=False,
+        )
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("provenance", [_OMITTED, None, {**_RECORDED, "checkpoint": None}])
+def test_unverifiable_checkpoint_is_reported_without_rejection(tmp_path, monkeypatch, provenance):
+    builder, case, _, _, _ = _cache_fixture(tmp_path, monkeypatch)
+    case = _pinned(case)
+    case.bundle_path.parent.mkdir(parents=True)
+    case.bundle_path.write_bytes(b"user bundle")
+    _inspection_reports(monkeypatch, provenance)
+    _, chosen = builder.prepare(
+        [case.with_values(bundle_is_explicit=True)], allow_build=False, rebuild=False, dry_run=False
+    )
+    assert chosen[0].status == "reused"
+    assert chosen[0].provenance == (None if provenance is _OMITTED else provenance)
+
+
+def test_explicit_model_directory_is_not_bound_to_the_manifest_checkpoint(tmp_path, monkeypatch):
+    _, case, _, _, calls = _cache_fixture(tmp_path, monkeypatch)
+    local = tmp_path / "local-model"
+    local.mkdir()
+    builder = BundleBuilder(tmp_path / "cache", model_dirs={"example": local})
+    recorded = {**_RECORDED, "checkpoint": {"hf_id": "example/model", "revision": "b" * 40}}
+    _inspection_reports(monkeypatch, recorded)
+    _, built = builder.prepare([_pinned(case)], allow_build=True, rebuild=False, dry_run=False)
+    assert built[0].status == "built" and built[0].provenance == recorded
+    assert len(calls) == 1
+
+
+def test_report_shows_the_measured_bundle_provenance(tmp_path):
+    recorded = {**_RECORDED, "producer": {"source_revision": "d" * 40, "source_dirty": False}}
+    run = _run(tmp_path / "new", "2")
+    run["preparation"]["bundles"][0]["provenance"] = recorded
+    (tmp_path / "new/result.json").write_text(json.dumps(run))
+    _run(tmp_path / "old", "1")
+    generate_collection_report([tmp_path], tmp_path / "report")
+    document = (tmp_path / "report/report.html").read_text()
+    assert "d" * 40 in document
+    assert "&quot;bundle_provenance&quot;: {" in document
+    assert "&quot;bundle_provenance&quot;: null" in document
 
 
 def _run(root, run_id, schema="v2", scope="public_task_call_wall", p50=10.0):
@@ -760,3 +884,61 @@ def test_report_image_artifacts_obey_case_boundary_and_do_not_invent_time(tmp_pa
     assert "outside.png" not in document and "link.png" not in document
     assert "Output images: 4 artifact(s) unavailable" in document
     assert "Frame 0</figcaption>" in document and "Frame 0 ·" not in document
+
+
+def test_build_reads_a_family_prepared_checkpoint(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from trtmc_benchmark import builder
+
+    module = types.ModuleType("families.fake_family.convert_checkpoint")
+    module.prepare = lambda model_dir, destination: destination
+    monkeypatch.setitem(sys.modules, "families.fake_family.convert_checkpoint", module)
+    monkeypatch.setattr(builder.importlib.util, "find_spec",
+                        lambda name: types.SimpleNamespace(name=name) if "fake_family" in name else None)
+    assert builder._buildable_model_dir("fake_family", tmp_path, tmp_path / "out") == tmp_path / "out"
+    assert builder._buildable_model_dir("plain_family", tmp_path, tmp_path / "out") == tmp_path
+
+
+def test_build_reports_a_failed_checkpoint_preparation(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from trtmc_benchmark import builder
+    from trtmc_benchmark.types import BenchmarkError
+
+    def prepare(model_dir, destination):
+        raise FileNotFoundError("pytorch_model.bin")
+
+    module = types.ModuleType("families.fake_family.convert_checkpoint")
+    module.prepare = prepare
+    monkeypatch.setitem(sys.modules, "families.fake_family.convert_checkpoint", module)
+    monkeypatch.setattr(builder.importlib.util, "find_spec", lambda name: types.SimpleNamespace(name=name))
+    with pytest.raises(BenchmarkError, match="cannot prepare the fake_family checkpoint"):
+        builder._buildable_model_dir("fake_family", tmp_path, tmp_path / "out")
+
+
+def test_build_stages_the_manifest_external_files_beside_the_checkpoint(tmp_path):
+    from trtmc_benchmark import builder
+    from trtmc_benchmark.types import BenchmarkError
+
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "config.json").write_text("{}")
+    public = tmp_path / "public-tokenizer.json"
+    public.write_text('{"tokens": 1}')
+    manifest = tmp_path / "model.json"
+    manifest.write_text(json.dumps({"external_files": [{"path": "tokenizer.json", "url": public.as_uri()}]}))
+    staged = builder._with_external_files(manifest, checkpoint, tmp_path / "staged")
+    assert staged == tmp_path / "staged"
+    assert (staged / "config.json").resolve() == (checkpoint / "config.json").resolve()
+    assert (staged / "tokenizer.json").read_text() == '{"tokens": 1}'
+    assert not (checkpoint / "tokenizer.json").exists()
+    (checkpoint / "tokenizer.json").write_text("{}")  # present in the checkpoint: used as is
+    assert builder._with_external_files(manifest, checkpoint, tmp_path / "other") == checkpoint
+    (tmp_path / "plain.json").write_text("{}")
+    assert builder._with_external_files(tmp_path / "plain.json", checkpoint, tmp_path / "other") == checkpoint
+    manifest.write_text(json.dumps({"external_files": [{"path": "../escape", "url": public.as_uri()}]}))
+    with pytest.raises(BenchmarkError, match="relative path"):
+        builder._with_external_files(manifest, checkpoint, tmp_path / "other")

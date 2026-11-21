@@ -35,11 +35,13 @@ typedef struct {
 
 #define TRTMC_TASK_TEXT_TO_AUDIO "text_to_audio"
 #define TRTMC_TASK_TEXT_AUDIO_TOKEN_HISTORY_TO_AUDIO "text_audio_token_history_to_audio"
+#define TRTMC_TASK_AUDIO_CODEBOOK_TOKENS_TO_AUDIO "audio_codebook_tokens_to_audio"
 #define TRTMC_TASK_BATCH_TEXT_AUDIO_TOKEN_HISTORY_TO_AUDIO "batch_text_audio_token_history_to_audio"
 #define TRTMC_TASK_TEXT_TO_SPEECH "text_to_speech"
 #define TRTMC_TASK_SPEECH_TRANSCRIPTION "speech_transcription"
 #define TRTMC_TASK_SPEECH_TRANSLATION "speech_translation"
 #define TRTMC_TASK_AUDIO_LANGUAGE_IDENTIFICATION "audio_language_identification"
+#define TRTMC_TASK_AUDIO_TO_CLASS_SCORES "audio_to_class_scores"
 #define TRTMC_TASK_SPEECH_TO_SPEECH_RESPONSE "speech_to_speech_response"
 #define TRTMC_TASK_BATCH_SPEECH_TRANSCRIPTION "batch_speech_transcription"
 #define TRTMC_TASK_BATCH_SPEECH_TRANSLATION "batch_speech_translation"
@@ -57,6 +59,19 @@ typedef struct {
     trtmc_i32_view tokens;
     uint64_t codebooks, frames;
 } trtmc_audio_codebook_tokens_view_v1;
+/* Nonempty contiguous [codebook, frame] codec tokens, borrowed through run.
+ * The family owns vocabulary, frame profile and codebook interpretation. */
+typedef struct {
+    trtmc_audio_codebook_tokens_view_v1 codes;
+} trtmc_audio_codebook_tokens_to_audio_request_v1;
+typedef struct {
+    trtmc_api_header header;
+    trtmc_status(TRTMC_CALL* run)(trtmc_model*,
+                                  const trtmc_audio_codebook_tokens_to_audio_request_v1*,
+                                  const trtmc_config_view_v1*, trtmc_result**, trtmc_error**);
+    trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_audio_result_view_v1*,
+                                          trtmc_error**);
+} trtmc_audio_codebook_tokens_to_audio_api_v1;
 typedef struct {
     trtmc_i32_view semantic_tokens;
     trtmc_audio_codebook_tokens_view_v1 coarse_tokens, fine_tokens;
@@ -85,6 +100,9 @@ typedef struct {
 typedef struct {
     trtmc_audio_view_v1 audio;
 } trtmc_audio_language_identification_request_v1;
+typedef struct {
+    trtmc_audio_view_v1 audio;
+} trtmc_audio_to_class_scores_request_v1;
 typedef struct {
     trtmc_audio_view_v1 audio;
 } trtmc_speech_to_speech_response_request_v1;
@@ -145,6 +163,16 @@ typedef struct {
     trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_label_scores_view_v1*,
                                           trtmc_error**);
 } trtmc_audio_language_identification_api_v1;
+
+/* Sound-event tagging over the family's own vocabulary, not language IDs.
+ * Multi-label families return scores that do not sum to one. */
+typedef struct {
+    trtmc_api_header header;
+    trtmc_status(TRTMC_CALL* run)(trtmc_model*, const trtmc_audio_to_class_scores_request_v1*,
+                                  const trtmc_config_view_v1*, trtmc_result**, trtmc_error**);
+    trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_label_scores_view_v1*,
+                                          trtmc_error**);
+} trtmc_audio_to_class_scores_api_v1;
 
 /* Response speech to the complete input utterance, not generic audio editing. */
 typedef struct {

@@ -81,6 +81,23 @@ def load_qwen3_encoder_weights(
     return weights
 
 
+def _work_dtypes(precision: str) -> tuple[type, "trt.DataType"]:
+    """The numpy dtype weights are stored in and the TensorRT dtype the graph computes in.
+
+    numpy has no bf16: bf16 weights are stored as fp16 constants and cast to bf16 in the graph,
+    so the embedding rows and the RoPE tables are cast explicitly.
+    """
+    if precision == "fp16":
+        return np.float16, trt.float16
+    if precision == "bf16":
+        return np.float16, trt.bfloat16
+    if precision == "fp32":
+        return np.float32, trt.float32
+    raise ValueError(
+        f"Unsupported Qwen3 encoder precision {precision!r}; expected fp32, fp16 or bf16"
+    )
+
+
 def build_qwen3_encoder_engine(
     weights: WeightDict,
     *,
@@ -116,14 +133,7 @@ def build_qwen3_encoder_engine(
     """
     if max_batch_size < 1:
         raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
-    if precision == "fp16":
-        work_np_dtype, work_trt_dtype = np.float16, trt.float16
-    elif precision == "fp32":
-        work_np_dtype, work_trt_dtype = np.float32, trt.float32
-    else:
-        raise ValueError(
-            f"Unsupported Qwen3 encoder precision {precision!r}; expected fp32 or fp16"
-        )
+    work_np_dtype, work_trt_dtype = _work_dtypes(precision)
     if max_batch_size > 1:
         return _build_qwen3_encoder_engine_batched(
             weights,
@@ -174,15 +184,24 @@ def build_qwen3_encoder_engine(
         network, (vocab_size, hidden_size), weights["embed_tokens"], dtype=work_np_dtype
     )
     hidden = network.add_gather(embed_table, input_ids, 0).get_output(0)
+    hidden = graph_ops._cast_back_to_trt_dtype(network, hidden, work_trt_dtype)
 
     graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
     rope_cos_half_np = graph_ops.make_rope_table_half_dim(max_seq_len, head_dim, rope_theta, True)
     rope_sin_half_np = graph_ops.make_rope_table_half_dim(max_seq_len, head_dim, rope_theta, False)
-    rope_cos_half = graph_ops.add_constant(
-        network, rope_cos_half_np.shape, rope_cos_half_np, dtype=work_np_dtype
+    rope_cos_half = graph_ops._cast_back_to_trt_dtype(
+        network,
+        graph_ops.add_constant(
+            network, rope_cos_half_np.shape, rope_cos_half_np, dtype=work_np_dtype
+        ),
+        work_trt_dtype,
     )
-    rope_sin_half = graph_ops.add_constant(
-        network, rope_sin_half_np.shape, rope_sin_half_np, dtype=work_np_dtype
+    rope_sin_half = graph_ops._cast_back_to_trt_dtype(
+        network,
+        graph_ops.add_constant(
+            network, rope_sin_half_np.shape, rope_sin_half_np, dtype=work_np_dtype
+        ),
+        work_trt_dtype,
     )
     rope_position_ids = graph_ops.add_constant(
         network, (max_seq_len,), np.arange(max_seq_len, dtype=np.int32), dtype=np.int32
@@ -511,14 +530,7 @@ def _build_qwen3_encoder_engine_batched(
     verbose: bool,
 ) -> bytes:
     """Build a dynamic-leading-batch Qwen3 encoder TRT engine."""
-    if precision == "fp16":
-        work_np_dtype, work_trt_dtype = np.float16, trt.float16
-    elif precision == "fp32":
-        work_np_dtype, work_trt_dtype = np.float32, trt.float32
-    else:
-        raise ValueError(
-            f"Unsupported Qwen3 encoder precision {precision!r}; expected fp32 or fp16"
-        )
+    work_np_dtype, work_trt_dtype = _work_dtypes(precision)
     if opt_batch_size is None:
         opt_batch_size = min(max_batch_size, 4)
     if output_layer < 0:
@@ -560,15 +572,24 @@ def _build_qwen3_encoder_engine_batched(
         network, (vocab_size, hidden_size), weights["embed_tokens"], dtype=work_np_dtype
     )
     hidden = network.add_gather(embed_table, input_ids, 0).get_output(0)
+    hidden = graph_ops._cast_back_to_trt_dtype(network, hidden, work_trt_dtype)
 
     graph_ops.validate_native_rope_dim(head_dim, field_name="head_dim")
     rope_cos_half_np = graph_ops.make_rope_table_half_dim(max_seq_len, head_dim, rope_theta, True)
     rope_sin_half_np = graph_ops.make_rope_table_half_dim(max_seq_len, head_dim, rope_theta, False)
-    rope_cos_half = graph_ops.add_constant(
-        network, rope_cos_half_np.shape, rope_cos_half_np, dtype=work_np_dtype
+    rope_cos_half = graph_ops._cast_back_to_trt_dtype(
+        network,
+        graph_ops.add_constant(
+            network, rope_cos_half_np.shape, rope_cos_half_np, dtype=work_np_dtype
+        ),
+        work_trt_dtype,
     )
-    rope_sin_half = graph_ops.add_constant(
-        network, rope_sin_half_np.shape, rope_sin_half_np, dtype=work_np_dtype
+    rope_sin_half = graph_ops._cast_back_to_trt_dtype(
+        network,
+        graph_ops.add_constant(
+            network, rope_sin_half_np.shape, rope_sin_half_np, dtype=work_np_dtype
+        ),
+        work_trt_dtype,
     )
 
     # See the static path: right padding is outside every consumed query's

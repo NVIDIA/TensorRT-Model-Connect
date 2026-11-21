@@ -27,6 +27,13 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
     return bundle.read_section(name);
 }
 
+constexpr const char* kImageEncoderPlan = "vae.encoder.plan";
+
+bool has_image_encoder(const BundleReader& bundle) {
+    const auto* section = bundle.find_section(kImageEncoderPlan);
+    return section != nullptr && section->length != 0;
+}
+
 PlanMap index_plans(const BundleReader& bundle) {
     constexpr std::array<const char*, 4> names = {"text_encoder.0.plan", "denoiser.plan",
                                                   "vae.plan", "vae.first_frame.plan"};
@@ -34,6 +41,9 @@ PlanMap index_plans(const BundleReader& bundle) {
     for (const char* name : names) {
         plans.emplace(name, require_section(bundle, name));
     }
+    // Image-to-video bundles add the first-frame encoder; older bundles do not have it.
+    if (has_image_encoder(bundle))
+        plans.emplace(kImageEncoderPlan, require_section(bundle, kImageEncoderPlan));
     return plans;
 }
 
@@ -74,5 +84,6 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
                                           trtmc::wan22_factory::index_plans(context.reader)),
         trtmc::wan22_factory::load_tokenizer(context.reader),
         trtmc::parse_wan22_options(runtime_text),
-        trtmc::wan2_2_ti2v::parse_runtime_config(runtime_text), "");
+        trtmc::wan2_2_ti2v::parse_runtime_config(runtime_text), "", context.reader.info().task,
+        trtmc::wan22_factory::has_image_encoder(context.reader));
 }

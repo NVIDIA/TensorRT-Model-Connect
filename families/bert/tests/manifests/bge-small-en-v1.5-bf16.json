@@ -1,0 +1,19 @@
+{
+  "name": "bge-small-en-v1.5-bf16",
+  "hf_id": "BAAI/bge-small-en-v1.5",
+  "hf_revision": "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a",
+  "bundle": "bge-small-en-v1.5-bf16.bundle",
+  "family": "bert",
+  "task": "encoding",
+  "precision": "bf16",
+  "testcases": [
+    {
+      "name": "bge-small-en-v1.5-bf16",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is Paris."
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512
+}

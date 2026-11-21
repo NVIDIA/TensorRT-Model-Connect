@@ -222,6 +222,22 @@ def _result_preview(
     return content
 
 
+def _bundle_preparation(
+    cell: Mapping[str, Any], run: Mapping[str, Any], resolved: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    preparations = _mapping(run.get("preparation")).get("bundles", [])
+    if not isinstance(preparations, list):
+        return {}
+    for item in preparations:
+        if (
+            isinstance(item, Mapping)
+            and item.get("model") == cell.get("model")
+            and item.get("bundle") == resolved.get("bundle_path")
+        ):
+            return item
+    return {}
+
+
 def _history_key(
     cell: Mapping[str, Any], run: Mapping[str, Any], resolved: Mapping[str, Any]
 ) -> str | None:
@@ -325,6 +341,9 @@ def _row(
                 for key in ("name", "family", "hf_id", "hf_revision", "precision", "task", "build")
                 if key in model
             },
+            # What the measured bundle records about its own build, as opposed
+            # to the manifest's declared model above.
+            "bundle_provenance": _bundle_preparation(cell, run, resolved).get("provenance"),
         }
         details += "<p>Recorded workload and build settings:</p>"
         details += f"<pre>{_escape(json.dumps(reproduction, indent=2, sort_keys=True))}</pre>"

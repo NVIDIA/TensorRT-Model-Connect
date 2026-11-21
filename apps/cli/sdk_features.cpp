@@ -433,4 +433,14 @@ bool dispatch_sdk_features(const Command& command, const Model& model, std::stri
     }
     return false;
 }
+
+namespace detail {
+
+// One label-scores rendering, shared by every Task that returns class scores.
+nlohmann::json label_scores_json(const LabelScoresResult& result) {
+    return output_json(result);
+}
+
+} // namespace detail
+
 } // namespace trtmc::cli

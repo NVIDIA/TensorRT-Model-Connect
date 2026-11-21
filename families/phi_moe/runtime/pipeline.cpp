@@ -6,6 +6,7 @@
 #include "families/phi_moe/runtime/pipeline.h"
 
 #include "families/phi_moe/runtime/chat_templates.h"
+#include "families/phi_moe/runtime/eos_tokens.h"
 #include "families/phi_moe/runtime/kv_cache.h"
 #include "families/phi_moe/runtime/tensor_names.h"
 
@@ -207,7 +208,7 @@ void PhiMoeTextGenerationPipeline::prime_decoder_after_batched_prefill(
         return;
 
     ITrtModule& decoder = bind_decoder_for_step();
-    if (!decoder.cuda_graph_active())
+    if (!decoder.cuda_graph_active() || decoder.cuda_graph_captured())
         return;
 
     int32_t token_id = input_ids.back();
@@ -224,10 +225,11 @@ void PhiMoeTextGenerationPipeline::prime_decoder_after_batched_prefill(
 }
 
 void PhiMoeTextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
-                                               std::vector<float>& logits) {
+                                               std::vector<float>& logits, bool prime_decoder) {
     if (prefill_) {
         run_prefill_batched(input_ids, logits);
-        prime_decoder_after_batched_prefill(input_ids);
+        if (prime_decoder)
+            prime_decoder_after_batched_prefill(input_ids);
     } else {
         for (const int32_t token : input_ids)
             run_step(token, logits);
@@ -273,7 +275,7 @@ PhiMoeTextGenerationPipeline::TimedGenResult PhiMoeTextGenerationPipeline::gener
 
     std::vector<float> logits;
     const auto t0 = Clock::now();
-    run_prefill(input_ids, logits);
+    run_prefill(input_ids, logits, max_new_tokens > 1);
     const auto t1 = Clock::now();
 
     std::vector<int32_t> output = input_ids;
@@ -309,12 +311,15 @@ int32_t PhiMoeTextGenerationPipeline::run_decode_loop(
     int32_t steps = 0;
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         const PhiMoeSampleResult result = sampler->sample(logits.data(), vocab_size, params);
+        const bool is_eos = phi_moe_is_eos(result.token_id, config_.id_eos, config_.eos_token_ids,
+                                           cfg.eos_token_id);
         output.push_back(result.token_id);
         ++steps;
-        if (should_stop_on_answer(output, prompt_token_count, cfg, steps, stop_interval,
-                                  result.is_eos))
+        if (should_stop_on_answer(output, prompt_token_count, cfg, steps, stop_interval, is_eos))
             break;
-        if (result.is_eos)
+        if (is_eos)
+            break;
+        if (step + 1 >= max_new_tokens)
             break;
         run_step(result.token_id, logits);
     }

@@ -37,6 +37,7 @@ from typing import Mapping, Union
 import numpy as np
 import tensorrt as trt
 from . import graph_ops
+from .quantization import QwenImageQuantContext, calibrate_qwen_image, configure_build
 
 PathLike = Union[str, Path]
 
@@ -63,6 +64,10 @@ _CAST_DTYPE = trt.bfloat16
 # builder.build_serialized_network() returns. Without this, TRT silently
 # reads garbage (or segfaults).
 _weight_refs: list[np.ndarray] = []
+
+# FP8 quantization context of the engine being built (None for plain BF16 builds). Set and
+# cleared by ``build_qwen_image_dit_engine``; ``_add_linear_3d`` reads it.
+_QUANT_CTX: "QwenImageQuantContext | None" = None
 
 
 def _to_compute_dtype(network, tensor):
@@ -893,6 +898,7 @@ def _add_mlp_block(
     w2 = np.asarray(weights[f"{prefix}.net.2.weight"], dtype=np.float32)  # [hidden, inner]
     b2 = np.asarray(weights[f"{prefix}.net.2.bias"], dtype=np.float32)
 
+    qprefix = getattr(weights, "prefix", "") + prefix
     h = _add_linear_3d(
         network,
         x_3d,
@@ -900,6 +906,7 @@ def _add_mlp_block(
         intermediate_size,
         w1,
         b1,
+        qname=f"{qprefix}.net.0.proj",
     )
     h = graph_ops.add_gelu_new(network, h)
     return _add_linear_3d(
@@ -909,6 +916,7 @@ def _add_mlp_block(
         hidden_size,
         w2,
         b2,
+        qname=f"{qprefix}.net.2",
     )
 
 
@@ -950,6 +958,7 @@ def _add_qkv_with_norm_and_rope(
             hidden_size,
             w_hf,
             b,
+            qname=getattr(weights, "prefix", "") + weight_key,
         )
 
     q_3d = _proj(q_key)
@@ -1017,6 +1026,8 @@ def _add_joint_block_graph(
     n_text: int,
     attention_mask=None,
     batch_size: int = 1,
+    cond_img_mod: "np.ndarray | None" = None,
+    n_gen: "int | None" = None,
 ):
     """Build the math of one Qwen-Image MMDiT joint block.
 
@@ -1029,6 +1040,11 @@ def _add_joint_block_graph(
     ``batch_size`` is the static batch (``1``) or sentinel for dynamic
     (``>1``): the dim is treated as dynamic when ``batch_size > 1``, in
     which case slice helpers build a runtime shape tensor from input dim 0.
+
+    ``cond_img_mod`` ([6*hidden], the block's ``img_mod`` output at timestep
+    0) enables diffusers' ``zero_cond_t``: the first ``n_gen`` image tokens
+    use the timestep modulation, the condition-image tokens after them use
+    ``cond_img_mod``.
     """
     H = cfg.num_attention_heads
     D = cfg.attention_head_dim
@@ -1047,6 +1063,10 @@ def _add_joint_block_graph(
         def __init__(self, base: Mapping[str, np.ndarray], prefix: str):
             self._base = base
             self._prefix = prefix
+
+        @property
+        def prefix(self) -> str:
+            return self._prefix
 
         def __getitem__(self, key: str):
             return self._base[f"{self._prefix}{key}"]
@@ -1094,13 +1114,58 @@ def _add_joint_block_graph(
     img_shift_msa, img_scale_msa, img_gate_msa, img_shift_mlp, img_scale_mlp, img_gate_mlp = (
         _six_chunks(img_mod_params)
     )
+    cond_chunks = None
+    if cond_img_mod is not None:
+        if n_gen is None or not 0 < n_gen < n_img:
+            raise ValueError("zero_cond_t needs 0 < n_gen < n_img generated-image tokens")
+        cond_params = _add_constant_reduced(
+            network, (1, 6 * dim), np.asarray(cond_img_mod, dtype=np.float32).reshape(1, 6 * dim)
+        )
+        cond_chunks = [_slice_batch_vector(network, cond_params, i * dim, dim, 1) for i in range(6)]
+
+    def _img_segments(x_3d):
+        gen = _slice_batch_sequence(network, x_3d, 0, n_gen, dim, batch_size)
+        cond = _slice_batch_sequence(network, x_3d, n_gen, n_img - n_gen, dim, batch_size)
+        return gen, cond
+
+    def _concat_tokens(gen, cond):
+        joined = network.add_concatenation([gen, cond])
+        joined.axis = 1
+        return joined.get_output(0)
+
+    def _img_modulate(x_3d, chunk):
+        shift, scale = (
+            (img_shift_msa, img_scale_msa) if chunk == 0 else (img_shift_mlp, img_scale_mlp)
+        )
+        if cond_chunks is None:
+            return _add_modulate(network, x_3d, shift, scale, dim)
+        gen, cond = _img_segments(x_3d)
+        cond_shift, cond_scale = cond_chunks[3 * chunk], cond_chunks[3 * chunk + 1]
+        return _concat_tokens(
+            _add_modulate(network, gen, shift, scale, dim),
+            _add_modulate(network, cond, cond_shift, cond_scale, dim),
+        )
+
+    def _img_gate_residual(residual_3d, branch_3d, chunk):
+        gate = img_gate_msa if chunk == 0 else img_gate_mlp
+        if cond_chunks is None:
+            return _add_gate_residual(network, residual_3d, gate, branch_3d, dim)
+        residual_gen, residual_cond = _img_segments(residual_3d)
+        branch_gen, branch_cond = _img_segments(branch_3d)
+        return _concat_tokens(
+            _add_gate_residual(network, residual_gen, gate, branch_gen, dim),
+            _add_gate_residual(
+                network, residual_cond, cond_chunks[3 * chunk + 2], branch_cond, dim
+            ),
+        )
+
     txt_shift_msa, txt_scale_msa, txt_gate_msa, txt_shift_mlp, txt_scale_mlp, txt_gate_mlp = (
         _six_chunks(txt_mod_params)
     )
 
     # ----- norm1 + modulate per stream.
     img_normed = _add_layernorm_no_affine_3d(network, img_3d, dim, cfg.layer_norm_eps)
-    img_modulated = _add_modulate(network, img_normed, img_shift_msa, img_scale_msa, dim)
+    img_modulated = _img_modulate(img_normed, 0)
     txt_normed = _add_layernorm_no_affine_3d(network, txt_3d, dim, cfg.layer_norm_eps)
     txt_modulated = _add_modulate(network, txt_normed, txt_shift_msa, txt_scale_msa, dim)
 
@@ -1171,18 +1236,19 @@ def _add_joint_block_graph(
             dim,
             w,
             b,
+            qname=f"{weights_prefix}{key_suffix}",
         )
 
     img_attn_out = _out_proj(attn_img_3d, "attn.to_out.0", n_img)
     txt_attn_out = _out_proj(attn_txt_3d, "attn.to_add_out", n_text)
 
     # ----- gated residual (post-attention).
-    hs_img = _add_gate_residual(network, img_3d, img_gate_msa, img_attn_out, dim)
+    hs_img = _img_gate_residual(img_3d, img_attn_out, 0)
     hs_txt = _add_gate_residual(network, txt_3d, txt_gate_msa, txt_attn_out, dim)
 
     # ----- norm2 + modulate(mod2) + MLP + gated residual.
     img_n2 = _add_layernorm_no_affine_3d(network, hs_img, dim, cfg.layer_norm_eps)
-    img_mod2_out = _add_modulate(network, img_n2, img_shift_mlp, img_scale_mlp, dim)
+    img_mod2_out = _img_modulate(img_n2, 1)
     img_mlp_out = _add_mlp_block(
         network,
         img_mod2_out,
@@ -1193,7 +1259,7 @@ def _add_joint_block_graph(
         n_img,
         batch_size=batch_size,
     )
-    img_out = _add_gate_residual(network, hs_img, img_gate_mlp, img_mlp_out, dim)
+    img_out = _img_gate_residual(hs_img, img_mlp_out, 1)
 
     txt_n2 = _add_layernorm_no_affine_3d(network, hs_txt, dim, cfg.layer_norm_eps)
     txt_mod2_out = _add_modulate(network, txt_n2, txt_shift_mlp, txt_scale_mlp, dim)
@@ -1263,6 +1329,8 @@ class QwenImageDiTConfig:
     max_image_tokens: int = 8192
     max_text_tokens: int = 1024
     guidance_embeds: bool = False  # Qwen-Image-2512: False.
+    # Edit-2511: condition-image tokens are modulated at timestep 0.
+    zero_cond_t: bool = False
 
 
 def _joint_block_cfg_from(cfg: QwenImageDiTConfig) -> JointBlockConfig:
@@ -1284,23 +1352,33 @@ def _add_linear_3d(
     out_dim: int,
     w_hf: np.ndarray,
     b_hf: "np.ndarray | None",
+    qname: "str | None" = None,
 ):
     """Linear on a [B, S, in_dim] tensor -> [B, S, out_dim].
 
     Uses a rank-3 matmul so the leading batch dimension can be dynamic
     (B = -1). The weight is broadcast as ``[1, in_dim, out_dim]`` and TRT's
     matmul handles the implicit broadcast along axis 0.
+
+    ``qname`` (for example ``transformer_blocks.3.attn.to_k``) names the projection for
+    FP8 builds; when the build's quantization context has a scale for it, the matmul
+    runs on an FP8 weight instead.
     """
     x_c = _to_compute_dtype(network, x_3d)
-    w_t = np.ascontiguousarray(w_hf.T, dtype=np.float32)  # [in, out]
-    w_const = _add_constant_reduced(network, (1, in_dim, out_dim), w_t.reshape(1, in_dim, out_dim))
-    mm = network.add_matrix_multiply(
-        x_c,
-        trt.MatrixOperation.NONE,
-        w_const,
-        trt.MatrixOperation.NONE,
-    )
-    y = mm.get_output(0)
+    if qname is not None and _QUANT_CTX is not None and _QUANT_CTX.should_quantize(qname):
+        y = _QUANT_CTX.matmul_3d(network, x_c, w_hf, qname)
+    else:
+        w_t = np.ascontiguousarray(w_hf.T, dtype=np.float32)  # [in, out]
+        w_const = _add_constant_reduced(
+            network, (1, in_dim, out_dim), w_t.reshape(1, in_dim, out_dim)
+        )
+        mm = network.add_matrix_multiply(
+            x_c,
+            trt.MatrixOperation.NONE,
+            w_const,
+            trt.MatrixOperation.NONE,
+        )
+        y = mm.get_output(0)
     if b_hf is not None:
         b_const = _add_constant_reduced(
             network,
@@ -1354,6 +1432,33 @@ def _add_rms_norm_last_dim_3d(network, x_3d, hidden_size: int, gamma: np.ndarray
         trt.ElementWiseOperation.PROD,
     )
     return scaled.get_output(0)
+
+
+def _silu_np(x: np.ndarray) -> np.ndarray:
+    return x / (1.0 + np.exp(-x))
+
+
+def _zero_timestep_embedding(weights: Mapping[str, np.ndarray], in_dim: int) -> np.ndarray:
+    """``time_text_embed`` at timestep 0, a weight-only constant [hidden].
+
+    The sinusoid of 0 is cos=1, sin=0, and ``flip_sin_to_cos`` puts cos first.
+    """
+    half = in_dim // 2
+    sample = np.concatenate([np.ones(half), np.zeros(in_dim - half)]).astype(np.float32)
+    w1 = np.asarray(weights["time_text_embed.timestep_embedder.linear_1.weight"], np.float32)
+    b1 = np.asarray(weights["time_text_embed.timestep_embedder.linear_1.bias"], np.float32)
+    w2 = np.asarray(weights["time_text_embed.timestep_embedder.linear_2.weight"], np.float32)
+    b2 = np.asarray(weights["time_text_embed.timestep_embedder.linear_2.bias"], np.float32)
+    return w2 @ _silu_np(w1 @ sample + b1) + b2
+
+
+def _zero_timestep_img_mod(
+    weights: Mapping[str, np.ndarray], prefix: str, zero_temb: np.ndarray
+) -> np.ndarray:
+    """A block's ``img_mod`` output [6*hidden] at timestep 0."""
+    w = np.asarray(weights[f"{prefix}img_mod.1.weight"], np.float32)
+    b = np.asarray(weights[f"{prefix}img_mod.1.bias"], np.float32)
+    return w @ _silu_np(zero_temb) + b
 
 
 def _add_time_text_embed(
@@ -1509,6 +1614,51 @@ def build_qwen_image_dit_engine(
     max_batch_size: int = 1,
     opt_batch_size: int | None = None,
     verbose: bool = False,
+    quantization: str | None = None,
+) -> Path:
+    """Build the full Qwen-Image MMDiT denoiser; ``quantization="fp8"`` quantizes it to FP8.
+
+    FP8 quantizes the joint-block projections of the original BF16 weights at build time
+    (see ``quantization.py``). It supports text-to-image only (no condition images).
+    """
+    global _QUANT_CTX
+    quant_ctx = None
+    if quantization not in (None, "none"):
+        if cfg.zero_cond_t or (image_token_shapes is not None and len(image_token_shapes) > 1):
+            raise NotImplementedError("Qwen-Image FP8 supports text-to-image only")
+        quant_ctx = calibrate_qwen_image(cfg, weights, quantization)
+    _QUANT_CTX = quant_ctx
+    try:
+        return _build_qwen_image_dit_engine(
+            cfg,
+            weights,
+            out_path,
+            h_lat=h_lat,
+            w_lat=w_lat,
+            n_text=n_text,
+            image_token_shapes=image_token_shapes,
+            max_batch_size=max_batch_size,
+            opt_batch_size=opt_batch_size,
+            verbose=verbose,
+            quant_ctx=quant_ctx,
+        )
+    finally:
+        _QUANT_CTX = None
+
+
+def _build_qwen_image_dit_engine(
+    cfg: QwenImageDiTConfig,
+    weights: Mapping[str, "np.ndarray"],
+    out_path: PathLike,
+    *,
+    h_lat: int,
+    w_lat: int,
+    n_text: int,
+    image_token_shapes: list[tuple[int, int]] | None = None,
+    max_batch_size: int = 1,
+    opt_batch_size: int | None = None,
+    verbose: bool = False,
+    quant_ctx: QwenImageQuantContext | None = None,
 ) -> Path:
     """Build the full Qwen-Image MMDiT denoiser as a single TRT engine.
 
@@ -1612,6 +1762,8 @@ def build_qwen_image_dit_engine(
     )
 
     builder, config, network = _make_builder(verbose)
+    if quant_ctx is not None:
+        configure_build(config)
 
     # When ``max_batch_size > 1`` we expose a dynamic leading batch dim via a
     # TensorRT optimization profile. Otherwise the engine remains fixed at
@@ -1721,6 +1873,9 @@ def build_qwen_image_dit_engine(
 
     # ----- Joint blocks loop.
     jb_cfg = _joint_block_cfg_from(cfg)
+    zero_cond = cfg.zero_cond_t and len(image_token_shapes) > 1
+    n_gen = image_token_shapes[0][0] * image_token_shapes[0][1]
+    zero_temb = _zero_timestep_embedding(weights, cfg.timestep_embed_dim) if zero_cond else None
     cur_img = img_tokens
     cur_txt = txt_tokens
     for i in range(cfg.num_joint_blocks):
@@ -1741,6 +1896,10 @@ def build_qwen_image_dit_engine(
             n_text=n_text,
             attention_mask=attention_mask,
             batch_size=inner_batch_size,
+            cond_img_mod=(
+                _zero_timestep_img_mod(weights, prefix, zero_temb) if zero_cond else None
+            ),
+            n_gen=n_gen if zero_cond else None,
         )
 
     # ----- AdaLayerNormContinuous(elementwise_affine=False) -> proj_out.
@@ -1877,6 +2036,7 @@ def load_qwen_image_dit_weights(
         max_image_tokens=8192,
         max_text_tokens=1024,
         guidance_embeds=bool(cfg_json.get("guidance_embeds", False)),
+        zero_cond_t=bool(cfg_json.get("zero_cond_t", False)),
     )
 
     safetensor_files = sorted(text_dir.glob("*.safetensors"))

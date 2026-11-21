@@ -1,0 +1,18 @@
+{
+  "name": "esm2-t33-650m-ur50d",
+  "hf_id": "facebook/esm2_t33_650M_UR50D",
+  "hf_revision": "08e4846e537177426273712802403f7ba8261b6c",
+  "bundle": "esm2-t33-650m-ur50d.bundle",
+  "family": "esm",
+  "task": "masked_text_to_token_scores",
+  "precision": "fp32",
+  "max_sequence_length": 256,
+  "testcases": [
+    {
+      "name": "esm2-t33-650m-ur50d",
+      "premerge": true,
+      "prompt": "MKTVRQERLKSIVRILERSKEPVSGAQLAEELSVSRQVIVQDIAYLRSLGYNIVATPRGYVLAGG<mask>KTVRQERLKSIVRILERSKEPVSGAQLAEELSVSRQVIVQDIAYLRSLGYNIVATPRGYVLAGG"
+    }
+  ],
+  "tensor_parallel_size": 1
+}

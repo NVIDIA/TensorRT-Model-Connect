@@ -82,7 +82,10 @@ def test_build_emits_the_family_owned_split_bundle(
     calls: list[tuple[str, int, str]] = []
     monkeypatch.setattr(model, "load_standard_weights", lambda *args, **kwargs: {})
 
-    def build_engine(config, weights, length: int, *, precision: str, verbose: bool) -> bytes:
+    def build_engine(
+        config, weights, length: int, *, precision: str, verbose: bool, quant_ctx=None
+    ) -> bytes:
+        assert quant_ctx is None
         role = str(config.raw["_decoder_engine_role"])
         calls.append((role, length, precision))
         return role.encode()
@@ -110,6 +113,53 @@ def test_build_emits_the_family_owned_split_bundle(
     assert runtime["precision"] == "bf16"
 
 
+def test_fp8_build_passes_the_quantization_context_to_both_engines(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from families.smollm3 import quantization
+
+    context = object()
+    seen: list[tuple[str, object]] = []
+    monkeypatch.setattr(model, "load_standard_weights", lambda *args, **kwargs: {})
+    monkeypatch.setattr(quantization, "calibrate_smollm3_fp8", lambda *args: context)
+
+    def build_engine(
+        config, weights, length: int, *, precision: str, verbose: bool, quant_ctx=None
+    ) -> bytes:
+        seen.append((str(config.raw["_decoder_engine_role"]), quant_ctx))
+        return b"plan"
+
+    monkeypatch.setattr(model, "_build_engine", build_engine)
+    checkpoint = _checkpoint(tmp_path / "checkpoint")
+    model.build(_request(checkpoint, quantization="fp8"), RecordingWriter())
+    assert seen == [("prefill", context), ("decode", context)]
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"quantization": "fp8", "precision": "fp32"}, "fp16 or bf16"),
+        ({"quantization": "fp8", "fp32_layers": (0,)}, "fp32_layers"),
+    ],
+)
+def test_fp8_build_rejects_unsupported_combinations(
+    tmp_path: Path, changes: dict[str, object], message: str
+) -> None:
+    checkpoint = _checkpoint(tmp_path / "checkpoint")
+    with pytest.raises(NotImplementedError, match=message):
+        model.build(_request(checkpoint, **changes), RecordingWriter())
+
+
+def test_fp8_build_refuses_an_already_quantized_checkpoint(tmp_path: Path) -> None:
+    checkpoint = _checkpoint(tmp_path / "checkpoint")
+    config_path = checkpoint / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["quantization_config"] = {"quant_method": "compressed-tensors"}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    with pytest.raises(ValueError, match="already quantized"):
+        model.build(_request(checkpoint, quantization="fp8"), RecordingWriter())
+
+
 @pytest.mark.parametrize(
     ("changes", "message"),
     [
@@ -119,7 +169,7 @@ def test_build_emits_the_family_owned_split_bundle(
         ({"max_batch_size": 2}, "max_batch_size"),
         ({"tensor_parallel_size": 2}, "tensor-parallel"),
         ({"context_parallel_size": 2}, "context parallelism"),
-        ({"quantization": "fp8"}, "quantized"),
+        ({"quantization": "nvfp4"}, "quantization"),
         ({"image_height": 256}, "image_height"),
         ({"image_width": 256}, "image_width"),
         ({"video_num_frames": 8}, "video_num_frames"),

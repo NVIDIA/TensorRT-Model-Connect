@@ -219,7 +219,12 @@ def add_silu(network, inp):
 def add_geglu(network, inp, weight, bias, dtype=np.float32):
     """The feed-forward gate used by SD: project to 2x width, split value and gate."""
     projected = add_linear(network, inp, weight, bias, dtype=dtype)
-    width = int(np.asarray(weight).shape[0]) // 2
+    return gate_projection(network, projected)
+
+
+def gate_projection(network, projected):
+    """Split a projected [..., 2 * width] tensor into value and gate and return value * gelu(gate)."""
+    width = int(tuple(projected.shape)[-1]) // 2
     rank = len(tuple(projected.shape))
     start = (0,) * rank
     size = tuple(int(v) for v in projected.shape[:-1]) + (width,)

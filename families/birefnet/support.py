@@ -7,7 +7,7 @@ from tensorrt_model_connect.model_support import family_support
 
 
 describe = family_support(
-    pipeline_classes=("BiRefNet",),
+    architectures=("BiRefNet",),
     tasks=("segmentation",),
     default_task="segmentation",
 )

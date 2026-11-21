@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "families/llama/runtime/sampler.h"
 #include "trtmc/runtime/trt_module.h"
 
 #include <array>
@@ -45,8 +46,10 @@ struct StepResult {
     // Row-major [best, (second best for draft), all_finite].
     std::vector<std::int32_t> selection;
     int vocab = 0, ranks = 0;
+    std::vector<float> logits; // Present only when a caller requests host sampling.
     FeatureView features;
     std::int32_t token(int row = 0, int rank = 0) const;
+    std::int32_t sample(LlamaISampler& sampler, const LlamaSamplingParams& params) const;
 };
 
 // Borrowed outputs with an explicit completion stream. Consumers must order
@@ -64,7 +67,8 @@ class Engine {
            std::unique_ptr<ITrtModule> selection, std::unique_ptr<ITrtModule> prefill = nullptr);
     StepResult run(Phase phase, const std::vector<std::int32_t>& tokens, int start,
                    const std::vector<std::int32_t>& parents, bool all_logits,
-                   FeatureView target_features = {}, FeatureView draft_features = {});
+                   FeatureView target_features = {}, FeatureView draft_features = {},
+                   bool collect_logits = false);
     DeviceStep run_device(const std::int32_t* tokens, int rows, ITrtModule& metadata,
                           const std::int32_t* start, bool all_logits,
                           FeatureView target_features = {}, FeatureView draft_features = {});

@@ -434,6 +434,8 @@ def _read_config(model_dir: Path) -> dict[str, Any]:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one strict PatchTSMixer bundle without shared model orchestration."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("PatchTSMixer does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("patchtsmixer does not support dynamic_kv_cache")
 

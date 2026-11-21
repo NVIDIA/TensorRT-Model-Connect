@@ -8,8 +8,18 @@ Tensor names and shapes must stay compatible with the C++ bundle runtime.
 
 from __future__ import annotations
 
+import weakref
+
 import numpy as np
 import tensorrt as trt
+
+from .weight_spill import file_backed_empty
+
+# trt.Weights built from a pointer does not own its data: the BF16 arrays stay referenced by their
+# network until the network itself is released.
+_BF16_DATA: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+# Elements converted per step, which bounds the FP32 temporary of one conversion to 64 MiB.
+_BF16_STEP = 1 << 24
 
 
 
@@ -40,6 +50,33 @@ def add_constant(
     return layer.get_output(0)
 
 
+def bf16_bits(values: np.ndarray) -> np.ndarray:
+    """BF16 bit patterns (uint16) of ``values``, rounded to nearest even like TensorRT's cast."""
+    source = np.ascontiguousarray(values).reshape(-1)
+    bits = file_backed_empty(np.shape(values), np.uint16)
+    flat = bits.reshape(-1)
+    for start in range(0, source.size, _BF16_STEP):
+        word = source[start:start + _BF16_STEP].astype(np.float32).view(np.uint32)
+        flat[start:start + _BF16_STEP] = ((word + 0x7FFF + ((word >> 16) & 1)) >> 16).astype(np.uint16)
+    return bits
+
+
+def add_bf16_constant(
+    network: trt.INetworkDefinition,
+    shape: tuple[int, ...],
+    values: np.ndarray,
+) -> trt.ITensor:
+    """Add a BF16 constant directly.
+
+    The FP16-storage-plus-cast form makes TensorRT fold the cast into a second, BF16 host copy of
+    the weights during the build, which a 27B checkpoint cannot afford on a 128 GB GPU.
+    """
+    bits = bf16_bits(np.asarray(values).reshape(shape))
+    _BF16_DATA.setdefault(network, []).append(bits)
+    layer = network.add_constant(shape, trt.Weights(trt.bfloat16, bits.ctypes.data, bits.size))
+    return layer.get_output(0)
+
+
 def add_matmul_rhs_constant(
     network: trt.INetworkDefinition,
     lhs: trt.ITensor,
@@ -55,12 +92,15 @@ def add_matmul_rhs_constant(
         if rank <= 2
         else (1,) * (rank - 2) + (lhs_width, rhs_width)
     )
-    rhs = add_constant(
-        network,
-        rhs_shape,
-        np.asarray(rhs_weights).reshape(rhs_shape),
-        dtype=dtype,
-    )
+    if lhs.dtype == trt.bfloat16 and np.dtype(dtype) == np.float16:
+        rhs = add_bf16_constant(network, rhs_shape, rhs_weights)
+    else:
+        rhs = add_constant(
+            network,
+            rhs_shape,
+            np.asarray(rhs_weights).reshape(rhs_shape),
+            dtype=dtype,
+        )
     rhs = _cast_back_to_trt_dtype(network, rhs, lhs.dtype)
     mm = network.add_matrix_multiply(
         lhs, trt.MatrixOperation.NONE,
@@ -786,7 +826,7 @@ def _repeat_kv_heads_4d(
     return concat.get_output(0)
 
 
-def _add_attention_core_with_logit_softcap(
+def _add_attention_core_with_fp32_scores(
     network: trt.INetworkDefinition,
     q_4d: trt.ITensor,
     k_4d: trt.ITensor,
@@ -797,8 +837,9 @@ def _add_attention_core_with_logit_softcap(
     head_dim: int,
     mask: trt.ITensor | None,
     scale: float,
-    logit_softcap: float,
+    logit_softcap: float | None,
 ) -> trt.ITensor:
+    """Explicit FP32 score/softmax math, with probabilities cast back for V."""
     output_dtype = q_4d.dtype
     k_4d = _repeat_kv_heads_4d(
         network, k_4d, num_heads=num_heads, num_kv_heads=num_kv_heads,
@@ -824,8 +865,9 @@ def _add_attention_core_with_logit_softcap(
     scores = network.add_elementwise(
         scores, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
 
-    scores = add_tanh_softcap(
-        network, scores, logit_softcap, scalar_shape=(1, 1, 1, 1))
+    if logit_softcap is not None and logit_softcap > 0.0:
+        scores = add_tanh_softcap(
+            network, scores, logit_softcap, scalar_shape=(1, 1, 1, 1))
 
     if score_mask is not None:
         scores = network.add_elementwise(
@@ -858,14 +900,20 @@ def add_attention_from_rows(
     mask: trt.ITensor | None = None,
     scale: float | None = None,
     logit_softcap: float | None = None,
+    fp32_scores: bool = False,
     fp32_accumulation: bool = False,
     tag: str | None = None,
 ) -> trt.ITensor:
-    """Native IAttention for row-major [S, H * D] Q/K/V tensors.
+    """Attention for row-major [S, H * D] Q/K/V tensors.
 
     ``num_kv_heads`` can be smaller than ``num_heads`` for GQA/MQA. TRT
     native IAttention supports this directly, so callers should not expand K/V
     heads unless the model semantics require per-query-head K/V values.
+
+    ``fp32_scores`` expresses score scaling, masking and softmax as explicit
+    FP32 operations for quantized projections. This preserves their dtype
+    boundary without relying on IAttention Q/DQ decomposition. Probability
+    and V multiplication retains the original dtype, as in softcapped attention.
     """
     attention_size = num_heads * head_dim
     kv_heads = num_heads if num_kv_heads is None else num_kv_heads
@@ -880,14 +928,15 @@ def add_attention_from_rows(
         tag=None if tag is None else tag + ".v")
     if scale is None:
         scale = float(1.0 / np.sqrt(head_dim)) if head_dim > 0 else 1.0
-    if logit_softcap is not None and float(logit_softcap) > 0.0:
+    if fp32_scores or (logit_softcap is not None and float(logit_softcap) > 0.0):
         if causal:
             raise NotImplementedError(
-                "logit_softcap attention requires an explicit additive mask")
-        ctx_4d = _add_attention_core_with_logit_softcap(
+                "FP32 score attention requires an explicit additive mask")
+        ctx_4d = _add_attention_core_with_fp32_scores(
             network, q_4d, k_4d, v_4d,
             num_heads=num_heads, num_kv_heads=kv_heads, head_dim=head_dim,
-            mask=mask, scale=scale, logit_softcap=float(logit_softcap))
+            mask=mask, scale=scale,
+            logit_softcap=None if logit_softcap is None else float(logit_softcap))
     else:
         ctx_4d = add_attention_core(
             network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale,

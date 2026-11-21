@@ -78,3 +78,17 @@ set(ENV{PATH} "@CUDAToolkit_BIN_DIR@:$ENV{PATH}")
 run("${_edge_kernel_python}" -I "@_edge_source@/kernelSrcs/build_cutedsl.py"
   --gpu_arch "sm_@TRTMC_EDGELLM_CUDA_ARCHITECTURE@" --arch "@CMAKE_SYSTEM_PROCESSOR@"
   --kernels "@_edge_cute_cli_groups@" --cuda-version "@CUDAToolkit_VERSION_MAJOR@.@CUDAToolkit_VERSION_MINOR@" --jobs "@TRTMC_EDGELLM_JOBS@")
+
+# Keep the semicolon-separated group list as one argument. Passing it through
+# ExternalProject's custom CONFIGURE_COMMAND list splits off all but the first.
+execute_process(COMMAND "@_edge_prefix@/libexec/trtmc-edge-llm/bin/cmake"
+  -S "@_edge_source@" -B "@_edge_build@"
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+  "-DCMAKE_CUDA_COMPILER=@CMAKE_CUDA_COMPILER@"
+  "-DCMAKE_CUDA_ARCHITECTURES=@TRTMC_EDGELLM_CUDA_ARCHITECTURE@"
+  "-DCUDA_DIR=@CUDAToolkit_LIBRARY_ROOT@" "-DCUDAToolkit_ROOT=@CUDAToolkit_LIBRARY_ROOT@"
+  "-DCUDA_CTK_VERSION=@CUDAToolkit_VERSION_MAJOR@.@CUDAToolkit_VERSION_MINOR@"
+  "-DTRT_PACKAGE_DIR=@TRTMC_EDGELLM_TRT_ROOT@" "-DPython3_EXECUTABLE=@_edge_python@"
+  "-DENABLE_CUTE_DSL=@_edge_cute_groups@"
+  "-DCUTE_DSL_ARTIFACT_TAG=sm_@TRTMC_EDGELLM_CUDA_ARCHITECTURE@"
+  COMMAND_ERROR_IS_FATAL ANY)

@@ -20,6 +20,7 @@ class Adapter:
         options = {"revision": spec.revision} if spec.revision else {}
         self.pipeline = ChronosBoltPipeline.from_pretrained(spec.model, device_map=spec.device, dtype=spec.dtype,
                                                             **options)
+        host.maybe_compile(self.pipeline.model, spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         import torch

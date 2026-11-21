@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  requirements: families/cosmos3_edge/requirements.txt  # Cosmos3EdgeForConditionalGeneration (Transformers 5.20)
+  adapter: families/cosmos3_edge/reference/adapter.py  # the E2E chat template, thinking off
+
+# OCRBench images reach thousands of visual patches; the catalog's 1024-token bundle holds 4096. A bundle of 8192
+# tokens holds the family's 16384-patch maximum and the prompt and answer beside it.
+candidate:
+  build: {name: cosmos3-edge-fp32-qual, max_sequence_length: 8192}

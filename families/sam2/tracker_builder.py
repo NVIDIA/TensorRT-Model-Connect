@@ -42,16 +42,19 @@ class _DecoderOutput:
 
 
 class _TrackerBuilder:
-    def __init__(self, trt: Any, network: Any, checkpoint: Any) -> None:
+    def __init__(self, trt: Any, network: Any, checkpoint: Any, half: Any = None) -> None:
         self.trt = trt
         self.network = network
         self.checkpoint = checkpoint
-        self.layers = TrtLayers(trt, network, checkpoint)
+        self.layers = TrtLayers(trt, network, checkpoint, half)
 
     def _add_input(self, contract: tuple[str, str, tuple[int, ...]]) -> Any:
         name, dtype_name, shape = contract
         dtype = getattr(self.trt, dtype_name)
         tensor = self.network.add_input(name, dtype, shape)
+        if dtype == self.trt.bfloat16:
+            # The runtime contract keeps BF16 interface tensors for both compute types.
+            tensor = self.layers.cast(tensor, self.layers.half, f"{name}.compute")
         return tensor
 
     def _float_constant(
@@ -133,7 +136,7 @@ class _TrackerBuilder:
         groups: int,
         name: str,
     ) -> Any:
-        tensor = self.layers.cast(tensor, self.trt.bfloat16, f"{name}.input")
+        tensor = self.layers.cast(tensor, self.layers.half, f"{name}.input")
         return self.layers.convolution(
             tensor,
             f"{module}.weight",
@@ -155,7 +158,7 @@ class _TrackerBuilder:
         output_channels: int,
         name: str,
     ) -> Any:
-        tensor = self.layers.cast(tensor, self.trt.bfloat16, f"{name}.input")
+        tensor = self.layers.cast(tensor, self.layers.half, f"{name}.input")
         source_kernel = self.checkpoint.tensor(
             f"{module}.weight", (input_channels, output_channels, 2, 2)
         )
@@ -170,8 +173,8 @@ class _TrackerBuilder:
                 tensor,
                 output_channels * 4,
                 (1, 1),
-                self.layers._bf16_weights(projection_kernel),
-                self.layers._bf16_weights(projection_bias),
+                self.layers._half_weights(projection_kernel),
+                self.layers._half_weights(projection_bias),
             ),
             "pixel-shuffle projection",
             f"{name}.projection",
@@ -227,7 +230,7 @@ class _TrackerBuilder:
     def _linear_relu(
         self, tensor: Any, module: str, input_features: int, output_features: int, name: str
     ) -> Any:
-        value = self.layers.linear_bf16(
+        value = self.layers.linear_half(
             tensor, module, input_features, output_features, f"{name}.linear"
         )
         return self._activation(value, self.trt.ActivationType.RELU, name)
@@ -264,14 +267,14 @@ class _TrackerBuilder:
                 coordinates[0, spatial, 0] = np.float32(2.0) * normalized_x - np.float32(1.0)
                 coordinates[0, spatial, 1] = np.float32(2.0) * normalized_y - np.float32(1.0)
         grid = self._float_constant(
-            coordinates, coordinates.shape, "prompt.dense_position.grid", self.trt.bfloat16
+            coordinates, coordinates.shape, "prompt.dense_position.grid", self.layers.half
         )
         gaussian = self._checkpoint_constant(
             "sam_prompt_encoder.pe_layer.positional_encoding_gaussian_matrix",
             (2, 128),
             (1, 2, 128),
             "prompt.dense_position.gaussian",
-            self.trt.bfloat16,
+            self.layers.half,
         )
         phase = self.layers.matrix_multiply(
             grid,
@@ -321,13 +324,13 @@ class _TrackerBuilder:
         unit = self._binary(
             doubled, minus_one, self.trt.ElementWiseOperation.SUM, "prompt.box.unit_square"
         )
-        unit = self.layers.cast(unit, self.trt.bfloat16, "prompt.box.unit_square_bf16")
+        unit = self.layers.cast(unit, self.layers.half, "prompt.box.unit_square_bf16")
         gaussian = self._checkpoint_constant(
             "sam_prompt_encoder.pe_layer.positional_encoding_gaussian_matrix",
             (2, 128),
             (1, 2, 128),
             "prompt.box.gaussian",
-            self.trt.bfloat16,
+            self.layers.half,
         )
         phase = self.layers.matrix_multiply(
             unit,
@@ -494,13 +497,13 @@ class _TrackerBuilder:
         query_tokens = self.layers._shape(query)[1]
         key_tokens = self.layers._shape(key)[1]
         head_dim = internal_features // heads
-        projected_q = self.layers.linear_bf16(
+        projected_q = self.layers.linear_half(
             query, f"{module}.q_proj", query_features, internal_features, f"{name}.q_proj"
         )
-        projected_k = self.layers.linear_bf16(
+        projected_k = self.layers.linear_half(
             key, f"{module}.k_proj", key_value_features, internal_features, f"{name}.k_proj"
         )
-        projected_v = self.layers.linear_bf16(
+        projected_v = self.layers.linear_half(
             value, f"{module}.v_proj", key_value_features, internal_features, f"{name}.v_proj"
         )
         q_grouped = self.layers.shuffle(
@@ -562,7 +565,7 @@ class _TrackerBuilder:
         recombined = self.layers.shuffle(
             token_major, (1, query_tokens, internal_features), f"{name}.recombine"
         )
-        return self.layers.linear_bf16(
+        return self.layers.linear_half(
             recombined,
             f"{module}.out_proj",
             internal_features,
@@ -675,7 +678,7 @@ class _TrackerBuilder:
             hidden = self._linear_relu(
                 queries, f"{prefix}.mlp.layers.0", 256, 2048, f"{name}.mlp.relu"
             )
-            mlp = self.layers.linear_bf16(
+            mlp = self.layers.linear_half(
                 hidden, f"{prefix}.mlp.layers.1", 2048, 256, f"{name}.mlp.output"
             )
             queries = self._binary(
@@ -921,7 +924,7 @@ class _TrackerBuilder:
                 hidden0, f"{module}1", 256, 256, f"decoder.hyper.{token}.relu1"
             )
             hypernetworks.append(
-                self.layers.linear_bf16(
+                self.layers.linear_half(
                     hidden1, f"{module}2", 256, 32, f"decoder.hyper.{token}.output"
                 )
             )
@@ -952,7 +955,7 @@ class _TrackerBuilder:
             256,
             "decoder.iou.relu1",
         )
-        iou_rank3 = self.layers.linear_bf16(
+        iou_rank3 = self.layers.linear_half(
             iou_hidden1,
             "sam_mask_decoder.iou_prediction_head.layers.2",
             256,
@@ -978,7 +981,7 @@ class _TrackerBuilder:
             256,
             "decoder.object.relu1",
         )
-        object_score_rank3 = self.layers.linear_bf16(
+        object_score_rank3 = self.layers.linear_half(
             object_hidden1,
             "sam_mask_decoder.pred_obj_score_head.layers.2",
             256,
@@ -1040,8 +1043,8 @@ class _TrackerBuilder:
                 (1, 1, 1, 1),
                 "decoder.mask.alternate_best",
             )
-            upper = self.layers.scalar(0.05, 4, self.trt.bfloat16, "decoder.stability.upper")
-            lower = self.layers.scalar(-0.05, 4, self.trt.bfloat16, "decoder.stability.lower")
+            upper = self.layers.scalar(0.05, 4, self.layers.half, "decoder.stability.upper")
+            lower = self.layers.scalar(-0.05, 4, self.layers.half, "decoder.stability.lower")
             intersection_bool = self.layers.elementwise(
                 stability_mask,
                 upper,
@@ -1161,7 +1164,7 @@ class _TrackerBuilder:
         pointer1 = self._linear_relu(
             pointer0, "obj_ptr_proj.layers.1", 256, 256, "decoder.pointer.relu1"
         )
-        pointer2 = self.layers.linear_bf16(
+        pointer2 = self.layers.linear_half(
             pointer1, "obj_ptr_proj.layers.2", 256, 256, "decoder.pointer.output"
         )
         pointer_fp32 = self.layers.cast(pointer2, self.trt.float32, "decoder.pointer.fp32")
@@ -1264,11 +1267,11 @@ class _TrackerBuilder:
             )
             normalized = self._layer_norm_2d(depthwise, module + ".norm", 256, name + ".norm")
             nhwc = self.layers.transpose(normalized, (0, 2, 3, 1), name + ".nhwc")
-            expanded = self.layers.linear_bf16(
+            expanded = self.layers.linear_half(
                 nhwc, module + ".pwconv1", 256, 1024, name + ".expand"
             )
             hidden = self.layers.gelu(expanded, name + ".gelu")
-            projected = self.layers.linear_bf16(
+            projected = self.layers.linear_half(
                 hidden, module + ".pwconv2", 1024, 256, name + ".project"
             )
             gamma = self._checkpoint_constant(
@@ -1323,7 +1326,7 @@ class _TrackerBuilder:
         memory_positions = []
         spatial_position_fp32 = self._make_sine_position(64, "attention.memory.spatial_fp32")
         spatial_position = self.layers.cast(
-            spatial_position_fp32, self.trt.bfloat16, "attention.memory.spatial_bf16"
+            spatial_position_fp32, self.layers.half, "attention.memory.spatial_bf16"
         )
         temporal_table = self._checkpoint_constant(
             "maskmem_tpos_enc",
@@ -1399,7 +1402,7 @@ class _TrackerBuilder:
                 history_frames if index == 0 else index,
                 f"attention.pointer.raw_position.{index}",
             )
-            projected_position = self.layers.linear_bf16(
+            projected_position = self.layers.linear_half(
                 raw_position,
                 "obj_ptr_tpos_proj",
                 256,
@@ -1546,7 +1549,7 @@ class _TrackerBuilder:
                 name + ".mlp.norm",
             )
             hidden = self._linear_relu(mlp_norm, module + ".linear1", 256, 2048, name + ".mlp.relu")
-            projected = self.layers.linear_bf16(
+            projected = self.layers.linear_half(
                 hidden, module + ".linear2", 2048, 256, name + ".mlp.output"
             )
             output = self._binary(
@@ -1627,7 +1630,7 @@ class _TrackerBuilder:
 
 
 def populate_tracker_network(
-    trt: Any, network: Any, checkpoint: Any, history_frames: int
+    trt: Any, network: Any, checkpoint: Any, history_frames: int, half: Any = None
 ) -> _TrackerBuilder:
     """Populate one static prompt (H=0) or recurrent (H=1..4) SAM2 network.
 
@@ -1635,6 +1638,6 @@ def populate_tracker_network(
     network because TensorRT may retain pointers to NumPy-backed weights.
     """
 
-    builder = _TrackerBuilder(trt, network, checkpoint)
+    builder = _TrackerBuilder(trt, network, checkpoint, half)
     builder.build(history_frames)
     return builder

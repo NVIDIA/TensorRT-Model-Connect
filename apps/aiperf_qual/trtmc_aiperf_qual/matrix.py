@@ -28,7 +28,7 @@ def row(environment: Environment, profile: str) -> dict[str, Any]:
         model = resolve_model(profile, environment)
     except ConfigError as error:
         return {"profile": profile, "executable": False, "problem": f"configuration: {error}"}
-    from .runner import applies, quality_only
+    from .runner import applies, native_modes, quality_only
 
     reference, policy = model["reference"], model["performance"]
     checks = [check for check in model["supplementary"] if not check.get("informational") and applies(check, model)]
@@ -49,7 +49,7 @@ def row(environment: Environment, profile: str) -> dict[str, Any]:
             "benchmarks": " ".join(item["suite"] for item in model["absolute"]),
             "checks": " ".join(check["check"] for check in checks),
             "timed_request": " ".join(datasets) if quality_only(model) else policy["suite"].get("suite"),
-            "reference_modes": "eager" if quality_only(model) else " ".join(policy["reference_modes"]),
+            "reference_modes": " ".join(native_modes(reference) if quality_only(model) else policy["reference_modes"]),
             "executable": not problems, "problem": "; ".join(problems)}
 
 

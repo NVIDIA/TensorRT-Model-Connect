@@ -1,0 +1,29 @@
+{
+  "name": "personaplex-7b-fp8",
+  "hf_id": "nvidia/personaplex-7b-v1",
+  "hf_revision": "fdaf4090a61cb315c138a1faee287ffd6c716309",
+  "hf_dependencies": [
+    {
+      "repo_id": "kyutai/mimi"
+    }
+  ],
+  "bundle": "personaplex-7b-fp8.bundle",
+  "family": "personaplex",
+  "task": "speech_to_speech",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "personaplex-7b-fp8",
+      "reference_backend": "personaplex_official",
+      "reference_precision": "bf16",
+      "test_input_audio": "data/Recording.wav",
+      "speech_test_max_frames": 300,
+      "seed": 0,
+      "premerge": true
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512,
+  "fp32_layers": [],
+  "quantization": "fp8"
+}

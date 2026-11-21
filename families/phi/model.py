@@ -36,10 +36,15 @@ class _PhiModel:
         self,
         model_dir: str,
         config: ModelConfig,
+        *,
+        precision: str = "fp32",
     ) -> WeightDict:
         """Load Phi-3 weights, splitting fused qkv_proj and gate_up_proj."""
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
+        # Note (Jiaxin Deng): FP16 graph projections already round these values;
+        # keep norms and the top-k LM-head refinement's source weights in FP32.
+        projection_precision = "fp16" if precision == "fp16" else "fp32"
 
         hidden = config.hidden_size
         vocab = config.vocab_size
@@ -92,9 +97,9 @@ class _PhiModel:
                 attention_size = q_dim
 
             # Transpose [out, in] -> [in, out]
-            q_t = _transpose_2d(q_raw, "q_proj")
-            k_t = _transpose_2d(k_raw, "k_proj")
-            v_t = _transpose_2d(v_raw, "v_proj")
+            q_t = _transpose_2d(q_raw, "q_proj", projection_precision)
+            k_t = _transpose_2d(k_raw, "k_proj", projection_precision)
+            v_t = _transpose_2d(v_raw, "v_proj", projection_precision)
             del q_raw, k_raw, v_raw
 
             weights[f"{prefix}.w_q"] = q_t
@@ -103,7 +108,7 @@ class _PhiModel:
 
             # Output projection (separate, not fused)
             o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
-            weights[f"{prefix}.w_o"] = _transpose_2d(o_raw, "o_proj")
+            weights[f"{prefix}.w_o"] = _transpose_2d(o_raw, "o_proj", projection_precision)
             del o_raw
 
             # ---- Fused gate_up projection ----
@@ -117,13 +122,13 @@ class _PhiModel:
             up_raw = gate_up_raw[intermediate:, :]
             del gate_up_raw
 
-            weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate_proj")
-            weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj")
+            weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate_proj", projection_precision)
+            weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj", projection_precision)
             del gate_raw, up_raw
 
             # Down projection (separate, not fused)
             down_raw = _load_tensor(readers, f"{hf_prefix}.mlp.down_proj.weight")
-            weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj")
+            weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj", projection_precision)
             del down_raw
 
         # Final norm
@@ -273,17 +278,30 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("Phi max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Phi has no qualified family-owned quantized build")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(f"Phi does not support quantization={request.quantization!r}")
+    quantized = request.quantization == "fp8"
+    if quantized and precision not in {"fp16", "bf16"}:
+        raise NotImplementedError("Phi fp8 quantization requires precision fp16 or bf16")
+    if quantized and request.tensor_parallel_size != 1:
+        raise NotImplementedError("Phi fp8 quantization does not support tensor parallelism")
     if request.fp32_layers:
         raise NotImplementedError("Phi does not expose mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Phi does not support MTP speculative decoding")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
     parallel.validate()
     model = _PhiModel()
     config.raw["_model_dir"] = str(model_dir)
-    weights = model.load_weights(str(model_dir), config)
+    weights = model.load_weights(str(model_dir), config, precision=precision)
+    quant_ctx = None
+    if quantized:
+        from . import graph_ops
+        from .quantization import calibrate_phi_fp8
+
+        quant_ctx = calibrate_phi_fp8(config, weights, graph_ops)
     writer.set_header(family="phi", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -292,7 +310,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 weights,
                 max_sequence_length,
                 precision=precision,
-                quant_ctx=None,
+                quant_ctx=quant_ctx,
                 verbose=bool(request.verbose),
                 debug_layer_outputs=False,
                 parallel_config=parallel.for_rank(rank),
@@ -306,7 +324,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
@@ -317,7 +335,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,

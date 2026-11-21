@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from functools import cache
 from pathlib import Path
 import pytest
@@ -17,7 +18,7 @@ import numpy as np
 from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "timesfm"
-TASKS = frozenset({"time_series_forecast"})
+TASKS = frozenset({"series_to_point_forecast"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
@@ -174,6 +175,8 @@ def _run_json(
             "LD_LIBRARY_PATH",
             "-np",
             str(manifest["tensor_parallel_size"]),
+            sys.executable,
+            str(TEST_ROOT / "rank_exec.py"),
             *invocation,
         ]
     env = os.environ.copy()
@@ -198,7 +201,9 @@ def _run_json(
                 payloads.append(json.loads(line[start:]))
             except json.JSONDecodeError:
                 pass
-    assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
+    assert len(payloads) == int(manifest["tensor_parallel_size"]), (
+        f"native {command} must return one result per rank: {completed.stdout[-1000:]}"
+    )
     assert all((payload == payloads[0] for payload in payloads))
     return payloads[0]
 
@@ -228,7 +233,7 @@ def _native(
     manifest["task"]
     inputs = case["inputs"]
     values = np.asarray(inputs["past_values"], dtype=np.float32)
-    mask = np.ones_like(values)
+    mask = np.asarray(inputs.get("observed_mask", np.ones_like(values)), dtype=np.float32)
     input_path = tmp_path / "values.f32"
     mask_path = tmp_path / "mask.f32"
     values.tofile(input_path)
@@ -275,7 +280,9 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     series = [0.0] * context_length
     series[-min(len(raw), context_length) :] = raw[-context_length:]
     padding = [1] * context_length
-    padding[-min(len(raw), context_length) :] = [0] * min(len(raw), context_length)
+    observed = list(inputs.get("observed_mask", [1] * len(raw)))
+    assert len(observed) == len(raw) and all(value in (0, 1) for value in observed)
+    padding[-min(len(raw), context_length) :] = [1 - value for value in observed[-context_length:]]
     freq = int(inputs["frequency"])
     with torch.no_grad():
         decoded = model.decoder(
@@ -297,8 +304,15 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
     assert left.size == int(np.prod(shape))
     left = left.reshape(shape)
     right = np.asarray(expected["values"])
+    # The model returns [batch,horizon]; the Task returns [horizon,channel].
+    assert right.ndim == 2 and right.shape[0] == 1
+    right = right.T
     assert left.shape == right.shape and left.size > 0
-    assert right.ndim in (2, 3)
+    assert actual["task"] == manifest["task"]
+    assert actual["kind"] == "point"
+    assert actual["axes"] == ["horizon", "channel"]
+    assert actual["horizon_steps"] == list(range(1, right.shape[0] + 1))
+    assert actual["channel_names"] == actual["channel_units"] == []
     assert np.isfinite(left).all() and np.isfinite(right).all()
     assert _relative_l2(left, right) <= float(thresholds["relative_l2"])
     assert np.max(np.abs(left.reshape(-1) - right.reshape(-1))) <= float(
@@ -306,16 +320,60 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
     )
 
 
-def test_forecast_contract_requires_matching_shape() -> None:
-    expected = {"values": np.asarray([0.1, 0.2], dtype=np.float32)}
-    with pytest.raises(AssertionError):
-        _assert_parity(
-            {"values": np.asarray([0.1, 0.2], dtype=np.float32), "shape": [2]},
-            expected,
-            {"task": "time_series_forecast"},
-            {},
-            {"relative_l2": 1.0, "max_pointwise_error": 1.0},
+def _assert_sdk_consumers(runtime_root, bundle, manifest, case, tmp_path, expected, thresholds):
+    build_root = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = ":".join(
+        value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value
+    )
+    for language in ("c", "cpp"):
+        consumer = build_root / f"test_timesfm_sdk_{language}"
+        assert consumer.is_file(), f"build the TimesFM {language} SDK consumer first"
+        invocation = [
+            str(consumer), str(bundle), str(runtime_root),
+            str(tmp_path / "values.f32"), str(tmp_path / "mask.f32"),
+            str(case["inputs"]["frequency"]),
+        ]
+        if int(manifest["tensor_parallel_size"]) > 1:
+            mpirun = shutil.which("mpirun")
+            assert mpirun, "selected multi-GPU SDK test requires mpirun"
+            invocation = [mpirun, "--tag-output", "-x", "LD_LIBRARY_PATH", "-np",
+                          str(manifest["tensor_parallel_size"]), sys.executable,
+                          str(TEST_ROOT / "rank_exec.py"), *invocation]
+        completed = subprocess.run(
+            invocation, check=True, capture_output=True, text=True, env=env,
+            timeout=int(case.get("runtime_timeout_s", 3600)),
         )
+        record_evidence("commands", {"argv": invocation})
+        payloads = []
+        for line in completed.stdout.splitlines():
+            start = line.find("{")
+            if start >= 0:
+                payloads.append(json.loads(line[start:]))
+        assert len(payloads) == int(manifest["tensor_parallel_size"])
+        assert all(value == payloads[0] for value in payloads)
+        payload = payloads[0]
+        record_evidence("native", {"sdk_language": language, **payload})
+        _assert_parity(payload, expected, manifest, case, thresholds)
+
+
+def test_forecast_contract_requires_matching_shape() -> None:
+    expected = {"values": np.asarray([[0.1, 0.2]], dtype=np.float32)}
+    actual = {
+        "values": np.asarray([0.1, 0.2], dtype=np.float32),
+        "shape": [2, 1],
+        "task": "series_to_point_forecast",
+        "kind": "point",
+        "axes": ["horizon", "channel"],
+        "horizon_steps": [1, 2],
+        "channel_names": [],
+        "channel_units": [],
+    }
+    manifest = {"task": "series_to_point_forecast"}
+    thresholds = {"relative_l2": 1.0, "max_pointwise_error": 1.0}
+    _assert_parity(actual, expected, manifest, {}, thresholds)
+    with pytest.raises(AssertionError):
+        _assert_parity({**actual, "shape": [2]}, expected, manifest, {}, thresholds)
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
@@ -348,6 +406,29 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             with evidence_stage("compare"):
                 record_evidence("thresholds", GATES)
                 _assert_parity(actual, expected, manifest, window_case, GATES)
+                if index == 0:
+                    _assert_sdk_consumers(
+                        runtime_root, bundle, manifest, window_case, window_root, expected, GATES
+                    )
+        # Exercise a real missing-observation request and another frequency category.
+        inputs = dict(windows()[0])
+        inputs["frequency"] = 1
+        inputs["observed_mask"] = [int(index % 7 != 0) for index in range(len(inputs["past_values"]))]
+        masked_root = tmp_path / "masked-frequency-one"
+        masked_root.mkdir()
+        masked_case = {**case, "inputs": inputs}
+        record_evidence("inputs", {"case": masked_case})
+        with evidence_stage("native"):
+            actual = _native(binary, runtime_root, bundle, model_dir, manifest, masked_case, masked_root)
+        record_evidence("native", actual)
+        with evidence_stage("reference"):
+            expected = _official_reference(model_dir, manifest, masked_case, masked_root)
+        record_evidence("reference", expected)
+        with evidence_stage("compare"):
+            _assert_parity(actual, expected, manifest, masked_case, GATES)
+            _assert_sdk_consumers(
+                runtime_root, bundle, manifest, masked_case, masked_root, expected, GATES
+            )
         return
     with evidence_stage("native"):
         actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
@@ -357,3 +438,6 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_evidence("reference", expected)
     with evidence_stage("compare"):
         _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+        _assert_sdk_consumers(
+            runtime_root, bundle, manifest, case, tmp_path, expected, _thresholds(case_name)
+        )

@@ -8,6 +8,7 @@ import logging
 from concurrent.futures import Future
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from trtmc_server.app import ServerConfig, create_app
@@ -87,6 +88,9 @@ class FakeRegistry:
     def supports_streaming(self, model: str) -> bool:
         return False
 
+    def supports(self, model: str, capability: str) -> bool:
+        return capability == "text_conversation" and getattr(self, "conversation", False)
+
     def max_tokens(self, model: str, hard_cap: int) -> int:
         if model != "test/model":
             raise ModelNotFoundError(model)
@@ -110,6 +114,65 @@ def make_client(registry: FakeRegistry) -> TestClient:
         ),
     )
     return TestClient(app)
+
+
+def test_real_prompt_and_native_output_identity_survive_http(tmp_path):
+    import hashlib
+
+    registry = FakeRegistry()
+    path = tmp_path / "records.jsonl"
+    prompt = "  first\nsecond\u2028third\u0085fourth  "
+    app = create_app(registry, ServerConfig(max_body_bytes=4096, max_prompt_bytes=1024,
+                                            max_generation_tokens=64, records=path))
+    with TestClient(app) as client:
+        response = client.post("/v1/completions", json={"model": "test/model", "prompt": prompt},
+                               headers={"X-Request-ID": "original-corpus-row"})
+        assert response.status_code == 200 and response.json()["choices"][0]["text"] == "Paris"
+    assert registry.requests[0][1]["prompt"] == prompt
+    row, = [json.loads(line) for line in path.read_text().split("\n") if line]
+    assert row["request_id"] == "original-corpus-row"
+    assert row["prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
+    assert row["prompt_bytes"] == len(prompt.encode())
+    assert row["completion_sha256"] == hashlib.sha256(b"Paris").hexdigest()
+    assert "prompt" not in row and "text" not in row
+
+
+def test_history_forwards_typed_roles_and_content_without_a_client_template(tmp_path):
+    import hashlib
+
+    registry = FakeRegistry()
+    registry.conversation = True
+    path = tmp_path / "records.jsonl"
+    messages = [{"role": "system", "content": "  system\n"},
+                {"role": "user", "content": "Remember ORCHID."},
+                {"role": "assistant", "content": "OK\u2028"},
+                {"role": "user", "content": "What word?"}]
+    app = create_app(registry, ServerConfig(max_body_bytes=4096, max_prompt_bytes=1024,
+                                          max_generation_tokens=64, records=path))
+    with TestClient(app) as client:
+        response = client.post("/v1/chat/completions", json={"model": "test/model", "messages": messages})
+    assert response.status_code == 200
+    operation, payload = registry.requests[0]
+    assert operation == "converse" and payload["messages"] == messages
+    assert "prompt" not in payload and "use_chat_template" not in payload["config"]
+    row, = [json.loads(line) for line in path.read_text().split("\n") if line]
+    assert row["conversation_sha256"] == hashlib.sha256(json.dumps(
+        messages, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    assert row["conversation_roles"] == ["system", "user", "assistant", "user"]
+    assert "messages" not in row and row["native_operation"] == "converse"
+
+
+def test_history_rejects_unsupported_models_streaming_and_full_history_limits():
+    registry = FakeRegistry()
+    messages = [{"role": "user", "content": "first"}, {"role": "assistant", "content": "answer"},
+                {"role": "user", "content": "last"}]
+    with make_client(registry) as client:
+        assert client.post("/v1/chat/completions", json={"model": "test/model", "messages": messages}).status_code == 400
+        registry.conversation = True
+        assert client.post("/v1/chat/completions", json={"model": "test/model", "messages": messages, "stream": True}).status_code == 400
+        messages[0]["content"] = "x" * 2048
+        assert client.post("/v1/chat/completions", json={"model": "test/model", "messages": messages}).status_code == 413
+    assert registry.requests == []
 
 
 def test_completion_and_chat_keep_model_semantics_in_worker(caplog: Any) -> None:
@@ -295,3 +358,56 @@ def test_worker_request_too_large_returns_413_and_finishes_metrics() -> None:
         metrics = client.get("/metrics")
         assert 'route="/v1/completions",status="413"' in metrics.text
         assert "trtmc_server_active_requests 0" in metrics.text
+
+
+@pytest.mark.parametrize("route", ["/v1/completions", "/v1/chat/completions"])
+@pytest.mark.parametrize("value", ["1e400", "Infinity", '"Infinity"'])
+def test_nonfinite_temperature_is_rejected_before_worker_acquisition(route: str, value: str) -> None:
+    registry = FakeRegistry()
+    registry.saturated = True
+    payload = {"model": "test/model"}
+    if route == "/v1/completions":
+        payload["prompt"] = "Capital?"
+    else:
+        payload["messages"] = [{"role": "user", "content": "Capital?"}]
+    body = json.dumps(payload)[:-1] + ', "temperature": ' + value + '}'
+    with make_client(registry) as client:
+        invalid = client.post(route, content=body, headers={"content-type": "application/json"})
+        assert invalid.status_code == 400
+        assert invalid.json()["error"]["param"] == "temperature"
+        assert registry.requests == []
+        registry.saturated = False
+        valid = client.post(route, json={**payload, "temperature": 0.0})
+        assert valid.status_code == 200
+        assert registry.requests[-1][1]["config"]["temperature"] == 0.0
+
+
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
+@pytest.mark.parametrize("location", ["prompt", "user", "system", "text_part"])
+def test_surrogate_input_is_rejected_before_worker_acquisition(surrogate, location):
+    registry = FakeRegistry()
+    registry.saturated = True
+    payload = {"model": "test/model"}
+    route = "/v1/completions" if location == "prompt" else "/v1/chat/completions"
+    if location == "prompt":
+        payload["prompt"] = surrogate
+    else:
+        content = [{"type": "text", "text": surrogate}] if location == "text_part" else surrogate
+        payload["messages"] = [{"role": "user", "content": content}]
+        if location == "system":
+            payload["messages"] = [
+                {"role": "system", "content": surrogate},
+                {"role": "user", "content": "Capital?"},
+            ]
+    with make_client(registry) as client:
+        invalid = client.post(route, content=json.dumps(payload),
+                              headers={"content-type": "application/json"})
+        assert invalid.status_code == 400
+        assert invalid.json()["error"]["type"] == "invalid_request_error"
+        assert registry.requests == []
+        registry.saturated = False
+        valid = client.post("/v1/completions", content=json.dumps({
+            "model": "test/model", "prompt": "\U0001f600",
+        }), headers={"content-type": "application/json"})
+        assert valid.status_code == 200
+        assert registry.requests[-1][1]["prompt"] == "\U0001f600"

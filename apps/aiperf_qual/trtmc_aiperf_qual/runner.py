@@ -15,13 +15,16 @@ import math
 import statistics
 import time
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from . import absolute, aiperf_metrics, compat, edits, execution, geneval, intelligibility, judge, replay_parity, sweep, world_model
 from .aiperf_runner import AiperfRun, run_aiperf
 from .config import Environment
+from .gold_metrics import SandboxUnavailable
 from .report import write_report
+from .artifacts import recorded_path
 from .services import gpu_exclusive, gpu_identity, platform_fingerprint, platform_id, reference_python, serving
 from .suites import Suite, build_suite, request_sha, single_request_suite, unstated_defaults
 
@@ -130,11 +133,15 @@ def near_capacity_request(environment: Environment, model: Mapping[str, Any], re
     return long, rendered_tokens(tokenizer, long)
 
 
+# The text generation Task under its legacy name and its Task SDK name (the migrated decoder LMs).
+TEXT_GENERATION_TASKS = frozenset({"text_generation", "text_continuation"})
+
+
 def near_capacity_applies(model: Mapping[str, Any], request: Mapping[str, Any]) -> bool:
     """The text generation Task's text-only requests (not vision-language models, whose image tokens share the
     bundle length) on a bundle long enough for a passage."""
     length = int(model["candidate"].get("max_sequence_length") or 0)
-    return (model.get("task") == "text_generation" and not any(key.startswith("image") for key in request)
+    return (model.get("task") in TEXT_GENERATION_TASKS and not any(key.startswith("image") for key in request)
             and length > 2 * NEAR_CAPACITY_NEW_TOKENS)
 
 
@@ -225,6 +232,9 @@ def _observations(environment: Environment, service: Mapping[str, Any], model: M
 def _collect_outputs(environment: Environment, service: Mapping[str, Any], model: Mapping[str, Any],
                   suite: Suite, out: Path) -> dict[str, Any]:
     """One observation per suite sample from a server (sequential, one request each)."""
+    for sample in suite.samples:
+        if missing := unstated_defaults(sample["request"], model["operation"]):
+            raise ValueError(f"{suite.name}: state {', '.join(missing)} explicitly before benchmarking")
     run = run_aiperf(environment, out, [*TASK_ENDPOINT, *_task_url(service, model["operation"]), "--concurrency", "1",
                                         "--input-file", str(suite.write_inputs(out.parent / f"{out.name}.inputs.jsonl")),
                                         "--custom-dataset-type", "single_turn", "--dataset-sampling-strategy",
@@ -411,17 +421,19 @@ CONVERSION_PARITY = "conversion-parity"
 
 def conversion_parity(performance: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """A Perf-only model's Acc evidence: on every timed request TRTMC's output passes the
-    Task's output check against the native eager output (text: the first 8 greedy token ids, or the whole
-    text, are equal); a mismatch is a ``fail``. Empty when no eager comparison ran (``missing_results``
+    Task's output check against the qualifying native output (text: the first 8 greedy token ids, or the whole
+    text, are equal); a mismatch is a ``fail``. Empty when no qualifying comparison ran (``missing_results``
     then reports it)."""
     checks = [(item.get("request"), item.get("output_check") or {}) for item in performance
-              if item.get("gate", True) and item.get("reference_mode") == "eager" and "match" in (item.get("output_check") or {})]
+              if judge.qualifying(item) and "match" in (item.get("output_check") or {})]
     if not checks:
         return []
     failures = [{"sample_id": str(request), "explanation": str(check.get("reason"))[:300]}
                 for request, check in checks if not check["match"]]
     count = len(checks)
-    return [{"suite": CONVERSION_PARITY, "source": "parity", "benchmark": "TRTMC vs native eager output on the timed requests",
+    modes = "/".join(sorted({str(item.get("reference_mode")) for item in performance if judge.qualifying(item)}))
+    return [{"suite": CONVERSION_PARITY, "source": "parity",
+             "benchmark": f"TRTMC vs native {modes} output on the timed requests",
              "samples": count, "expected_samples": count, "passed": count - len(failures), "required_passes": count,
              "status": "fail" if failures else "pass", "failures": failures,
              "reasons": [f"{len(failures)} of {count} timed requests differ from the native output"] if failures else []}]
@@ -444,26 +456,34 @@ def supplementary(environment: Environment, model: dict[str, Any], check: Mappin
     return result if isinstance(result, list) else [result]
 
 
-def gpu_busy_percent(samples: int = 5, interval_s: float = 0.2, settle_s: float = 1.0) -> float | None:
+def gpu_busy_percent(samples: int = 30, interval_s: float = 0.5, settle_s: float = 1.0) -> float | None:
     """Other processes' GPU load just before a timed run, while our servers are idle.
 
     nvidia-smi averages utilization over its last sample period, so a reading right after our own
     request (seconds long for diffusion) still shows that request. The lowest of a few readings taken
     after a short settle is what persists without us.
     """
+    import os
     import subprocess
+
+    from . import cancel
 
     time.sleep(settle_s)
     readings = []
+    selector = (os.environ.get("CUDA_VISIBLE_DEVICES") or "").split(",")[0].strip()
     for index in range(samples):
+        cancel.check()
         try:
-            completed = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-                                       capture_output=True, text=True, timeout=30)
+            completed = subprocess.run(["nvidia-smi", *(["-i", selector] if selector else []),
+                                       "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                                       capture_output=True, text=True, timeout=5, check=True)
             values = [float(line) for line in completed.stdout.split() if line.strip().replace(".", "").isdigit()]
-        except (OSError, subprocess.TimeoutExpired, ValueError):
+        except (OSError, subprocess.SubprocessError, ValueError):
             return None
         if values:
             readings.append(max(values))
+            if readings[-1] < judge.GPU_BUSY_PERCENT:
+                return readings[-1]
         if index + 1 < samples:
             time.sleep(interval_s)
     return min(readings) if readings else None
@@ -512,6 +532,9 @@ class _Phases:
             evidence_start = execution.checkpoint()
             try:
                 return call()
+            except SandboxUnavailable:
+                execution.supersede(evidence_start)
+                raise
             except Exception as error:  # noqa: BLE001 - reported per phase
                 execution.supersede(evidence_start)
                 self.errors[name] = f"{type(error).__name__}: {error}"[:1500]
@@ -520,6 +543,19 @@ class _Phases:
                 if reset is not None:
                     reset()
         return None
+
+
+def reported_reference(reference: Mapping[str, Any], performance: Sequence[Mapping[str, Any]],
+                       accuracy: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The report's native-reference summary. ``precision`` is the precision the native model ran at (as timed,
+    else as it answered the benchmarks, else the first it would be timed at); the configured fallback precision
+    is ``fallback_precision``, so a reader does not take the fallback for the precision that ran."""
+    ran = next((precision for precision in [*((item.get("reference") or {}).get("precision") for item in performance),
+                                            *((item.get("native") or {}).get("precision") for item in accuracy)]
+                if precision), None)
+    return {"backend": reference.get("backend"), "precision": ran or timing_precisions(reference)[0],
+            "fallback_precision": reference.get("precision"), "perf_precision": reference.get("perf_precision"),
+            "timing_precision": reference.get("timing_precision")}
 
 
 def timing_precisions(reference: Mapping[str, Any]) -> list[str]:
@@ -531,23 +567,63 @@ def timing_precisions(reference: Mapping[str, Any]) -> list[str]:
     return list(dict.fromkeys(value for value in (reference["perf_precision"], reference["precision"]) if value))
 
 
+def native_modes(reference: Mapping[str, Any]) -> list[str]:
+    """The native modes to try, in order: torch.compile (``reference.mode: compile``) and eager in its place
+    when compile fails, or the configured mode alone."""
+    mode = reference.get("mode", "eager")
+    return ["compile", "eager"] if mode == "compile" else [mode]
+
+
+@dataclass(frozen=True)
+class NativeAttempt:
+    precision: str
+    mode: str
+    compile_fallback: str | None = None  # why torch.compile failed at this precision (an eager attempt in its place)
+    precision_fallback: str | None = None  # why the earlier precisions failed
+
+
+def first_native(reference: Mapping[str, Any], attempt: Callable[[NativeAttempt], Any], *,
+                 precisions: Sequence[str] | None = None,
+                 modes: Sequence[str] | None = None) -> tuple[Any, NativeAttempt]:
+    """``attempt``'s result for the first native attempt that succeeds, and that attempt: each precision
+    (``timing_precisions``) in each mode (``native_modes``). The evidence of a failed attempt is superseded,
+    never mixed with the attempt that replaces it; when all fail, the error names every failure."""
+    errors: list[str] = []
+    for precision in precisions if precisions is not None else timing_precisions(reference):
+        earlier, compile_error = "; ".join(errors)[:600] or None, None
+        for mode in modes or native_modes(reference):
+            current = NativeAttempt(precision, mode, compile_error if mode != "compile" else None, earlier)
+            evidence_start = execution.checkpoint()
+            try:
+                return attempt(current), current
+            except Exception as error:  # noqa: BLE001 - the next mode or precision
+                execution.supersede(evidence_start)
+                errors.append(f"{mode} {precision}: {type(error).__name__}: {str(error)[-300:]}")
+                if mode == "compile":
+                    compile_error = errors[-1]
+    raise RuntimeError("; ".join(errors)[:1500])
+
+
 def _reference_perf(environment: Environment, model: Mapping[str, Any], policy: Mapping[str, Any], suites: Sequence[Suite],
                     python: str, phases: _Phases, out: Path) -> dict[str, dict[str, tuple[AiperfRun, dict, dict]]]:
-    """Time the native model per reference mode and timed request, at the first precision it runs at."""
+    """Time the native model per configured reference mode and timed request, at the first precision it runs
+    at. A compile mode that fails is timed in eager mode in its place (unless eager is configured too); the
+    stats record the mode that ran (``mode``) and why compile did not (``compile_fallback``)."""
     results: dict[str, dict[str, tuple[AiperfRun, dict, dict]]] = {}
-    for mode in policy["reference_modes"]:
-        def measure(mode: str = mode) -> None:
-            errors = []
-            for precision in timing_precisions(model["reference"]):
-                try:
-                    results[mode] = _time_reference(environment, model, policy, suites, python, mode, precision, out)
-                    if errors:
-                        for _, stats, _ in results[mode].values():
-                            stats["precision_fallback"] = errors[-1][:300]
-                    return
-                except Exception as error:  # noqa: BLE001 - try the next precision
-                    errors.append(f"{precision}: {type(error).__name__}: {error}")
-            raise RuntimeError("; ".join(errors)[:1500])
+    configured = policy["reference_modes"]
+    for mode in configured:
+        modes = ["compile", "eager"] if mode == "compile" and "eager" not in configured else [mode]
+
+        def measure(mode: str = mode, modes: Sequence[str] = modes) -> None:
+            timed, attempt = first_native(model["reference"], lambda attempt: _time_reference(
+                environment, model, policy, suites, python, attempt.mode, attempt.precision, out,
+                compile_fallback=attempt.compile_fallback), modes=modes)
+            for _, stats, _ in timed.values():
+                if attempt.precision_fallback:
+                    stats["precision_fallback"] = attempt.precision_fallback[:300]
+                if attempt.compile_fallback:
+                    stats["compile_fallback"] = attempt.compile_fallback[:300]
+            results[mode] = timed
         phases.run(f"reference_perf_{mode}", measure, retries=retries(environment))
         if mode in results:
             phases.errors.pop(f"reference_perf_{mode}", None)  # a retry measured it
@@ -555,19 +631,21 @@ def _reference_perf(environment: Environment, model: Mapping[str, Any], policy: 
 
 
 def _time_reference(environment: Environment, model: Mapping[str, Any], policy: Mapping[str, Any], suites: Sequence[Suite],
-                    python: str, mode: str, precision: str,
-                    out: Path) -> dict[str, tuple[AiperfRun, dict[str, Any], dict[str, Any]]]:
+                    python: str, mode: str, precision: str, out: Path,
+                    compile_fallback: str | None = None) -> dict[str, tuple[AiperfRun, dict[str, Any], dict[str, Any]]]:
     tag = f"{mode}-{precision}"
     timed = {}
     with serving(environment, model, "reference", out / f"reference-{tag}", mode=mode, precision=precision,
-                 python=python) as service:
+                 python=python, compile_fallback=compile_fallback) as service:
         for suite in suites:
             probe(service, model["operation"], suite.samples[0]["request"])
             run, stats = _perf_run(environment, service, model, suite, policy["measurement"],
                                    out / f"perf-reference-{tag}-{suite.name}", policy["aggregation"].get(mode, "mean"))
             if stats.get("p50_ms") is None:
                 raise RuntimeError(f"no successful {precision} requests ({suite.name})")
-            stats["precision"] = precision
+            if mode == "compile" and stats.get("incomplete"):  # eager times it in its place
+                raise RuntimeError(f"incomplete under torch.compile ({suite.name}): {stats['incomplete']}")
+            stats["precision"], stats["mode"] = precision, mode
             timed[suite.name] = (run, stats, service["info"])
     return timed
 
@@ -590,9 +668,12 @@ def _candidate(environment: Environment, model: Mapping[str, Any], policy: Mappi
                                    out / f"perf-candidate-{suite.name}", policy["aggregation"].get("candidate", "mean"))
             candidate_output = judge.first_observation(run.raw_records())
             timed = {mode: by_suite[suite.name] for mode, by_suite in reference_perf.items() if suite.name in by_suite}
-            outputs = {mode: judge.first_observation(entry[0].raw_records()) for mode, entry in timed.items()}
+            # Keyed by the mode that ran: a failed compile mode was timed in eager mode in its place.
+            outputs = {entry[1].get("mode", mode): judge.first_observation(entry[0].raw_records())
+                       for mode, entry in timed.items()}
             for mode, (reference_run, reference_stats, info) in timed.items():
-                match, reason = output_check(policy, candidate_output, outputs, mode, sampled)
+                ran = reference_stats.get("mode", mode)
+                match, reason = output_check(policy, candidate_output, outputs, ran, sampled)
                 verdict = judge.judge_performance(stats, reference_stats, margin_percent=float(policy["margin_percent"]),
                                                   max_ci_percent=float(policy["max_ci_percent"]),
                                                   guard_percent=float(policy.get("guard_percent", 0)),
@@ -601,7 +682,8 @@ def _candidate(environment: Environment, model: Mapping[str, Any], policy: Mappi
                                                   candidate_precision=model["reference"].get("perf_precision"))
                 if (model["reference"].get("options") or {}).get("cpu_offload"):
                     verdict["notes"].append("the native pipeline offloads its weights to host memory (larger than the GPU)")
-                performance.append({"reference_mode": mode, "request": suite.name,
+                performance.append({"reference_mode": ran, **({"configured_mode": mode} if ran != mode else {}),
+                                    "qualifying": mode == policy["reference_modes"][0], "request": suite.name,
                                     "candidate_timing_scope": service["info"].get("timing_scope"),
                                     "reference_timing_scope": info.get("timing_scope"),
                                     "reference_backend": info.get("backend"), **verdict})
@@ -710,9 +792,11 @@ def retries(environment: Environment) -> int:
 
 
 def smoke_model(model: Mapping[str, Any]) -> dict[str, Any]:
-    """The model as smoke mode runs it: performance with one request against native eager, no opt-in sweeps."""
+    """The model as smoke mode runs it: performance with one request against the first native mode, no opt-in
+    sweeps."""
     policy = model.get("performance")
-    performance = {**policy, "measurement": dict(SMOKE_MEASUREMENT), "reference_modes": ["eager"]} if policy else {}
+    performance = {**policy, "measurement": dict(SMOKE_MEASUREMENT),
+                   "reference_modes": list(policy.get("reference_modes") or ["eager"])[:1]} if policy else {}
     return {**model, "performance": performance}
 
 
@@ -739,24 +823,32 @@ def quality_only(model: Mapping[str, Any]) -> bool:
         for check in model.get("supplementary", [])))
 
 
+def execution_session(model: Mapping[str, Any], environment: Environment, out: Path, **kwargs: Any) -> execution.Session:
+    """The same request/timing contract for initial qualification and media rechecks."""
+    return execution.Session(
+        out, model.get("performance", {}).get("measurement", {}), gpu_busy_percent,
+        lambda observation: judge.work_signature(model["operation"], observation),
+        lambda mine, theirs: judge.work_check({"work": [mine] if mine is not None else []},
+                                             {"work": [theirs] if theirs is not None else []}) is None,
+        smoke=bool(environment.values.get("smoke")),
+        request_problems=lambda payload: unstated_defaults(payload.get("request") or {}, model["operation"]), **kwargs)
+
+
 def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[str, Any]:
     """Run quality workloads once per side and reuse their outputs for performance."""
     model = compat.configuration(model)
     environment = Environment({**environment.values, "native_replicas": 1, "candidate_replicas": 1,
                                "acc_mps": False, "acc_overlap": False})
     out.mkdir(parents=True, exist_ok=True)
+    from . import gold_metrics
+
+    gold_metrics.preflight_code_sandbox(model, environment.values, out)
     (out / "execution.jsonl").write_text("")
-    evidence = execution.Session(
-        out, model.get("performance", {}).get("measurement", {}), gpu_busy_percent,
-        lambda observation: judge.work_signature(model["operation"], observation),
-        lambda mine, theirs: judge.work_check({"work": [mine] if mine is not None else []},
-                                             {"work": [theirs] if theirs is not None else []}) is None,
-        smoke=bool(environment.values.get("smoke")),
-        request_problems=lambda payload: unstated_defaults(payload.get("request") or {}))
+    evidence = execution_session(model, environment, out)
     with execution.session(evidence):
         result = _qualify(model, environment, out)
     result["schema_version"] = execution.SCHEMA
-    result["performance"].extend(evidence.natural_performance())
+    result["performance"].extend(evidence.natural_performance(result["accuracy"]))
     if quality_only(model):
         result["performance_source"] = "quality"
         result["performance_expected"] = [item["suite"] for item in model.get("absolute", [])]
@@ -766,7 +858,7 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
     result["aiperf_metrics"] = aiperf_metrics.entries(evidence.batches)
     for item in result["accuracy"]:
         item.pop("workload_perf", None)
-    result["execution"] = {"records": str(out / "execution.jsonl"), "timing_contract": execution.TIMING_CONTRACT,
+    result["execution"] = {"records": recorded_path(out, out / "execution.jsonl"), "timing_contract": execution.TIMING_CONTRACT,
                            "device_layout": "single-serial", "replicas": 1, "concurrency": 1,
                            "quality_outputs_reused": True, "workloads": [
                                {"name": batch["workload"], "role": batch["role"]} for batch in evidence.batches]}
@@ -777,7 +869,10 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
 def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[str, Any]:
     started = time.time()
     out.mkdir(parents=True, exist_ok=True)
-    phases = _Phases(out)
+    root = out
+    out = root / "artifacts"
+    out.mkdir(exist_ok=True)
+    phases = _Phases(root)
     smoke = bool(environment.values.get("smoke"))
     if smoke:
         model = smoke_model(model)
@@ -787,7 +882,7 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
     (out / "suites").mkdir(exist_ok=True)
     if perf_suite:
         (out / "suites" / f"{perf_suite.name}.manifest.json").write_text(json.dumps(perf_suite.manifest, indent=2))
-    (out / "model.json").write_text(json.dumps(model, indent=2, default=str))
+    (root / "model.json").write_text(json.dumps(model, indent=2, default=str))
 
     reference = model["reference"]
     if reference["backend"] == "unsupported":  # no native path: nothing to compare against
@@ -807,11 +902,10 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
     fingerprint = platform_fingerprint(environment, python)["fingerprint"]
     from . import gold_metrics
 
-    gold_metrics.protect([out.parent, *(environment.values.get(key) for key in (
-        "bundle_root", "hf_hub_cache", "hf_datasets_cache", "data_root", "reference_env_root", "runtime_root"))])
+    gold_metrics.protect(gold_metrics.protected_roots(environment.values, root))
     accuracy: list[dict[str, Any]] = []
     performance: list[dict[str, Any]] = []
-    unstated = unstated_defaults(perf_suite.samples[0]["request"]) if perf_suite else []
+    unstated = unstated_defaults(perf_suite.samples[0]["request"], model["operation"]) if perf_suite else []
     if unstated:  # each side would apply its own default: different work
         phases.errors["perf_request"] = (f"the timed request leaves {', '.join(unstated)} to each side's default; "
                                          "state them in config/models performance")
@@ -867,27 +961,27 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
                 phases.run("service_metrics", lambda: service_metrics.update(sweep.run_serial(
                     environment, model, service_config, out, python, timing_precisions(reference)[0])))
     if performance:  # the candidate was measured: record modes whose native reference could not run
-        measured = {(item["reference_mode"], item.get("request")) for item in performance}
-        performance += [unavailable_mode(mode, phases.errors.get(f"reference_perf_{mode}", "not measured"), suite.name)
-                           for mode in policy["reference_modes"] for suite in timed_suites
-                           if (mode, suite.name) not in measured]
+        measured = {(item.get("configured_mode", item["reference_mode"]), item.get("request")) for item in performance}
+        performance += [{**unavailable_mode(mode, phases.errors.get(f"reference_perf_{mode}", "not measured"),
+                                            suite.name), "qualifying": mode == policy["reference_modes"][0]}
+                        for mode in policy["reference_modes"] for suite in timed_suites
+                        if (mode, suite.name) not in measured]
     if model.get("accuracy_source") == "none":
         accuracy.extend(conversion_parity(performance))
     mark_informational(model, accuracy)
 
     result = {"model": model["model"], "operation": model["operation"], "task": model.get("task"),
               "repro": f"trtmc-aiperf-qual run --profile {model['catalog_profile']} --environment "
-                       f"{environment.values.get('environment_file', '<environment.yaml>')} --out {out}",
+                       f"{environment.values.get('environment_file', '<environment.yaml>')} --out {root}",
               "family": model.get("family"), "started": started,
               "platform": {"id": platform_id(fingerprint), **fingerprint},
               "host": {**gpu_identity(environment), "trtmc_libraries": _loaded(out)},
-              "bundle": _bundle_identity(out),
+              "bundle": _bundle_identity(root),
               "accuracy_source": model.get("accuracy_source"),
               "performance_source": "quality" if dataset_only else "fixed",
               **({"accuracy_note": model["accuracy_note"]} if model.get("accuracy_note") else {}),
               **({"coverage": model["coverage"]} if model.get("coverage") else {}),
-              "reference": {key: reference.get(key) for key in ("backend", "precision", "perf_precision",
-                                                                 "timing_precision")},
+              "reference": reported_reference(reference, performance, accuracy),
               "reference_python": python, "duration_s": time.time() - started, "accuracy": accuracy,
               "performance": performance, "service_metrics": service_metrics,
               "errors": phases.errors,

@@ -8,17 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import yaml
 
 from families.nemotron_h.model import _runtime_config, _stop_token_ids
-
-
-def test_qualification_environment_keeps_extension_builds_in_family_environment() -> None:
-    profile = yaml.safe_load(
-        (Path(__file__).parent / "benchmark/nemotron-h-nano-9b.yaml").read_text(encoding="utf-8")
-    )
-
-    assert profile["reference_environment"]["build_isolation"] is False
 
 
 def test_runtime_keeps_a_scalar_eos_and_every_declared_stop_token(tmp_path) -> None:
@@ -50,7 +41,7 @@ def test_stop_token_contract_rejects_invalid_values(value) -> None:
         _stop_token_ids(value, 32)
 
 
-def test_runtime_keeps_checkpoint_prompt_and_builder_policies() -> None:
+def test_runtime_keeps_checkpoint_prompt_and_builder_policies(tmp_path) -> None:
     family = Path(__file__).resolve().parents[1]
     plugin = (family / "runtime/plugin.cpp").read_text(encoding="utf-8")
     model = (family / "model.py").read_text(encoding="utf-8")
@@ -58,6 +49,24 @@ def test_runtime_keeps_checkpoint_prompt_and_builder_policies() -> None:
     assert 'config.find("chat_template")' in plugin
     assert "chat_template.jinja" not in plugin
     assert '"chat_template.jinja"' not in model
+
+    # Preserve the runtime's single embedded-template contract while admitting
+    # newer source checkpoints whose standalone template overrides JSON.
+    from families.nemotron_h.tokenizer_assets import native_tokenizer_assets
+
+    source_config = json.dumps({"chat_template": "old template", "extra": 7})
+    (tmp_path / "tokenizer_config.json").write_text(source_config)
+    names = ("tokenizer_config.json",)
+    assert json.loads(native_tokenizer_assets(tmp_path, names)[names[0]])["chat_template"] == "old template"
+    (tmp_path / "chat_template.jinja").write_text("standalone template")
+    normalized = json.loads(native_tokenizer_assets(tmp_path, names)[names[0]])
+    assert normalized == {"chat_template": "standalone template", "extra": 7}
+    assert (tmp_path / "tokenizer_config.json").read_text() == source_config
+    (tmp_path / "tokenizer_config.json").write_text('{"extra": 7}')
+    assert json.loads(native_tokenizer_assets(tmp_path, names)[names[0]]) == normalized
+    (tmp_path / "chat_template.jinja").write_text("")
+    with pytest.raises(ValueError, match="chat template"):
+        native_tokenizer_assets(tmp_path, names)
 
     for path in (family / "model.py", family / "tp_builder.py"):
         source = path.read_text(encoding="utf-8")
@@ -72,6 +81,16 @@ def test_runtime_keeps_checkpoint_prompt_and_builder_policies() -> None:
         assert ("linux", "x86_64", sm, "fp16") in EDGE_DISPATCH
     assert ("linux", "x86_64", 80, "nvfp4") not in EDGE_DISPATCH
 
+    from families.nemotron_h.model import _NemotronHModel
+
+    # Paired provider indices are strict and retain their declared order.
+    model_config = SimpleNamespace(num_hidden_layers=3)
+    for indices in ((-1,), (3,), (0, 0), (True,), ("1",)):
+        with pytest.raises(ValueError, match="target feature layers"):
+            _NemotronHModel().build_engine(
+                model_config, {}, 8, target_feature_layers=indices
+            )
+
 
 def _edge_cli_source(tmp_path):
     import json
@@ -85,7 +104,8 @@ def _edge_cli_source(tmp_path):
 
 
 @pytest.mark.parametrize("precision", [None, "fp16", "fp32"])
-def test_edge_cli_uses_ordinary_family_build(tmp_path, monkeypatch, precision):
+@pytest.mark.parametrize("variant", ["dflash", "dspark", "dspark_tree"])
+def test_edge_cli_uses_ordinary_family_build(tmp_path, monkeypatch, precision, variant):
     from tensorrt_model_connect import family_cli as build_cli
     from families.nemotron_h.edge_llm import dispatch
     from families.nemotron_h.edge_llm.config import NemotronHBuildRequest
@@ -97,7 +117,7 @@ def test_edge_cli_uses_ordinary_family_build(tmp_path, monkeypatch, precision):
     def paired(request, writer, execution):
         assert isinstance(request, NemotronHBuildRequest)
         assert request.execution is execution
-        assert execution.variant == "dflash"
+        assert execution.variant == variant
         assert [(item.role, item.model_dir) for item in execution.checkpoints] == [("draft", draft)]
         seen.append(request)
         writer.set_header(family="nemotron_h", task=request.task, backend=request.backend)
@@ -107,7 +127,7 @@ def test_edge_cli_uses_ordinary_family_build(tmp_path, monkeypatch, precision):
     options = ["--precision", precision] if precision else []
     assert build_cli.main(["nemotron_h",
         "build", str(source), *options, "-o", str(output),
-        "--execution-variant", "dflash", "--companion", f"draft={draft}",
+        "--execution-variant", variant, "--companion", f"draft={draft}",
     ]) == 0
     assert len(seen) == 1
     assert seen[0].precision == (precision or "fp16")
@@ -119,7 +139,7 @@ def test_edge_cli_uses_ordinary_family_build(tmp_path, monkeypatch, precision):
     _build_bundle(
         {"precision": "fp16", "max_sequence_length": 64, "tensor_parallel_size": 1},
         source, output,
-        execution=BuildExecutionInputs("dflash", (NamedCheckpoint("draft", draft),)),
+        execution=BuildExecutionInputs(variant, (NamedCheckpoint("draft", draft),)),
     )
     assert len(seen) == 2
     assert seen[-1].precision == "fp16"
@@ -153,7 +173,7 @@ def test_edge_cli_help_is_family_owned(tmp_path, capsys):
         build_cli.main(["nemotron_h", "build", str(source), "--help"])
     assert caught.value.code == 0
     help_text = capsys.readouterr().out
-    assert "--execution-variant {dflash}" in help_text
+    assert "--execution-variant {dflash,dspark,dspark_tree}" in help_text
     assert "--companion" in help_text
 
 
@@ -169,6 +189,13 @@ def test_edge_request_preserves_fields_and_family_owner(tmp_path):
     request = BuildRequest(source, tmp_path / "out", "nemotron_h", "text_generation", "fp16",
                            graph_transform=lambda layer: layer)
     assert coerce_request(request) is request
+    # Native fallback must reject an unsupported graph callback instead of
+    # silently publishing a graph that never applied the caller's transform.
+    # The deliberately incomplete config proves rejection precedes weight IO.
+    from families.nemotron_h.model import build
+
+    with pytest.raises(NotImplementedError, match="graph_transform"):
+        build(request, None)
     execution = BuildExecutionInputs("dflash", (NamedCheckpoint("draft", draft),))
     assert cli.execution_inputs(None) is None
     extended = with_execution(request, execution)
@@ -205,7 +232,7 @@ def test_edge_cli_failure_preserves_existing_bundle(tmp_path, monkeypatch, failu
     assert sorted(item.name for item in tmp_path.iterdir()) == ["draft", "pair.bundle", "target"]
 
 
-def test_edge_pair_requires_draft_and_rechecks_local_inputs(tmp_path):
+def test_edge_pair_requires_draft_and_rechecks_local_inputs(tmp_path, monkeypatch, caplog):
     from tensorrt_model_connect.build import BuildRequest
     from families.nemotron_h.edge_llm.config import BuildExecutionInputs, NamedCheckpoint
     from families.nemotron_h.edge_llm.dispatch import build_paired
@@ -218,6 +245,56 @@ def test_edge_pair_requires_draft_and_rechecks_local_inputs(tmp_path):
     draft.rmdir()
     with pytest.raises(ValueError, match="existing local directory"):
         build_paired(request, None, execution)
+
+    # Native retries retain the exact complete pair; cancellation/publication
+    # failures must not retry or leave a partial public bundle.
+    from families.nemotron_h.edge_llm import dispatch
+    from families.nemotron_h import paired
+    draft.mkdir()
+    (source / "config.json").write_text(json.dumps({"max_position_embeddings": 4096}))
+    monkeypatch.setattr(dispatch, "candidate", lambda *_: True)
+    monkeypatch.setattr(dispatch, "source_quantization", lambda *_: "nvfp4")
+    monkeypatch.setattr(dispatch.edge_llm, "local_target", lambda: {
+        "os": "linux", "arch": "x86_64", "sm": 120,
+    })
+    writer = object()
+    native_calls = []
+
+    def native(original, destination, companion, variant):
+        assert original is request and destination is writer and companion is draft
+        native_calls.append(variant)
+
+    monkeypatch.setattr(paired, "build", native)
+    for variant in ("dflash", "dspark", "dspark_tree"):
+        monkeypatch.setattr(dispatch.edge_llm, "package_present", lambda: False)
+        dispatch.build_speculative(request, writer, draft, variant)
+        assert native_calls.pop() == variant
+    monkeypatch.setattr(dispatch.edge_llm, "package_present", lambda: True)
+
+    def failed(*_):
+        raise RuntimeError("paired preparation failed")
+
+    monkeypatch.setattr(dispatch.edge_llm, "prepare_paired", failed)
+    dispatch.build_speculative(request, writer, draft, "dspark")
+    assert native_calls.pop() == "dspark"
+    assert "unchanged native pair" in caplog.text
+    diagnostics = list(tmp_path.glob(".out.edge-onnx-*.log"))
+    assert len(diagnostics) == 1 and "paired preparation failed" in diagnostics[0].read_text()
+    diagnostics[0].unlink()
+
+    def cancel(*_):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(dispatch.edge_llm, "prepare_paired", cancel)
+    with pytest.raises(KeyboardInterrupt):
+        dispatch.build_speculative(request, writer, draft, "dflash")
+    assert not native_calls
+    assert not list(tmp_path.glob(".out.edge-onnx-*.log"))
+    monkeypatch.setattr(dispatch.edge_llm, "prepare_paired", lambda *_: ([], {}))
+    monkeypatch.setattr(dispatch.edge_llm, "publish", failed)
+    with pytest.raises(RuntimeError, match="paired preparation failed"):
+        dispatch.build_speculative(request, writer, draft, "dflash")
+    assert not native_calls
 
 
 @pytest.mark.parametrize("mode", ["absent", "success", "corrupt", "failure", "cancel", "device_failure"])
@@ -296,7 +373,9 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
         assert not logs and "Edge build failed" not in caplog.text
 
 
-@pytest.mark.parametrize("options", [[], ["--precision", "fp16", "--max-sequence-length", "64"]])
+@pytest.mark.parametrize("options", [[], ["--precision", "fp16", "--max-sequence-length", "64"],
+    ["--precision", "fp16", "--quantization", "fp8"],
+    ["--precision", "fp16", "--quantization", "nvfp4"]])
 def test_declared_build_matches_legacy_request(tmp_path, monkeypatch, options):
     """Owner command preserves ordinary request defaults and explicit controls."""
     import json
@@ -344,7 +423,8 @@ def test_declared_build_matches_legacy_request(tmp_path, monkeypatch, options):
     e2e._build_bundle(
         {"precision": captured[1].precision,
          "max_sequence_length": captured[1].max_sequence_length,
-         "tensor_parallel_size": captured[1].tensor_parallel_size},
+         "tensor_parallel_size": captured[1].tensor_parallel_size,
+         "quantization": captured[1].quantization},
         source, output,
     )
     assert captured[-1] == captured[1]

@@ -16,7 +16,7 @@ namespace trtmc::nemotron_h::edge_llm {
 /// Match the native Nemotron-H task default; insufficient capacity is an explicit error.
 inline constexpr int kDefaultMaxNewTokens = 128;
 
-inline constexpr const char* kRevision = "e8b29522938901f6df19ebeedd4b69bc8edbcd97";
+inline constexpr const char* kRevision = "95515c2f87fba8982db5a519f9022277667b3cc9";
 
 /// Return whether an artifact is a normalized file below one of the three Edge roots.
 inline bool safe_artifact_path(const std::string& name) {

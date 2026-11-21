@@ -14,6 +14,7 @@ from . import graph_ops
 from .checkpoint_mapper import (
     _target_np_dtype,
 )
+from .quantization import configure_fp8_build
 
 
 _PROCESS_LOGGER: trt.Logger | None = None
@@ -36,6 +37,7 @@ def build_serialized_network(
     precision: str,
     verbose: bool = False,
     tag: str = "time_series",
+    quant_ctx=None,
 ) -> bytes:
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
@@ -44,6 +46,7 @@ def build_serialized_network(
     config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
     config.clear_flag(trt.BuilderFlag.TF32)
+    configure_fp8_build(config, quant_ctx)
 
     if verbose:
         print(
@@ -65,6 +68,38 @@ def create_network(*, verbose: bool = False) -> tuple[trt.Builder, trt.INetworkD
     return builder, network
 
 
+LinearConstants = dict[tuple[str, str, int], tuple[trt.ITensor, trt.ITensor | None]]
+
+
+def _linear_constants(
+    network: trt.INetworkDefinition,
+    weight_out_in: np.ndarray,
+    bias: np.ndarray | None,
+    *,
+    target_dtype: np.dtype,
+    rank: int,
+) -> tuple[trt.ITensor, trt.ITensor | None]:
+    """Weight ``[in, out]`` and bias constants of one linear for an input of ``rank``."""
+    out_features, in_features = (int(size) for size in weight_out_in.shape)
+    weight_shape = (
+        (in_features, out_features)
+        if rank <= 2
+        else (1,) * (rank - 2) + (in_features, out_features)
+    )
+    weight = np.ascontiguousarray(weight_out_in.T, dtype=target_dtype).reshape(weight_shape)
+    weight_t = graph_ops.add_constant(network, weight_shape, weight, dtype=target_dtype)
+    if bias is None:
+        return weight_t, None
+    bias_shape = (out_features,) if rank <= 1 else (1,) * (rank - 1) + (out_features,)
+    bias_t = graph_ops.add_constant(
+        network,
+        bias_shape,
+        np.ascontiguousarray(bias, dtype=target_dtype).reshape(bias_shape),
+        dtype=target_dtype,
+    )
+    return weight_t, bias_t
+
+
 def add_linear(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -72,30 +107,38 @@ def add_linear(
     bias: np.ndarray | None,
     *,
     precision: str = "fp32",
+    shared: LinearConstants | None = None,
+    name: str | None = None,
 ) -> trt.ITensor:
+    """``inp @ weight.T + bias`` (fp16 GEMMs accumulate in fp32).
+
+    With ``shared`` and ``name``, the weight and bias constants of linear ``name`` are added
+    to the network once and reused by every later call with the same name, precision and
+    input rank. PatchTST runs the encoder once per channel row with the same weights; one
+    constant per linear lets TensorRT run one GEMM for all channel rows instead of one GEMM
+    per row. The math of each call is unchanged.
+    """
+    if (shared is None) != (name is None):
+        raise ValueError("add_linear needs both shared and name, or neither")
     target_dtype = _target_np_dtype(precision)
-    target_trt_dtype = (
-        trt.float16 if target_dtype == np.float16 else trt.float32)
+    target_trt_dtype = trt.float16 if target_dtype == np.float16 else trt.float32
     if inp.dtype != target_trt_dtype:
         inp = network.add_cast(inp, target_trt_dtype).get_output(0)
-    w = np.ascontiguousarray(weight_out_in.T, dtype=target_dtype)
-    out_features = int(weight_out_in.shape[0])
-    out = graph_ops.add_matmul_rhs_constant(
-        network,
-        inp,
-        int(weight_out_in.shape[1]),
-        out_features,
-        w,
-        dtype=target_dtype,
-    )
-    if bias is not None:
-        out = graph_ops.add_bias_sum(
-            network,
-            out,
-            out_features,
-            np.ascontiguousarray(bias, dtype=target_dtype),
-            dtype=target_dtype,
+    rank = len(tuple(inp.shape))
+    key = (str(name), precision, rank)
+    if shared is not None and key in shared:
+        weight_t, bias_t = shared[key]
+    else:
+        weight_t, bias_t = _linear_constants(
+            network, weight_out_in, bias, target_dtype=target_dtype, rank=rank
         )
+        if shared is not None:
+            shared[key] = (weight_t, bias_t)
+    out = graph_ops._add_matrix_multiply_with_fp32_accumulation(
+        network, inp, trt.MatrixOperation.NONE, weight_t, trt.MatrixOperation.NONE
+    )
+    if bias_t is not None:
+        out = network.add_elementwise(out, bias_t, trt.ElementWiseOperation.SUM).get_output(0)
     return out
 
 

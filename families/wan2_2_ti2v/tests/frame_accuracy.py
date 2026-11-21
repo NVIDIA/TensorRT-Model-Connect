@@ -163,3 +163,19 @@ def compare_png_sequences(
             reference_temporal_profile, actual_temporal_profile
         ),
     }
+
+
+def active_transition_fraction(paths: Sequence[str]) -> float:
+    """Share of consecutive frames that change, for a video without a reference."""
+
+    frames = _validated_paths(paths, label="TensorRT")
+    if len(frames) < 2:
+        raise ValueError("Wan2.2 temporal activity requires at least two frames")
+    active = 0
+    previous = _load_rgb(frames[0])
+    for path in frames[1:]:
+        current = _load_rgb(path)
+        delta = np.subtract(current, previous, dtype=np.int16)
+        active += np.abs(delta).sum(dtype=np.int64) / current.size > _ACTIVE_TRANSITION_MAE_UINT8
+        previous = current
+    return active / (len(frames) - 1)

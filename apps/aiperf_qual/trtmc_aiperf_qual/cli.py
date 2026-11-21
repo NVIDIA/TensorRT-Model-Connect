@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Sequence
 
-from .config import ConfigError, load_environment
+from .config import ConfigError, Environment, load_environment
 
 
 def doctor(fix: bool) -> int:
@@ -113,10 +113,14 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
     """Run the Task's whole-output checks (``supplementary``) again on finished results and replace
     their report entries, then rejudge; the rest of the result is kept. Generations that sent the
     same requests are reused unless ``regenerate``."""
-    from . import compat, models
-    from .runner import SUPPLEMENTARY_SUITES, applies, supplementary
-    from .services import reference_python
+    from . import aiperf_metrics, compat, execution, models
+    from .runner import SUPPLEMENTARY_SUITES, applies, execution_session, supplementary
+    from .artifacts import recorded_path, work_directory
+    from .services import gpu_exclusive, reference_python
 
+    environment = Environment({**environment.values, "native_replicas": 1, "candidate_replicas": 1,
+                               "acc_mps": False, "acc_overlap": False})
+    pending = []
     for out in outs:
         path = out / "report.json"
         if not path.is_file():
@@ -129,19 +133,64 @@ def recheck_reports(outs: Sequence[Path], environment, only: Sequence[str] = (),
                   if (not only or check["check"] in only) and applies(check, model)]
         if not checks:
             continue
+        retention = out / "retention.json"
+        cleaned = (json.loads(retention.read_text()).get("temporary_files") or {}) if retention.is_file() else {}
+        if regenerate or cleaned.get("media_recheck") == "regenerate":
+            from .bundles import bundle_path
+            from .config import ConfigError
+
+            if not bundle_path(environment, model).is_file():
+                raise ConfigError(f"{out}: generated files were removed or regeneration was requested, but the "
+                                  "candidate bundle is missing; run the model again before recheck")
         python = reference_python(environment, model)
-        entries, suites = [], set()
-        for check in checks:
-            suites.update(SUPPLEMENTARY_SUITES.get(check["check"], ()))
-            try:
-                entries += supplementary(environment, model, check, python, out)
-            except Exception as error:  # noqa: BLE001 - recorded like a run's phase error
-                entries.append({"suite": SUPPLEMENTARY_SUITES[check["check"]][0], "source": "task", "status": "error",
-                                "samples": 0, "passed": None, "required_passes": None,
-                                "error": f"{type(error).__name__}: {str(error)[-800:]}"})
+        pending.append((out, path, model, checks, python))
+    # A later missing prerequisite must not leave earlier reports updated but unjudged.
+    for out, path, model, checks, python in pending:
         result = compat.report(json.loads(path.read_text()))
+        recorded = out / Path((result.get("execution") or {}).get("records", "execution.jsonl")).name
+        batches = execution.read_batches(recorded) if recorded.is_file() else []
+        for index, batch in enumerate(batches):
+            batch["batch_id"] = index
+        temporary = out / "execution.recheck.tmp.jsonl"
+        temporary.unlink(missing_ok=True)
+        evidence = execution_session(model, environment, out, batches=batches, records_name=temporary.name)
+        previous_count = len(batches)
+        entries, suites = [], set()
+        informational_attempts = set()
+        with execution.session(evidence), gpu_exclusive(environment):
+            for check in checks:
+                start = len(evidence.batches)
+                attempts = set(evidence.attempts)
+                suites.update(SUPPLEMENTARY_SUITES.get(check["check"], ()))
+                try:
+                    entries += supplementary(environment, model, check, python, work_directory(out))
+                except Exception as error:  # noqa: BLE001 - recorded like a run's phase error
+                    entries.append({"suite": SUPPLEMENTARY_SUITES[check["check"]][0], "source": "task", "status": "error",
+                                    "samples": 0, "passed": None, "required_passes": None,
+                                    "error": f"{type(error).__name__}: {str(error)[-800:]}"})
+                if check.get("informational"):
+                    informational_attempts.update(evidence.attempts - attempts)
+                    evidence.attempts = attempts
+                    for batch in evidence.batches[start:]:
+                        batch.update(informational=True, role="quality")
+        for batch in evidence.batches[:previous_count]:
+            replaced = informational_attempts if batch.get("informational") else evidence.attempts
+            if (batch["workload"], batch["identity"].get("side")) in replaced:
+                batch["superseded"] = True
         result["accuracy"] = [item for item in result.get("accuracy", []) if item.get("suite") not in suites] + entries
+        measured = evidence.natural_performance(result["accuracy"])
+        names = {item["request"] for item in measured}
+        result["performance"] = [item for item in result.get("performance", [])
+                                 if item.get("kind") != "natural_dataset" or item.get("request") not in names] + measured
+        result["aiperf_metrics"] = aiperf_metrics.entries(evidence.batches)
+        temporary.write_text("".join(json.dumps(batch, default=str) + "\n" for batch in evidence.batches))
         preserve_original(out)
+        recorded = out / "execution.rechecked.jsonl"
+        temporary.replace(recorded)
+        result["execution"] = {**result.get("execution", {}), "records": recorded_path(out, recorded),
+                               "timing_contract": execution.TIMING_CONTRACT, "quality_outputs_reused": True,
+                               "workloads": [{"name": batch["workload"], "role": batch["role"]}
+                                             for batch in evidence.batches if not batch.get("superseded")]}
         path.write_text(json.dumps(result, indent=2, default=str))
         (out / "model.json").write_text(json.dumps(model, indent=2, default=str))
     return rejudge_reports(outs, environment)
@@ -183,6 +232,29 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
             continue
         result = compat.report(json.loads(path.read_text()))
         model = compat.configuration(json.loads((out / "model.json").read_text()))
+        if selection_cache is None and environment is None and result.get("performance_source") == "quality":
+            from .benchmark_perf import refresh
+
+            result = refresh(out, result)
+            # Conversion comparison no longer rejects a low absolute native
+            # score. Preserve scores and statistical margins during replay.
+            changed = False
+            for entry in result.get("accuracy", []):
+                removed_floor = (entry.get("gate") or {}).pop("min_native", None) is not None
+                changed |= removed_floor
+                # Task checks (the TTS ASR round trip) carry the same non-inferiority test.
+                if ((entry.get("source") in ("absolute", "task") or removed_floor)
+                        and (entry.get("metrics") or {}).get("test") and entry.get("status") != "error"):
+                    status, reasons = absolute.status(entry)
+                    changed |= status != entry.get("status")
+                    entry.update(status=status, reasons=reasons)
+            result["verdict"] = judge.verdict(result, expected_suites=list(expected_suites(model)), expected_modes=0)
+            preserve_original(out)
+            result["rejudged"] = {"time": time.time(), "original": ORIGINAL_REPORT,
+                                  "benchmark_timings_refreshed": True, "accuracy_contract_preserved": not changed}
+            write_report(out, result)
+            print(json.dumps({"out": str(out), **result["verdict"]}))
+            continue
         if selection_cache is not None:
             preserve_original(out)
             result = recover(out, model, result, archive)
@@ -218,17 +290,20 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
                                               not_equivalent=policy.get("not_equivalent"),
                                               candidate_precision=(model.get("reference") or {}).get("perf_precision"))
             result["performance"][index] = {key: item[key] for key in item
-                                               if key in ("reference_mode", "request", "candidate_timing_scope",
-                                                          "reference_timing_scope", "reference_backend")} | verdict
+                                               if key in ("reference_mode", "configured_mode", "qualifying", "request",
+                                                          "candidate_timing_scope", "reference_timing_scope",
+                                                          "reference_backend")} | verdict
         requests = sorted({item.get("request") for item in result.get("performance", []) if item.get("gate", True)}, key=str) or [None]
         if any(item.get("gate", True) for item in result.get("performance", [])):
             from .runner import unavailable_mode
 
-            measured = {(item["reference_mode"], item.get("request")) for item in result["performance"]
-                        if item.get("gate", True)}
+            measured = {(item.get("configured_mode", item["reference_mode"]), item.get("request"))
+                        for item in result["performance"] if item.get("gate", True)}
+            configured = list(policy.get("reference_modes", []))
             result["performance"] += [
-                unavailable_mode(mode, result.get("errors", {}).get(f"reference_perf_{mode}", "not measured"), request)
-                for mode in policy.get("reference_modes", []) for request in requests if (mode, request) not in measured]
+                {**unavailable_mode(mode, result.get("errors", {}).get(f"reference_perf_{mode}", "not measured"),
+                                    request), "qualifying": mode == configured[0]}
+                for mode in configured for request in requests if (mode, request) not in measured]
         for item in result["accuracy"]:
             if item.get("source") == "absolute":  # both sides' scores are kept: re-apply today's gate
                 declared = next((entry for entry in model.get("absolute", []) if entry["suite"] == item["suite"]), {})
@@ -243,6 +318,9 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
                     elif item["gate"] != judged:  # a corpus bootstrap needs the outputs: rerun the model
                         item["metrics"]["test"] = {"outcome": None}
                     item["status"], item["reasons"] = absolute.status(item)
+            elif (item.get("source") == "task" and (item.get("metrics") or {}).get("test")
+                  and item.get("status") != "error"):  # a task check's test (the TTS ASR round trip)
+                item["status"], item["reasons"] = absolute.status(item)
         result["accuracy"] = [item for item in result.get("accuracy", []) if item.get("source") != "missing"]
         if model.get("accuracy_source") == "none":  # re-derived from today's output checks
             result["accuracy"] = [item for item in result["accuracy"] if item.get("suite") != CONVERSION_PARITY]
@@ -285,7 +363,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     batch.add_argument("--shard", help="INDEX/COUNT: this host's share (profiles sharing a checkpoint stay together)")
     batch.add_argument("--assignment", type=Path, help="a frozen multi-host assignment (`assign`): run --host's "
                                                       "profiles in its order")
-    batch.add_argument("--host", help="this host's name in --assignment")
+    batch.add_argument("--host", help="this host's name in --assignment or --fragment")
+    batch.add_argument("--campaign", help="a campaign run as fragments (a coordinator hands profiles to hosts as "
+                                          "they free up): its identifier, with --fragment and --host")
+    batch.add_argument("--fragment", help="this fragment of --campaign (one attempt at the given --profile list, "
+                                          "in that order, in an --out-root of its own)")
     batch.add_argument("--rerun", action="store_true", help="rerun profiles that already have a result")
     batch.add_argument("--ledger", type=Path, help="this run's ledger (JSON: profile -> predicted seconds): each AIPerf "
                                                    "run's deadline is three times its profile's time, at least ten "
@@ -310,7 +392,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "reason in the HTML report; the matrix itself stays as run")
     merge.add_argument("--assignment", type=Path, help="a formal multi-host run: refuse to merge unless the roots "
                                                       "pass merge-check against this assignment")
-    merge.add_argument("--smoke", action="store_true", help="with --assignment: the roots hold smoke results")
+    merge.add_argument("--manifest", type=Path, help="a campaign run as fragments: refuse to merge unless the "
+                                                    "roots pass merge-check against this manifest, and merge only "
+                                                    "its accepted fragments")
+    merge.add_argument("--smoke", action="store_true", help="with --assignment or --manifest: the roots hold smoke "
+                                                           "results")
     split = commands.add_parser("assign", help="freeze the formal run's profile -> host assignment from a ledger")
     split.add_argument("--environment", type=Path, required=True)
     split.add_argument("--profile", action="append", help="only these profiles")
@@ -318,8 +404,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     split.add_argument("--host", action="append", required=True, help="host names, in tie order")
     split.add_argument("--output", type=Path, required=True)
     merge_check = commands.add_parser("merge-check", help="verify that hosts' result roots form the assignment's "
-                                                          "matrix: disjoint, complete, formal, same campaign inputs")
-    merge_check.add_argument("--assignment", type=Path, required=True)
+                                                          "matrix (or the manifest's campaign): disjoint, complete, "
+                                                          "formal, same campaign inputs")
+    against = merge_check.add_mutually_exclusive_group(required=True)
+    against.add_argument("--assignment", type=Path)
+    against.add_argument("--manifest", type=Path, help="JSON: {campaign, expected: [profiles], accepted: [fragments]}")
     merge_check.add_argument("--smoke", action="store_true", help="check smoke roots (results of run-all --smoke)")
     merge_check.add_argument("roots", nargs="+", type=Path)
     plan = commands.add_parser("plan", help="print the derived configuration of this machine's models "
@@ -357,8 +446,58 @@ def main(argv: Sequence[str] | None = None) -> int:
     text.add_argument("--environment", type=Path, required=True)
     text.add_argument("--config", type=Path, required=True)
     text.add_argument("--out", type=Path, required=True)
+    endpoints = commands.add_parser("endpoint-models", help="inventory every checkpoint for a native endpoint group")
+    endpoints.add_argument("--repo", type=Path, required=True)
+    endpoints.add_argument("--group", choices=("embeddings", "reranking", "transcription", "detection", "vision", "images", "image-edit", "videos"), required=True)
+    for name, description in (("image-profile", "text-to-image"), ("image-edit-profile", "image editing"), ("video-profile", "text-to-video")):
+        images = commands.add_parser(name, help=f"verify and profile one existing {description} bundle")
+        images.add_argument("--environment", type=Path, required=True)
+        images.add_argument("--profile", required=True)
+        images.add_argument("--bundle", type=Path, required=True)
+        images.add_argument("--inputs", type=Path, required=True)
+        images.add_argument("--out", type=Path, required=True)
+        images.add_argument("--request-count", type=int, default=5)
+        images.add_argument("--warmup-request-count", type=int, default=1)
+    endpoint_run = commands.add_parser("endpoint-profile", help="verify and profile one built native endpoint model")
+    endpoint_run.add_argument("--environment", type=Path, required=True)
+    endpoint_run.add_argument("--profile", required=True)
+    endpoint_run.add_argument("--bundle", type=Path, required=True)
+    endpoint_run.add_argument("--inputs", type=Path, required=True)
+    endpoint_run.add_argument("--out", type=Path, required=True)
+    endpoint_run.add_argument("--max-output-tokens", type=int, default=120)
+    endpoint_run.add_argument("--tokenizer", help="AIPerf client tokenizer name or prepared local directory")
+    endpoint_run.add_argument("--tokenizer-revision", help="revision of an explicitly selected client tokenizer")
     arguments = parser.parse_args(argv)
     try:
+        if arguments.command == "video-profile":
+            from .video_profile import profile as video_profile
+
+            print(json.dumps(video_profile(load_environment(arguments.environment), arguments.profile,
+                arguments.bundle, arguments.inputs, arguments.out, requests=arguments.request_count,
+                warmup=arguments.warmup_request_count), indent=2))
+            return 0
+        if arguments.command in {"image-profile", "image-edit-profile"}:
+            from .image_profile import profile as image_profile
+
+            print(json.dumps(image_profile(load_environment(arguments.environment), arguments.profile,
+                arguments.bundle, arguments.inputs, arguments.out, requests=arguments.request_count,
+                warmup=arguments.warmup_request_count,
+                group="image-edit" if arguments.command == "image-edit-profile" else "images"), indent=2))
+            return 0
+        if arguments.command == "endpoint-profile":
+            from .endpoint_profile import profile as endpoint_profile
+
+            result = endpoint_profile(load_environment(arguments.environment), arguments.profile,
+                                      arguments.bundle, arguments.inputs, arguments.out,
+                                      token_limit=arguments.max_output_tokens, tokenizer=arguments.tokenizer,
+                                      tokenizer_revision=arguments.tokenizer_revision)
+            print(json.dumps(result, indent=2))
+            return 0
+        if arguments.command == "endpoint-models":
+            from .endpoint_catalog import print_inventory
+
+            print_inventory(arguments.repo, arguments.group)
+            return 0
         if arguments.command == "text-profile":
             from .text_profile import profile
 
@@ -377,11 +516,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             return rejudge_reports(arguments.outs, load_environment(arguments.environment)
                                    if arguments.environment else None, selection_cache=arguments.selection_cache)
         if arguments.command == "merge-check":
-            from .split import merge_check
+            from .split import accepted_roots, fragment_merge_check, informational_differences, merge_check
 
-            problems = merge_check(json.loads(arguments.assignment.read_text()), arguments.roots,
-                                   "smoke" if arguments.smoke else "formal")
-            print("\n".join(problems) if problems else "the roots form the assignment's matrix")
+            mode = "smoke" if arguments.smoke else "formal"
+            roots = arguments.roots
+            if arguments.manifest:
+                manifest = json.loads(arguments.manifest.read_text())
+                problems = fragment_merge_check(manifest, roots, mode)
+                roots = accepted_roots(manifest, roots)
+            else:
+                problems = merge_check(json.loads(arguments.assignment.read_text()), roots, mode)
+            print("\n".join(problems) if problems else
+                  "the roots form the " + ("manifest's campaign" if arguments.manifest else "assignment's matrix"))
+            for note in informational_differences(roots):
+                print(f"note: {note}")
             return 1 if problems else 0
         if arguments.command == "summary":
             import tempfile
@@ -391,14 +539,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             with tempfile.TemporaryDirectory(prefix="trtmc-aiperf-summary-") as fetched:
                 store = arguments.html.parent / f"{arguments.html.stem}-evidence" if arguments.html else Path(fetched)
                 roots = fetch_roots(arguments.roots, arguments.ssh, store, evidence=bool(arguments.html))
-                if arguments.assignment:
-                    from .split import merge_check
+                if arguments.assignment and arguments.manifest:
+                    print("trtmc-aiperf-qual: --assignment and --manifest exclude each other", file=sys.stderr)
+                    return 2
+                if arguments.assignment or arguments.manifest:
+                    from .split import accepted_roots, fragment_merge_check, merge_check
 
-                    problems = merge_check(json.loads(arguments.assignment.read_text()), roots,
-                                           "smoke" if arguments.smoke else "formal")
+                    mode = "smoke" if arguments.smoke else "formal"
+                    if arguments.manifest:
+                        manifest = json.loads(arguments.manifest.read_text())
+                        problems = fragment_merge_check(manifest, roots, mode)
+                        roots = accepted_roots(manifest, roots)  # a superseded fragment is left out
+                    else:
+                        problems = merge_check(json.loads(arguments.assignment.read_text()), roots, mode)
                     if problems:
                         print("\n".join(["trtmc-aiperf-qual: the roots do not merge:", *problems]), file=sys.stderr)
                         return 1
+                    from .split import informational_differences
+
+                    for note in informational_differences(roots):
+                        print(f"trtmc-aiperf-qual: note: {note}", file=sys.stderr)
                 baseline = fetch_roots(arguments.baseline, arguments.ssh, Path(fetched) / "baseline")
                 text, counts = summary(roots, baseline)
                 if arguments.html:
@@ -444,8 +604,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             return [profile.name for profile in selected], excluded
 
         if arguments.command == "run-all":
-            from .campaign import exit_code, parse_shard, run_all, shard, write_exclusions, write_plan
+            from . import preflight
+            from .campaign import exit_code, parse_shard, run_all, set_aside, shard, write_exclusions, write_plan
 
+            serve_python = environment.values.get("serve_python")
+            if serve_python and Path(str(serve_python)).is_file():
+                missing = preflight.missing_serve_packages(environment)
+                if missing:  # stop before the campaign: every native reference that needs one would fail
+                    print(f"trtmc-aiperf-qual: serve_python cannot import the serving packages: {missing}; install "
+                          "apps/perf_serving/requirements.txt into it (apps/aiperf_qual/setup.sh)", file=sys.stderr)
+                    return 2
+            if arguments.campaign or arguments.fragment:
+                if not (arguments.campaign and arguments.fragment and arguments.host and arguments.profile):
+                    raise ConfigError("a fragment needs --campaign, --fragment, --host and its --profile list")
+                if arguments.assignment or arguments.shard:
+                    raise ConfigError("--fragment excludes --assignment and --shard")
             names, excluded = machine_list()
             if arguments.smoke and arguments.out_root.name != "smoke":  # never mixed with formal results
                 arguments.out_root = arguments.out_root / "smoke"
@@ -459,22 +632,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 except ConfigError as error:
                     config_errors.append({"profile": name, "reason": str(error)})
                     print(json.dumps({"profile": name, "category": "config-error", "reason": str(error)}), flush=True)
+                    # An older result must not stand in for a profile that no longer configures: the summary
+                    # takes a result directory over the plan's configuration error.
+                    set_aside(arguments.out_root / name)
             if arguments.shard:
                 models = shard(models, *parse_shard(arguments.shard))
             extra = None
-            if arguments.assignment:
-                from .split import campaign_inputs, check_resume, digest, host_models, set_aside_results
+            if arguments.assignment or arguments.fragment:
+                from .split import campaign_inputs, check_resume, digest, fragment_plan, host_models, set_aside_results
 
-                assignment = json.loads(arguments.assignment.read_text())
-                models = host_models(assignment, str(arguments.host), models)
-                extra = {"host": arguments.host, "assignment": digest(assignment), "inputs": campaign_inputs(environment)}
+                if arguments.fragment:
+                    extra = fragment_plan(arguments.campaign, arguments.fragment, str(arguments.host), environment)
+                else:
+                    assignment = json.loads(arguments.assignment.read_text())
+                    models = host_models(assignment, str(arguments.host), models)
+                    extra = {"host": arguments.host, "assignment": digest(assignment),
+                             "inputs": campaign_inputs(environment)}
                 if arguments.rerun:
                     set_aside_results(arguments.out_root)
                 else:
                     check_resume(arguments.out_root, extra)
             write_plan(arguments.out_root, [model["model"] for model in models], config_errors, extra)
             records = run_all(environment, models, arguments.out_root, rerun=arguments.rerun,
-                              prefetch_next=not arguments.no_prefetch, keep_order=bool(arguments.assignment))
+                              prefetch_next=not arguments.no_prefetch,
+                              keep_order=bool(arguments.assignment or arguments.fragment))
             return exit_code(records, config_errors, smoke=arguments.smoke)
         if arguments.command == "assign":
             from .split import assign
@@ -517,7 +698,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             names, _ = machine_list()
             return write_matrix(environment, names, arguments.output)
         if arguments.command == "plan":
-            from .runner import applies, quality_only
+            from .runner import applies, native_modes, quality_only
 
             names, excluded = machine_list()
             for item in excluded:
@@ -534,7 +715,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                                       "perf_request": "quality" if quality_only(model) else
                                                       model["performance"]["suite"]["source"]["kind"],
                                       "bundle": model["candidate"]["bundle"],
-                                      "modes": ["eager"] if quality_only(model) else model["performance"]["reference_modes"]}))
+                                      "modes": native_modes(model["reference"]) if quality_only(model) else
+                                               model["performance"]["reference_modes"]}))
                 except ConfigError as error:
                     print(json.dumps({"profile": name, "error": str(error)}))
             return 0
@@ -544,7 +726,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.out = arguments.out.parent / "smoke" / arguments.out.name
         record = run_one(environment, resolve_model(arguments.profile, environment), arguments.out)
         print(json.dumps({"report": str(arguments.out / "report.md"), **record}))
-        return 0 if record["category"] in ("pass", "smoke-pass") else 1
+        complete_measurement = (record["category"] == "measured" and record.get("acc") == "pass"
+                                and record.get("perf") == "measured")
+        return 0 if record["category"] in ("pass", "smoke-pass") or complete_measurement else 1
     except ConfigError as error:
         print(f"trtmc-aiperf-qual: {error}", file=sys.stderr)
         return 2

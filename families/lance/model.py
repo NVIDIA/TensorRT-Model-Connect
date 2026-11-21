@@ -230,6 +230,8 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Lance vision-language bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Lance does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("lance does not support dynamic_kv_cache")
 
@@ -250,12 +252,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.task != "vision_language_generation":
         raise ValueError("lance supports only task=vision_language_generation")
-    if (
-        request.tensor_parallel_size != 1
-        or request.quantization not in {None, "none"}
-        or request.fp32_layers
-    ):
-        raise NotImplementedError("Lance supports only single-device non-quantized builds")
+    if request.tensor_parallel_size != 1 or request.fp32_layers:
+        raise NotImplementedError("Lance supports only single-device builds without fp32 layers")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(f"Lance does not support quantization={request.quantization!r}")
+    quantized = request.quantization == "fp8"
     model_dir = Path(request.model_dir)
     llm_dir = model_dir / "Lance_3B"
     llm_config = llm_dir / "llm_config.json"
@@ -268,17 +269,26 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.model_type = "lance"
     config.raw["model_type"] = "lance"
     precision = str(request.precision).lower()
+    if quantized and precision != "bf16":
+        # Down-projection inputs reach 1e5 (massive activations), above the fp16 range.
+        raise NotImplementedError("Lance fp8 quantization requires precision bf16")
     max_length = int(request.max_sequence_length or min(config.max_position_embeddings, 256))
     config.raw["_model_dir"] = str(llm_dir)
     model = _LanceModel()
     weights = model.load_weights(str(llm_dir), config)
+    quant_ctx = None
+    if quantized:
+        from . import graph_ops
+        from .quantization import calibrate_lance_fp8
+
+        quant_ctx = calibrate_lance_fp8(config, weights, graph_ops)
     config.raw["_decoder_engine_role"] = "prefill"
     prefill = model.build_engine(
         config,
         weights,
         max_length,
         precision=precision,
-        quant_ctx=None,
+        quant_ctx=quant_ctx,
         verbose=request.verbose,
         parallel_config=None,
     )
@@ -288,7 +298,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         weights,
         max_length,
         precision=precision,
-        quant_ctx=None,
+        quant_ctx=quant_ctx,
         verbose=request.verbose,
         parallel_config=None,
     )

@@ -16,12 +16,17 @@ _SUPPORT = FamilySupport(
     tasks=("text_generation",), default_task="text_generation", default_precision="bf16",
 )
 
+_VISION_SUPPORT = FamilySupport(
+    tasks=("text_generation", "vision_language_generation"),
+    default_task="text_generation", default_precision="bf16",
+)
+
 
 def describe(metadata: ModelMetadata) -> FamilySupport | None:
     if "joint_head_config.json" in metadata.files:
         return None
     if support := _ALIASES(metadata):
-        return support
+        return _VISION_SUPPORT if isinstance(metadata.config.get("vision_config"), dict) else support
     config = metadata.config.get("text_config", metadata.config)
     if not isinstance(config, dict):
         return None
@@ -30,4 +35,4 @@ def describe(metadata: ModelMetadata) -> FamilySupport | None:
         return None
     if "mlp_only_layers" in config or "output_gate_type" not in config:
         return None
-    return _SUPPORT
+    return _VISION_SUPPORT if isinstance(metadata.config.get("vision_config"), dict) else _SUPPORT

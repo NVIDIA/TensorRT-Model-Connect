@@ -1,0 +1,19 @@
+{
+  "name": "electra-base-discriminator-bf16",
+  "hf_id": "google/electra-base-discriminator",
+  "hf_revision": "1ae76a97c7e84a4e640876a07453fccd636f0667",
+  "bundle": "electra-base-discriminator-bf16.bundle",
+  "family": "electra",
+  "task": "text_to_pooled_features",
+  "precision": "bf16",
+  "testcases": [
+    {
+      "name": "electra-base-discriminator-bf16",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 256
+}

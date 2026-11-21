@@ -7,8 +7,10 @@
 
 #include "trtmc/internal/image.h"
 #include "trtmc/internal/matrix.h"
+#include "trtmc/internal/perception.h"
 #include "trtmc/internal/scores.h"
 #include "trtmc/internal/text.h"
+#include "trtmc/internal/video.h"
 
 namespace trtmc::internal {
 
@@ -81,6 +83,35 @@ struct ImageTokenFeaturesResult {
     FloatMatrix features; // [token, feature], retaining class/register rows.
     std::vector<ImageFeatureToken> tokens;
     uint64_t grid_rows{0}, grid_columns{0};
+};
+enum class VideoFeatureTokenRole : uint32_t {
+    Patch = 1,
+    Class = 2,
+    Register = 3,
+    GlobalPooled = 4
+};
+struct VideoFeatureToken {
+    VideoFeatureTokenRole role{VideoFeatureTokenRole::Patch};
+    uint64_t grid_frame{0}, grid_row{0}, grid_column{0};
+    // Patch support is [begin,end) in the supplied ordered input frames.
+    // It does not invent a frame rate or imply a temporal receptive field.
+    uint64_t frame_begin{0}, frame_end{0};
+    float x_min{0}, y_min{0}, x_max{0}, y_max{0};
+};
+struct VideoTokenFeaturesResult {
+    FloatMatrix features;
+    std::vector<VideoFeatureToken> tokens;
+    uint64_t grid_frames{0}, grid_rows{0}, grid_columns{0}, source_frame_count{0};
+};
+struct VideoToTokenFeaturesRequest {
+    VideoView video;
+};
+class IVideoToTokenFeatures {
+  public:
+    using TaskInterface = IVideoToTokenFeatures;
+    static constexpr std::string_view kTask = "video_to_token_features";
+    virtual ~IVideoToTokenFeatures() = default;
+    virtual VideoTokenFeaturesResult run(const VideoToTokenFeaturesRequest&, ConfigView) = 0;
 };
 struct ImageTokenAndPooledFeaturesResult {
     ImageTokenFeaturesResult tokens;
@@ -194,6 +225,14 @@ struct ImageToEmbeddingRequest {
 struct ImageTextToEmbeddingRequest {
     ImageView image;
     std::string_view text;
+};
+// Points are row-major [num_points, input_dim] float32. The family defines the
+// column meaning, owns any normalization or sampling and must reject point
+// counts and input dimensions it does not support.
+struct PointsToEmbeddingRequest {
+    Span<const float> points;
+    uint32_t num_points{0};
+    uint32_t input_dim{3};
 };
 struct TextPairToRelevanceRequest {
     std::string_view query;
@@ -335,6 +374,14 @@ class IImageTextToEmbedding {
     static constexpr std::string_view kTask = "image_text_to_embedding";
     virtual ~IImageTextToEmbedding() = default;
     virtual SemanticEmbeddingResult run(const ImageTextToEmbeddingRequest&, ConfigView) = 0;
+};
+
+class IPointsToEmbedding {
+  public:
+    using TaskInterface = IPointsToEmbedding;
+    static constexpr std::string_view kTask = "points_to_embedding";
+    virtual ~IPointsToEmbedding() = default;
+    virtual SemanticEmbeddingResult run(const PointsToEmbeddingRequest&, ConfigView) = 0;
 };
 
 class ITextPairToRelevance {
@@ -507,6 +554,76 @@ class IBatchImageToTokenAndPooledFeatures {
     virtual ~IBatchImageToTokenAndPooledFeatures() = default;
     virtual std::vector<ImageTokenAndPooledFeaturesResult>
     run_batch(const BatchImageToTokenAndPooledFeaturesRequest&) = 0;
+};
+
+struct SpatialFeatureInput {
+    std::string_view name;
+    Span<const float> values; // Contiguous CHW; names and coordinate meaning are family-owned.
+    uint64_t channels{0}, height{0}, width{0};
+};
+struct SpatialFeaturesToClassScoresRequest {
+    std::vector<SpatialFeatureInput> inputs; // One example, with unique nonempty input names.
+};
+struct SpatialClassScoresResult {
+    std::vector<float> values; // Contiguous [class,height,width]; classes may overlap.
+    uint64_t classes{0}, height{0}, width{0};
+    std::vector<std::string> class_names; // Exactly one nonempty name per class, in score order.
+    ScoreKind kind{ScoreKind::Unbounded};
+};
+class ISpatialFeaturesToClassScores {
+  public:
+    using TaskInterface = ISpatialFeaturesToClassScores;
+    static constexpr std::string_view kTask = "spatial_features_to_class_scores";
+    virtual ~ISpatialFeaturesToClassScores() = default;
+    virtual SpatialClassScoresResult run(const SpatialFeaturesToClassScoresRequest&,
+                                         ConfigView) = 0;
+};
+
+// Spectral convention and normalization belong to the loaded family. Output
+// rows map to input spectral frame indices, not waveform samples or seconds.
+struct SpectrogramToFrameFeaturesRequest {
+    FloatMatrixView spectrogram;
+};
+struct SpectrogramFrameFeaturesResult {
+    FloatMatrix features;
+    std::vector<uint64_t> input_frame_indices;
+    uint64_t source_frame_count{0};
+};
+class ISpectrogramToFrameFeatures {
+  public:
+    using TaskInterface = ISpectrogramToFrameFeatures;
+    static constexpr std::string_view kTask = "spectrogram_to_frame_features";
+    virtual ~ISpectrogramToFrameFeatures() = default;
+    virtual SpectrogramFrameFeaturesResult run(const SpectrogramToFrameFeaturesRequest&,
+                                               ConfigView) = 0;
+};
+
+// Ordered caller-supplied document words and original-image pixel boxes.
+// OCR, tokenization and checkpoint coordinate normalization are family-owned.
+struct DocumentWordView {
+    std::string_view text;
+    PixelBox box;
+};
+struct DocumentWordsToTokenFeaturesRequest {
+    ImageView image;
+    Span<const DocumentWordView> words;
+};
+struct DocumentFeatureToken {
+    int64_t token_id{0}, word_index{-1}; // -1 special, -2 padding; otherwise input word index.
+    uint64_t token_index{0};
+};
+struct DocumentTokenFeaturesResult {
+    FloatMatrix features; // Returned text rows only; included padding remains explicitly mapped.
+    std::vector<DocumentFeatureToken> tokens;
+    uint64_t source_word_count{0};
+};
+class IDocumentWordsToTokenFeatures {
+  public:
+    using TaskInterface = IDocumentWordsToTokenFeatures;
+    static constexpr std::string_view kTask = "document_words_to_token_features";
+    virtual ~IDocumentWordsToTokenFeatures() = default;
+    virtual DocumentTokenFeaturesResult run(const DocumentWordsToTokenFeaturesRequest&,
+                                            ConfigView) = 0;
 };
 
 } // namespace trtmc::internal

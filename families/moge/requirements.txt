@@ -1,4 +1,4 @@
-huggingface-hub==0.29.1
-numpy==1.26.4
+huggingface-hub==1.21.0
+numpy==2.2.6
 Pillow==12.2.0
-scipy==1.12.0
+scipy==1.16.3

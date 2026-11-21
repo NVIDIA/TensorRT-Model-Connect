@@ -42,6 +42,11 @@ struct SemanticAcousticHistoryView {
     Span<const std::int32_t> semantic_tokens;
     AudioCodebookTokensView coarse_tokens, fine_tokens;
 };
+// Nonempty codebook-major integer codec tokens; the loaded family owns the
+// vocabulary, codebook count, frame profile and token-to-PCM interpretation.
+struct AudioCodebookTokensToAudioRequest {
+    AudioCodebookTokensView codes;
+};
 struct TextAudioTokenHistoryToAudioRequest {
     std::string_view prompt;
     SemanticAcousticHistoryView history;
@@ -60,6 +65,9 @@ struct SpeechTranslationRequest {
     std::optional<std::string_view> source_language{};
 };
 struct AudioLanguageIdentificationRequest {
+    AudioView audio;
+};
+struct AudioToClassScoresRequest {
     AudioView audio;
 };
 struct SpeechToSpeechResponseRequest {
@@ -81,6 +89,13 @@ class ITextAudioTokenHistoryToAudio {
     // Required history borrows caller storage through synchronous return.
     // Family owns vocabulary/count/length/alignment rules and never mutates it.
     virtual AudioResult run(const TextAudioTokenHistoryToAudioRequest&, ConfigView) = 0;
+};
+class IAudioCodebookTokensToAudio {
+  public:
+    using TaskInterface = IAudioCodebookTokensToAudio;
+    static constexpr std::string_view kTask = "audio_codebook_tokens_to_audio";
+    virtual ~IAudioCodebookTokensToAudio() = default;
+    virtual AudioResult run(const AudioCodebookTokensToAudioRequest&, ConfigView) = 0;
 };
 class ITextToSpeech {
   public:
@@ -116,6 +131,21 @@ class IAudioLanguageIdentification {
     // Every score needs its actual language label; ordinal-only output is not
     // sufficient for language identification. The kind states score semantics.
     virtual LabelScoresResult run(const AudioLanguageIdentificationRequest&, ConfigView) = 0;
+};
+class IAudioToClassScores {
+  public:
+    using TaskInterface = IAudioToClassScores;
+    static constexpr std::string_view kTask = "audio_to_class_scores";
+    virtual ~IAudioToClassScores() = default;
+    // Nonempty scores over the family's own sound-event vocabulary, in class-ordinal
+    // order. This is general audio tagging, not language identification: the labels
+    // name sound events. Empty labels and vocabulary_id mean model-local ordinal
+    // order with unknown identity, not cross-model compatibility. Supplied labels
+    // have one entry per score; without a vocabulary_id every label must be
+    // nonempty. ScoreKind declares interpretation without shared normalization,
+    // reordering or invented class metadata. Multi-label families return per-class
+    // scores that do not sum to one; the application never renormalizes them.
+    virtual LabelScoresResult run(const AudioToClassScoresRequest&, ConfigView) = 0;
 };
 class ISpeechToSpeechResponse {
   public:

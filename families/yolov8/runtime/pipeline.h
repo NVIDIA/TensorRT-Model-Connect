@@ -6,8 +6,9 @@
 #pragma once
 
 #include "families/yolov8/runtime/image_preprocess_seam.h"
+#include "trtmc/internal/model.h"
+#include "trtmc/internal/perception.h"
 #include "trtmc/runtime/trt_module.h"
-#include "trtmc/task.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -21,15 +22,24 @@ namespace trtmc {
 std::vector<DetectionBox> suppress_yolov8_boxes(std::vector<DetectionBox> boxes,
                                                 float iou_threshold, std::size_t max_detections);
 
-class Yolov8ObjectDetectionPipeline final : public IObjectDetection {
+class Yolov8ObjectDetectionPipeline final : public internal::IModel,
+                                            public internal::IImageToBoxes {
   public:
     Yolov8ObjectDetectionPipeline(std::unique_ptr<ITrtModule> model,
                                   Yolov8PreprocessConfig preprocess_config, float score_threshold,
                                   float iou_threshold, std::int32_t max_detections);
 
-    ObjectDetectionResult detect(const float* pixels, int32_t height, int32_t width) override;
+    const char* task() const noexcept override { return internal::IImageToBoxes::kTask.data(); }
+    std::vector<internal::TaskInstance> task_bindings() override {
+        return {internal::bind<internal::IImageToBoxes>(*this)};
+    }
+    internal::DetectedBoxesResult run(const internal::ImageToBoxesRequest& request,
+                                      internal::ConfigView config) override;
 
   private:
+    internal::DetectedBoxesResult detect(const float* pixels, std::int32_t height,
+                                         std::int32_t width);
+
     std::unique_ptr<ITrtModule> model_;
     Yolov8PreprocessConfig preprocess_config_;
     float score_threshold_;

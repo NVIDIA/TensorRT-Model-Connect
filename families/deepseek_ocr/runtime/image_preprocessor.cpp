@@ -11,6 +11,7 @@
 #include "stb_image_resize2.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <nlohmann/json.hpp>
@@ -42,6 +43,13 @@ struct LoadedImage {
     int channels{0};
     bool ok{false};
 };
+
+// PIL uses Python's ties-to-even rounding for contain and center placement.
+static int round_even(double value) {
+    const auto lower = static_cast<int>(std::floor(value));
+    const auto fraction = value - lower;
+    return lower + (fraction > 0.5 || (fraction == 0.5 && lower % 2 != 0));
+}
 
 // Resize raw uint8 RGB buffer to target_size x target_size using the given filter.
 static std::vector<unsigned char> resize_raw(const unsigned char* raw, int width, int height,
@@ -220,13 +228,14 @@ load_pad_center_resize_normalize(const runtime::adapters::io::DecodedImage& imag
     const int target_size = config.fixed_image_size;
     const stbir_filter filter = resolve_stbir_filter(config.interpolation);
 
-    // Compute scaled dimensions that fit inside target_size x target_size
-    // This matches PIL ImageOps.pad behavior: scale to fit, then center.
-    const float scale_w = static_cast<float>(target_size) / static_cast<float>(image.width);
-    const float scale_h = static_cast<float>(target_size) / static_cast<float>(image.height);
-    const float scale = std::min(scale_w, scale_h);
-    const int new_w = std::max(1, static_cast<int>(image.width * scale));
-    const int new_h = std::max(1, static_cast<int>(image.height * scale));
+    int new_w = target_size;
+    int new_h = target_size;
+    if (image.width > image.height)
+        new_h =
+            std::max(1, round_even(static_cast<double>(image.height) / image.width * target_size));
+    else if (image.height > image.width)
+        new_w =
+            std::max(1, round_even(static_cast<double>(image.width) / image.height * target_size));
 
     // Resize preserving aspect ratio
     std::vector<unsigned char> resized_small(static_cast<std::size_t>(new_w) * new_h * 3);
@@ -253,8 +262,8 @@ load_pad_center_resize_normalize(const runtime::adapters::io::DecodedImage& imag
     }
 
     // Center the resized image in the padded canvas
-    const int x_off = (target_size - new_w) / 2;
-    const int y_off = (target_size - new_h) / 2;
+    const int x_off = round_even((target_size - new_w) * 0.5);
+    const int y_off = round_even((target_size - new_h) * 0.5);
     for (int y = 0; y < new_h; ++y) {
         const unsigned char* src_row =
             resized_small.data() + static_cast<std::size_t>(y) * new_w * 3;

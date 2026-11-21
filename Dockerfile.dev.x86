@@ -19,6 +19,9 @@ RUN apt-get update && \
       git \
       ninja-build \
       nlohmann-json3-dev \
+      libicu-dev \
+      libopencv-core-dev \
+      libopencv-imgproc-dev \
       patchelf \
       pkg-config \
       python3.12-dev \

@@ -14,7 +14,7 @@ repository name, and every clause has to hold.
 from tensorrt_model_connect.model_support import FamilySupport, ModelMetadata
 
 
-_SUPPORT = FamilySupport(tasks=("object_detection",), default_task="object_detection")
+_SUPPORT = FamilySupport(tasks=("image_to_boxes",), default_task="image_to_boxes")
 
 
 def describe(metadata: ModelMetadata) -> FamilySupport | None:

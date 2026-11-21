@@ -75,7 +75,7 @@ These are the three current identities:
 
 At build time, exactly one dependency-free `support.py` claims the checkpoint
 and the core calls only that family's `model.py`. At runtime, the loader opens
-only that family's DSO and the named backend from an explicit runtime root.
+only that family's DSO and the named backend from one runtime root.
 There is no central model/strategy registry or sibling fallback.
 
 ## Reference versus deployment result

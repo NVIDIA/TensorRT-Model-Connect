@@ -363,15 +363,12 @@ def _hf_reference(
     prompt: str,
     actual_ids: list[int],
     torch,
+    *,
+    reference=None,
 ) -> tuple[list[int], str, float | None, str]:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     trust_remote_code = bool(manifest.get("trust_remote_code", False))
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_dir,
-        local_files_only=True,
-        trust_remote_code=trust_remote_code,
-    )
     reference_precision = case.get(
         "reference_precision",
         manifest.get("reference_precision", manifest["precision"]),
@@ -382,16 +379,25 @@ def _hf_reference(
         "bf16": torch.bfloat16,
     }
     assert reference_precision in dtypes, reference_precision
-    model = (
-        AutoModelForCausalLM.from_pretrained(
+    if reference is None:
+        tokenizer = AutoTokenizer.from_pretrained(
             model_dir,
             local_files_only=True,
             trust_remote_code=trust_remote_code,
-            dtype=dtypes[reference_precision],
         )
-        .eval()
-        .to("cuda")
-    )
+        model = (
+            AutoModelForCausalLM.from_pretrained(
+                model_dir,
+                local_files_only=True,
+                trust_remote_code=trust_remote_code,
+                dtype=dtypes[reference_precision],
+            )
+            .eval()
+            .to("cuda")
+        )
+    else:
+        tokenizer, model = reference
+        assert model.dtype == dtypes[reference_precision], "preloaded reference precision differs"
     inputs = _render_prompt(tokenizer, prompt, case).to(model.device)
     prompt_ids = inputs["input_ids"][0].tolist()
     if "expected_prompt_token_ids" in case:
@@ -445,10 +451,11 @@ def _hf_reference(
             reference_text = tokenizer.decode(reference_ids, skip_special_tokens=True).strip()
 
     actual_decoded = tokenizer.decode(actual_ids, skip_special_tokens=True).strip()
-    del model
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    if reference is None:
+        del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     return reference_ids, reference_text, sampling_support, actual_decoded
 
 
@@ -477,6 +484,20 @@ def _text_threshold(case: dict, thresholds: dict[str, float]) -> float:
     _evidence_threshold = float(thresholds.get("contract_ned_threshold", default))
     record_evidence("thresholds", {**thresholds, "contract_ned_threshold": _evidence_threshold})
     return _evidence_threshold
+
+
+def _assert_reference_free(payload: dict, case: dict) -> None:
+    """Check a generation that has no reference model: shape, length and expected answer."""
+    expected_answers = case.get("expected_answers")
+    assert expected_answers, "a case with reference=none must set expected_answers"
+    token_ids = payload["token_ids"]
+    assert isinstance(token_ids, list) and token_ids
+    assert all(isinstance(token_id, int) for token_id in token_ids)
+    assert len(token_ids) <= int(case["max_new_tokens"])
+    text = str(payload["text"]).strip()
+    if case.get("enable_thinking") is False:
+        assert "<think>" not in text.casefold()
+    assert any(answer.casefold() in text.casefold() for answer in expected_answers), text
 
 
 def _assert_correctness(
@@ -573,6 +594,14 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
             assert_native_kv_receipt(payload, case, prompt_tokens)
         record_evidence("reference", {"mode": "contract_only", "oracle": "family runtime contract"})
         record_evidence("thresholds", {"case_contract": case})
+        return
+
+    if case.get("reference") == "none":
+        # ModelOpt FP8 / NVFP4 checkpoints cannot be run by transformers, so there is no
+        # reference model; the engine output is checked against the expected answer.
+        record_evidence("reference", {"mode": "none", "oracle": "expected_answers"})
+        with evidence_stage("compare"):
+            _assert_reference_free(payload, case)
         return
 
     with evidence_stage("reference"):

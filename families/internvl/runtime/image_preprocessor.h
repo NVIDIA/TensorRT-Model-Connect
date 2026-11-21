@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace trtmc {
@@ -32,6 +33,10 @@ struct InternVlPreprocessConfig {
     std::string preprocessor_type{"merge_group_chw"};
     // Interpolation mode for resize: "bicubic", "bilinear", or "nearest"
     std::string interpolation{"bicubic"};
+    // "dynamic_tiles_chw": tile counts of the processor's crop_to_patches.
+    int32_t min_image_tiles{1};
+    int32_t max_image_tiles{1};
+    bool use_thumbnail{false};
 };
 
 // Preprocessed pixel values ready for the vision TRT engine.
@@ -41,6 +46,7 @@ struct InternVlPreprocessedImage {
     int32_t channels{0};                 // C*T for merge_group_chw, C for simple_chw
     int32_t height{0};
     int32_t width{0};
+    int32_t num_tiles{1}; // images of [channels, height, width] in pixel_values
     bool ok{false};
 };
 
@@ -63,6 +69,16 @@ internvl_preprocess_decoded_image(const runtime::adapters::io::DecodedImage& ima
 // Replaces {image_pads} and {prompt} in vl_prompt_template.
 std::string internvl_format_prompt(const std::string& user_prompt,
                                    const InternVlPreprocessConfig& config);
+
+// As above, with num_image_pad_tokens pads for each of num_tiles tiles.
+std::string internvl_format_prompt(const std::string& user_prompt,
+                                   const InternVlPreprocessConfig& config, int32_t num_tiles);
+
+// The (columns, rows) tile grid GotOcr2's get_optimal_tiled_canvas selects:
+// the closest aspect ratio, preferring more tiles on a tie until they cover
+// twice the image area.
+std::pair<int32_t, int32_t> internvl_tile_grid(int32_t height, int32_t width, int32_t tile_size,
+                                               int32_t min_tiles, int32_t max_tiles);
 
 // Parse InternVlPreprocessConfig from config.json text.
 InternVlPreprocessConfig internvl_parse_preprocess_config(const std::string& config_text);

@@ -15,8 +15,17 @@ def read_json(path: str | Path) -> dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+_BF16_SHARDS = [
+    f"diffusion_pytorch_model-{index:05d}-of-00007.safetensors" for index in range(1, 8)
+]
+_FP8_SHARDS = [f"diffusion_pytorch_model-{index:05d}-of-00004.safetensors" for index in range(1, 5)]
+
+
 def transformer_safetensor_paths(component_dir: str | Path) -> tuple[Path, ...]:
-    """Resolve the seven official transformer shards from their exact index."""
+    """Resolve the official transformer shards from their exact index.
+
+    The BF16 checkpoint has seven shards; the ModelOpt FP8 checkpoint has four.
+    """
 
     root = Path(component_dir)
     index_path = root / "diffusion_pytorch_model.safetensors.index.json"
@@ -29,11 +38,11 @@ def transformer_safetensor_paths(component_dir: str | Path) -> tuple[Path, ...]:
     if not all(isinstance(name, str) and name for name in raw_names):
         raise ValueError(f"Cosmos3 transformer index has invalid shard names: {index_path}")
     names = sorted(set(raw_names))
-    expected_names = [
-        f"diffusion_pytorch_model-{index:05d}-of-00007.safetensors" for index in range(1, 8)
-    ]
-    if names != expected_names:
-        raise ValueError("Cosmos3 transformer index must reference the seven official shards")
+    if names not in (_BF16_SHARDS, _FP8_SHARDS):
+        raise ValueError(
+            "Cosmos3 transformer index must reference the seven official shards "
+            "or the four official FP8 shards"
+        )
     paths = tuple(root / name for name in names)
     missing = [str(path) for path in paths if not path.is_file()]
     if missing:

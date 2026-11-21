@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from trtmc_aiperf_qual import aiperf_runner, compat, execution, judge, runner
+from trtmc_aiperf_qual import aiperf_runner, compat, execution, judge, report, runner
 from trtmc_aiperf_qual.config import Environment
 
 
@@ -36,6 +36,29 @@ def new_session(tmp_path):
                              lambda obs: judge.work_signature("generate", obs), same_work)
 
 
+@pytest.mark.parametrize("busy", [None, 20, 100])
+@pytest.mark.parametrize("role", ["both", "performance"])
+def test_formal_benchmark_never_starts_without_confirmed_gpu_idleness(tmp_path, busy, role):
+    from trtmc_aiperf_qual.services import ServiceError
+
+    evidence = new_session(tmp_path)
+    evidence.gpu_probe = lambda: busy
+    with execution.session(evidence), execution.workload("evaluation", role):
+        with pytest.raises(ServiceError, match="no benchmark requests were sent"):
+            execution.prepare(["--request-count", "1"])
+    assert not evidence.batches
+
+
+@pytest.mark.parametrize("role", ["both", "performance"])
+def test_smoke_does_not_require_formal_gpu_idleness(tmp_path, role):
+    evidence = new_session(tmp_path)
+    evidence.smoke = True
+    evidence.gpu_probe = lambda: None
+    with execution.session(evidence), execution.workload("evaluation", role):
+        _, metadata = execution.prepare(["--request-count", "1"])
+    assert metadata["gpu_busy_percent"] is None
+
+
 def test_same_inference_records_feed_accuracy_and_timing_without_replaying(tmp_path, monkeypatch):
     calls = []
     out = tmp_path / "aiperf"
@@ -58,7 +81,7 @@ def test_same_inference_records_feed_accuracy_and_timing_without_replaying(tmp_p
     assert "--warmup-request-count" in calls[0]
     records = evidence.batches[0]["records"]
     assert len(records) == 1 and records[0]["model_call_ms"] == 10
-    assert records[0]["output_ref"]["aiperf_run"] == str(out)
+    assert records[0]["output_ref"]["aiperf_run"] == "aiperf"
     assert len((tmp_path / "execution.jsonl").read_text().splitlines()) == 1
 
 
@@ -71,6 +94,142 @@ def test_pair_work_per_sample_instead_of_demanding_every_problem_have_one_length
     assert result["total_time_speedup"] == pytest.approx(2)
     assert result["speedup_interval90"] == pytest.approx([2, 2])
     assert not result["gate"] and result["matched_pairs"] == result["pairs"] == 2
+
+
+def test_media_precision_fallback_keeps_only_the_successful_attempt_in_measurements(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import aiperf_metrics, generation
+
+    evidence = new_session(tmp_path)
+    attempts = []
+
+    def generate(environment, model, backend, out, suite, python, precision, reuse=False, **mode):
+        attempts.append(precision)
+        if precision == "fp16":
+            collect(evidence, "reference", [raw(0, None, status=422, error={"type": "RequestError"})],
+                    precision=precision)
+            raise RuntimeError("native precision unsupported")
+        collect(evidence, "reference", [raw(0, 20)], precision=precision)
+        return []
+
+    monkeypatch.setattr(generation, "generate", generate)
+    model = {"reference": {"perf_precision": "fp16", "precision": "fp32"}}
+    with execution.session(evidence):
+        _, backend, precision, _ = generation.generate_native(Environment({}), model, None, "/py", tmp_path, "media")
+        collect(evidence, "candidate", [raw(0, 10)])
+    measured, = evidence.natural_performance()
+    assert attempts == ["fp16", "fp32"] and (backend, precision) == ("reference", "fp32")
+    assert measured["complete"] and measured["measurement_status"] == "measured"
+    assert measured["reference"]["requests"] == 1 and measured["reference"]["p50_ms"] == 20
+    assert [entry["precision"] for entry in aiperf_metrics.entries(evidence.batches)
+            if entry["side"] == "reference"] == ["fp32"]
+    saved = [json.loads(line) for line in (tmp_path / "execution.jsonl").read_text().splitlines()]
+    assert saved[0]["records"][0]["output_valid"] is False  # retain the failed attempt for diagnosis
+    assert any(row.get("event") == "supersede_failed_attempt" and row["batch_ids"] == [0] for row in saved)
+
+
+def test_native_attempts_try_torch_compile_then_eager_at_each_precision():
+    attempts = []
+
+    def attempt(current):
+        attempts.append((current.precision, current.mode))
+        if current.precision == "fp16":
+            raise RuntimeError(f"{current.mode} overflow")
+        return "answers"
+
+    reference = {"mode": "compile", "perf_precision": "fp16", "precision": "fp32"}
+    result, chosen = runner.first_native(reference, attempt)
+    assert result == "answers" and attempts == [("fp16", "compile"), ("fp16", "eager"), ("fp32", "compile")]
+    assert chosen.compile_fallback is None and "compile overflow" in chosen.precision_fallback
+    assert runner.native_modes({"mode": "eager"}) == runner.native_modes({}) == ["eager"]
+
+    def fail(current):
+        raise RuntimeError("no")
+
+    with pytest.raises(RuntimeError, match="compile fp16: RuntimeError: no; eager fp16: RuntimeError: no"):
+        runner.first_native({"mode": "compile", "timing_precision": "fp16"}, fail)
+
+
+def test_media_generation_answers_in_eager_mode_when_torch_compile_fails(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import generation
+
+    calls = []
+
+    def generate(environment, model, backend, out, suite, python, precision, reuse=False, *, mode="eager",
+                 compile_fallback=None):
+        calls.append((out.name, mode, compile_fallback))
+        if mode == "compile":
+            raise RuntimeError("the torch.compile reference stopped serving: FailOnRecompileLimitHit")
+        return ["answers"]
+
+    monkeypatch.setattr(generation, "generate", generate)
+    model = {"reference": {"mode": "compile", "perf_precision": "fp16", "precision": "fp32"}}
+    assert generation.generate_native(Environment({}), model, None, "/py", tmp_path, "media") == (
+        ["answers"], "reference", "fp16", "eager")
+    assert [call[:2] for call in calls] == [("media-native-reference-compile-fp16", "compile"),
+                                           ("media-native-reference-fp16", "eager")]
+    assert "FailOnRecompileLimitHit" in calls[1][2]
+    # A recheck reuses the earlier generation in whichever mode it ran, before trying torch.compile again.
+    monkeypatch.setattr(generation, "_reusable", lambda out, suite: ["earlier"] if out.name.endswith("reference-fp16")
+                        else None)
+    assert generation.generate_native(Environment({}), model, None, "/py", tmp_path, "media", reuse=True) == (
+        ["earlier"], "reference", "fp16", "eager")
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("status, expected", [(200, None), (503, "torch.compile reference failed: X")])
+def test_a_compile_reference_that_stopped_serving_says_why(status, expected):
+    import http.server
+    import threading
+
+    from trtmc_aiperf_qual import services
+
+    class Ready(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = json.dumps({"status": "unavailable", "reason": expected} if expected else {"status": "ready"})
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body.encode())
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Ready)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        assert services._stopped_serving(f"http://127.0.0.1:{server.server_port}") == expected
+    finally:
+        server.shutdown()
+
+
+def test_natural_timings_name_the_native_mode_that_answered(tmp_path):
+    evidence = new_session(tmp_path / "compiled")
+    collect(evidence, "candidate", [raw(0, 10)])
+    collect(evidence, "reference", [raw(0, 20)], mode="compile")
+    assert evidence.natural_performance()[0]["reference_mode"] == "compile"
+    evidence = new_session(tmp_path / "replaced")
+    collect(evidence, "candidate", [raw(0, 10)])
+    collect(evidence, "reference", [raw(0, 20)], mode="eager", compile_fallback="compile fp16: ServiceError: X")
+    row, = evidence.natural_performance()
+    assert row["reference_mode"] == "eager"
+    assert any(note.startswith("Native torch.compile failed") and note.endswith("X") for note in row["notes"])
+    assert row["compile_fallback"] == "compile fp16: ServiceError: X"  # structured for the summary
+    evidence = new_session(tmp_path / "floor")  # a timed compile batch and an eager batch that answered nothing
+    collect(evidence, "candidate", [raw(0, 10)])
+    collect(evidence, "reference", [raw(0, 20)], mode="compile")
+    collect(evidence, "reference", [], mode="eager")
+    assert evidence.natural_performance()[0]["reference_mode"] == "compile"
+    evidence = new_session(tmp_path / "excluded")  # an eager batch of capacity-rejected samples names no mode
+    body = json.dumps({"error": {"message": "prompt exceeds the prefill profile", "code": "backend_rejected_request"}})
+    rejected = {**raw(1, 10), "status": 422, "responses": [], "error": {"code": 422, "message": body}}
+    collect(evidence, "candidate", [raw(0, 10), rejected])
+    collect(evidence, "reference", [raw(0, 20)], mode="compile")
+    collect(evidence, "reference", [raw(1, 20)], mode="eager")
+    assert evidence.natural_performance([{"suite": "evaluation", "out_of_capacity": 1}])[0]["reference_mode"] == "compile"
+    evidence = new_session(tmp_path / "failed")  # no native mode answered: none is named
+    collect(evidence, "candidate", [raw(0, 10)])
+    row, = evidence.natural_performance()
+    assert row["reference_mode"] == "" and report.native_modes({"performance": [row]}) == ""
 
 
 def test_less_generation_is_not_claimed_as_equal_work_acceleration(tmp_path):
@@ -100,6 +259,16 @@ def test_failed_or_missing_responses_cannot_disappear_into_a_fast_subset(tmp_pat
     result, = evidence.natural_performance()
     assert not result["comparable"] and result["pairs"] == 1 and "speedup" not in result
     assert "unpaired" in " ".join(result["reasons"])
+
+
+def test_empty_benchmark_answer_still_has_a_valid_task_timing(tmp_path):
+    evidence = new_session(tmp_path)
+    empty = {"type": "InvalidInferenceResultError", "message": "empty text response"}
+    collect(evidence, "candidate", [raw(0, 10, 0, error=empty)])
+    collect(evidence, "reference", [raw(0, 20, 0, error=empty)])
+    result, = evidence.natural_performance()
+    assert result["complete"] and result["measurement_status"] == "measured"
+    assert result["candidate"]["valid_requests"] == result["reference"]["valid_requests"] == 1
 
 
 def test_matching_export_gaps_on_both_sides_do_not_prove_complete_work(tmp_path):
@@ -220,16 +389,19 @@ def test_qualification_runs_only_quality_workloads_for_absolute_and_media_models
 
     def native(*args, **kwargs):
         assert args[-1] is None  # no catalog request as a native serviceability probe
+        assert args[-2] == tmp_path / "artifacts"
         answer("reference")
         return {"runs": {}}
 
     def candidate(*args):
         assert args[2] is None and not args[3]  # no separate performance policy or suites
+        assert args[7] == tmp_path / "artifacts"
         answer("candidate")
         args[5].append({"suite": name, "source": "absolute", "status": "pass"})
 
     def media(*args):
         assert args[2]["check"] == "geneval"  # informational replay never runs
+        assert args[-1] == tmp_path / "artifacts"
         answer("reference")
         answer("candidate")
         return [{"suite": "geneval", "source": "absolute", "status": "pass"}]
@@ -256,6 +428,8 @@ def test_qualification_runs_only_quality_workloads_for_absolute_and_media_models
     assert result["verdict"]["acc"] == "pass" and result["verdict"]["perf"] != "error"
     assert result["performance_source"] == "quality" and not result["performance"][0]["gate"]
     assert result["provenance"]["timed_requests"] == []
+    assert (tmp_path / "model.json").is_file() and not (tmp_path / "artifacts/model.json").exists()
+    assert (tmp_path / "report.json").is_file() and (tmp_path / "execution.jsonl").is_file()
 
 
 def test_quality_measurement_verdict_does_not_claim_repeated_performance_gate(tmp_path):
@@ -268,7 +442,8 @@ def test_quality_measurement_verdict_does_not_claim_repeated_performance_gate(tm
     result = judge.verdict(base, expected_suites=["evaluation"], expected_modes=0)
     assert result == {"acc": "pass", "perf": "measured", "lights": {}, "category": "measured"}
     item["complete"] = False
-    assert judge.verdict(base, expected_suites=["evaluation"], expected_modes=0)["category"] == "error"
+    partial = judge.verdict(base, expected_suites=["evaluation"], expected_modes=0)
+    assert partial["perf"] == "partial" and partial["category"] == "measured"
     item["complete"] = True
     base["accuracy"].append({"suite": "another-required-dataset", "source": "absolute", "status": "pass"})
     assert judge.verdict(base, expected_suites=["evaluation"], expected_modes=0)["perf"] == "error"

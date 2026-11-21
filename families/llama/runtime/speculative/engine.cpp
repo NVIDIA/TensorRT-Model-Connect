@@ -204,7 +204,8 @@ Engine::Engine(std::unique_ptr<ITrtModule> module, Contract contract,
 
 StepResult Engine::run(Phase phase, const std::vector<std::int32_t>& tokens, int start,
                        const std::vector<std::int32_t>& parents, bool all_logits,
-                       FeatureView target_features, FeatureView draft_features) {
+                       FeatureView target_features, FeatureView draft_features,
+                       bool collect_logits) {
     const auto& c = contract_;
     if (device_bound_) {
         // Restore owned maximum-sized inputs before a host call. Borrowed
@@ -305,6 +306,14 @@ StepResult Engine::run(Phase phase, const std::vector<std::int32_t>& tokens, int
     checked(cudaStreamSynchronize(selection_->stream()));
     std::copy_n(static_cast<const std::int32_t*>(selection_host_.get()), result.selection.size(),
                 result.selection.begin());
+    if (collect_logits) {
+        require(selected.size() == 1, "host sampling requires one selected target row");
+        result.logits.resize(c.vocab);
+        checked(cudaMemcpyAsync(result.logits.data(), module->device_ptr("logits"),
+                                result.logits.size() * sizeof(float), cudaMemcpyDeviceToHost,
+                                module->stream()));
+        module->sync();
+    }
     result.features = {static_cast<const std::uint16_t*>(module->device_ptr("features")), rows,
                        c.draft ? c.hidden : c.feature_width};
     return result;
@@ -413,4 +422,10 @@ std::int32_t StepResult::token(int row, int rank) const {
     require(id >= 0 && id < vocab, "selected token outside vocabulary");
     return id;
 }
+std::int32_t StepResult::sample(LlamaISampler& sampler, const LlamaSamplingParams& params) const {
+    token(); // Validate the selector's finite-logits status before sampling.
+    require(logits.size() == static_cast<std::size_t>(vocab), "missing sampled target logits");
+    return sampler.sample(logits.data(), vocab, params).token_id;
+}
+
 } // namespace trtmc::llama::speculative

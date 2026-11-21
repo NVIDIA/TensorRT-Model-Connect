@@ -40,6 +40,7 @@ def build_encoder_engine(
     max_seq_length: int,
     *,
     precision: str = "fp32",
+    quant_ctx=None,
     verbose: bool = False,
 ) -> bytes:
     """Build a TRT engine plan for a BERT-style encoder.
@@ -49,6 +50,8 @@ def build_encoder_engine(
         weights: Loaded weight dict from BERT plugin.
         max_seq_length: Maximum sequence length the engine is compiled for.
         precision: TensorRT graph precision.
+        quant_ctx: Optional FP8 context (``quantization.RobertaQuantContext``);
+            fp16 precision only.
         verbose: Print TRT builder logs.
 
     Returns:
@@ -73,12 +76,14 @@ def build_encoder_engine(
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
     elif precision == "bf16":
-        work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
+        work_np_dtype, work_trt_dtype = np.float32, trt.bfloat16
     elif precision == "fp32":
         work_np_dtype, work_trt_dtype = np.float32, trt.float32
         requested_fp32_layers = frozenset()
     else:
         raise ValueError(f"Unsupported BERT precision: {precision}")
+    if quant_ctx is not None and precision != "fp16":
+        raise ValueError(f"RoBERTa FP8 needs precision fp16, got {precision!r}")
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -88,6 +93,14 @@ def build_encoder_engine(
     # Disable TF32 to ensure full FP32 precision. TF32 uses 10-bit mantissa
     # which causes significant accuracy loss across 12+ encoder layers.
     trt_config.clear_flag(trt.BuilderFlag.TF32)
+    if quant_ctx is not None:
+        quant_ctx.configure_build(trt_config)
+
+    def work_constant(shape, values):
+        tensor = graph_ops.add_constant(network, shape, values, dtype=work_np_dtype)
+        if tensor.dtype != work_trt_dtype:
+            tensor = network.add_cast(tensor, work_trt_dtype).get_output(0)
+        return tensor
 
     # Resolve GELU variant from config
     hidden_act = config.hidden_act or config.raw.get("activation", "") or "gelu"
@@ -108,35 +121,26 @@ def build_encoder_engine(
     # Shared constants (support embedding factorization: embedding_size != hidden)
     # -------------------------------------------------------------------
     embedding_size = weights["embedding"].shape[1]  # may differ from hidden (e.g. ALBERT 128 vs 768)
-    embedding_table = graph_ops.add_constant(
-        network, weights["embedding"].shape, weights["embedding"],
-        dtype=work_np_dtype)
-    position_embed_table = graph_ops.add_constant(
-        network, weights["position_embedding"].shape,
-        weights["position_embedding"], dtype=work_np_dtype)
-    token_type_table = graph_ops.add_constant(
-        network, (type_vocab_size, embedding_size),
-        weights["token_type_embedding"], dtype=work_np_dtype)
+    embedding_table = work_constant(
+        weights["embedding"].shape, weights["embedding"])
+    position_embed_table = work_constant(
+        weights["position_embedding"].shape, weights["position_embedding"])
+    token_type_table = work_constant(
+        (type_vocab_size, embedding_size), weights["token_type_embedding"])
 
     graph_ops.add_constant(
         network, (1, 1), np.array([eps], dtype=work_np_dtype),
         dtype=work_np_dtype)
-    attn_scale_tensor = graph_ops.add_constant(
-        network, (1, 1, 1),
-        np.array([1.0 / np.sqrt(max(head_dim, 1))], dtype=work_np_dtype),
-        dtype=work_np_dtype)
+    attn_scale_tensor = work_constant(
+        (1, 1, 1), np.array([1.0 / np.sqrt(max(head_dim, 1))], dtype=work_np_dtype))
 
     # Build additive attention mask from attention_mask input:
     # attention_mask is [seq_len] with 1=real, 0=padding.
     # Convert to [1, 1, seq_len] additive mask: 0.0 for real, -1e10 for padding.
     mask_float = network.add_cast(attention_mask_input, work_trt_dtype)
-    ones_mask = graph_ops.add_constant(
-        network, (1,), np.array([1.0], dtype=work_np_dtype),
-        dtype=work_np_dtype)
+    ones_mask = work_constant((1,), np.array([1.0], dtype=work_np_dtype))
     mask_penalty = -1e4 if precision in {"fp16", "bf16"} else -1e10
-    neg_large = graph_ops.add_constant(
-        network, (1,), np.array([mask_penalty], dtype=work_np_dtype),
-        dtype=work_np_dtype)
+    neg_large = work_constant((1,), np.array([mask_penalty], dtype=work_np_dtype))
     inv_mask = network.add_elementwise(
         ones_mask, mask_float.get_output(0),
         trt.ElementWiseOperation.SUB)  # 0 for real, 1 for pad
@@ -191,8 +195,7 @@ def build_encoder_engine(
     if "relative_position_bias" in weights:
         # Pre-computed [num_heads, seq_len, seq_len] bias matrix
         rpb = weights["relative_position_bias"]
-        rel_pos_bias_tensor = graph_ops.add_constant(
-            network, rpb.shape, rpb, dtype=work_np_dtype)
+        rel_pos_bias_tensor = work_constant(rpb.shape, rpb)
 
     # -------------------------------------------------------------------
     # Encoder layers
@@ -224,6 +227,7 @@ def build_encoder_engine(
             hidden_act=hidden_act,
             eps=eps,
             dtype=layer_np_dtype,
+            quant_ctx=quant_ctx,
         )
         if hidden_state.dtype != work_trt_dtype:
             hidden_state = network.add_cast(
@@ -275,6 +279,24 @@ def _add_seq_layer_norm(
         network, inp, hidden_size, gamma, beta, eps, dtype=dtype)
 
 
+def _quantized_input(network, activation, quant_ctx, modules):
+    """Shared Quantize/Dequantize of the input of ``modules``, or None when all stay 16-bit."""
+    if quant_ctx is None:
+        return None
+    return quant_ctx.quantize_input(network, activation, modules)
+
+
+def _projection(
+    network, activation, dequantized, in_width, out_width, weight, *, dtype,
+    quant_ctx, module,
+):
+    """``activation @ weight``; FP8 when ``module`` is quantized and has a Q/DQ input."""
+    if dequantized is None or not quant_ctx.should_quantize(module):
+        return graph_ops.add_matmul_rhs_constant(
+            network, activation, in_width, out_width, weight, dtype=dtype)
+    return quant_ctx.matmul(network, dequantized, module)
+
+
 def _add_encoder_layer(
     *,
     network: trt.INetworkDefinition,
@@ -292,6 +314,7 @@ def _add_encoder_layer(
     hidden_act: str = "gelu",
     eps: float,
     dtype: np.dtype = np.float32,
+    quant_ctx=None,
 ) -> trt.ITensor:
     """Add one BERT encoder layer with POST-norm.
 
@@ -304,16 +327,17 @@ def _add_encoder_layer(
     attention_size = num_heads * head_dim
 
     # --- Self-attention (no causal mask, bidirectional) ---
-    # QKV projections
-    q = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, attention_size,
-        weights[f"{prefix}.w_q"], dtype=dtype)
-    k = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, attention_size,
-        weights[f"{prefix}.w_k"], dtype=dtype)
-    v = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, attention_size,
-        weights[f"{prefix}.w_v"], dtype=dtype)
+    # QKV projections (FP8 when quant_ctx quantizes them; one shared input Q/DQ)
+    qkv_modules = tuple(
+        f"{prefix}.attention.self.{name}" for name in ("query", "key", "value"))
+    qkv_input = _quantized_input(network, hidden, quant_ctx, qkv_modules)
+    q, k, v = (
+        _projection(
+            network, hidden, qkv_input, hidden_size, attention_size,
+            weights[f"{prefix}.w_{part}"], dtype=dtype, quant_ctx=quant_ctx,
+            module=module)
+        for part, module in zip("qkv", qkv_modules)
+    )
 
     # QKV biases
     q = graph_ops.add_bias_sum(
@@ -363,16 +387,22 @@ def _add_encoder_layer(
         weights[f"{prefix}.post_attn_norm_beta"], eps, dtype=dtype)
 
     # --- FFN: fc1 -> GELU -> fc2 ---
-    fc1 = graph_ops.add_matmul_rhs_constant(
-        network, normed1, hidden_size, intermediate_size,
-        weights[f"{prefix}.w_fc1"], dtype=dtype)
+    fc1_module = f"{prefix}.intermediate.dense"
+    fc1 = _projection(
+        network, normed1,
+        _quantized_input(network, normed1, quant_ctx, (fc1_module,)),
+        hidden_size, intermediate_size, weights[f"{prefix}.w_fc1"],
+        dtype=dtype, quant_ctx=quant_ctx, module=fc1_module)
     fc1 = graph_ops.add_bias_sum(network, fc1, intermediate_size,
                                   weights[f"{prefix}.fc1_bias"], dtype=dtype)
     activated = graph_ops.add_activation(
         network, fc1, hidden_act, dtype=dtype)
-    fc2 = graph_ops.add_matmul_rhs_constant(
-        network, activated, intermediate_size, hidden_size,
-        weights[f"{prefix}.w_fc2"], dtype=dtype)
+    fc2_module = f"{prefix}.output.dense"
+    fc2 = _projection(
+        network, activated,
+        _quantized_input(network, activated, quant_ctx, (fc2_module,)),
+        intermediate_size, hidden_size, weights[f"{prefix}.w_fc2"],
+        dtype=dtype, quant_ctx=quant_ctx, module=fc2_module)
     fc2 = graph_ops.add_bias_sum(network, fc2, hidden_size,
                                   weights[f"{prefix}.fc2_bias"], dtype=dtype)
 

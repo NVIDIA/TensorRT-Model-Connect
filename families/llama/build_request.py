@@ -35,11 +35,12 @@ class BuildRequest:
     max_batch_size: ClassVar[int] = 1
     tensor_parallel_size: int = 1
     context_parallel_size: ClassVar[int] = 1
-    quantization: ClassVar[str | None] = None
     fp32_layers: tuple[int, ...] = ()
     dynamic_kv_cache: bool = False
+    mtp_seq_len: ClassVar[int | None] = None
     verbose: bool = False
     graph_transform: GraphTransform | None = None
+    quantization: str | None = None
 
     def __post_init__(self) -> None:
         if not self.precision:
@@ -75,17 +76,15 @@ def coerce_request(request: object) -> BuildRequest:
     if isinstance(request, BuildRequest):
         return request
     unsupported = {
+        "mtp_seq_len": None,
         "image_height": None,
         "image_width": None,
         "video_num_frames": None,
         "max_batch_size": 1,
         "context_parallel_size": 1,
-        "quantization": None,
     }
     for name, default in unsupported.items():
         value = getattr(request, name, default)
-        if name == "quantization" and value == "none":
-            continue
         if value != default:
             raise NotImplementedError(f"llama does not support {name}")
     names = {field.name for field in fields(BuildRequest)}

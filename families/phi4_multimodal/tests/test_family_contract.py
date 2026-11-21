@@ -214,7 +214,11 @@ def test_phi4_siglip_attention_preserves_fp16_score_boundaries(monkeypatch) -> N
     )
 
     assert accumulation_calls == [(half, half), (half, half)]
-    assert elementwise_dtypes[0] == (half, half)
+    # Eager scales FP16 scores by a Python float in FP32; the mask add is FP16.
+    assert elementwise_dtypes == [
+        (module.trt.float32, module.trt.float32),
+        (half, half),
+    ]
     assert output.dtype == half
 
 
@@ -311,6 +315,57 @@ def test_longrope_table_applies_frequency_and_attention_factors() -> None:
         1.5 * np.cos(np.array([0.5, 0.25])),
         rtol=1e-6,
     )
+
+
+def _longrope_config(**overrides) -> dict:
+    config = {
+        "max_position_embeddings": 16,
+        "original_max_position_embeddings": 4,
+        "rope_scaling": {
+            "type": "longrope",
+            "short_factor": [1.0, 1.0],
+            "long_factor": [2.0, 4.0],
+        },
+    }
+    config.update(overrides)
+    return config
+
+
+def test_longrope_tables_hold_both_regimes_beyond_the_original_length() -> None:
+    from families.phi4_multimodal import graph_ops
+
+    config = _longrope_config()
+    cos, sin, threshold = graph_ops.make_rope_half_tables(config, 6, 4, 10.0)
+    attention = np.sqrt(1.0 + np.log(4.0) / np.log(4.0))
+
+    assert threshold == 4
+    assert cos.shape == sin.shape == (12, 2)
+    for cosine, table in ((True, cos), (False, sin)):
+        for rows, factors in ((slice(0, 6), [1.0, 1.0]), (slice(6, 12), [2.0, 4.0])):
+            np.testing.assert_array_equal(table[rows], graph_ops.make_rope_table_half_dim(
+                6, 4, 10.0, cosine, frequency_factors=factors,
+                attention_factor=attention))
+    assert graph_ops.longrope_regime_threshold(config) == 4
+
+
+def test_longrope_tables_keep_one_regime_when_it_cannot_change() -> None:
+    from families.phi4_multimodal import graph_ops
+
+    short_only = graph_ops.make_rope_half_tables(_longrope_config(), 4, 4, 10.0)
+    assert short_only[0].shape == (4, 2) and short_only[2] == 0
+    np.testing.assert_array_equal(short_only[0], graph_ops.make_rope_table_half_dim(
+        4, 4, 10.0, True, frequency_factors=[1.0, 1.0],
+        attention_factor=np.sqrt(2.0)))
+
+    same = _longrope_config(rope_scaling={
+        "type": "longrope", "short_factor": [2.0, 4.0], "long_factor": [2.0, 4.0]})
+    assert graph_ops.make_rope_half_tables(same, 6, 4, 10.0)[0].shape == (6, 2)
+    assert graph_ops.longrope_regime_threshold(same) == 0
+
+    plain = graph_ops.make_rope_half_tables({}, 6, 4, 10.0)
+    assert plain[2] == 0
+    np.testing.assert_array_equal(
+        plain[0], graph_ops.make_rope_table_half_dim(6, 4, 10.0, True))
 
 
 class TestPhi4MultimodalModel:

@@ -1,0 +1,20 @@
+{
+  "name": "all-mpnet-base-v2-fp8",
+  "hf_id": "sentence-transformers/all-mpnet-base-v2",
+  "hf_revision": "e8c3b32edf5434bc2275fc9bab85f82640a19130",
+  "bundle": "all-mpnet-base-v2-fp8.bundle",
+  "family": "mpnet",
+  "task": "text_to_pooled_features",
+  "precision": "fp16",
+  "quantization": "fp8",
+  "testcases": [
+    {
+      "name": "all-mpnet-base-v2-fp8",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "This is an example sentence for embedding."
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 384
+}

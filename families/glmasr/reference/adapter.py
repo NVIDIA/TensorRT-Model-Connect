@@ -25,8 +25,8 @@ class Adapter:
 
         self.spec = spec
         self.processor = GlmAsrProcessor.from_pretrained(spec.model, **spec.pretrained_kwargs())
-        self.model = GlmAsrForConditionalGeneration.from_pretrained(
-            spec.model, dtype=spec.dtype, **spec.pretrained_kwargs()).to(spec.device).eval()
+        self.model = host.maybe_compile(GlmAsrForConditionalGeneration.from_pretrained(
+            spec.model, dtype=spec.dtype, **spec.pretrained_kwargs()).to(spec.device).eval(), spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         audio = self.host.load_audio(str(self.host.required(request, "audio_path")), SAMPLE_RATE)
@@ -44,5 +44,5 @@ class Adapter:
         text = self.processor.tokenizer.decode(token_ids, skip_special_tokens=True).strip()
         seconds = len(audio) / SAMPLE_RATE
         return self.host.invocation({"text": text, "token_ids": token_ids, "output_tokens": len(token_ids),
-                                     "input_audio_seconds": seconds}, model_ms,
+                                     "prompt_tokens": prompt_tokens, "input_audio_seconds": seconds}, model_ms,
                                     realtime_factor=seconds / (model_ms / 1000.0))

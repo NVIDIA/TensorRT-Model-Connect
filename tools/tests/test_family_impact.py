@@ -44,20 +44,6 @@ def test_family_requirements_select_only_the_owner(tmp_path: Path) -> None:
     assert impact.families == ("alpha",)
 
 
-def test_release_performance_policy_does_not_expand_family_scope(tmp_path: Path) -> None:
-    repo = _repo(tmp_path)
-    impact = test_impact.classify(
-        repo,
-        [
-            "qualification_tests/benchmark_qualification/performance/config/release.yaml",
-            "families/alpha/model.py",
-        ],
-    )
-
-    assert impact.scope == "families"
-    assert impact.families == ("alpha",)
-
-
 def test_base_requirements_select_all_families(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     impact = test_impact.classify(repo, ["requirements/base.txt"])
@@ -99,7 +85,6 @@ def test_families_package_selects_all_directly(tmp_path: Path) -> None:
     [
         ".coderabbit.yaml",
         ".gitignore",
-        "ASSET_LICENSES.md",
         "examples/removed.py",
         "plugins/removed/SKILL.md",
         "requirements/community-ci.txt",
@@ -117,6 +102,21 @@ def test_docs_do_not_select_model_proofs(tmp_path: Path) -> None:
     impact = test_impact.classify(_repo(tmp_path), ["website/docs/architecture/overview.md"])
     assert impact.scope == "docs"
     assert impact.families == ()
+    assert impact.run_docs is True
+
+
+def test_asset_license_record_selects_only_the_fixture_owner(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    alone = test_impact.classify(repo, ["ASSET_LICENSES.md"])
+    assert alone.scope == "docs"
+    assert alone.families == ()
+
+    impact = test_impact.classify(
+        repo,
+        ["ASSET_LICENSES.md", "families/alpha/tests/data/frame.png"],
+    )
+    assert impact.scope == "families"
+    assert impact.families == ("alpha",)
     assert impact.run_docs is True
 
 

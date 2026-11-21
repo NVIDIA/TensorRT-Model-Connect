@@ -22,7 +22,7 @@ class ITokenizer {
     virtual std::string token_for_id(std::int32_t id) const = 0;
 };
 
-void k2_horizon_uno_require_ascii_tokenizer_input(std::string_view text);
+std::vector<std::string> k2_horizon_uno_pre_tokenize(std::string_view text);
 std::string k2_horizon_uno_utf8_lossy(std::string_view bytes);
 
 std::unique_ptr<ITokenizer> CreateK2HorizonUnoBpeTokenizer(const char* tokenizer_json_data,

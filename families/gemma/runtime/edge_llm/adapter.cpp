@@ -4,7 +4,7 @@
  */
 #include "families/gemma/runtime/edge_llm/adapter.h"
 
-#include "families/gemma/runtime/edge_llm/request.h"
+#include "families/gemma/runtime/edge_llm/media.h"
 
 #include <NvInferRuntime.h>
 #include <algorithm>
@@ -16,6 +16,7 @@
 #include <edgellm/cpp/runtime/streaming.h>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -79,17 +80,34 @@ class Artifacts {
                 !bundle.find_section(name))
                 throw std::runtime_error("Invalid Gemma4 Edge artifact: " + name);
         }
-        std::vector<std::string> required_files{"edge_llm/engine/tokenizer.json",
-                                                "edge_llm/engine/tokenizer_config.json",
-                                                "edge_llm/engine/processed_chat_template.json",
-                                                "edge_llm/engine/embedding.safetensors",
-                                                "edge_llm/engine/spec_base.engine",
-                                                "edge_llm/engine/spec_draft.engine",
-                                                "edge_llm/engine/base_config.json",
-                                                "edge_llm/engine/draft_config.json"};
+        std::vector<std::string> required_files{
+            "edge_llm/engine/tokenizer.json", "edge_llm/engine/tokenizer_config.json",
+            "edge_llm/engine/chat_template.jinja", "edge_llm/engine/embedding.safetensors"};
+        auto require = [&](const char* name) {
+            required_files.push_back(std::string("edge_llm/engine/") + name);
+        };
+        if (marker.at("execution_variant") == "autoregressive") {
+            require("llm.engine");
+            require("config.json");
+            if (marker.value("ple", false))
+                require("ple_embedding.safetensors");
+            if (marker.value("vision", false)) {
+                require("visual/visual.engine");
+                require("visual/config.json");
+            }
+            if (marker.value("audio", false)) {
+                require("audio/audio_encoder.engine");
+                require("audio/config.json");
+            }
+        } else {
+            require("spec_base.engine");
+            require("spec_draft.engine");
+            require("base_config.json");
+            require("draft_config.json");
+        }
         if (marker.at("execution_variant") == "dspark") {
-            required_files.push_back("edge_llm/engine/dspark_heads.safetensors");
-            required_files.push_back("edge_llm/engine/dspark_heads_info.json");
+            require("dspark_heads.safetensors");
+            require("dspark_heads_info.json");
         }
         for (const auto& required : required_files)
             if (!names.count(required) || bundle.find_section(required)->length == 0)
@@ -136,6 +154,11 @@ struct CloseLibrary {
 
 /// Initialize the CMake-installed adjacent plugin without process-global environment mutation.
 std::unique_ptr<void, CloseLibrary> load_plugin() {
+    // Edge INFO goes to stdout. Keep the public CLI result channel machine-readable;
+    // upstream warnings and errors continue to stderr.
+    static std::once_flag logging;
+    std::call_once(logging,
+                   [] { trt_edgellm::gLogger.setLevel(nvinfer1::ILogger::Severity::kWARNING); });
     Dl_info location{};
     if (!dladdr(reinterpret_cast<void*>(&create), &location) || !location.dli_fname)
         throw std::runtime_error("Cannot locate Gemma4 family library");
@@ -166,13 +189,26 @@ class Stream {
     cudaStream_t value_{nullptr};
 };
 
-/// Delegate the complete assistant MTP algorithm to the original Edge runtime.
+/// Delegate the complete speculative algorithm to the original Edge runtime.
 std::unique_ptr<trt_edgellm::rt::LLMInferenceRuntime>
-make_runtime(const Artifacts& artifacts, cudaStream_t stream, bool dspark) {
+make_runtime(const Artifacts& artifacts, cudaStream_t stream, const nlohmann::json& marker) {
+    const bool standalone = marker.at("execution_variant") == "autoregressive";
+    const bool dspark = marker.at("execution_variant") == "dspark";
+    const bool eagle3 = marker.at("execution_variant") == "eagle3";
+    const bool dflash = marker.at("execution_variant") == "dflash";
+    const bool media = marker.value("vision", false) || marker.value("audio", false);
+    if (standalone)
+        return std::make_unique<trt_edgellm::rt::LLMInferenceRuntime>(
+            artifacts.engine(), media ? artifacts.engine() : "",
+            std::unordered_map<std::string, std::string>{}, stream,
+            trt_edgellm::rt::ContextCacheConfig{});
     trt_edgellm::rt::SpecDecodeDraftingConfig drafting{};
-    drafting.draftingTopK = 1;
-    drafting.draftingStep = dspark ? 1 : 3;
-    drafting.verifySize = dspark ? 8 : 4;
+    drafting.draftingTopK = eagle3 ? 10 : 1;
+    drafting.draftingStep = eagle3 ? 6 : (dspark || dflash) ? 1 : 3;
+    drafting.verifySize = dflash   ? marker.at("verify_size").get<int>()
+                          : eagle3 ? 60
+                          : dspark ? 8
+                                   : 4;
     drafting.dsparkSchedulerMode = trt_edgellm::rt::DSparkSchedulerMode::kOff;
     return std::make_unique<trt_edgellm::rt::LLMInferenceRuntime>(
         artifacts.engine(), "", std::unordered_map<std::string, std::string>{}, drafting, stream,
@@ -180,29 +216,106 @@ make_runtime(const Artifacts& artifacts, cudaStream_t stream, bool dspark) {
 }
 
 /// Thin persistent Edge API adapter; serialization prevents concurrent use of Edge request state.
-class EdgeTask final : public ITextGeneration {
+class EdgeTask final : public ITextGeneration,
+                       public api::IModel,
+                       public api::ITextContinuation,
+                       public api::IImagesTextToText,
+                       public api::IAudioTextToText,
+                       public api::IImageAudioTextToText {
   public:
     EdgeTask(const BundleReader& bundle, const nlohmann::json& marker)
         : artifacts_(bundle, marker), plugin_(load_plugin()),
-          runtime_(
-              make_runtime(artifacts_, stream_.get(), marker.at("execution_variant") == "dspark")),
+          runtime_(make_runtime(artifacts_, stream_.get(), marker)),
           capacity_(marker.at("max_sequence_length").get<int>()),
           input_limit_(marker.at("max_input_length").get<int>()),
-          dspark_(marker.at("execution_variant") == "dspark") {}
+          sampling_(allows_sampling(marker.at("execution_variant").get<std::string>())),
+          sampled_vanilla_(
+              sampling_uses_vanilla(marker.at("execution_variant").get<std::string>())),
+          headroom_(marker.at("execution_variant") == "autoregressive" ? 1
+                    : marker.at("execution_variant") == "dflash"
+                        ? marker.at("verify_size").get<int>()
+                    : marker.at("execution_variant") == "eagle3" ? 60
+                    : marker.at("execution_variant") == "dspark" ? 8
+                                                                 : 4),
+          vision_(marker.value("vision", false)), audio_(marker.value("audio", false)),
+          primary_(marker.value("task", "text_generation")) {}
 
-    std::int32_t default_max_new_tokens() const override { return std::min(128, capacity_ - 1); }
+    const char* task() const noexcept override { return primary_.c_str(); }
+
+    std::vector<api::TaskInstance> task_bindings() override {
+        std::vector<api::TaskInstance> bindings{
+            api::bind<api::ITextContinuation>(*this, fields(false))};
+        if (vision_)
+            bindings.push_back(api::bind<api::IImagesTextToText>(*this, fields(true)));
+        if (audio_)
+            bindings.push_back(api::bind<api::IAudioTextToText>(*this, fields(true)));
+        if (vision_ && audio_)
+            bindings.push_back(api::bind<api::IImageAudioTextToText>(*this, fields(true)));
+        return bindings;
+    }
+
+    TextResult run(const api::TextContinuationRequest& input, api::ConfigView supplied) override {
+        const auto* text = std::get_if<std::string_view>(&input.prefix);
+        if (!text)
+            throw std::invalid_argument("Gemma4 Edge currently accepts UTF-8 text prefixes only");
+        return generate(std::string(*text),
+                        generation_config(supplied, false, default_max_new_tokens()));
+    }
+
+    TextResult run(const api::ImagesTextToTextRequest& input, api::ConfigView config) override {
+        if (!input.tools.empty())
+            throw std::invalid_argument("Gemma4 media does not map tools");
+        return generate_media(input.messages, config);
+    }
+    TextResult run(const api::AudioTextToTextRequest& input, api::ConfigView config) override {
+        return generate_media(input.messages, config);
+    }
+    TextResult run(const api::ImageAudioTextToTextRequest& input, api::ConfigView config) override {
+        return generate_media(input.messages, config);
+    }
+
+    std::int32_t default_max_new_tokens() const override {
+        return std::min(128, capacity_ - headroom_ - 1);
+    }
 
     /// Drain work from failed requests before destroying the runtime and its weight buffers.
     ~EdgeTask() override { cudaStreamSynchronize(stream_.get()); }
 
     /// Invoke Edge once; failures propagate without attempting native inference.
     TextResult generate(const std::string& prompt, const TextGenerationConfig& config) override {
-        auto request = make_request(prompt, config, default_max_new_tokens(), dspark_);
+        if (sampled_vanilla_ && config.temperature > 0 && config.top_k != 1)
+            std::cerr
+                << "Warning: Gemma Edge 0.11 uses vanilla fallback for this sampled speculative "
+                   "request; speculative activity is not qualified. Sampling controls "
+                   "are forwarded unchanged.\n";
+        return execute(make_request(prompt, config, default_max_new_tokens(), sampling_));
+    }
+
+  private:
+    template <class Part>
+    TextResult generate_media(Span<const api::MediaMessage<Part>> messages,
+                              api::ConfigView supplied) {
+        const auto config = generation_config(supplied, true, default_max_new_tokens());
+        return execute(media_request(messages, config, default_max_new_tokens(), vision_, audio_));
+    }
+
+    TextResult execute(trt_edgellm::rt::LLMGenerationRequest request) {
         std::lock_guard<std::mutex> lock(mutex_);
-        const auto counts = runtime_->countPromptTokens(request);
-        if (counts.size() != 1)
-            throw std::runtime_error("Gemma4 Edge returned invalid prompt counts");
-        validate_capacity(counts.front(), input_limit_, capacity_, request.maxGenerateLength);
+        const auto& item = request.requests.front();
+        if (item.imageBuffers.empty() && item.audioBuffers.empty()) {
+            const auto counts = runtime_->countPromptTokens(request);
+            if (counts.size() != 1)
+                throw std::runtime_error("Gemma4 Edge returned invalid prompt counts");
+            validate_capacity(counts.front(), input_limit_, capacity_ - headroom_,
+                              request.maxGenerateLength);
+        } else {
+            // Edge 0.11 cannot count media tokens without executing preprocessing.
+            // Reserve the entire input profile plus decode lookahead. Edge rejects
+            // expanded prefills exceeding that profile; it cannot silently clip an
+            // accepted request's generation budget under this conservative bound.
+            validate_capacity(input_limit_, input_limit_, capacity_ - headroom_,
+                              request.maxGenerateLength);
+        }
         trt_edgellm::rt::LLMGenerationResponse response{};
         // Complete queued work before response/request storage is destroyed,
         // including exception paths in a persistent task.
@@ -231,7 +344,12 @@ class EdgeTask final : public ITextGeneration {
     std::unique_ptr<trt_edgellm::rt::LLMInferenceRuntime> runtime_;
     int capacity_;
     int input_limit_;
-    bool dspark_;
+    bool sampling_;
+    bool sampled_vanilla_;
+    int headroom_;
+    bool vision_;
+    bool audio_;
+    std::string primary_;
     std::mutex mutex_;
 };
 } // namespace
@@ -240,16 +358,33 @@ ITask* create(const BundleReader& bundle) {
     const auto bytes = bundle.read_section("edge_llm.json");
     const auto marker = nlohmann::json::parse(bytes.begin(), bytes.end());
     if (marker.at("version") != 1 || marker.at("edge_revision") != kRevision ||
-        marker.at("max_sequence_length").get<int>() <= 1 ||
+        marker.at("max_sequence_length").get<int>() <= 2 ||
         marker.at("max_input_length").get<int>() <= 0 ||
         marker.at("max_input_length").get<int>() > marker.at("max_sequence_length").get<int>() ||
         marker.at("max_batch_size") != 1 || marker.at("precision") != "fp16" ||
         !marker.at("artifacts").is_array())
         throw std::runtime_error("Invalid Gemma4 Edge bundle contract");
     if ((marker.value("execution_variant", "") != "mtp" &&
-         marker.value("execution_variant", "") != "dspark") ||
+         marker.value("execution_variant", "") != "dspark" &&
+         marker.value("execution_variant", "") != "eagle3" &&
+         marker.value("execution_variant", "") != "dflash" &&
+         marker.value("execution_variant", "") != "autoregressive") ||
         marker.value("builder_flow", "") != "onnx")
-        throw std::runtime_error("Gemma4 requires a paired MTP or DSpark ONNX contract");
+        throw std::runtime_error(
+            "Gemma4 requires an autoregressive, MTP, DSpark, EAGLE3 or DFlash ONNX contract");
+    if (marker.at("execution_variant") == "dflash" &&
+        (marker.value("verify_size", 0) != 7 && marker.value("verify_size", 0) != 16))
+        throw std::runtime_error("Invalid Gemma4 DFlash block-size contract");
+    const auto primary = marker.value("task", "text_generation");
+    if (primary != "text_generation" && primary != "text_continuation" &&
+        !(primary == "images_text_to_text" && marker.value("vision", false)) &&
+        !(primary == "audio_text_to_text" && marker.value("audio", false)) &&
+        !(primary == "image_audio_text_to_text" && marker.value("vision", false) &&
+          marker.value("audio", false)))
+        throw std::runtime_error("Gemma4 bundle primary task does not match its components");
+    if (marker.at("execution_variant") != "autoregressive" &&
+        (marker.value("vision", false) || marker.value("audio", false)))
+        throw std::runtime_error("Gemma4 paired media execution is not mapped");
     validate_target(marker.at("target"));
     return new EdgeTask(bundle, marker);
 }

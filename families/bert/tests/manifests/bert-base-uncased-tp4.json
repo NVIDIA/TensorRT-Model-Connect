@@ -1,6 +1,7 @@
 {
   "name": "bert-base-uncased-tp4",
   "hf_id": "google-bert/bert-base-uncased",
+  "hf_revision": "86b5e0934494bd15c9632b12f734a8a67f723594",
   "bundle": "bert-base-uncased-tp4.bundle",
   "family": "bert",
   "task": "encoding",

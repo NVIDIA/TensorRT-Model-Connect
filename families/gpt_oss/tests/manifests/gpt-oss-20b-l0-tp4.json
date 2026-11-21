@@ -1,6 +1,7 @@
 {
   "name": "gpt-oss-20b-l0-tp4",
   "hf_id": "openai/gpt-oss-20b",
+  "hf_revision": "6cee5e81ee83917806bbde320786a8fb61efebee",
   "bundle": "gpt-oss-20b-l0-tp4.bundle",
   "family": "gpt_oss",
   "task": "text_generation",

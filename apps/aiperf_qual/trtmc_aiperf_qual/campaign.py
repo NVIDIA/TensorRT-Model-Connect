@@ -12,6 +12,7 @@ directory holds a final result is skipped unless ``rerun`` (the old directory is
 from __future__ import annotations
 
 import collections
+import copy
 import functools
 import hashlib
 import json
@@ -25,14 +26,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import bundles, retention
+from . import bundles, gold_metrics, retention
 from .bundles import prefetch
 from .config import Environment
-from .judge import QUALIFYING_MODE
+from .judge import qualifying
 from .models import checkpoints
 from .compat import report as normalized_report
 from .report import acc_value, plain
-from .services import reference_python
+from .services import platform_fingerprint, reference_python
 
 KEPT_ASIDE = re.compile(r"\.\d{10}$")  # <profile>.<unix time> of a previous run
 RUN_KEY = "run-key.txt"
@@ -165,14 +166,77 @@ def warm_selections(environment: Environment, model: Mapping[str, Any]) -> None:
                 pass
 
 
+def _sandbox_run_key(environment: Environment, model: Mapping[str, Any], out: Path, reason: str,
+                     blocked_by: str = "code_sandbox") -> str:
+    # Note (Jiaxin Deng): A blocked run must not prepare reference dependencies just to identify its result.
+    value = {"model": model, "harness": harness_digest(), "smoke": bool(environment.values.get("smoke")),
+             "blocked_by": blocked_by, "reason": reason,
+             "protected_roots": gold_metrics.protected_roots(environment.values, out)}
+    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _blocked_result(environment: Environment, model: Mapping[str, Any], out: Path, started: float,
+                    blocked_by: str, reason: str, key_reason: str | None = None) -> dict[str, Any]:
+    record = {"profile": model["model"], "task": model.get("task"), "category": "environment-blocked",
+              "failure_type": "environment", "blocked_by": blocked_by, "reason": reason,
+              "seconds": round(time.time() - started)}
+    key = _sandbox_run_key(environment, model, out, reason if key_reason is None else key_reason, blocked_by)
+    (out / RUN_KEY).write_text(key + "\n")
+    (out / "error.json").write_text(json.dumps(record, indent=2))
+    return record
+
+
+def _sandbox_blocked_result(environment: Environment, model: Mapping[str, Any], out: Path,
+                            started: float, error: gold_metrics.SandboxUnavailable) -> dict[str, Any]:
+    return _blocked_result(environment, model, out, started, "code_sandbox", _error(error), str(error))
+
+
+_GPU_ARCH: dict[str, str] = {}
+
+
+def device_capacity_limit(environment: Environment, model: Mapping[str, Any]) -> str | None:
+    """Why the serving GPU cannot hold the model: its ``capacity_limits`` entry for this GPU architecture, else
+    None. Only a model that declares limits reads the platform."""
+    limits = model.get("capacity_limits") or {}
+    if not limits:
+        return None
+    python = str(environment["serve_python"])
+    if python not in _GPU_ARCH:
+        _GPU_ARCH[python] = str(platform_fingerprint(environment)["fingerprint"].get("gpu_arch", "unknown"))
+    arch = _GPU_ARCH[python]
+    return f"device capacity ({arch}): {limits[arch]}" if arch in limits else None
+
+
+def _probe_capacity(environment: Environment, model: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """(capacity limit, probe failure): a platform probe that fails is the profile's error, never built past."""
+    try:
+        return device_capacity_limit(environment, model), None
+    except Exception as error:  # noqa: BLE001 - reported as the profile's result
+        return None, f"platform probe for capacity_limits failed: {_error(error)}"
+
+
 def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[str, Any]:
     """Build the bundle when missing, qualify, and apply the bundle retention policy. A previous run
     in ``out`` is set aside first."""
     started = time.time()
+    configured_model = model
+    model = copy.deepcopy(model)  # resolved build capacity must not mutate the caller's resume configuration
     set_aside(out)
     out.mkdir(parents=True, exist_ok=True)
+    try:
+        gold_metrics.preflight_code_sandbox(model, environment.values, out)
+    except gold_metrics.SandboxUnavailable as error:
+        return _sandbox_blocked_result(environment, configured_model, out, started, error)
+    limit, probe_error = _probe_capacity(environment, model)  # before any download or build
+    if probe_error:
+        record = {"profile": model["model"], "task": model.get("task"), "category": "error", "reason": probe_error,
+                  "seconds": round(time.time() - started)}
+        (out / "error.json").write_text(json.dumps(record, indent=2))
+        return record
+    if limit:
+        return _blocked_result(environment, configured_model, out, started, "device_capacity", limit)
     (out / RUN_KEY).write_text(run_key(environment, model) + "\n")
-    bundle_policy, _ = retention.policies(environment)
+    bundle_policy, hf_policy = retention.policies(environment)
     record: dict[str, Any] = {"profile": model["model"], "task": model.get("task")}
     with ThreadPoolExecutor(max_workers=1) as warm:
         warm.submit(warm_selections, environment, model)  # CPU work while the GPU builds
@@ -189,11 +253,25 @@ def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[
         try:
             verdict = qualify(model, environment, out)["verdict"]
             record.update(verdict)
+        except gold_metrics.SandboxUnavailable as error:
+            return _sandbox_blocked_result(environment, configured_model, out, started, error)
         except Exception as error:  # noqa: BLE001
             record.update(category="error", reason=_error(error))
             (out / "error.json").write_text(json.dumps({**record, "traceback": traceback.format_exc()}, indent=2))
-        if retention.should_delete_bundle(bundle_policy, record["category"], built=build.get("status") == "built"):
+        category = record["category"]
+        if category == "measured" and record.get("acc") == "pass" and record.get("perf") == "measured":
+            category = "pass"
+        if retention.should_delete_bundle(bundle_policy, category, built=build.get("status") == "built"):
             record["bundle_deleted"] = retention.delete_bundle(environment, model)
+    category = record["category"]
+    if category == "measured" and record.get("acc") == "pass" and record.get("perf") == "measured":
+        category = "pass"
+    cleanup = {"bundle_policy": bundle_policy, "hf_cache_policy": hf_policy,
+               "temporary_files": retention.cleanup_temporary(environment, out, category)}
+    if "bundle_deleted" in record:
+        cleanup["bundle"] = record["bundle_deleted"]
+    (out / "retention.json").write_text(json.dumps(cleanup, indent=2))
+    record["temporary_files"] = cleanup["temporary_files"]
     record["seconds"] = round(time.time() - started)
     return record
 
@@ -225,6 +303,9 @@ def _finished(out: Path, key: str | None = None) -> str | None:
         return json.loads(report.read_text()).get("verdict", {}).get("category")
     if build.is_file() and json.loads(build.read_text()).get("status") == "failed":
         return "build-failed"
+    error = out / "error.json"
+    if error.is_file() and json.loads(error.read_text()).get("category") == "environment-blocked":
+        return "environment-blocked"
     return None
 
 
@@ -235,23 +316,46 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
     _, hf_policy = retention.policies(environment)
     ordered = list(models) if keep_order else order(models)
     remaining = collections.Counter(repo for model in ordered for repo in checkpoints(model))
+    failed_checkpoints: set[str] = set()
     out_root.mkdir(parents=True, exist_ok=True)
     records = []
     with ThreadPoolExecutor(max_workers=1) as downloads, open(out_root / "campaign.jsonl", "a") as log:
         for index, model in enumerate(ordered):
             profile, out = model["model"], out_root / model["model"]
             if prefetch_next and index + 1 < len(ordered):
-                downloads.submit(prefetch, environment, ordered[index + 1])
+                following = ordered[index + 1]
+                try:
+                    gold_metrics.preflight_code_sandbox(following, environment.values, out_root / following["model"])
+                except gold_metrics.SandboxUnavailable:
+                    # Note (Jiaxin Deng): run_one records the blocked profile without speculative weight downloads.
+                    pass
+                else:
+                    if not any(_probe_capacity(environment, following)):  # blocked or unknown: no download
+                        downloads.submit(prefetch, environment, following)
             started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            finished = _finished(out, run_key(environment, model))
+            finished = None
+            if out.is_dir():
+                key = None
+                try:
+                    gold_metrics.preflight_code_sandbox(model, environment.values, out)
+                except gold_metrics.SandboxUnavailable as error:
+                    key = _sandbox_run_key(environment, model, out, str(error))
+                else:
+                    limit, probe_error = _probe_capacity(environment, model)
+                    if not probe_error:  # a failed probe leaves the profile unfinished: run_one records it
+                        key = (_sandbox_run_key(environment, model, out, limit, "device_capacity") if limit
+                               else run_key(environment, model))
+                finished = _finished(out, key) if key else None
             if finished and not rerun:
                 record = {"profile": profile, "status": "skipped", "category": finished}
             else:
                 set_aside(out)
                 record = run_one(environment, model, out)
+            if record["category"] in (*HARNESS_FAILURES, "smoke-fail"):
+                failed_checkpoints.update(checkpoints(model))
             for repo in sorted(checkpoints(model)):
                 remaining[repo] -= 1
-                if remaining[repo] == 0 and hf_policy == "delete_unused":
+                if remaining[repo] == 0 and hf_policy == "delete_unused" and repo not in failed_checkpoints:
                     record.setdefault("checkpoints_deleted", []).append(
                         retention.delete_checkpoint(Path(environment["hf_hub_cache"]), repo))
             record = {**record, "host": socket.gethostname(), "position": index + 1, "started_at": started_at}
@@ -262,11 +366,11 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
     return records
 
 
-CATEGORIES = ("error", "config-error", "build-failed", "not-run", "acc-issue", "not-covered", "acc-inconclusive",
+CATEGORIES = ("error", "environment-blocked", "config-error", "build-failed", "not-run", "acc-issue", "not-covered", "acc-inconclusive",
               "not-comparable", "perf-issue", "perf-inconclusive", "measured", "pass", "excluded", "smoke-fail", "smoke-pass")
 EXCLUSIONS = "excluded.json"
 PLAN = "plan.json"
-HARNESS_FAILURES = ("error", "build-failed")
+HARNESS_FAILURES = ("error", "environment-blocked", "build-failed")
 
 
 def write_plan(out_root: Path, selected: Sequence[str], config_errors: Sequence[Mapping[str, Any]],
@@ -291,7 +395,7 @@ def exit_code(records: Sequence[Mapping[str, Any]], config_errors: Sequence[Mapp
 
 
 def write_exclusions(out_root: Path, excluded: Sequence[Mapping[str, Any]]) -> None:
-    """Record the profiles the machine's model list leaves out, so the summary shows them."""
+    """Audit the profiles the machine's model list leaves out, outside result statistics."""
     out_root.mkdir(parents=True, exist_ok=True)
     (out_root / EXCLUSIONS).write_text(json.dumps(list(excluded), indent=2) + "\n")
 
@@ -329,11 +433,42 @@ def _row(directory: Path) -> dict[str, Any] | None:
                                         *(f"{key}: {text[:100]}" for key, text in value.get("errors", {}).items())])}
         if name == "build.json" and value.get("status") != "failed":
             continue
-        return {"task": value.get("task"), "category": "build-failed" if name == "build.json" else "error",
+        category = ("build-failed" if name == "build.json" else
+                    "environment-blocked" if value.get("category") == "environment-blocked" else "error")
+        return {"task": value.get("task"), "category": category,
                 "directory": str(directory), "repro": value.get("repro"),
                 "time": path.stat().st_mtime,
                 "accuracy": [], "perf": [], "backend": "", "notes": value.get("reason", "")}
     return None
+
+
+NO_NATIVE_MODE = "—"
+FELL_BACK = "eager (compile failed)"
+
+
+def native_mode(row: Mapping[str, Any]) -> str:
+    """The native mode that answered a profile: ``compile``, ``eager`` (configured, or pinned), ``eager (compile
+    failed)`` where eager replaced a failed torch.compile, ``compile, eager`` when the evidence mixes them, or
+    ``—``."""
+    # An entry that errored records the mode it would have run; only evidence names the mode that answered.
+    accuracy = [item.get("native") or {} for item in row.get("accuracy", []) if item.get("status") != "error"]
+    perf = [item for item in row.get("perf", []) if item.get("light") != "n/a"
+            and (item.get("reference") or {}).get("p50_ms") is not None]  # a native side that timed requests
+    modes = {str(item["mode"]) for item in accuracy if item.get("mode")}
+    modes |= {mode for item in perf for mode in str(item.get("reference_mode") or "").split("+") if mode}
+    fell_back = (any(item.get("compile_fallback") for item in accuracy)
+                 or any(item.get("compile_fallback") or item.get("configured_mode") for item in perf))
+    if not modes:
+        return NO_NATIVE_MODE
+    if fell_back and modes == {"eager"}:
+        return FELL_BACK
+    return ", ".join(sorted(modes)) + (" (a compile failed)" if fell_back else "")
+
+
+def native_mode_counts(rows: Mapping[str, Mapping[str, Any]]) -> str:
+    """``compile 160, eager 48, ...``: how many profiles each native mode answered."""
+    counts = collections.Counter(native_mode(row) for row in rows.values())
+    return ", ".join(f"{mode} {count}" for mode, count in counts.most_common())
 
 
 def _accuracy_text(items: Sequence[Mapping[str, Any]]) -> str:
@@ -346,19 +481,42 @@ def ms(value: Any) -> str:
     return f"{value:.0f} ms" if value >= 100 else f"{value:.1f} ms" if value >= 1 else f"{value:.3f} ms"
 
 
+def measurement_note(item: Mapping[str, Any]) -> str:
+    """Surface workload and coverage limits beside the summary's task-call timings."""
+    if item.get("kind") != "natural_dataset":
+        return ""
+    notes = []
+    pairs = item.get("pairs", 0)
+    unmatched = pairs - item.get("matched_pairs", 0)
+    if unmatched > 0:
+        notes.append(f"work differs or is unknown on {unmatched}/{pairs} pairs")
+    if item.get("measurement_status") in ("partial", "unavailable") or item.get("complete") is False:
+        notes.extend(f"{label} {side.get('valid_requests', 0)}/{side.get('requests', 0)} timed"
+                     for label, side in (("Native", item.get("reference") or {}),
+                                         ("TRTMC", item.get("candidate") or {})))
+    return "; ".join(notes)
+
+
+def _native(item: Mapping[str, Any]) -> str:
+    """``native``, with the mode that answered (compile or eager) unless the request label already names it."""
+    mode = item.get("reference_mode")
+    return f"native {mode}" if mode and item.get("request") else "native"
+
+
 def _perf_text(profile: str, items: Sequence[Mapping[str, Any]]) -> str:
     return "; ".join(f"{request_label(profile, item)}: TRTMC {ms((item.get('candidate') or {}).get('p50_ms'))} · "
-                     f"native {ms((item.get('reference') or {}).get('p50_ms'))}"
-                     + (" per audio second" if (item.get("candidate") or {}).get("unit") else "") for item in items)
+                     f"{_native(item)} {ms((item.get('reference') or {}).get('p50_ms'))}"
+                     + (" per audio second" if (item.get("candidate") or {}).get("unit") else "")
+                     + (f" ({note})" if (note := measurement_note(item)) else "") for item in items)
 
 
 # The owner's four results, worst first: White, no valid comparison (no verdict: an error or a failed build; or the
-# comparison does not apply: the native model below a benchmark's floor, a Task without an Acc check, timings that
+# comparison does not apply: a Task without an Acc check, historical fixed timings that
 # cannot be compared); Red, Acc or Perf worse than the native model beyond its margin; Yellow, Perf about equal
 # (counts as a pass) or an Acc difference not shown either way; Green, a pass.
 SIGNALS = ("white", "red", "yellow", "green")
 SIGNAL_NAMES = {"white": "White", "red": "Red", "yellow": "Yellow", "green": "Green"}
-NO_VERDICT = {"error", "config-error", "build-failed", "not-run", "excluded", "smoke-fail"}
+NO_VERDICT = {"error", "environment-blocked", "config-error", "build-failed", "not-run", "excluded", "smoke-fail"}
 NOT_COMPARED = {"not-comparable", "not-covered"}
 
 
@@ -368,13 +526,20 @@ def reported_perf(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     if row.get("performance_source") == "quality":
         return datasets
     return [item for item in row.get("perf", []) if "near-capacity" not in str(item.get("request") or "")
-            and item.get("reference_mode", QUALIFYING_MODE) == QUALIFYING_MODE and item.get("gate", True)]
+            and qualifying(item)]
 
 
 def request_label(profile: str, item: Mapping[str, Any]) -> str:
     """A timed request named without its model (``catalog``, ``catalog-en``)."""
     name = str(item.get("request") or item.get("reference_mode") or "")
-    return name[len(profile) + 1:] if name.startswith(profile + "-") else name
+    name = name[len(profile) + 1:] if name.startswith(profile + "-") else name
+    stem, separator, preset_count = name.rpartition("-")
+    mine, theirs = item.get("candidate") or {}, item.get("reference") or {}
+    count = mine.get("requests")
+    if (item.get("kind") == "natural_dataset" and separator and preset_count.isdecimal()
+            and count is not None and count == theirs.get("requests") and count != int(preset_count)):
+        return f"{stem} ({count} requests)"
+    return name
 
 
 def _judged(row: Mapping[str, Any], status: str) -> list[Mapping[str, Any]]:
@@ -395,6 +560,12 @@ def signal(row: Mapping[str, Any]) -> str:
     if category == "acc-inconclusive" or "yellow" in lights:
         return "yellow"
     return "green"
+
+
+def is_pass(row: Mapping[str, Any]) -> bool:
+    """An inconclusive accuracy test is a Yellow result, not an accepted conversion."""
+    return (signal(row) in ("green", "yellow") and row["category"] != "acc-inconclusive"
+            and not _judged(row, "inconclusive"))
 
 
 def signal_reason(profile: str, row: Mapping[str, Any]) -> str:
@@ -427,9 +598,12 @@ def signal_reason(profile: str, row: Mapping[str, Any]) -> str:
 
 def run_context(roots: Sequence[Path]) -> str:
     """Which run the roots hold: each root's host, the assignment and campaign inputs it ran under (``plan.json``),
-    and when its first and last results started."""
+    and when its first and last results started. The campaign inputs' digest covers the part hosts must share, so
+    hosts that may merge show the same one (each host's own runtime build and dependency set are informational)."""
     import datetime
     import hashlib
+
+    from .split import required_inputs
 
     def day(stamp: float) -> str:
         return datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -439,23 +613,21 @@ def run_context(roots: Sequence[Path]) -> str:
         plan = json.loads((root / PLAN).read_text()) if (root / PLAN).is_file() else {}
         times = [row["time"] for row in (_row(path) for path in root.iterdir() if path.is_dir()) if row]
         inputs = plan.get("inputs")
-        digest = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:12] if inputs else ""
+        digest = (hashlib.sha256(json.dumps(required_inputs(inputs), sort_keys=True).encode()).hexdigest()[:12]
+                  if inputs else "")
         parts.append(f"{root.name}: host {plan.get('host') or '-'}"
                      + (f", assignment {str(plan['assignment'])[:12]}" if plan.get("assignment") else "")
+                     + (f", fragment {plan['fragment']}" if plan.get("fragment") else "")
                      + (f", campaign inputs {digest}" if digest else "")
                      + (f", {day(min(times))} to {day(max(times))}" if times else ""))
     return " · ".join(parts)
 
 
 def collect(roots: Sequence[Path]) -> tuple[dict[str, dict[str, Any]], collections.Counter, dict[str, int]]:
-    """The latest result of every planned or reported profile under the given roots; profiles a
-    root's model list excluded are listed unless another root holds a result for them."""
+    """Latest results of configured profiles. Exclusions and absent Task configurations remain
+    in run metadata for coverage audit, outside result statistics; real results still count."""
     rows = {}
     for root in roots:
-        path = root / EXCLUSIONS
-        for item in json.loads(path.read_text()) if path.is_file() else []:
-            rows[item["profile"]] = {"task": item.get("task"), "category": "excluded", "accuracy": [], "perf": [],
-                                     "backend": "", "notes": item.get("reason", ""), "root": root.name}
         plan = json.loads((root / PLAN).read_text()) if (root / PLAN).is_file() else {}
         for name in plan.get("selected", []):
             rows.setdefault(name, {"task": None, "category": "not-run", "accuracy": [], "perf": [], "backend": "",
@@ -468,6 +640,9 @@ def collect(roots: Sequence[Path]) -> tuple[dict[str, dict[str, Any]], collectio
             row = _row(directory)
             if row and row["time"] >= rows.get(directory.name, {}).get("time", float("-inf")):
                 rows[directory.name] = {**row, "root": root.name}  # the latest run of a profile wins
+    rows = {profile: row for profile, row in rows.items()
+            if row["category"] != "excluded" and not (
+                row["category"] == "config-error" and str(row.get("notes", "")).startswith("no Task defaults"))}
     counts = collections.Counter(row["category"] for row in rows.values())
     ordered = [*CATEGORIES, *sorted(set(counts) - set(CATEGORIES))]
     return rows, counts, {category: position for position, category in enumerate(ordered)}
@@ -478,19 +653,27 @@ REGRESSION_MARGIN_PERCENT = 5.0
 
 def annotate_regressions(rows: Mapping[str, dict[str, Any]], baseline: Mapping[str, Mapping[str, Any]],
                          margin_percent: float = REGRESSION_MARGIN_PERCENT) -> None:
-    """Compare TRTMC p50 per profile and native mode with a baseline run (for example the previous
-    release); slower by more than the margin is noted as a regression (the category is unchanged)."""
+    """Compare TRTMC p50 per profile and timed request with a baseline run (for example the previous
+    release); slower by more than the margin is noted as a regression (the category is unchanged). The native
+    mode is not part of the key: it does not change the TRTMC time, and a baseline may have run another one."""
+    def timed(perf: Sequence[Mapping[str, Any]]) -> dict[str, float]:
+        """TRTMC p50 per timed request (a mode the native side could not run has no TRTMC timing)."""
+        found: dict[str, float] = {}
+        for item in perf:
+            p50 = (item.get("candidate") or {}).get("p50_ms")
+            if p50:
+                found.setdefault(str(item.get("request") or item.get("reference_mode")), p50)
+        return found
+
     for profile, row in rows.items():
-        key = lambda item: f"{item.get('reference_mode')}/{item.get('request') or ''}".rstrip("/")  # noqa: E731
-        previous = {key(item): item for item in (baseline.get(profile) or {}).get("perf", [])}
-        for item in row.get("perf", []):
-            before = (previous.get(key(item)) or {}).get("candidate", {}).get("p50_ms")
-            now = item.get("candidate", {}).get("p50_ms")
-            if before and now:
+        previous = timed((baseline.get(profile) or {}).get("perf", []))
+        for name, now in timed(row.get("perf", [])).items():
+            before = previous.get(name)
+            if before:
                 change = (now / before - 1) * 100
-                row.setdefault("baseline", {})[key(item)] = change
+                row.setdefault("baseline", {})[name] = change
                 if change > margin_percent:
-                    row["notes"] = (f"regression: TRTMC {key(item)} p50 +{change:.1f}% vs baseline; "
+                    row["notes"] = (f"regression: TRTMC {name} p50 +{change:.1f}% vs baseline; "
                                     + row.get("notes", "")).strip("; ")
 
 
@@ -505,20 +688,23 @@ def summary(roots: Sequence[Path], baseline: Sequence[Path] = ()) -> tuple[str, 
         by_task[row["task"] or "-"][signal(row)] += 1
     names = [SIGNAL_NAMES[result] for result in SIGNALS]
     lines = ["# TRTMC vs native qualification", "", f"{len(rows)} models from {', '.join(r.name for r in roots)}: "
-             f"{results['green'] + results['yellow']} pass (Green + Yellow).", "",
-             "Green: pass. Yellow: Perf about equal to native (counts as a pass) or an Acc difference not shown either "
-             "way. Red: Acc or Perf worse than native beyond its margin. White: no valid comparison (an error or a "
+             f"{sum(is_pass(row) for row in rows.values())} pass (Green + conclusive Yellow).", "",
+             "Green: pass. Yellow: Perf about equal to native (counts as a pass); an inconclusive Acc of an older "
+             "report does not count as a pass. Red: Acc or Perf worse than native beyond its margin. White: no valid comparison (an error or a "
              "failed build, or the comparison does not apply).", "",
+             f"Native mode (torch.compile by default; eager where pinned or where compile failed): "
+             f"{native_mode_counts(rows)}.", "",
              "| result | models |", "|---|---|", *(f"| {SIGNAL_NAMES[r]} | {results[r]} |" for r in SIGNALS),
              "", "## By Task", "", "| Task | " + " | ".join(names) + " |", "|---|" + "---|" * len(names),
              *(f"| {task} | " + " | ".join(str(by_task[task].get(r) or "") for r in SIGNALS) + " |"
                for task in sorted(by_task)),
-             "", "## Per model", "", "| result | model | Task | host | Acc (TRTMC · native) | Perf p50 (TRTMC · native) | "
-             "reason |", "|---|---|---|---|---|---|---|"]
+             "", "## Per model", "", "| result | model | Task | native mode | host | Acc (TRTMC · native) | "
+             "Perf p50 (TRTMC · native) | reason |", "|---|---|---|---|---|---|---|---|"]
     for profile in sorted(rows, key=lambda p: (SIGNALS.index(signal(rows[p])), rows[p]["task"] or "", p)):
         row = rows[profile]
         reason = signal_reason(profile, row).replace("|", "/").replace("\n", " ")
-        lines.append(f"| {SIGNAL_NAMES[signal(row)]} | {profile} | {row['task'] or '-'} | {row['root']} | "
+        lines.append(f"| {SIGNAL_NAMES[signal(row)]} | {profile} | {row['task'] or '-'} | {native_mode(row)} | "
+                     f"{row['root']} | "
                      f"{_accuracy_text(row['accuracy'])} | {_perf_text(profile, reported_perf(row))} | {reason} |")
     native = {profile: row["aiperf_metrics"] for profile, row in rows.items() if row.get("aiperf_metrics")}
     if native:
@@ -532,7 +718,9 @@ def summary(roots: Sequence[Path], baseline: Sequence[Path] = ()) -> tuple[str, 
 
 
 REMOTE_ROOT = re.compile(r"^(?:(?P<name>[\w.-]+)=)?(?P<host>[\w.@-]+):(?P<path>/.*)$")
-RESULT_FILES = ("report.json", "model.json", "build.json", "error.json", EXCLUSIONS, PLAN)  # model: its precision
+RESULT_FILES = ("report.json", "model.json", "build.json", "retention.json", "execution.jsonl",
+                "execution.timing-recovered.jsonl", "execution.aligned.jsonl", "execution.rechecked.jsonl",
+                "error.json", EXCLUSIONS, PLAN)
 EVIDENCE_FILES = ("report.md", "phase-errors.log", "build.log", "error.log", "server.log", "result.json")
 MAX_EVIDENCE_BYTES = "5M"
 

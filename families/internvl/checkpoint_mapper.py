@@ -134,3 +134,51 @@ def _load_tensor(readers: _ReaderCollection, name: str) -> np.ndarray:
     if reader is None:
         raise KeyError(f"Tensor not found: {name}")
     return _to_numpy_fp32(reader.get_tensor(name))
+
+
+def _load_projection(readers: _ReaderCollection, prefix: str, quantization: dict | None) -> np.ndarray:
+    """Return [out, in] weights, retaining the values of a source AWQ checkpoint.
+
+    Native fallback uses ordinary TensorRT matmuls, not an AWQ CUDA plugin. AWQ
+    GEMM packs eight output columns per INT32 in order [0,2,4,6,1,3,5,7]. Unlike
+    GPTQ, its packed zero points have no +1 offset. Reconstruct each group once
+    at build time and round to the checkpoint scale dtype (W4A16 semantics).
+    This expands weight storage; it does not promise packed INT4 residency.
+    """
+    if _has_tensor(readers, f"{prefix}.weight"):
+        return _load_tensor(readers, f"{prefix}.weight")
+    if not quantization or not (
+        quantization.get("quant_method") == "awq"
+        and quantization.get("bits") == 4
+        and quantization.get("group_size") == 128
+        and str(quantization.get("version", "")).lower() == "gemm"
+        and quantization.get("zero_point") is True
+    ):
+        raise ValueError(f"{prefix}: native packed weights require group128 GEMM AWQ with zero points")
+
+    def packed(suffix: str) -> np.ndarray:
+        name = f"{prefix}.{suffix}"
+        reader = readers.tensor_map.get(name)
+        if reader is None:
+            raise KeyError(f"Tensor not found: {name}")
+        value = np.asarray(reader.get_tensor(name))
+        if value.ndim != 2 or value.dtype != np.int32:
+            raise ValueError(f"{name}: expected a rank-2 INT32 packed tensor")
+        # Work in unsigned integers so the high nibble survives sign extension.
+        shifts = np.array([0, 16, 4, 20, 8, 24, 12, 28], dtype=np.uint32)
+        return ((value.astype(np.uint32)[..., None] >> shifts) & 15).reshape(value.shape[0], -1)
+
+    values, zeros = packed("qweight"), packed("qzeros")
+    scale_name = f"{prefix}.scales"
+    if not _has_tensor(readers, scale_name):
+        raise KeyError(f"Tensor not found: {scale_name}")
+    scales = np.asarray(readers.tensor_map[scale_name].get_tensor(scale_name))
+    group_size = int(quantization["group_size"])
+    if (values.shape[0] % group_size or scales.shape != zeros.shape
+            or scales.shape != (values.shape[0] // group_size, values.shape[1])):
+        raise ValueError(f"{prefix}: inconsistent AWQ weights, zero points, or group scales")
+    if scales.dtype not in (np.float16, np.float32) or not np.isfinite(scales).all():
+        raise ValueError(f"{prefix}: AWQ scales must be finite floating-point values")
+    grouped = values.reshape(-1, group_size, values.shape[1]).astype(np.float32)
+    decoded = (grouped - zeros[:, None, :].astype(np.float32)) * scales[:, None, :]
+    return np.ascontiguousarray(decoded.astype(scales.dtype).reshape(values.shape).T, dtype=np.float32)

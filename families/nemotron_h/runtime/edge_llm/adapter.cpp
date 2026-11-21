@@ -82,12 +82,17 @@ class Artifacts {
                 !bundle.find_section(name))
                 throw std::runtime_error("Invalid Nemotron-H Edge artifact: " + name);
         }
-        const bool paired = marker.value("execution_variant", "autoregressive") == "dflash";
-        const std::vector<std::string> plans =
+        const auto variant = marker.value("execution_variant", "autoregressive");
+        const bool paired = variant != "autoregressive";
+        std::vector<std::string> plans =
             paired ? std::vector<std::string>{"spec_base.engine", "spec_draft.engine",
                                               "base_config.json", "draft_config.json",
                                               "embedding.safetensors"}
                    : std::vector<std::string>{"llm.engine", "config.json"};
+        if (variant == "dspark" || variant == "dspark_tree") {
+            plans.push_back("dspark_heads.safetensors");
+            plans.push_back("dspark_heads_info.json");
+        }
         for (const auto& plan : plans) {
             const auto required = "edge_llm/engine/" + plan;
             if (!names.count(required) || bundle.find_section(required)->length == 0)
@@ -95,10 +100,10 @@ class Artifacts {
         }
         for (const auto* required :
              {"edge_llm/engine/tokenizer.json", "edge_llm/engine/tokenizer_config.json",
-              "edge_llm/engine/processed_chat_template.json", "edge_llm/checkpoint/config.json",
+              "edge_llm/engine/chat_template.jinja", "edge_llm/checkpoint/config.json",
               "edge_llm/runtime_tokenizer/tokenizer.json",
               "edge_llm/runtime_tokenizer/tokenizer_config.json",
-              "edge_llm/runtime_tokenizer/processed_chat_template.json"})
+              "edge_llm/runtime_tokenizer/chat_template.jinja"})
             if (!names.count(required) || bundle.find_section(required)->length == 0)
                 throw std::runtime_error(
                     std::string("Required Nemotron-H Edge artifact missing: ") + required);
@@ -187,16 +192,17 @@ class RequestDrain {
     cudaStream_t stream_;
 };
 
-/// The paired engine ABI fixes a linear block16 speculative schedule.
+/// Map the family-owned paired profile to the public Edge scheduler contract.
 std::optional<trt_edgellm::rt::SpecDecodeDraftingConfig>
 drafting_config(const nlohmann::json& marker) {
-    if (marker.value("execution_variant", "autoregressive") != "dflash")
+    const auto variant = marker.value("execution_variant", "autoregressive");
+    if (variant == "autoregressive")
         return std::nullopt;
     trt_edgellm::rt::SpecDecodeDraftingConfig config{};
-    config.draftingTopK = 1;
+    config.draftingTopK = variant == "dspark_tree" ? 4 : 1;
     config.draftingStep = 1;
-    config.verifySize = 16;
-    config.dflashBlockSize = 16;
+    config.verifySize = variant == "dspark" ? 9 : 16;
+    config.dflashBlockSize = variant == "dflash" ? 16 : 0;
     return config;
 }
 
@@ -204,7 +210,7 @@ drafting_config(const nlohmann::json& marker) {
 trt_edgellm::rt::ModelArtifacts
 runtime_artifacts(const Artifacts& files, const nlohmann::json& marker, cudaStream_t stream) {
     auto artifacts = trt_edgellm::rt::ModelArtifacts::loadFromEngineDir(
-        files.engine(), drafting_config(marker), files.checkpoint(), "", stream);
+        files.engine(), drafting_config(marker), files.checkpoint(), "", false, stream);
     artifacts.tokenizer = load_tokenizer(files.tokenizer(),
                                          marker.at("native_eos_token_ids").get<std::vector<int>>());
     artifacts.deployment.base.eosTokenIds =
@@ -244,7 +250,8 @@ class EdgeTask final : public ITextGeneration {
           capacity_(marker.at("max_sequence_length").get<int>()),
           input_limit_(marker.at("max_input_length").get<int>()),
           bos_id_(marker.at("native_bos_token_id").get<int>()),
-          paired_(marker.value("execution_variant", "autoregressive") == "dflash") {}
+          greedy_only_(marker.value("execution_variant", "autoregressive") == "dflash" ||
+                       marker.value("execution_variant", "autoregressive") == "dspark_tree") {}
 
     std::int32_t default_max_new_tokens() const override { return kDefaultMaxNewTokens; }
 
@@ -254,10 +261,11 @@ class EdgeTask final : public ITextGeneration {
     /// Invoke Edge once; failures propagate without attempting native inference.
     TextResult generate(const std::string& prompt, const TextGenerationConfig& config) override {
         auto request = make_request(prompt, config, chat_format_, *native_tokenizer_, bos_id_);
-        // The pinned DFlash decoder forces greedy verification. Reject sampling
-        // rather than silently replacing caller-requested stochastic semantics.
-        if (paired_ && request.temperature != 0.0F)
-            throw std::invalid_argument("Nemotron-H DFlash supports greedy generation only");
+        // DFlash is admitted only for greedy generation; DSpark DDTree requires it.
+        // DSpark chain preserves caller-requested stochastic sampling semantics.
+        if (greedy_only_ && request.temperature != 0.0F)
+            throw std::invalid_argument(
+                "This Nemotron-H paired profile supports greedy generation only");
         const auto count = request.preTokenizedInputIds.front().size();
         if (count == 0)
             return {};
@@ -289,7 +297,7 @@ class EdgeTask final : public ITextGeneration {
     int capacity_;
     int input_limit_;
     int bos_id_;
-    bool paired_;
+    bool greedy_only_;
     std::mutex mutex_;
 };
 } // namespace
@@ -307,9 +315,14 @@ ITask* create(const BundleReader& bundle) {
         !marker.at("native_eos_token_ids").is_array() || marker.at("native_eos_token_ids").empty())
         throw std::runtime_error("Invalid Nemotron-H Edge bundle contract");
     const auto variant = marker.value("execution_variant", "autoregressive");
-    if ((variant != "autoregressive" && variant != "dflash") ||
-        (variant == "dflash" && (marker.value("builder_flow", "") != "onnx" ||
-                                 marker.value("dflash_block_size", 0) != 16)))
+    const bool dspark = variant == "dspark" || variant == "dspark_tree";
+    if ((variant != "autoregressive" && variant != "dflash" && !dspark) ||
+        (variant != "autoregressive" && marker.value("builder_flow", "") != "onnx") ||
+        (variant == "dflash" && marker.value("dflash_block_size", 0) != 16) ||
+        (dspark &&
+         (marker.value("dspark_block_size", 0) != 8 || marker.value("spec_draft_size", 0) != 9 ||
+          marker.value("spec_verify_size", 0) != (variant == "dspark" ? 9 : 16) ||
+          marker.value("spec_draft_top_k", 0) != (variant == "dspark" ? 1 : 4))))
         throw std::runtime_error("Invalid Nemotron-H Edge execution variant");
     std::set<int> stops;
     for (const auto& id : marker.at("native_eos_token_ids")) {

@@ -26,6 +26,7 @@ def build_bundle(request: BuildRequest, output: Path) -> None:
     from .model import build as build_model
 
     writer = BundleWriter(output)
+    writer.record_build(request)
     try:
         with graph_transform(request.graph_transform):
             build_model(request, writer)
@@ -39,6 +40,7 @@ def build(
     task: str = "text_generation", precision: str | None = None, backend: str = "trt",
     max_sequence_length: int | None = None, tensor_parallel_size: int = 1,
     verbose: bool = False,
+    quantization: str | None = None,
     execution_variant: str | None = None, companion: list[str] | tuple[str, ...] = (),
 ) -> int:
     """Run the declared owner command; help never imports this handler."""
@@ -53,7 +55,7 @@ def build(
         model_dir=model_dir, output_path=output, family="nemotron_h",
         task=task, precision=precision, backend=backend,
         max_sequence_length=max_sequence_length, tensor_parallel_size=tensor_parallel_size,
-        verbose=verbose,
+        verbose=verbose, quantization=quantization,
     )
     if execution is not None:
         request = with_execution(request, execution)

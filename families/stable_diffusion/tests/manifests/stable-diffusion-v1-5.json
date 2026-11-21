@@ -1,6 +1,7 @@
 {
   "name": "stable-diffusion-v1-5",
   "hf_id": "stable-diffusion-v1-5/stable-diffusion-v1-5",
+  "hf_revision": "451f4fe16113bff5a5d2269ed5ad43b0592e9a14",
   "bundle": "stable-diffusion-v1-5.bundle",
   "family": "stable_diffusion",
   "task": "image_generation",

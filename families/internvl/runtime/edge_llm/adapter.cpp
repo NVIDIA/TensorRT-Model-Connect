@@ -12,9 +12,15 @@
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <dlfcn.h>
+#ifdef TRTMC_INTERNVL_EDGE_012
+#include <tensorrt_edgellm/common/trtInterop.h>
+#include <tensorrt_edgellm/runtime/llmInferenceRuntime.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#else
 #include <edgellm/cpp/common/logger.h>
 #include <edgellm/cpp/runtime/llmInferenceRuntime.h>
 #include <edgellm/cpp/runtime/streaming.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -26,6 +32,7 @@
 
 namespace trtmc::internvl::edge_llm {
 namespace {
+using EdgeDataType = decltype(trt_edgellm::rt::Tensor{}.getDataType());
 namespace fs = std::filesystem;
 
 /// Turn CUDA failures into caller-visible load or inference errors.
@@ -83,7 +90,7 @@ class Artifacts {
              {"edge_llm/engine/visual/visual.engine", "edge_llm/engine/visual/config.json",
               "edge_llm/engine/llm.engine", "edge_llm/engine/config.json",
               "edge_llm/engine/tokenizer.json", "edge_llm/engine/tokenizer_config.json",
-              "edge_llm/engine/processed_chat_template.json", "edge_llm/checkpoint/config.json"})
+              "edge_llm/engine/chat_template.jinja", "edge_llm/checkpoint/config.json"})
             if (!names.count(required) || bundle.find_section(required)->length == 0)
                 throw std::runtime_error(std::string("Required InternVL Edge artifact missing: ") +
                                          required);
@@ -142,7 +149,12 @@ std::unique_ptr<void, CloseLibrary> load_plugin() {
                                  std::string(dlerror()));
     using Initialize = bool (*)(void*, const char*);
     auto initialize = reinterpret_cast<Initialize>(dlsym(plugin.get(), "initEdgellmPlugins"));
-    if (!initialize || !initialize(static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger), ""))
+#ifdef TRTMC_INTERNVL_EDGE_012
+    auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::TrtLogger::instance());
+#else
+    auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger);
+#endif
+    if (!initialize || !initialize(logger, ""))
         throw std::runtime_error("Cannot initialize InternVL Edge plugin");
     return plugin;
 }
@@ -203,7 +215,7 @@ class EdgeTask final : public ITextGeneration, public IVisionLanguageGeneration 
         auto request = make_request(prompt, config, !bytes.empty());
         if (!bytes.empty()) {
             trt_edgellm::rt::Tensor tensor({1, height, width, 3}, trt_edgellm::rt::DeviceType::kCPU,
-                                           nvinfer1::DataType::kUINT8);
+                                           EdgeDataType::kUINT8);
             std::memcpy(tensor.rawPointer(), bytes.data(), bytes.size());
             request.requests.front().imageBuffers.emplace_back(std::move(tensor));
         }
@@ -239,12 +251,22 @@ class EdgeTask final : public ITextGeneration, public IVisionLanguageGeneration 
 ITask* create(const BundleReader& bundle) {
     const auto bytes = bundle.read_section("edge_llm.json");
     const auto marker = nlohmann::json::parse(bytes.begin(), bytes.end());
-    if (marker.at("version") != 1 || marker.at("edge_revision") != kRevision ||
+    const auto& revision = marker.at("edge_revision");
+#ifdef TRTMC_INTERNVL_EDGE_012
+    const bool compatible =
+        marker.at("edge_release") == "0.12.0" && (revision.is_null() || revision == kRevision);
+    const bool packed_flow = marker.value("builder_flow", "") == "direct";
+#else
+    const bool compatible = revision == kRevision;
+    const bool packed_flow = marker.value("builder_flow", "") == "onnx";
+#endif
+    if (marker.at("version") != 1 || !compatible ||
         marker.at("max_sequence_length").get<int>() <= 1 ||
         marker.at("max_input_length").get<int>() <= 0 ||
         marker.at("max_input_length").get<int>() > marker.at("max_sequence_length").get<int>() ||
         marker.at("max_batch_size") != 1 || marker.at("precision") != "fp16" ||
-        marker.at("weight_format") != "fp16" ||
+        (marker.at("weight_format") != "fp16" &&
+         !(marker.at("weight_format") == "int4_awq" && packed_flow)) ||
         marker.at("component_weight_formats").at("llm") != marker.at("weight_format") ||
         marker.at("component_weight_formats").at("visual") != "fp16" ||
         marker.at("visual_image_tokens") != 256 || !marker.at("artifacts").is_array())

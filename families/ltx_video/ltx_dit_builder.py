@@ -28,6 +28,7 @@ import tensorrt as trt
 
 from . import graph_ops
 from .checkpoint_mapper import WeightDict, _has_tensor, _load_tensor, _open_safetensors
+from .quantization import LTXQuantContext, configure_build
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -152,10 +153,16 @@ def build_ltx_dit_engine(
     eps: float = 1e-6,
     precision: str = "fp16",
     verbose: bool = False,
+    quant_ctx: LTXQuantContext | None = None,
 ) -> bytes:
-    """Build the LTX transformer denoiser as a TensorRT plan."""
+    """Build the LTX transformer denoiser as a TensorRT plan.
+
+    ``quant_ctx`` (optional) routes its projections through FP8 Q/DQ matmuls.
+    """
     if precision not in ("fp16", "fp32"):
         raise ValueError("LTX DiT raw builder currently supports fp16 or fp32")
+    if quant_ctx is not None and quant_ctx.has_fp8_weights and precision != "fp16":
+        raise NotImplementedError("LTX-Video fp8 builds require precision fp16")
 
     _ensure_trt()
     _ensure_graph_ops()
@@ -169,6 +176,8 @@ def build_ltx_dit_engine(
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
+    if quant_ctx is not None and quant_ctx.has_fp8_weights:
+        configure_build(config)
 
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 
@@ -239,12 +248,6 @@ def build_ltx_dit_engine(
     )
     rotary_cos_t = graph_ops.add_constant(network, (seq_len, dim), rotary_cos, dtype=np.float32)
     rotary_sin_t = graph_ops.add_constant(network, (seq_len, dim), rotary_sin, dtype=np.float32)
-    rot_half = graph_ops.add_constant(
-        network,
-        (dim, dim),
-        _make_ltx_rotate_half_matrix(dim, num_heads, interleaved=True),
-        dtype=np.float32,
-    )
 
     cross_mask = _make_cross_attention_mask(network, encoder_mask, text_seq_len=text_seq_len)
 
@@ -280,7 +283,6 @@ def build_ltx_dit_engine(
             dtype=np_dtype,
             rotary_cos=rotary_cos_t,
             rotary_sin=rotary_sin_t,
-            rot_half=rot_half,
         )
         hidden = _residual_gated(network, hidden, attn_hidden, gate_msa)
 
@@ -312,7 +314,7 @@ def build_ltx_dit_engine(
             dtype=np_dtype,
         )
         ff_norm = _modulate(network, ff_norm, scale_mlp, shift_mlp)
-        ff_out = _ffn(network, ff_norm, weights, p, dim, np_dtype)
+        ff_out = _ffn(network, ff_norm, weights, p, dim, np_dtype, quant_ctx)
         hidden = _residual_gated(network, hidden, ff_out, gate_mlp)
 
     shift, scale = _final_modulation(network, embedded_timestep, weights["scale_shift_table"], dim)
@@ -438,6 +440,22 @@ def _drop_batch(
     return s.get_output(0)
 
 
+def _matmul(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    in_dim: int,
+    out_dim: int,
+    weight: np.ndarray,
+    name: str,
+    dtype: np.dtype,
+    quant_ctx: LTXQuantContext | None,
+) -> trt.ITensor:
+    """``inp @ weight`` as an FP8 Q/DQ matmul when ``name`` is quantized, else a plain matmul."""
+    if quant_ctx is not None and quant_ctx.should_quantize(name):
+        return quant_ctx.matmul(network, inp, weight, name)
+    return graph_ops.add_matmul_rhs_constant(network, inp, in_dim, out_dim, weight, dtype=dtype)
+
+
 def _linear(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -553,18 +571,38 @@ def _from_attention_4d(
     return flat.get_output(0)
 
 
+def _rotate_half_interleaved(network: trt.INetworkDefinition, x: trt.ITensor) -> trt.ITensor:
+    """RoPE rotate-half on adjacent pairs, ``(x0, x1) -> (-x1, x0)``, as slice and concat.
+
+    Same result as multiplying by ``_make_ltx_rotate_half_matrix(..., interleaved=True)``,
+    without a float32 ``[tokens, dim] x [dim, dim]`` GEMM per call (the GEMM runs in TF32 on
+    Blackwell and rounds the rotated values).
+    """
+    seq, width = x.shape
+    pairs = network.add_shuffle(x)
+    pairs.reshape_dims = (seq, width // 2, 2)
+    even = network.add_slice(pairs.get_output(0), (0, 0, 0), (seq, width // 2, 1), (1, 1, 1))
+    odd = network.add_slice(pairs.get_output(0), (0, 0, 1), (seq, width // 2, 1), (1, 1, 1))
+    minus_one = graph_ops.add_constant(network, (1, 1, 1), np.array([-1.0], dtype=np.float32))
+    negated_odd = network.add_elementwise(
+        odd.get_output(0), minus_one, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    joined = network.add_concatenation([negated_odd, even.get_output(0)])
+    joined.axis = 2
+    flat = network.add_shuffle(joined.get_output(0))
+    flat.reshape_dims = (seq, width)
+    return flat.get_output(0)
+
+
 def _apply_ltx_rope(
     network: trt.INetworkDefinition,
     x: trt.ITensor,
     cos: trt.ITensor,
     sin: trt.ITensor,
-    rot_half: trt.ITensor,
 ) -> trt.ITensor:
     out_dtype = x.dtype
     x_fp32 = x if x.dtype == trt.float32 else network.add_cast(x, trt.float32).get_output(0)
-    rotated = network.add_matrix_multiply(
-        x_fp32, trt.MatrixOperation.NONE, rot_half, trt.MatrixOperation.NONE
-    ).get_output(0)
+    rotated = _rotate_half_interleaved(network, x_fp32)
     x_cos = network.add_elementwise(x_fp32, cos, trt.ElementWiseOperation.PROD).get_output(0)
     rot_sin = network.add_elementwise(rotated, sin, trt.ElementWiseOperation.PROD).get_output(0)
     out = network.add_elementwise(x_cos, rot_sin, trt.ElementWiseOperation.SUM).get_output(0)
@@ -588,7 +626,6 @@ def _ltx_attention(
     dtype: np.dtype,
     rotary_cos: trt.ITensor | None = None,
     rotary_sin: trt.ITensor | None = None,
-    rot_half: trt.ITensor | None = None,
 ) -> trt.ITensor:
     kv_source = hidden if context is None else context
     q = _linear(network, hidden, dim, dim, weights, f"{prefix}.to_q", dtype)
@@ -602,18 +639,16 @@ def _ltx_attention(
         network, k, dim, weights[f"{prefix}.norm_k.weight"], eps_t, dtype=dtype
     )
 
-    if rotary_cos is not None and rotary_sin is not None and rot_half is not None:
-        q = _apply_ltx_rope(network, q, rotary_cos, rotary_sin, rot_half)
-        k = _apply_ltx_rope(network, k, rotary_cos, rotary_sin, rot_half)
+    if rotary_cos is not None and rotary_sin is not None:
+        q = _apply_ltx_rope(network, q, rotary_cos, rotary_sin)
+        k = _apply_ltx_rope(network, k, rotary_cos, rotary_sin)
 
     q4 = _to_attention_4d(network, q, seq_len=q_seq_len, num_heads=num_heads, head_dim=head_dim)
     k4 = _to_attention_4d(network, k, seq_len=kv_seq_len, num_heads=num_heads, head_dim=head_dim)
     v4 = _to_attention_4d(network, v, seq_len=kv_seq_len, num_heads=num_heads, head_dim=head_dim)
     if mask is not None:
         mask = _cast_back(network, mask, q4.dtype)
-    ctx4 = graph_ops.add_attention_core(
-        network, q4, k4, v4, causal=False, mask=mask
-    )
+    ctx4 = graph_ops.add_attention_core(network, q4, k4, v4, causal=False, mask=mask)
     ctx = _from_attention_4d(
         network, ctx4, seq_len=q_seq_len, num_heads=num_heads, head_dim=head_dim
     )
@@ -640,15 +675,23 @@ def _ffn(
     prefix: str,
     dim: int,
     dtype: np.dtype,
+    quant_ctx: LTXQuantContext | None = None,
 ) -> trt.ITensor:
     fc1_w = weights[f"{prefix}.ff.net.0.proj.weight"]
     ffn_dim = fc1_w.shape[1]
-    x = graph_ops.add_matmul_rhs_constant(network, hidden, dim, ffn_dim, fc1_w, dtype=dtype)
+    x = _matmul(network, hidden, dim, ffn_dim, fc1_w, f"{prefix}.ff.net.0.proj", dtype, quant_ctx)
     x = graph_ops.add_bias_sum(
         network, x, ffn_dim, weights[f"{prefix}.ff.net.0.proj.bias"], dtype=dtype
     )
     x = graph_ops.add_gelu_new(network, x, dtype=dtype)
-    x = graph_ops.add_matmul_rhs_constant(
-        network, x, ffn_dim, dim, weights[f"{prefix}.ff.net.2.weight"], dtype=dtype
+    x = _matmul(
+        network,
+        x,
+        ffn_dim,
+        dim,
+        weights[f"{prefix}.ff.net.2.weight"],
+        f"{prefix}.ff.net.2",
+        dtype,
+        quant_ctx,
     )
     return graph_ops.add_bias_sum(network, x, dim, weights[f"{prefix}.ff.net.2.bias"], dtype=dtype)

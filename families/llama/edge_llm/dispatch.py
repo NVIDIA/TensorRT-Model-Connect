@@ -17,14 +17,17 @@ from . import builder as edge_llm
 
 _LOG = logging.getLogger(__name__)
 
-# Only the two native platforms exercised by the recorded FP16 profiles.
-EDGE_DISPATCH = {("linux", "x86_64", sm, "fp16"): edge_llm.prepare for sm in (80, 120)}
+# Qualified complete-network profiles, not a native model GPU restriction.
+EDGE_DISPATCH = {
+    ("linux", "x86_64", sm, weight_format): edge_llm.prepare
+    for sm, weight_format in ((80, "fp16"), (120, "fp16"), (120, "fp8"), (120, "nvfp4"))
+}
 
 # Documented Llama3.x dense shapes: layers, hidden, intermediate, heads, KV heads.
 LLAMA3_CONFIGS = {
     (16, 2048, 8192, 32, 8),  # Llama3.2 1B
     (28, 3072, 8192, 24, 8),  # Llama3.2 3B
-    (32, 4096, 14336, 32, 8),  # Llama3 / Llama3.1 8B
+    (32, 4096, 14336, 32, 8),  # Llama3.1 8B; source context checked below
 }
 
 
@@ -44,6 +47,10 @@ def candidate(request, raw: dict) -> bool:
         raw.get("model_type") == "llama"
         and all(type(value) is int for value in shape)
         and shape in LLAMA3_CONFIGS
+        # The admitted 8B source is Llama3.1 (131072 context). The shared
+        # geometry must not also add the inaccessible/unexecuted Llama3 profile.
+        and (shape != (32, 4096, 14336, 32, 8)
+             or raw.get("max_position_embeddings") == 131072)
         and raw.get("vocab_size") == 128256
         and not raw.get("num_experts")
         and not raw.get("text_config")
@@ -54,7 +61,7 @@ def candidate(request, raw: dict) -> bool:
         and request.backend == "trt"
         and request.task == "text_generation"
         and request.precision.lower() == "fp16"
-        and request.quantization in {None, "none"}
+        and request.quantization in {None, "none", "fp8", "nvfp4"}
         and request.max_batch_size
         == request.tensor_parallel_size
         == request.context_parallel_size
@@ -117,8 +124,15 @@ def build(request, writer, native, *, draft_dir: Path | None = None) -> None:
             weight_format = edge_llm.request_weight_format(request, raw)
             key = (target["os"], target["arch"], target["sm"], weight_format)
             adapter = EDGE_DISPATCH.get(key)
-            # Ordinary profiles were qualified on SM80; the EAGLE pair on SM120.
-            if target["sm"] != (120 if draft_dir is not None else 80):
+            # Packed 8B sources and the original EAGLE pair use SM120.
+            packed = weight_format != "fp16"
+            if target["sm"] != (120 if draft_dir is not None or packed else 80):
+                adapter = None
+            small_calibrated_fp8 = (
+                weight_format == "fp8" and raw.get("hidden_size") == 2048
+                and (raw.get("quantization_config") or {}).get("quant_method") == "compressed-tensors"
+            )
+            if packed and (draft_dir is not None or (raw.get("hidden_size") != 4096 and not small_calibrated_fp8)):
                 adapter = None
             if adapter is not None:
                 if draft_dir is None:
@@ -161,6 +175,8 @@ def build_paired(request, writer, execution) -> None:
     execution.validate_local()
     if execution.variant != "eagle3" or tuple(x.role for x in execution.checkpoints) != ("draft",):
         raise ValueError("Llama paired execution requires variant=eagle3 and one draft checkpoint")
+    if request.quantization not in {None, "none"}:
+        raise ValueError("Llama EAGLE3 does not support quantization; use original FP16 checkpoints")
     draft_dir = execution.checkpoints[0].model_dir
     base = json.loads((request.model_dir / "config.json").read_text())
     if not isinstance(base, dict):
@@ -200,10 +216,17 @@ def build_paired(request, writer, execution) -> None:
         raise ValueError("Requested context exceeds Llama EAGLE3 draft capacity")
 
     def native_pair(original_request, original_writer):
-        # Never turn a failed explicit pair into an ordinary base-only bundle.
-        raise ValueError(
-            "This Edge EAGLE3 profile requires Linux x86_64 SM120 with FP16 weights; "
-            "the separate native build-speculative profile is not an automatic fallback"
+        from ..speculative.build import build_speculative
+
+        # Preserve the actual base and companion. Native EAGLE3 owns its
+        # greedy verification schedule; this is never base-only decoding.
+        capacity = original_request.max_sequence_length or min(
+            base["max_position_embeddings"], draft_capacity)
+        build_speculative(
+            model_dir=Path(original_request.model_dir), draft_dir=draft_dir,
+            output=original_request.output_path, max_sequence_length=capacity,
+            max_query=min(64, capacity), draft_depth=6,
+            verbose=bool(original_request.verbose), _writer=original_writer,
         )
 
     build(request, writer, native_pair, draft_dir=draft_dir)

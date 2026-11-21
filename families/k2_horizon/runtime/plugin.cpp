@@ -38,6 +38,9 @@ struct RuntimeConfig {
     std::vector<std::int32_t> eos_token_ids;
     std::int32_t pad_token_id;
     std::int32_t max_cache_length;
+    // "single": one single-token profile (prompt fed one token per launch).
+    // "dual_profile": profile 0 prefills a chunk of tokens, profile 1 decodes one.
+    bool dual_profile;
 };
 
 template <typename T>
@@ -72,7 +75,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     if (require_value<std::string>(json, "model_type") != "k2_horizon" ||
         require_value<std::string>(json, "architecture") != "K2HorizonForCausalLM" ||
         require_value<std::string>(json, "precision") != "bf16" ||
-        require_value<std::string>(json, "decoder_engine_layout") != "single" ||
+
         require_value<std::int32_t>(json, "tensor_parallel_size") != 1 ||
         require_value<std::string>(json, "tensor_parallel_mode") != "single" ||
         !require_value<bool>(json, "native_kv_cache") ||
@@ -80,6 +83,9 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_value<bool>(json, "tie_word_embeddings")) {
         throw std::runtime_error("K2-Horizon runtime.json violates the qualified contract");
     }
+    const auto layout = require_value<std::string>(json, "decoder_engine_layout");
+    if (layout != "single" && layout != "dual_profile")
+        throw std::runtime_error("K2-Horizon runtime.json has an unknown decoder_engine_layout");
 
     RuntimeConfig config{
         require_value<std::int32_t>(json, "vocab_size"),
@@ -97,6 +103,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_eos_ids(json),
         require_value<std::int32_t>(json, "pad_token_id"),
         require_value<std::int32_t>(json, "max_cache_length"),
+        layout == "dual_profile",
     };
     constexpr std::int32_t max_layers = 4096;
     constexpr std::int32_t max_heads = 65536;
@@ -151,12 +158,34 @@ std::set<std::string> names(const std::vector<TensorInfo>& tensors) {
     return result;
 }
 
+// Dual-profile token inputs: [1..max_tokens] in this context's profile.
+void require_token_profile(const ITrtModule& module, const std::string& name,
+                           std::int64_t max_tokens) {
+    const auto profile = module.profile_idx();
+    if (!module.has_input(name) || module.tensor_dtype(name) != DType::kInt32 ||
+        module.input_profile_shape(name, profile, ProfileShapeSelector::kMin) !=
+            std::vector<std::int64_t>{1} ||
+        module.input_profile_shape(name, profile, ProfileShapeSelector::kMax) !=
+            std::vector<std::int64_t>{max_tokens}) {
+        throw std::runtime_error("K2-Horizon engine input profile mismatch for '" + name + "'");
+    }
+}
+
+// max_tokens: 0 for a single-profile engine (static [1] token inputs), else the
+// token count this dual-profile context accepts.
 void validate_engine(const RuntimeConfig& config, const ITrtModule& module,
-                     const K2HorizonKvCacheNames& cache_names) {
-    if (module.optimization_profile_count() != 1)
-        throw std::runtime_error("K2-Horizon requires exactly one optimization profile");
-    require_input(module, "token_id", DType::kInt32, {1});
-    require_input(module, "position_id", DType::kInt32, {1});
+                     const K2HorizonKvCacheNames& cache_names, std::int64_t max_tokens) {
+    if (max_tokens == 0) {
+        if (module.optimization_profile_count() != 1)
+            throw std::runtime_error("K2-Horizon requires exactly one optimization profile");
+        require_input(module, "token_id", DType::kInt32, {1});
+        require_input(module, "position_id", DType::kInt32, {1});
+    } else {
+        if (module.optimization_profile_count() != 2)
+            throw std::runtime_error("K2-Horizon dual-profile engine needs two profiles");
+        require_token_profile(module, "token_id", max_tokens);
+        require_token_profile(module, "position_id", max_tokens);
+    }
     require_input(module, "cache_write_indices", DType::kInt32, {1});
     require_input(module, "key_value_lengths", DType::kInt32, {1});
     if (!module.has_output("logits") || module.tensor_dtype("logits") != DType::kFloat32 ||
@@ -189,9 +218,28 @@ ITask* create(const FamilyContext& context) {
                                      "'");
     }
     const RuntimeConfig config = parse_runtime_config(context.reader);
-    auto decoder = load_engine(context.backend, require_section(context.reader, "engine.plan"));
     auto cache_names = make_cache_names(config.num_layers);
-    validate_engine(config, *decoder, cache_names);
+    std::unique_ptr<ITrtModule> decoder;
+    std::unique_ptr<ITrtModule> prefill;
+    if (config.dual_profile) {
+        const auto plan = require_section(context.reader, "engine.plan");
+        auto modules = context.backend.create_dual_profile_modules(plan.data(), plan.size(), {});
+        if (modules.prefill == nullptr || !modules.prefill->ok() || modules.decode == nullptr ||
+            !modules.decode->ok()) {
+            throw std::runtime_error("K2-Horizon dual-profile engine did not create both contexts");
+        }
+        prefill = std::move(modules.prefill);
+        decoder = std::move(modules.decode);
+        const auto chunk = prefill->input_profile_shape("token_id", prefill->profile_idx(),
+                                                        ProfileShapeSelector::kMax);
+        if (chunk.size() != 1 || chunk[0] < 1 || chunk[0] > config.max_cache_length)
+            throw std::runtime_error("K2-Horizon prefill profile has an invalid token range");
+        validate_engine(config, *prefill, cache_names, chunk[0]);
+        validate_engine(config, *decoder, cache_names, 1);
+    } else {
+        decoder = load_engine(context.backend, require_section(context.reader, "engine.plan"));
+        validate_engine(config, *decoder, cache_names, 0);
+    }
     if (config.num_kv_heads > std::numeric_limits<std::int32_t>::max() / config.head_dim)
         throw std::overflow_error("K2-Horizon KV width overflow");
     auto cache = std::make_unique<K2HorizonKvCache>(config.num_layers, config.max_cache_length,
@@ -200,13 +248,15 @@ ITask* create(const FamilyContext& context) {
     if (!cache->ok())
         throw std::runtime_error("K2-Horizon native KV cache allocation failed");
     cache->bind_to(*decoder);
+    if (prefill)
+        cache->bind_to(*prefill);
 
     K2HorizonTextGenConfig generation;
     generation.vocab_size = config.vocab_size;
     generation.eos_token_ids = config.eos_token_ids;
-    return new K2HorizonTextGenerationPipeline(std::move(decoder), std::move(cache),
-                                               std::move(generation),
-                                               create_tokenizer(context.reader));
+    return new K2HorizonTextGenerationPipeline(
+        std::move(decoder), std::move(cache), std::move(generation),
+        create_tokenizer(context.reader), std::move(prefill));
 }
 
 } // namespace trtmc::k2_horizon

@@ -28,10 +28,16 @@ def _bundle_section(bundle: Path, name: str) -> bytes:
 
 
 def _native_pixels(image, config: dict) -> np.ndarray:
-    from PIL import Image
+    from PIL import Image, ImageOps
 
     size = int(config["fixed_image_size"])
-    resized = image.convert("RGB").resize((size, size), Image.Resampling.BICUBIC)
+    image = image.convert("RGB")
+    if config["preprocessor_type"] == "pad_center_chw":
+        color = tuple(int(value * 255) for value in config["image_mean"])
+        resized = ImageOps.pad(image, (size, size), color=color)
+    else:
+        assert config["preprocessor_type"] == "simple_chw"
+        resized = image.resize((size, size), Image.Resampling.BICUBIC)
     pixels = np.asarray(resized, dtype=np.float32) / 255.0
     mean = np.asarray(config["image_mean"], dtype=np.float32)
     std = np.asarray(config["image_std"], dtype=np.float32)

@@ -16,8 +16,12 @@ from . import builder as edge_llm
 
 _LOG = logging.getLogger(__name__)
 
-# Only native platforms exercised by the recorded original-source profiles.
-EDGE_DISPATCH = {("linux", "x86_64", sm, "fp16"): edge_llm.prepare for sm in (80, 120)}
+# Native SDK identity is checked on each complete-network route.
+EDGE_DISPATCH = {
+    ("linux", "x86_64", sm, weight_format): edge_llm.prepare
+    for sm in (80, 86, 120)
+    for weight_format in ("fp16", "int4_awq")
+}
 
 # Pinned documented text topologies, not repository-name heuristics.
 # type, layers, hidden, intermediate, attention heads, KV heads, vocabulary.
@@ -26,6 +30,12 @@ INTERNVL_CONFIGS = {
     ("qwen2", 28, 1536, 8960, 12, 2, 151674),
     ("qwen2", 28, 3584, 18944, 28, 4, 151674),
     ("qwen2", 48, 5120, 13824, 40, 8, 151674),
+    # InternVL3.5 uses its explicit head dimension, not a hidden/heads inference.
+    ("qwen3", 28, 1024, 3072, 16, 8, 151936),
+    ("qwen3", 28, 2048, 6144, 16, 8, 151936),
+    ("qwen3", 36, 2560, 9728, 32, 8, 151936),
+    ("qwen3", 36, 4096, 12288, 32, 8, 151936),
+    ("qwen3", 40, 5120, 17408, 40, 8, 151936),
 }
 
 
@@ -35,7 +45,7 @@ def mapped_request(request) -> bool:
         request.backend == "trt"
         and request.task == "vision_language_generation"
         and request.precision.lower() == "fp16"
-        and request.quantization in {None, "none"}
+        and request.quantization in {None, "none", "int4_awq"}
         and request.max_batch_size
         == request.tensor_parallel_size
         == request.context_parallel_size
@@ -71,6 +81,7 @@ def candidate(request, raw: dict) -> bool:
         and not ("text_config" in raw and "llm_config" in raw)
         and all(type(value) is int for value in shape[1:])
         and shape in INTERNVL_CONFIGS
+        and (config.get("model_type") != "qwen3" or config.get("head_dim") == 128)
         and not any(
             config.get(key) for key in ("num_experts", "num_local_experts", "moe_intermediate_size")
         )
@@ -100,6 +111,50 @@ def candidate(request, raw: dict) -> bool:
     )
 
 
+UnavailableEdgeConfiguration = edge_llm.UnavailableEdgeConfiguration
+
+
+def device_memory_bytes() -> int:
+    """Read native device capacity for this family's complete-network offload."""
+    from cuda.bindings import runtime
+
+    status, device = runtime.cudaGetDevice()
+    if int(status) != 0:
+        raise RuntimeError(f"InternVL CUDA device query failed: {status}")
+    status, properties = runtime.cudaGetDeviceProperties(device)
+    if int(status) != 0:
+        raise RuntimeError(f"InternVL CUDA capacity query failed: {status}")
+    return properties.totalGlobalMem
+
+
+def validate_execution_capacity(
+    request, config: dict, target: dict, weight_format: str, *, release: str
+) -> None:
+    """Warn through dispatch before repeating an impossible ONNX allocation.
+
+    A single allocation exceeding total device memory cannot fit. These are
+    measurements for specific builder profiles, not a general memory estimate.
+    """
+    if not (
+        weight_format == "fp16" and config.get("model_type") == "qwen3"
+        and config.get("num_hidden_layers") == 40 and config.get("hidden_size") == 5120
+    ):
+        return
+    profile = (release, target.get("tensorrt_version"), request.max_sequence_length, target.get("sm"))
+    minimum = {
+        ("0.11.0", "11.1.0.106", 384, 80): 49_913_047_296,
+        ("0.11.0", "11.1.0.106", 384, 86): 52_849_060_096,
+    }.get(profile)
+    if (profile == ("0.12.0", "11.4.0.106", 4096, 80)
+            and target.get("arch") == "x86_64" and target.get("cuda_version") == "13.4"):
+        minimum = 45_718_743_296
+    if minimum is not None and device_memory_bytes() < minimum:
+        raise UnavailableEdgeConfiguration(
+            f"InternVL3.5-14B Edge {release} FP16/context{request.max_sequence_length} "
+            f"is unavailable on this GPU: the recorded ONNX build requires a {minimum:,}-byte allocation."
+        )
+
+
 def build(request, writer, native) -> None:
     """Dispatch locally or warn and retry native once with the original request.
 
@@ -113,6 +168,8 @@ def build(request, writer, native) -> None:
             Edge cause after a failed preparation. Cancellation never retries.
     """
     if not mapped_request(request) or not (Path(request.model_dir) / "config.json").is_file():
+        if getattr(request, "int4_gemm_plugin_version", None) is not None:
+            raise UnavailableEdgeConfiguration("INT4 plugin selection requires a mapped Edge AWQ request")
         native(request, writer)
         return
     raw = json.loads((Path(request.model_dir) / "config.json").read_text(encoding="utf-8"))
@@ -121,11 +178,18 @@ def build(request, writer, native) -> None:
     config = raw.get("text_config", raw.get("llm_config", raw))
     if not isinstance(config, dict):
         raise ValueError("checkpoint text_config must contain an object")
-    if not candidate(request, raw):
+    def run_native():
         native(request, writer)
+
+    if not candidate(request, raw):
+        if getattr(request, "int4_gemm_plugin_version", None) is not None:
+            raise UnavailableEdgeConfiguration("INT4 plugin selection requires a mapped Edge AWQ request")
+        run_native()
         return
     if not edge_llm.package_present():
-        native(request, writer)
+        if getattr(request, "int4_gemm_plugin_version", None) is not None:
+            raise UnavailableEdgeConfiguration("INT4 plugin selection requires an Edge SDK")
+        run_native()
         return
     failure = None
     descriptor, name = tempfile.mkstemp(
@@ -139,12 +203,43 @@ def build(request, writer, native) -> None:
         try:
             target = edge_llm.local_target()
             weight_format = edge_llm.request_weight_format(request, raw)
-            key = (target["os"], target["arch"], target["sm"], weight_format)
-            adapter = EDGE_DISPATCH.get(key)
-            # The recorded 14B profile uses SM120; 1B/2B/8B use SM80.
-            if target["sm"] != (120 if config["hidden_size"] == 5120 else 80):
-                adapter = None
+            release = edge_llm.selected_release()
+            modern = release == "0.12.0"
+            if modern:
+                # The installed native SDK validates its own architecture and GPU
+                # targets. Historical 0.11 ONNX allocation limits do not apply.
+                adapter = edge_llm.prepare if target["os"] == "linux" else None
+            else:
+                edge_llm.int4_plugin_version(request, config, target, weight_format)
+                key = (target["os"], target["arch"], target["sm"], weight_format)
+                adapter = EDGE_DISPATCH.get(key)
+                # Original Qwen2-backed 14B uses its recorded SM120 profile.
+                # Qwen3-backed InternVL3.5 uses the native SM80 ONNX profile.
+                profile_sm = (
+                    120 if config.get("model_type") == "qwen2" and config["hidden_size"] == 5120 else 80
+                )
+                larger_memory_retry = (
+                    config.get("model_type") == "qwen3"
+                    and config.get("num_hidden_layers") == 40
+                    and config.get("hidden_size") == 5120
+                    and target["sm"] == 86
+                    and weight_format == "fp16"
+                )
+                awq_sm120_control = (
+                    weight_format == "int4_awq" and target["sm"] == 120
+                    and config.get("model_type") == "qwen2"
+                    and config.get("hidden_size") == 1536
+                    and config.get("num_hidden_layers") == 28
+                )
+                if target["sm"] != profile_sm and not (larger_memory_retry or awq_sm120_control):
+                    adapter = None
+            if adapter is None and (
+                weight_format == "int4_awq"
+                or getattr(request, "int4_gemm_plugin_version", None) is not None
+            ):
+                raise UnavailableEdgeConfiguration("No Edge INT4 route is mapped for this target")
             if adapter is not None:
+                validate_execution_capacity(request, config, target, weight_format, release=release or "0.11.0")
                 # This is an Edge profile restriction, not a native build limit.
                 capacity = config.get("max_position_embeddings")
                 if type(capacity) is not int or capacity <= 0:
@@ -155,6 +250,14 @@ def build(request, writer, native) -> None:
                     raise ValueError("max_sequence_length exceeds checkpoint context capacity")
                 files, marker = adapter(request, raw, target, Path(directory), log_path)
         except Exception as error:
+            if getattr(request, "int4_gemm_plugin_version", None) is not None:
+                # An explicitly requested Edge plugin cannot be substituted by
+                # a native implementation of a different backend control.
+                with log_path.open("a", encoding="utf-8") as log:
+                    traceback.print_exception(error, file=log)
+                raise UnavailableEdgeConfiguration(
+                    f"Cannot honor the explicit Edge INT4 plugin selection; diagnostics: {log_path}"
+                ) from error
             failure = error
             with log_path.open("a", encoding="utf-8") as log:
                 traceback.print_exception(error, file=log)
@@ -176,7 +279,7 @@ def build(request, writer, native) -> None:
                 return
             log_path.unlink()  # A platform non-match is not an Edge failure.
     try:
-        native(request, writer)
+        run_native()
     except Exception as error:
         if failure is not None:
             raise error from failure

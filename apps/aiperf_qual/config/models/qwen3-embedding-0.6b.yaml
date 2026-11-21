@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Build for actual STS-B and SciFact prompts: one EOS plus a four-token allowance for the shipped
+# C++ tokenizer's different counts. Full-corpus runtime replay needs 260 tokens versus HF's 258.
+# Both sides still receive the same benchmark requests; accuracy tolerances are unchanged.
+candidate:
+  build: {name: qwen3-embedding-0.6b-benchmark}
+  benchmark_sequence_length: {extra_tokens: 5}

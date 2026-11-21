@@ -41,6 +41,11 @@ if TYPE_CHECKING:
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
+def _has_quantization_tensors(readers) -> bool:
+    """Return True when the checkpoint carries quantization scale tensors."""
+    return any(str(name).endswith((".weight_scale", ".input_scale")) for name in readers.tensor_map)
+
+
 class _CodeGenModel:
     def load_weights(
         self,
@@ -57,6 +62,9 @@ class _CodeGenModel:
         head_dim = hidden // num_heads
 
         weights = WeightDict()
+        if _has_quantization_tensors(readers):
+            # Lets the FP8 path refuse a checkpoint that is already quantized.
+            weights["_quantized_checkpoint"] = True  # type: ignore[assignment]
 
         # Token embedding (wte) — no position embedding (uses RoPE)
         embedding = _load_tensor(readers, "transformer.wte.weight")
@@ -292,10 +300,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("CodeGen max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("CodeGen has no qualified family-owned quantized build")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(f"CodeGen does not support quantization={request.quantization!r}")
+    quantized = request.quantization == "fp8"
+    if quantized and precision == "fp32":
+        raise NotImplementedError("CodeGen fp8 quantization requires precision fp16 or bf16")
+    if quantized and request.tensor_parallel_size != 1:
+        raise NotImplementedError("CodeGen fp8 quantization does not support tensor parallelism")
     if request.fp32_layers:
         raise NotImplementedError("CodeGen does not expose mixed-precision layer selection")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("CodeGen does not support MTP speculative decoding")
 
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
@@ -306,6 +321,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_resolved_build_precision"] = precision
     config.raw["_parallel_build_enabled"] = parallel.enabled
     weights = model.load_weights(str(model_dir), config)
+    quant_ctx = None
+    if quantized:
+        from . import graph_ops
+        from .quantization import calibrate_codegen_fp8
+
+        quant_ctx = calibrate_codegen_fp8(config, weights, graph_ops)
 
     writer.set_header(family="codegen", task=request.task, backend=request.backend)
     if parallel.enabled:
@@ -329,7 +350,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
@@ -340,7 +361,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,

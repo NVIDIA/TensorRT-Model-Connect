@@ -11,5 +11,5 @@ lizard==1.21.2
 pytest==8.4.2
 pytest-xdist==3.8.0
 jsonschema==4.26.0
-Pillow==12.2.0
+Pillow==13.0.0
 PyYAML==6.0.2

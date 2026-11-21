@@ -1,0 +1,18 @@
+{
+  "name": "deberta-v3-base",
+  "hf_id": "microsoft/deberta-v3-base",
+  "hf_revision": "8ccc9b6f36199bec6961081d44eb72fb3f7353f3",
+  "bundle": "deberta-v3-base.bundle",
+  "family": "deberta_v2",
+  "task": "text_to_token_features",
+  "precision": "fp32",
+  "max_sequence_length": 256,
+  "testcases": [
+    {
+      "name": "deberta-v3-base",
+      "premerge": true,
+      "prompt": "The capital of France is Paris. Rivers shape the cities built along them, and the Seine is no exception. Bridges carry traffic over the water while boats pass underneath. Museums hold paintings that visitors travel a long way to see. Cafes fill with people in the afternoon and empty again at night. Trains arrive from the coast carrying passengers and freight. Markets open early, selling bread and vegetables to anyone who comes. Students cross the bridges on their way to lectures in old buildings. Gardens are planted in squares that were once used for other purposes. The weather turns colder in autumn and the leaves fall into the river. Workers repair the roads at night when the traffic has thinned out. Tourists photograph the same tower from a dozen different angles. "
+    }
+  ],
+  "tensor_parallel_size": 1
+}

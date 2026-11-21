@@ -5,6 +5,11 @@ add_library(trtmc_model_gemma SHARED
   bpe_tokenizer.cpp
   chat_templates.cpp
   distributed_runtime.cpp
+  gemma4_audio.cpp
+  gemma4_image.cpp
+  gemma4_mtp.cpp
+  gemma4_dflash.cpp
+  image_pipeline.cpp
   kv_cache.cpp
   pipeline.cpp
   plugin.cpp

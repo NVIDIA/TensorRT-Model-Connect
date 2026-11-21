@@ -10,4 +10,5 @@ describe = family_support(
     model_types=("sam",),
     tasks=("prompted_segmentation",),
     default_task="prompted_segmentation",
+    default_precision="fp16",
 )

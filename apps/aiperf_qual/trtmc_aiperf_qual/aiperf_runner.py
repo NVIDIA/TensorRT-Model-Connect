@@ -104,13 +104,14 @@ def _run(command: Sequence[str], log: Any, env: Mapping[str, str], timeout_s: fl
 
 def run_aiperf(environment: Environment, out: Path, arguments: Sequence[str], *,
                env: Mapping[str, str] | None = None, timeout_s: float = 7200,
-               model_name: str = "trtmc", command_prefix: Sequence[str] | None = None) -> AiperfRun:
+               model_name: str = "trtmc", command_prefix: Sequence[str] | None = None,
+               request_timeout_s: float = 1800) -> AiperfRun:
     arguments, evidence = execution.prepare(arguments)
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
     command = [*(command_prefix or [str(environment["aiperf"])]), "profile", "--model", model_name, "--ui-type", "none",
                "--export-level", "raw", "--artifact-dir", str(out), "--random-seed", "0",
-               "--request-timeout-seconds", "1800", *arguments]
+               "--request-timeout-seconds", str(request_timeout_s), *arguments]
     # Tokenizers and public datasets load online (AIPerf's offline path rejects local tokenizer
     # directories); keep the datasets cache private to this environment.
     client_env = {key: value for key, value in os.environ.items()

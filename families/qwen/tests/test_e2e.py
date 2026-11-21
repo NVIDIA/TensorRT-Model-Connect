@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tensorrt_model_connect.provenance import checkpoint_identity
 
 
 _TEST_DIR = Path(__file__).resolve().parent
@@ -36,7 +37,7 @@ def _load_cases() -> dict[str, tuple[dict, dict]]:
     for path in sorted((_TEST_DIR / "manifests").glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == _FAMILY, path
-        assert manifest["task"] in {"text_generation", "embedding"}, path
+        assert manifest["task"] in {"text_continuation", "embedding"}, path
         assert isinstance(manifest["precision"], str), path
         assert isinstance(manifest["max_sequence_length"], int), path
         assert isinstance(manifest["tensor_parallel_size"], int), path
@@ -116,22 +117,66 @@ def _validation_revision(manifest: dict) -> str | None:
     return revision
 
 
-def _validation_bundle(manifest: dict, model_dir: Path, default: Path) -> Path:
+def _validation_bundle(manifest: dict, model_dir: Path, default: Path, binary: Path) -> Path:
     value = os.environ.get("TRTMC_E2E_BUNDLE")
     if value is None:
         with evidence_stage("build"):
             _build_bundle(manifest, model_dir, default)
         return default
-    _validation_revision(manifest)
-    assert manifest["task"] == "text_generation", "prebuilt validation supports text generation only"
+    revision = _validation_revision(manifest)
+    assert manifest["task"] == "text_continuation", "prebuilt validation supports text continuation only"
     bundle = Path(value)
     assert bundle.is_file() and bundle.stat().st_size > 0, bundle
-    from ..bundle_provenance import validate_prebuilt_bundle
-
-    provenance = validate_prebuilt_bundle(bundle, model_dir, manifest, _validation_revision(manifest))
+    provenance = _prebuilt_provenance(binary, bundle, model_dir, manifest, revision)
     record_evidence("inputs", {"prebuilt_bundle": str(bundle.resolve()),
                                "bundle_build_provenance": provenance})
     return bundle
+
+
+def _inspect(binary: Path, bundle: Path) -> dict:
+    inspected = subprocess.run(
+        [str(binary), "inspect", str(bundle)], check=True, capture_output=True, text=True, timeout=30
+    )
+    return json.loads(inspected.stdout)
+
+
+def _prebuilt_provenance(
+    binary: Path, bundle: Path, model_dir: Path, manifest: dict, revision: str
+) -> dict:
+    """Compare the core build provenance with the selected, pinned HF snapshot."""
+    info = _inspect(binary, bundle)
+    assert (info.get("family"), info.get("task")) == (_FAMILY, "text_continuation"), (
+        "prebuilt bundle has the wrong family or task"
+    )
+    provenance = info.get("provenance")
+    assert isinstance(provenance, dict), "prebuilt bundle lacks build provenance; rebuild it with TRTMC"
+    assert provenance.get("version") == 1, "unsupported prebuilt provenance version"
+    selected = {"hf_id": manifest["hf_id"], "revision": revision}
+    assert checkpoint_identity(model_dir) == selected, (
+        "prebuilt validation requires the selected immutable HF snapshot"
+    )
+    assert provenance.get("checkpoint") == selected, (
+        "prebuilt checkpoint provenance differs from the selected checkpoint"
+    )
+    expected = {
+        "precision": manifest["precision"],
+        "max_sequence_length": manifest["max_sequence_length"],
+        "tensor_parallel_size": manifest["tensor_parallel_size"],
+        "quantization": _quantization(manifest.get("quantization")),
+        "fp32_layers": list(manifest.get("fp32_layers", ())),
+    }
+    build = provenance.get("build")
+    assert isinstance(build, dict), "prebuilt build profile differs from the family manifest"
+    recorded = {key: build.get(key) for key in expected} | {
+        "quantization": _quantization(build.get("quantization"))
+    }
+    assert recorded == expected, "prebuilt build profile differs from the family manifest"
+    return provenance
+
+
+def _quantization(value: object) -> object:
+    # A build request may spell "no quantization" as None or "none".
+    return None if value == "none" else value
 
 
 def _checkpoint(manifest: dict) -> Path:
@@ -186,7 +231,7 @@ def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
             model_dir=model_dir,
             output_path=bundle,
             family=_FAMILY,
-            task="text_generation",
+            task="text_continuation",
             precision=manifest["precision"],
             max_sequence_length=manifest["max_sequence_length"],
             tensor_parallel_size=manifest["tensor_parallel_size"],
@@ -215,7 +260,7 @@ def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int) -> None:
     )
     payload = json.loads(inspected.stdout)
     assert payload["family"] == _FAMILY
-    assert payload["task"] == "text_generation"
+    assert payload["task"] == "text_continuation"
     if tp_size > 1:
         rank_sections = {
             name
@@ -245,6 +290,7 @@ def _native_arguments(bundle: Path, runtime_root: Path, prompt: str, case: dict)
         "repetition_penalty": "--repetition-penalty",
         "use_chat_template": "--use-chat-template",
         "enable_thinking": "--enable-thinking",
+        "system_prompt": "--system-prompt",
     }
     for field, option in options.items():
         if field not in case:
@@ -386,11 +432,41 @@ def _render_prompt(tokenizer, prompt: str, case: dict):
     options = {"tokenize": False, "add_generation_prompt": True}
     if "enable_thinking" in case:
         options["enable_thinking"] = case["enable_thinking"]
+    messages = []
+    if case.get("system_prompt"):  # The native ChatML formatter omits an empty system turn.
+        messages.append({"role": "system", "content": case["system_prompt"]})
+    messages.append({"role": "user", "content": prompt})
     rendered = tokenizer.apply_chat_template(
-        [{"role": "user", "content": prompt}],
+        messages,
         **options,
     )
     return tokenizer(rendered, return_tensors="pt", add_special_tokens=False)
+
+
+def test_s1_mini_system_prompt_reaches_native_and_reference_paths(tmp_path: Path) -> None:
+    class Tokenizer:
+        def __init__(self):
+            self.messages = None
+
+        def apply_chat_template(self, messages, **options):
+            self.messages = messages
+            assert options["enable_thinking"] is False
+            return "rendered"
+
+        def __call__(self, text, **options):
+            assert text == "rendered"
+            assert options["add_special_tokens"] is False
+            return text
+
+    case = _CASES["s1-mini-fp16-e2e"][1]
+    tokenizer = Tokenizer()
+    _render_prompt(tokenizer, case["prompt"], case)
+    assert tokenizer.messages == [
+        {"role": "system", "content": case["system_prompt"]},
+        {"role": "user", "content": case["prompt"]},
+    ]
+    arguments = _native_arguments(tmp_path / "model.bundle", tmp_path, case["prompt"], case)
+    assert arguments[arguments.index("--system-prompt") + 1] == case["system_prompt"]
 
 
 def _is_sampling(case: dict) -> bool:
@@ -724,6 +800,11 @@ def _assert_correctness(
         and _contains_expected_answer(normalized_reference, answer)
         for answer in expected_answers
     )
+    if case.get("require_answer_and_distance"):
+        assert expected_answers, "answer-and-distance contract requires expected_answers"
+        assert expected_answer_matches, f"expected one of {expected_answers} in both outputs"
+        assert ned <= _text_threshold(thresholds)
+        return
     assert ned <= _text_threshold(thresholds) or expected_answer_matches
 
 
@@ -767,6 +848,33 @@ def test_fp8_text_gate_uses_prefix_fallback_and_expected_answer_or() -> None:
         )
 
 
+def test_s1_mini_text_gate_requires_expected_answer_and_distance() -> None:
+    case = _CASES["s1-mini-fp16-e2e"][1]
+    thresholds = _thresholds(case["name"])
+    reference_text = "so um i need to like send the report by thursday"
+    payload = {"token_ids": [1], "text": ""}
+
+    close_text = "so um i need to send the report by thursday"
+    _assert_correctness(
+        {**payload, "text": close_text}, case, thresholds, [], reference_text, None, "", None
+    )
+
+    far_text = (
+        "Thursday, completely different padding words here that push the edit "
+        "distance well past the allowed threshold for this contract"
+    )
+    with pytest.raises(AssertionError):
+        _assert_correctness(
+            {**payload, "text": far_text}, case, thresholds, [], reference_text, None, "", None
+        )
+
+    missing_text = "so um i need to send the report by friday"
+    with pytest.raises(AssertionError):
+        _assert_correctness(
+            {**payload, "text": missing_text}, case, thresholds, [], reference_text, None, "", None
+        )
+
+
 def test_native_kv_semantic_case_reaches_the_third_prefill_chunk() -> None:
     _, case = _CASES["qwen3-0.6b-bf16-native-kv-two-chunk-parity"]
     prompt_tokens = int(case["expected_prompt_tokens"])
@@ -798,7 +906,7 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
         return _embedding_e2e(manifest, case, model_dir, runtime_root, torch, tmp_path)
     prompt = _prompt(case)
     record_evidence("inputs", {"prompt": prompt})
-    bundle = _validation_bundle(manifest, model_dir, tmp_path / manifest["bundle"])
+    bundle = _validation_bundle(manifest, model_dir, tmp_path / manifest["bundle"], binary)
     with evidence_stage("compare"):
         _assert_rank_sections(binary, bundle, tp_size)
     with evidence_stage("native"):
@@ -883,6 +991,11 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     record_evidence("thresholds", thresholds)
     with evidence_stage("compare"):
         _assert_correctness(payload, case, thresholds, *reference[:-1])
+    if tp_size == 1:
+        from families.qwen.tests.sdk import check_consumers
+
+        with evidence_stage("sdk"):
+            check_consumers(bundle, runtime_root, prompt, case, payload, model_dir, tmp_path)
 
 
 def _embedding_consumer_binary() -> Path:
@@ -964,6 +1077,7 @@ def _embedding_e2e(manifest, case, model_dir, runtime_root, torch, tmp_path):
         inputs = {key: value.to("cuda") for key, value in inputs.items()}
         with torch.inference_mode():
             hidden = model(**inputs).last_hidden_state
+            hidden_size = model.config.hidden_size
             expected = (
                 torch.nn.functional.normalize(hidden[:, -1, :], p=2, dim=-1)[0]
                 .float()
@@ -981,7 +1095,7 @@ def _embedding_e2e(manifest, case, model_dir, runtime_root, torch, tmp_path):
         {"cosine_similarity": 0.99, "l2_distance": 0.1, "embedding_norm_tolerance": 0.001},
     )
     with evidence_stage("compare"):
-        assert actual.shape == expected.shape == (1024,)
+        assert actual.shape == expected.shape == (hidden_size,)
         assert np.isfinite(actual).all() and np.isfinite(expected).all()
         assert abs(float(np.linalg.norm(actual)) - 1) <= 0.001
         assert abs(float(np.linalg.norm(expected)) - 1) <= 0.001

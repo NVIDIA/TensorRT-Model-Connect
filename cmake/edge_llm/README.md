@@ -5,6 +5,57 @@ nor builds it. Enable it once while installing Model Connect; ordinary model
 builds only use the installed package and never fetch or install dependencies.
 Cross compilation is rejected. Configure and build on the inference GPU host.
 
+## Opt in to Edge-LLM 0.12.0
+
+When Edge is enabled the default release is still **0.11.0** during the family
+migration. A build links **one** release; an engine from a different release
+is not interchangeable. Native-only builds do not provision either SDK.
+
+For 0.12, point CMake at a native installation exporting
+`TensorRTEdgeLLMConfig.cmake`, or let CMake build the official pinned GitHub
+source. Set the architecture to the compute capability of the GPU on the
+build host (for example, 80 for SM80). Supply the same TensorRT SDK to both
+projects and the compatible nlohmann JSON headers described below.
+
+```bash
+cmake -S . -B build-edge012 -DTRTMC_ENABLE_EDGELLM=ON \
+  -DTRTMC_EDGELLM_RELEASE=0.12.0 -DTRTMC_EDGELLM_CUDA_ARCHITECTURE=80 \
+  -DTRTMC_EDGELLM_TRT_ROOT="$TRT_ROOT" -DTRTMC_TRT_INCLUDE_DIR="$TRT_ROOT/include" \
+  -DTRTMC_TRT_LIBRARY="$TRT_ROOT/lib/libnvinfer.so"
+cmake --build build-edge012
+cmake --install build-edge012 --prefix "$PWD/mc-edge012"
+```
+
+Set `CMAKE_PREFIX_PATH` to the upstream SDK prefix before configuring to
+reuse it. Alternatively, `TRTMC_EDGELLM_SOURCE_DIR` accepts a populated
+checkout of the pinned revision and its submodules, including for offline
+builds. With no provided SDK or source, CMake fetches the public revision
+during this opt-in configure. It uses upstream's native build, prebuilt kernel
+selection and CMake exports. An external SDK attests its package version,
+not its source commit or kernel groups. Its receipt records
+a null source revision; the pinned source build records the verified commit.
+The SDK must include its installed license. To request all kernel groups
+(`TRTMC_EDGELLM_ALL_KERNELS=ON`), provision from pinned source.
+`TRTMC_EDGELLM_ONNX=ON` installs the upstream ONNX builder commands only when
+requested; it does not change the native MC graph path or qualify any family.
+
+Keep the **0.12 Python builder separate from the MC environment**. For
+example, when the native SDK uses TensorRT 11.4.0.106:
+
+```bash
+python3 -m venv "$HOME/.venvs/edge012"
+"$HOME/.venvs/edge012/bin/python" -m pip install 'tensorrt==11.4.0.106' 'tensorrt-edgellm[builder]==0.12.0'
+```
+
+The same interpreter can instead install `.[builder]` from the official
+0.12.0 checkout. Ensure its TensorRT Python version matches the C++ SDK. A
+ported family can use the installed interpreter regardless of pip provenance.
+It discovers the native receipt via `CMAKE_PREFIX_PATH` or inside the installed
+MC wheel. Neither installing the Python tools nor selecting the CMake release
+by itself enables an unported family or validates a model.
+
+## Default release: Edge-LLM 0.11.0
+
 ```bash
 cmake -S . -B build \
   -DTRTMC_ENABLE_EDGELLM=ON \
@@ -29,9 +80,9 @@ interpreter needs `ensurepip` or an already installed `virtualenv` bootstrapper.
 The native CUDA SDK must include NVCC, NVRTC, cuRAND headers and driver link
 libraries; the TensorRT SDK must contain its matching CPython wheel.
 
-The provider first uses `find_package(EdgeLLM 0.10.1 EXACT CONFIG)`. If absent,
+The provider first uses `find_package(EdgeLLM 0.11.0 EXACT CONFIG)`. If absent,
 CMake `ExternalProject` clones the public NVIDIA TensorRT-Edge-LLM repository at
-`e8b29522938901f6df19ebeedd4b69bc8edbcd97` (v0.10.1), initializes the pinned
+`95515c2f87fba8982db5a519f9022277667b3cc9` (v0.11.0), initializes the pinned
 submodules, builds the native core/plugin and FMHA/GDN CuTe archives, and installs
 an isolated direct-builder Python environment. It does not modify the caller
 Python environment. Downloads happen only during this
@@ -39,12 +90,16 @@ explicit dependency build. `TRTMC_EDGELLM_WHEELHOUSE` selects a complete offline
 Python wheelhouse; `TRTMC_EDGELLM_GIT_MIRROR` optionally supplies a local Git
 mirror, still checked out at the immutable upstream commit.
 
-Upstream 0.10.1 does not export a CMake SDK package, so these compact templates
+Upstream 0.11.0 does not export a CMake SDK package, so these compact templates
 supply that installation boundary. `EdgeLLM::Core` exposes the installed static
-core, headers, CuTe archive and native dependencies. Consumers requiring CUDA
+core, headers, CuTe archive and native dependencies, including 0.11.0's
+chat-template and XGrammar static archives. Consumers requiring CUDA
 device linking enable separable compilation and device-symbol resolution.
 `EdgeLLM::Plugin` identifies the plugin DSO; adapters load it, rather than linking
-it twice. `EdgeLLM_PYTHON_EXECUTABLE` and `EdgeLLM_BUILDER_LAUNCHER` expose the
+it twice. The plugin is installed beside the family DSOs by both the `sdk`
+component (used for Model Connect wheels) and the dependency-only `EdgeLLM`
+component. Reusing an external native SDK must not omit that runtime dependency
+from a clean wheel. `EdgeLLM_PYTHON_EXECUTABLE` and `EdgeLLM_BUILDER_LAUNCHER` expose the
 isolated upstream `experimental.builder.cli.main` API.
 
 `share/trtmc/edge-llm.json` records the pin, native architecture, CUDA/TensorRT
@@ -95,3 +150,22 @@ these exact pins and the dependencies for both environments. The kernel-only
 environment and its dependency report remain under the dependency build root.
 CUDA 13 provisioning requires Python 3.10-3.13 because of the pinned NumPy wheel support.
 The selected Python wheel and imported TensorRT version must match the exact native SDK header/library version; an ABI-compatible wheel from another release is rejected.
+
+### Native media tools
+
+With `TRTMC_EDGELLM_ONNX=ON`, provisioning also builds and installs the
+upstream visual and audio component builders as `edgellm-onnx-visual-build`
+and `edgellm-onnx-audio-build`. The package manifest exposes their
+`onnx_visual_builder` and `onnx_audio_builder` paths, with
+`visual_builder` and `audio_builder` aliases for existing family consumers.
+Families decide which checkpoint towers to build; provisioning adds no model
+selection or runtime dispatch. The original Edge source pin is unchanged.
+
+Specify the numeric GPU architecture for a native build (for example,
+`100` on GB200 or `103` on GB300). The 0.12 provider follows the pinned
+SDK's native compiler selection: architectures 100, 101, 103, 110 and 121
+use the `a` suffix for compiling the SDK and device-linking its consumers.
+The numeric GPU check, installed receipt and CuTe asset tag do not change.
+Compiling for plain `100`, for example, rejects the FP4 conversion used by
+the upstream quantization kernel. The reduced SDK build on GB300 also
+includes the CTM decode kernels required by the upstream attention plugin.

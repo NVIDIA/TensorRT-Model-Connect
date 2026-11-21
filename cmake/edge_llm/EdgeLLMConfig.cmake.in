@@ -61,7 +61,7 @@ if(NOT TARGET EdgeLLM::Core)
   set_target_properties(EdgeLLM::Core PROPERTIES
     IMPORTED_LOCATION "${EdgeLLM_PREFIX}/lib/libedgellmCore.a"
     INTERFACE_INCLUDE_DIRECTORIES "${EdgeLLM_PREFIX}/include;${EdgeLLM_PREFIX}/include/edgellm/cpp;${EdgeLLM_PREFIX}/include/edgellm/3rdParty/nlohmannJson/include;${EdgeLLM_PREFIX}/include/edgellm/3rdParty/stb;${EdgeLLM_PREFIX}/include/edgellm/3rdParty/miniaudio;${EdgeLLM_TRT_INCLUDE_DIR}"
-    INTERFACE_LINK_LIBRARIES "${EdgeLLM_PREFIX}/lib/libcutedsl.a;${EdgeLLM_TRT_LIBRARY};${EdgeLLM_PARSER_LIBRARY};CUDA::cudart;CUDA::cuda_driver;Threads::Threads;${CMAKE_DL_LIBS}")
+    INTERFACE_LINK_LIBRARIES "${EdgeLLM_PREFIX}/lib/libedgellmChatTemplate.a;${EdgeLLM_PREFIX}/lib/libxgrammarCore.a;${EdgeLLM_PREFIX}/lib/libcutedsl.a;${EdgeLLM_TRT_LIBRARY};${EdgeLLM_PARSER_LIBRARY};CUDA::cudart;CUDA::cuda_driver;Threads::Threads;${CMAKE_DL_LIBS}")
   add_library(EdgeLLM::Plugin SHARED IMPORTED)
   set_target_properties(EdgeLLM::Plugin PROPERTIES IMPORTED_LOCATION "${EdgeLLM_PREFIX}/lib/libNvInfer_edgellm_plugin.so")
 endif()

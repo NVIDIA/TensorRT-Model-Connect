@@ -14,6 +14,7 @@
 #include <NvInfer.h>
 #include <cstddef>
 #include <cuda_runtime_api.h>
+#include <deque>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -104,7 +105,9 @@ class TrtModuleImpl final : public ITrtModule {
     std::unordered_map<std::string, std::vector<uint8_t>> host_output_staging_;
     std::unordered_map<std::string, DeviceTensor> output_device_tensors_;
     std::string timing_label_{"engine"};
-    std::vector<TimingEvent> timing_events_;
+    std::deque<TimingEvent> timing_events_;
+    double timing_total_ms_{0};
+    std::uint64_t timing_launches_{0};
 
     void allocate_buffers(nvinfer1::ICudaEngine* engine);
     void discover_tensor_aliases(nvinfer1::ICudaEngine* engine);
@@ -131,6 +134,8 @@ class TrtModuleImpl final : public ITrtModule {
                               const std::vector<int64_t>& new_shape);
     void execute_enqueue();
     void flush_timing_events();
+    void collect_timing_events(bool wait);
+    bool collect_timing_event(TimingEvent& event, bool wait);
     bool begin_timing_event(TimingEvent& event);
     void finish_timing_event(TimingEvent event);
     void launch_ready_cuda_graph();
@@ -144,6 +149,7 @@ class TrtModuleImpl final : public ITrtModule {
     static std::size_t compute_alloc_bytes(const nvinfer1::Dims& dims, DType dtype,
                                            std::vector<int64_t>& shape_out);
     static DType from_trt_dtype(nvinfer1::DataType dt);
+    static void validate_io_tensor_format(nvinfer1::DataType dtype, nvinfer1::TensorFormat format);
 };
 
 } // namespace trtmc

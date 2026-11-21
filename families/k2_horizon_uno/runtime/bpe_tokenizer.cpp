@@ -12,6 +12,8 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <unicode/normalizer2.h>
+#include <unicode/regex.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -185,118 +187,34 @@ std::string utf8_lossy(std::string_view bytes) {
     return result;
 }
 
-bool is_letter(char value) {
-    return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z');
-}
+std::vector<std::string> pre_tokenize(std::string_view text) {
+    UErrorCode status = U_ZERO_ERROR;
+    const auto* nfc = icu::Normalizer2::getNFCInstance(status);
+    if (U_FAILURE(status))
+        schema_error("cannot initialize NFC normalization");
+    icu::UnicodeString normalized;
+    nfc->normalize(icu::UnicodeString::fromUTF8(icu::StringPiece(text.data(), text.size())),
+                   normalized, status);
+    if (U_FAILURE(status))
+        schema_error("cannot normalize prompt text");
 
-bool is_digit(char value) {
-    return value >= '0' && value <= '9';
-}
-
-bool is_line_break(char value) {
-    return value == '\r' || value == '\n';
-}
-
-bool is_whitespace(char value) {
-    return value == ' ' || value == '\t' || value == '\r' || value == '\n' || value == '\v' ||
-           value == '\f';
-}
-
-bool is_punctuation(char value) {
-    return !is_whitespace(value) && !is_letter(value) && !is_digit(value);
-}
-
-char ascii_lower(char value) {
-    return value >= 'A' && value <= 'Z' ? static_cast<char>(value - 'A' + 'a') : value;
-}
-
-std::size_t contraction_length(std::string_view text, std::size_t position) {
-    if (position >= text.size())
-        return 0;
-    const char first = ascii_lower(text[position]);
-    if (first == 's' || first == 't' || first == 'm' || first == 'd')
-        return 1;
-    if (position + 1 >= text.size())
-        return 0;
-    const char second = ascii_lower(text[position + 1]);
-    return ((first == 'r' || first == 'v') && second == 'e') || (first == 'l' && second == 'l') ? 2
-                                                                                                : 0;
-}
-
-std::vector<std::string> pre_tokenize_ascii(std::string_view text) {
+    static const auto pattern = [] {
+        UErrorCode code = U_ZERO_ERROR;
+        std::unique_ptr<icu::RegexPattern> value(icu::RegexPattern::compile(
+            icu::UnicodeString::fromUTF8(kPretokenizerPattern), 0, code));
+        if (U_FAILURE(code))
+            schema_error("cannot compile the pinned Unicode Split pattern");
+        return value;
+    }();
+    std::unique_ptr<icu::RegexMatcher> matcher(pattern->matcher(normalized, status));
     std::vector<std::string> result;
-    std::size_t position = 0;
-    while (position < text.size()) {
-        const std::size_t start = position;
-        const char first = text[position];
-
-        if (first == '\'') {
-            const std::size_t suffix = contraction_length(text, position + 1);
-            if (suffix != 0) {
-                position += suffix + 1;
-                result.emplace_back(text.substr(start, position - start));
-                continue;
-            }
-        }
-
-        if (is_letter(first)) {
-            while (++position < text.size() && is_letter(text[position])) {
-            }
-            result.emplace_back(text.substr(start, position - start));
-            continue;
-        }
-
-        if (!is_line_break(first) && !is_letter(first) && !is_digit(first) &&
-            position + 1 < text.size() && is_letter(text[position + 1])) {
-            position += 2;
-            while (position < text.size() && is_letter(text[position]))
-                ++position;
-            result.emplace_back(text.substr(start, position - start));
-            continue;
-        }
-
-        if (is_digit(first)) {
-            ++position;
-            while (position < text.size() && position - start < 3 && is_digit(text[position]))
-                ++position;
-            result.emplace_back(text.substr(start, position - start));
-            continue;
-        }
-
-        std::size_t punctuation = position;
-        if (first == ' ' && position + 1 < text.size() && is_punctuation(text[position + 1]))
-            ++punctuation;
-        if (punctuation < text.size() && is_punctuation(text[punctuation])) {
-            position = punctuation + 1;
-            while (position < text.size() && is_punctuation(text[position]))
-                ++position;
-            while (position < text.size() && is_line_break(text[position]))
-                ++position;
-            result.emplace_back(text.substr(start, position - start));
-            continue;
-        }
-
-        if (is_whitespace(first)) {
-            std::size_t run_end = position + 1;
-            std::size_t last_line_break = is_line_break(first) ? position : std::string_view::npos;
-            while (run_end < text.size() && is_whitespace(text[run_end])) {
-                if (is_line_break(text[run_end]))
-                    last_line_break = run_end;
-                ++run_end;
-            }
-            if (last_line_break != std::string_view::npos) {
-                position = last_line_break + 1;
-            } else if (run_end == text.size() || run_end - position == 1) {
-                position = run_end;
-            } else {
-                position = run_end - 1;
-            }
-            result.emplace_back(text.substr(start, position - start));
-            continue;
-        }
-
-        schema_error("ASCII pre-tokenizer reached an unsupported byte");
+    while (U_SUCCESS(status) && matcher->find(status)) {
+        std::string piece;
+        matcher->group(status).toUTF8String(piece);
+        result.push_back(std::move(piece));
     }
+    if (U_FAILURE(status))
+        schema_error("cannot split prompt text");
     return result;
 }
 
@@ -320,7 +238,6 @@ class BpeTokenizer final : public ITokenizer {
     }
 
     std::vector<std::int32_t> encode(const std::string& text) const override {
-        k2_horizon_uno_require_ascii_tokenizer_input(text);
         std::vector<std::int32_t> result;
         if (add_special_tokens_)
             result.push_back(kBosId);
@@ -434,7 +351,7 @@ class BpeTokenizer final : public ITokenizer {
                            split.at("behavior") == "Isolated" && split.at("invert") == false &&
                            split.at("pattern").is_object() && split.at("pattern").size() == 1 &&
                            split.at("pattern").at("Regex") == kPretokenizerPattern,
-                       "does not match the pinned Qwen ASCII-compatible Split contract");
+                       "does not match the pinned Unicode Split contract");
         const auto& byte_level = stages.at(1);
         require_schema(byte_level.is_object() && byte_level.size() == 4 &&
                            byte_level.at("type") == "ByteLevel" &&
@@ -664,7 +581,7 @@ class BpeTokenizer final : public ITokenizer {
     }
 
     void encode_text(std::string_view text, std::vector<std::int32_t>& result) const {
-        for (const auto& word : pre_tokenize_ascii(text)) {
+        for (const auto& word : pre_tokenize(text)) {
             for (const auto& token : apply_merges(byte_encode(word))) {
                 const auto found = token_to_id_.find(token);
                 if (found == token_to_id_.end())
@@ -688,11 +605,8 @@ std::string k2_horizon_uno_utf8_lossy(std::string_view bytes) {
     return utf8_lossy(bytes);
 }
 
-void k2_horizon_uno_require_ascii_tokenizer_input(std::string_view text) {
-    if (std::any_of(text.begin(), text.end(), [](unsigned char byte) { return byte >= 0x80U; })) {
-        throw std::invalid_argument(
-            "K2-Horizon-Uno native tokenizer currently supports ASCII prompt text only");
-    }
+std::vector<std::string> k2_horizon_uno_pre_tokenize(std::string_view text) {
+    return pre_tokenize(text);
 }
 
 std::unique_ptr<ITokenizer> CreateK2HorizonUnoBpeTokenizer(const char* tokenizer_json_data,

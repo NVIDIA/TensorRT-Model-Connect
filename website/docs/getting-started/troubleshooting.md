@@ -17,6 +17,7 @@ Identify the first boundary that fails in the [Quick Start](quick-start.md).
 | Multiple families match | Shared checkpoint architecture | Choose one of the reported compatible families with `trtmc build MODEL --family FAMILY -o model.bundle`. |
 | Bundle inspection fails | Partial/corrupt bundle | Rebuild; failed builds must not publish a partial output. |
 | Family/backend DSO missing | `--runtime-root` contents | Confirm `libtrtmc_core.so`, `libtrtmc_runtime.so`, selected backend, and exact family DSO are together. |
+| Existing S1 Mini bundle requests `s1_mini` | Bundle header was built before S1 Mini moved into Qwen | Rebuild the bundle from the checkpoint; new bundles use the `qwen` family and runtime DSO. |
 | Task mismatch | Bundle `task` versus CLI command | Use the Task command named by the family manifest/header. |
 | TensorRT/DSO ABI error | Mixed software or hardware cohort | Run with a compatible environment and rebuild the bundle when required. |
 | Output differs | Revision, input framing, precision, sampling, oracle | Reproduce the exact family testcase before changing code or thresholds. |

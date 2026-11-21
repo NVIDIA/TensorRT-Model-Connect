@@ -43,6 +43,17 @@ class ReferenceSpec:
     def dtype(self) -> torch.dtype:
         return DTYPES[self.precision]
 
+    @property
+    def device_map(self) -> str:
+        """``from_pretrained``'s ``device_map``: Transformers models load straight onto ``device``. Building one in
+        host memory first needs a host copy as large as the model, and the aarch64 PyTorch allocator keeps much of
+        it after the move (Transformers' loader threads allocated it): on Thor, where the CPU and GPU share memory,
+        it may not fit next to the GPU reservation. A bare ``"cuda"`` becomes the current device, where inputs moved
+        with ``.to("cuda")`` go (Transformers would read it as ``cuda:$LOCAL_RANK``)."""
+        if self.device == "cuda" and torch.cuda.is_available():
+            return f"cuda:{torch.cuda.current_device()}"
+        return self.device
+
     def pretrained_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {"trust_remote_code": self.trust_remote_code}
         if self.revision:
@@ -75,15 +86,32 @@ def timed(call: Callable[[], Any]) -> tuple[Any, float]:
 
 
 def maybe_compile(module: torch.nn.Module, spec: ReferenceSpec) -> torch.nn.Module:
-    """torch.compile ``module.forward`` (default mode, dynamic shapes) for compile references."""
+    """torch.compile ``module.forward`` for compile references, with PyTorch's defaults: the default mode, and
+    static shapes until a dimension changes, which then recompiles once as dynamic."""
     if spec.mode == "compile":
-        module.forward = torch.compile(module.forward, dynamic=True)
+        module.forward = torch.compile(module.forward)
     return module
 
 
-def reject_compile(spec: ReferenceSpec, adapter: str) -> None:
-    if spec.mode != "eager":
-        raise BackendError(f"{adapter} reference supports only eager mode")
+def strict_recompiles() -> None:
+    """A compiled function that would recompile past Dynamo's limit raises instead of running eager from then on
+    (Dynamo's default), so a compile reference never answers partly in eager mode."""
+    import torch._dynamo
+
+    config = torch._dynamo.config
+    for name in ("fail_on_recompile_limit_hit", "fail_on_cache_limit_hit"):  # the older name before PyTorch 2.7
+        if hasattr(config, name):
+            setattr(config, name, True)
+            return
+
+
+def compile_counts() -> dict[str, int]:
+    """What torch.compile did in this process so far: the graphs it compiled (recompilations included) and the
+    graph breaks between them."""
+    from torch._dynamo.utils import counters
+
+    return {"compiled_graphs": int(counters["stats"]["unique_graphs"]),
+            "graph_breaks": int(sum(counters["graph_break"].values()))}
 
 
 def required(request: Mapping[str, Any], name: str) -> Any:
@@ -121,13 +149,21 @@ def deferred_files(observation: Mapping[str, Any], files: Mapping[Path, Any]) ->
     return {**observation, _FILES: dict(files)}
 
 
+def deferred_values(observation: Mapping[str, Any], values: Mapping[str, Any]) -> dict[str, Any]:
+    """Encode host arrays as flat JSON values after the timed Task call, like the C++ worker."""
+    return {**observation, "_pending_values": dict(values)}
+
+
 def write_artifacts(observation: Any) -> Any:
     """Write the pending output arrays and files of an observation (any nesting); arrays get their sha256."""
     if isinstance(observation, list):
         return [write_artifacts(item) for item in observation]
     if not isinstance(observation, dict):
         return observation
-    result = {key: write_artifacts(value) for key, value in observation.items() if key not in (_PENDING, _FILES)}
+    result = {key: write_artifacts(value) for key, value in observation.items()
+              if key not in (_PENDING, _FILES, "_pending_values")}
+    for name, array in (observation.get("_pending_values") or {}).items():
+        result[name] = np.asarray(array).reshape(-1).tolist()
     for path, array in (observation.get(_FILES) or {}).items():
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         np.asarray(array).tofile(path)
@@ -206,16 +242,19 @@ class NativeHost:
     """What this backend hands a family's native pipeline: ``Adapter(spec, host)``. The family file imports
     nothing from this package (a family must not depend on an application); it reaches the backend's
     model-agnostic mechanics through ``host``: the request's fields and its input files, decoded before the timed
-    call (``required``, ``load_image``, ``load_audio``, ``load_bytes``), the timed model call (``timed``), output
-    tensors and files written after it (``tensor_observation``, ``deferred_files``), the result
-    (``invocation``), and the rejection of a request (``raise host.Error(...)``)."""
+    call (``required``, ``load_image``, ``load_audio``, ``load_bytes``), torch.compile of its modules in compile
+    mode (``maybe_compile``), the timed model call (``timed``), output tensors and files written after it
+    (``tensor_observation``, ``deferred_files``), the result (``invocation``), and the rejection of a request
+    (``raise host.Error(...)``)."""
 
     Error = BackendError
     required = staticmethod(required)
+    maybe_compile = staticmethod(maybe_compile)
     timed = staticmethod(timed)
     load_image = staticmethod(load_image)
     load_audio = staticmethod(load_audio)
     load_bytes = staticmethod(load_bytes)
     tensor_observation = staticmethod(tensor_observation)
     deferred_files = staticmethod(deferred_files)
+    deferred_values = staticmethod(deferred_values)
     invocation = staticmethod(invocation)

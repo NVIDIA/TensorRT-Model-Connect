@@ -5,6 +5,7 @@
 
 #include "families/qwen/runtime/chat_templates.h"
 
+#include <stdexcept>
 #include <string>
 
 namespace trtmc {
@@ -45,6 +46,40 @@ std::string qwen_apply_chat_template(const std::string& format, const std::strin
     if (format == "chatml" || format == "chatml_thinking")
         return apply_chatml(prompt, format == "chatml_thinking" && !enable_thinking, system_prompt);
     return prompt;
+}
+
+std::string
+qwen_apply_conversation_template(const std::string& format,
+                                 const std::vector<std::pair<std::string, std::string>>& messages,
+                                 bool enable_thinking) {
+    if (format != "chatml" && format != "chatml_thinking")
+        throw std::invalid_argument("Qwen conversation requires a supported chat template");
+    if (messages.empty() || messages.back().first != "user")
+        throw std::invalid_argument("Qwen conversation must end with a user message");
+    std::string result;
+    for (std::size_t index = 0; index < messages.size(); ++index) {
+        const auto& [role, original] = messages[index];
+        if (role != "user" && role != "assistant" && !(role == "system" && index == 0))
+            throw std::invalid_argument(
+                "Qwen conversation supports user/assistant and a leading system message");
+        auto content = original;
+        // The pinned hybrid Qwen3 template omits reasoning from assistant turns
+        // before the final user query. Preserve the original typed input; only
+        // this family-owned rendering applies that model-specific convention.
+        if (role == "assistant" && format == "chatml_thinking") {
+            const auto end = content.rfind("</think>");
+            if (end != std::string::npos) {
+                content.erase(0, end + std::string("</think>").size());
+                const auto first = content.find_first_not_of('\n');
+                content.erase(0, first == std::string::npos ? content.size() : first);
+            }
+        }
+        result += "<|im_start|>" + role + "\n" + content + "<|im_end|>\n";
+    }
+    result += "<|im_start|>assistant\n";
+    if (format == "chatml_thinking" && !enable_thinking)
+        result += "<think>\n\n</think>\n\n";
+    return result;
 }
 
 } // namespace trtmc

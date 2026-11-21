@@ -39,6 +39,7 @@ struct LlamaTextGenConfig {
     std::string present_v_pattern{"present_v_{i}"};
     int32_t prefill_max_length{0};
     int32_t num_layers{0};
+    bool single_forward{false}; // Internal single forward pass: stop at full-sequence logits.
 };
 
 class LlamaTextGenerationPipeline final : public ITextGeneration {
@@ -56,6 +57,7 @@ class LlamaTextGenerationPipeline final : public ITextGeneration {
     // Token-ID-based generation (for unit tests and internal callers).
     struct GenerationResult {
         std::vector<int32_t> token_ids;
+        std::vector<float> logits; // Populated only by the internal single-forward path.
     };
     GenerationResult generate_ids(const std::vector<int32_t>& input_ids,
                                   const TextGenerationConfig& cfg);
@@ -100,7 +102,6 @@ class LlamaTextGenerationPipeline final : public ITextGeneration {
                            const std::vector<const void*>& present_k,
                            const std::vector<const void*>& present_v, LlamaKvCache& kv,
                            std::vector<float>& logits);
-    void prime_decoder_after_batched_prefill(const std::vector<int32_t>& input_ids);
     bool should_stop_on_answer(const std::vector<int32_t>& output, int32_t prompt_token_count,
                                const TextGenerationConfig& cfg, int32_t steps,
                                int32_t stop_interval, bool is_eos) const;

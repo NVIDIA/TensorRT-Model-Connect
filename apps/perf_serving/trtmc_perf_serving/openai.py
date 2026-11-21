@@ -125,6 +125,10 @@ def chat(body: Mapping[str, Any], base: Mapping[str, Any], renderer: ChatRendere
 
 def embeddings(body: Mapping[str, Any], base: Mapping[str, Any]) -> dict[str, Any]:
     _check_fields(body, {"input", "dimensions"})
+    if body.get("dimensions") is not None:
+        raise RequestError("dimensions is unsupported; the native Task returns its full vector")
+    if body.get("encoding_format", "float") != "float":
+        raise RequestError("only encoding_format=float is supported")
     value = body.get("input")
     if isinstance(value, list) and len(value) == 1:
         value = value[0]
@@ -136,29 +140,48 @@ def embeddings(body: Mapping[str, Any], base: Mapping[str, Any]) -> dict[str, An
 def ranking(body: Mapping[str, Any], base: Mapping[str, Any]) -> dict[str, Any]:
     """NIM ``/v1/ranking``: {"query": {"text"}, "passages": [{"text"}]}."""
     _check_fields(body, {"query", "passages", "truncate"})
+    if body.get("truncate", "NONE") != "NONE":
+        raise RequestError("only truncate=NONE is supported")
     try:
         query = body["query"]["text"]
         documents = [passage["text"] for passage in body["passages"]]
     except (KeyError, TypeError) as error:
         raise RequestError("ranking requires query.text and passages[].text") from error
+    if (not isinstance(query, str) or not query or not documents or
+            any(not isinstance(document, str) or not document for document in documents)):
+        raise RequestError("ranking requires non-empty query and passage strings")
     return {**base, "query": query, "documents": documents}
 
 
-def image_generation(body: Mapping[str, Any], base: Mapping[str, Any]) -> dict[str, Any]:
-    _check_fields(body, {"prompt", "size", "seed", "num_inference_steps", "guidance_scale", "negative_prompt",
-                         "quality", "num_frames", "seconds", "fps"})
-    request = {**base, "prompt": str(body.get("prompt", ""))}
+def image_generation(body: Mapping[str, Any], base: Mapping[str, Any], *, video: bool = False) -> dict[str, Any]:
+    allowed = {"prompt", "size", "seed", "num_inference_steps", "guidance_scale", "negative_prompt",
+               "cfg_scale", "initial_latents_b64"}
+    if video:
+        allowed |= {"num_frames", "seconds", "fps"}
+    _check_fields(body, allowed)
+    if not isinstance(body.get("prompt"), str) or not body["prompt"].strip():
+        raise RequestError("prompt must be one nonempty string")
+    if body.get("stream"):
+        raise RequestError("streaming media generation is unsupported")
+    if body.get("response_format", "b64_json") != "b64_json":
+        raise RequestError("only response_format=b64_json is supported")
+    request = {**base, "prompt": body["prompt"]}
     if body.get("size"):
         try:
             width, height = (int(value) for value in str(body["size"]).lower().split("x"))
         except ValueError as error:
             raise RequestError("size must be WIDTHxHEIGHT") from error
+        if width <= 0 or height <= 0:
+            raise RequestError("size must contain positive dimensions")
         request.update(width=width, height=height)
     for source, target in (("num_inference_steps", "num_steps"), ("seed", "seed"),
                            ("guidance_scale", "guidance_scale"), ("negative_prompt", "negative_prompt"),
+                           ("cfg_scale", "cfg_scale"),
                            ("num_frames", "num_frames")):
         if body.get(source) is not None:
             request[target] = _number(body[source]) if target != "negative_prompt" else body[source]
+    if body.get("initial_latents_b64") is not None:
+        request["initial_latents_path"] = {FILE_KEY: {"suffix": ".f32", "b64": body["initial_latents_b64"]}}
     return request
 
 

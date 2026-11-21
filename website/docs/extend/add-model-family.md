@@ -257,6 +257,15 @@ Keep the migration in that family's directory:
    C/C++ calls for the newly implemented Tasks. Then qualify the actual model's
    numerical, device and performance behavior in its family tests.
 
+Put the direct C and C++ calls in `tests/sdk_consumer.c` and
+`tests/sdk_consumer.cpp`. Define them under `TRTMC_BUILD_TESTS` in the family's
+`runtime/CMakeLists.txt` as `test_<family>_sdk_c` and `test_<family>_sdk_cpp`,
+with `RUNTIME_OUTPUT_DIRECTORY` set to `${CMAKE_BINARY_DIR}`, and run them from
+`TRTMC_NATIVE_BUILD_DIR` in the family E2E. CI builds these targets by name in
+every lane. Internal premerge installs a prebuilt model library and never builds
+`trtmc_model_<family>`, so do not rely on the model target to build them.
+`tools/tests/test_architecture.py` checks the target names.
+
 The shared SDK contains more Tasks than the CLI or benchmark frontends expose.
 Preserve each family's existing application workloads during migration; do not
 claim an unrelated new CLI command exists just because its SDK Task is defined.

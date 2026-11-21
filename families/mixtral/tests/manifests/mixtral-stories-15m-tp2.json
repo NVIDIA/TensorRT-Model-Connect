@@ -1,6 +1,7 @@
 {
   "name": "mixtral-stories-15m-tp2",
   "hf_id": "ggml-org/stories15M_MOE",
+  "hf_revision": "b6dd737497465570b5f5e962dbc9d9454ed1e0eb",
   "bundle": "mixtral-stories-15m-tp2.bundle",
   "family": "mixtral",
   "task": "text_generation",

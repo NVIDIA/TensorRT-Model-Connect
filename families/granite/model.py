@@ -206,10 +206,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("Granite max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Granite has no qualified family-owned quantized build")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(f"Granite does not support quantization={request.quantization!r}")
+    quantized = request.quantization == "fp8"
+    if quantized and precision not in {"fp16", "bf16"}:
+        raise NotImplementedError("Granite fp8 quantization requires precision fp16 or bf16")
+    if quantized and request.tensor_parallel_size != 1:
+        raise NotImplementedError("Granite fp8 quantization does not support tensor parallelism")
     if request.fp32_layers:
         raise NotImplementedError("Granite does not expose mixed-precision layer selection")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Granite does not support MTP speculative decoding")
 
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
@@ -220,6 +227,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_resolved_build_precision"] = precision
     config.raw["_parallel_build_enabled"] = parallel.enabled
     weights = model.load_weights(str(model_dir), config, precision=precision)
+    quant_ctx = None
+    if quantized:
+        from . import graph_ops
+        from .quantization import calibrate_granite_fp8
+
+        quant_ctx = calibrate_granite_fp8(config, weights, graph_ops)
 
     writer.set_header(family="granite", task=request.task, backend=request.backend)
     if parallel.enabled:
@@ -229,7 +242,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 weights,
                 max_sequence_length,
                 precision=precision,
-                quant_ctx=None,
+                quant_ctx=quant_ctx,
                 verbose=bool(request.verbose),
                 debug_layer_outputs=False,
                 parallel_config=parallel.for_rank(rank),
@@ -243,7 +256,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
@@ -254,7 +267,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,

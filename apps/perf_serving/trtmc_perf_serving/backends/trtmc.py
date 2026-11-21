@@ -87,7 +87,8 @@ class TrtmcWorkerBackend:
         self._served += 1
         message_id = uuid.uuid4().hex
         self._write({"id": message_id, "request": dict(request), "artifact_base": str(artifact_base),
-                     "full_observation": self._full_observations})
+                     # API vectors and scores must survive transport regardless of log compaction.
+                     "full_observation": self._full_observations or self.operation in {"encode", "embed", "rerank"}})
         reply = self._read(self._request_timeout_s, "worker request")
         if reply.get("id") != message_id:
             self._retire()

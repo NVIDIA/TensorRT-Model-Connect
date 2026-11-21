@@ -10,8 +10,6 @@ from tools.e2e_evidence import evidence_stage, record_evidence
 import gc
 import json
 import os
-import re
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -22,7 +20,6 @@ from families.qwen3_8.cli import build
 
 _TEST_DIR = Path(__file__).resolve().parent
 _FAMILY = _TEST_DIR.parent.name
-_MPI_RANK_ZERO = re.compile(r"^\[[^,]+,0\]<stdout>:(.*)$")
 
 
 def _load_cases() -> dict[str, tuple[dict, dict]]:
@@ -30,7 +27,7 @@ def _load_cases() -> dict[str, tuple[dict, dict]]:
     for path in sorted((_TEST_DIR / "manifests").glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == _FAMILY, path
-        assert manifest["task"] == "text_generation", path
+        assert manifest["task"] in {"text_generation", "vision_language_generation"}, path
         assert isinstance(manifest["precision"], str), path
         assert isinstance(manifest["max_sequence_length"], int), path
         assert isinstance(manifest["tensor_parallel_size"], int), path
@@ -92,8 +89,6 @@ def _required_environment(tp_size: int):
     assert torch.cuda.device_count() >= tp_size, (
         f"{_FAMILY} TP{tp_size} requires {tp_size} visible GPUs; found {torch.cuda.device_count()}"
     )
-    if tp_size > 1:
-        assert shutil.which("mpirun"), "selected TP E2E requires mpirun"
     return binary, runtime_root, torch
 
 
@@ -141,7 +136,7 @@ def _build_bundle(manifest: dict, model_dir: Path, bundle: Path, *, execution=No
     build(
         model=str(model_dir),
         output=bundle,
-        task="text_generation",
+        task=manifest.get("task", "text_generation"),
         precision=manifest["precision"],
         max_sequence_length=manifest["max_sequence_length"],
         tensor_parallel_size=manifest["tensor_parallel_size"],
@@ -155,7 +150,8 @@ def _build_bundle(manifest: dict, model_dir: Path, bundle: Path, *, execution=No
     assert bundle.is_file() and bundle.stat().st_size > 0, bundle
 
 
-def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int) -> None:
+def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int,
+                          task: str = "text_generation") -> bool:
     inspected = subprocess.run(
         [str(binary), "inspect", str(bundle)],
         check=True,
@@ -167,14 +163,29 @@ def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int) -> None:
     record_evidence("native", {"stdout": getattr(inspected, "stdout", None), "stderr": getattr(inspected, "stderr", None)})
     payload = json.loads(inspected.stdout)
     assert payload["family"] == _FAMILY
-    assert payload["task"] == "text_generation"
-    if tp_size > 1:
+    edge = "edge_llm.json" in payload["sections"]
+    media = edge or "native_visual.json" in payload["sections"]
+    expected_task = "images_text_to_text" if media and task == "vision_language_generation" else task
+    # Previously published single-image bundles retain the legacy task ID.
+    assert payload["task"] in {task, expected_task}
+    if edge:
+        if tp_size == 2:
+            for rank in range(tp_size):
+                assert f"edge_llm/engine/llm_world2_rank{rank}.engine" in payload["sections"]
+        if task == "vision_language_generation":
+            assert "edge_llm/engine/visual/visual.engine" in payload["sections"]
+    elif tp_size > 1:
         rank_sections = {
             name
             for name in payload["sections"]
             if name.startswith("engine.rank") and name.endswith(".plan")
         }
         assert rank_sections == {f"engine.rank{rank}.plan" for rank in range(tp_size)}
+    if not edge and "native_visual.json" in payload["sections"]:
+        expected_visual = ({f"native_visual.rank{rank}.plan" for rank in range(tp_size)}
+                           if tp_size > 1 else {"native_visual.plan"})
+        assert expected_visual <= payload["sections"].keys()
+    return edge
 
 
 def _native_arguments(bundle: Path, runtime_root: Path, prompt: str, case: dict) -> list[str]:
@@ -205,6 +216,16 @@ def _native_arguments(bundle: Path, runtime_root: Path, prompt: str, case: dict)
         if isinstance(value, bool):
             value = "true" if value else "false"
         arguments.extend([option, str(value)])
+    if "video_frames" in case:
+        raise ValueError("Native video arguments are not mapped by this E2E harness")
+    if "image" in case and "images" in case:
+        raise ValueError("Specify image or ordered images, not both")
+    if "image" in case:
+        arguments.extend(["--image", str(case["image"])])
+    if "images" in case:
+        if not case["images"]:
+            raise ValueError("Ordered images cannot be empty")
+        arguments.extend(["--images", json.dumps(list(map(str, case["images"])))])
     return arguments
 
 
@@ -216,16 +237,13 @@ def _run_native(
     case: dict,
     tp_size: int,
     tmp_path: Path,
+    *, edge: bool = False,
 ) -> dict:
     command = [str(binary), *_native_arguments(bundle, runtime_root, prompt, case)]
     environment = dict(os.environ)
-    if tp_size > 1:
-        environment["TRTMC_NCCL_RENDEZVOUS"] = str(tmp_path / "nccl.rendezvous")
-        prefix = ["mpirun", "--tag-output", "-np", str(tp_size)]
-        for name in ("LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "TRTMC_NCCL_RENDEZVOUS"):
-            if name in environment:
-                prefix.extend(["-x", name])
-        command = [*prefix, *command]
+    # Both Edge and the family-native TP2 runtime own their rank threads and
+    # NCCL communicators in one process. An MPI wrapper would load duplicate
+    # two-GPU models and is not the family runtime contract.
 
     completed = subprocess.run(
         command,
@@ -240,16 +258,7 @@ def _run_native(
     (tmp_path / "native.stdout.log").write_text(completed.stdout, encoding="utf-8")
     (tmp_path / "native.stderr.log").write_text(completed.stderr, encoding="utf-8")
     completed.check_returncode()
-    if tp_size == 1:
-        return json.loads(completed.stdout)
-
-    rank_zero_payloads = []
-    for line in completed.stdout.splitlines():
-        match = _MPI_RANK_ZERO.fullmatch(line)
-        if match and match.group(1).lstrip().startswith("{"):
-            rank_zero_payloads.append(match.group(1))
-    assert len(rank_zero_payloads) == 1, completed.stdout
-    return json.loads(rank_zero_payloads[0])
+    return json.loads(completed.stdout)
 
 
 def _render_prompt(tokenizer, prompt: str, case: dict):
@@ -332,22 +341,93 @@ def _record_text_diagnostics(native_ids: list[int], reference_ids: list[int]) ->
     })
 
 
-def _hf_reference(
-    model_dir: Path,
-    manifest: dict,
-    case: dict,
-    prompt: str,
-    actual_ids: list[int],
-    torch,
-) -> tuple[list[int], str, float | None, str]:
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+def _reference_inputs(model_dir: Path, manifest: dict, tokenizer, prompt: str, case: dict):
+    """Validate every supplied modality before loading large source weights."""
+    has_images = "image" in case or "images" in case
+    has_video = "video_frames" in case
+    if not has_images and not has_video:
+        return _render_prompt(tokenizer, prompt, case)
+
+    import math
+    import numpy as np
+    from PIL import Image
+    from transformers import AutoProcessor
+    from transformers.video_utils import VideoMetadata
+
+    assert case.get("use_chat_template", True), "Media requires the source chat template"
+    if "image" in case and "images" in case:
+        raise ValueError("Specify image or ordered images, not both")
+    processor = AutoProcessor.from_pretrained(
+        model_dir, local_files_only=True, trust_remote_code=bool(manifest.get("trust_remote_code", False)),
+    )
+    content, images, arguments = [], [], {}
+    try:
+        if has_images:
+            factor = processor.image_processor.patch_size * processor.image_processor.merge_size
+            processor.image_processor.size = {
+                "shortest_edge": 128 * factor * factor,
+                "longest_edge": 1280 * factor * factor,
+            }
+            image_paths = case["images"] if "images" in case else [case["image"]]
+            if not image_paths:
+                raise ValueError("Ordered images cannot be empty")
+            for path in image_paths:
+                with Image.open(path) as image:
+                    images.append(image.convert("RGB"))
+                content.append({"type": "image"})
+            arguments["images"] = images
+        if has_video:
+            paths = case["video_frames"]
+            fps = float(case["video_fps"])
+            assert paths and math.isfinite(fps) and fps > 0
+            video_processor = processor.video_processor
+            factor = video_processor.patch_size * video_processor.merge_size
+            temporal = video_processor.temporal_patch_size
+            # Preserve the existing per-media temporal pixel budget.
+            video_processor.size = {
+                "shortest_edge": 128 * temporal * factor * factor,
+                "longest_edge": 1280 * temporal * factor * factor,
+            }
+            frames = []
+            for path in paths:
+                with Image.open(path) as image:
+                    frames.append(np.asarray(image.convert("RGB")))
+            frames = np.stack(frames)
+            arguments.update(
+                videos=[frames],
+                video_metadata=[VideoMetadata(
+                    total_num_frames=len(frames), fps=fps,
+                    height=frames.shape[1], width=frames.shape[2],
+                    duration=len(frames) / fps, frames_indices=list(range(len(frames))),
+                )],
+                do_sample_frames=False,
+            )
+            content.append({"type": "video"})
+        content.append({"type": "text", "text": prompt})
+        rendered = processor.apply_chat_template(
+            [{"role": "user", "content": content}], tokenize=False, add_generation_prompt=True,
+            enable_thinking=case.get("enable_thinking", False),
+        )
+        inputs = processor(text=[rendered], return_tensors="pt", **arguments)
+    finally:
+        for image in images:
+            image.close()
+    if has_images:
+        record_evidence("inputs", {"images": list(map(str, image_paths)),
+                                  "image_grid_thw": inputs["image_grid_thw"].tolist()})
+    if has_video:
+        record_evidence("inputs", {
+            "video_frames": list(map(str, paths)), "video_fps": fps,
+            "video_grid_thw": inputs["video_grid_thw"].tolist(),
+        })
+    return inputs
+
+
+def _load_reference_model(model_dir: Path, manifest: dict, case: dict, torch):
+    """Load the declared source oracle once; callers may reuse it across requests."""
+    from transformers import AutoModelForCausalLM
 
     trust_remote_code = bool(manifest.get("trust_remote_code", False))
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_dir,
-        local_files_only=True,
-        trust_remote_code=trust_remote_code,
-    )
     reference_precision = case.get(
         "reference_precision",
         manifest.get("reference_precision", manifest["precision"]),
@@ -364,7 +444,7 @@ def _hf_reference(
         from modelopt.torch.export.quant_utils import QUANTIZATION_FP8, from_quantized_weight
         from modelopt.torch.quantization.qtensor import NVFP4QTensor
         from safetensors.torch import load_file
-        from transformers import AutoConfig, GenerationConfig, Qwen3_5ForCausalLM
+        from transformers import AutoConfig, GenerationConfig, Qwen3_5ForCausalLM, Qwen3_5ForConditionalGeneration
 
         assert not trust_remote_code and reference_precision == "fp32"
         raw = json.loads((model_dir / "config.json").read_text())
@@ -425,14 +505,22 @@ def _hf_reference(
                 assert key.rsplit(".", 1)[0] + ".weight" in quantized, key
                 scale = state.pop(key)
                 assert torch.isfinite(scale.float()).all() and (scale.float() >= 0).all(), key
-        # Use the original official text-only class and checkpoint prefix conversion.
-        # HF owns its declared ignoring of unused visual/MTP keys; do not filter weights.
+        # Use the complete official source model for media. All packed tensors
+        # have already been checked and dequantized above; remove only the
+        # quantizer instruction, never weights or missing-key checks.
         config = AutoConfig.from_pretrained(
             model_dir, local_files_only=True, trust_remote_code=False,
-        ).get_text_config(decoder=True)
-        assert config.model_type == "qwen3_5_text"
+        )
+        if isinstance(raw.get("vision_config"), dict):
+            assert config.model_type == "qwen3_5"
+            del config.quantization_config
+            model_class = Qwen3_5ForConditionalGeneration
+        else:
+            config = config.get_text_config(decoder=True)
+            assert config.model_type == "qwen3_5_text"
+            model_class = Qwen3_5ForCausalLM
         assert not getattr(config, "quantization_config", None)
-        model, loading = Qwen3_5ForCausalLM.from_pretrained(
+        model, loading = model_class.from_pretrained(
             None, config=config, state_dict=state, dtype=torch.float32,
             output_loading_info=True,
         )
@@ -445,16 +533,49 @@ def _hf_reference(
             )
         del state, tensors
     else:
-        model = AutoModelForCausalLM.from_pretrained(
+        raw = json.loads((model_dir / "config.json").read_text())
+        model_class = AutoModelForCausalLM
+        if isinstance(raw.get("vision_config"), dict):
+            from transformers import AutoModelForImageTextToText
+            model_class = AutoModelForImageTextToText
+        model = model_class.from_pretrained(
             model_dir,
             local_files_only=True,
             trust_remote_code=trust_remote_code,
             dtype=dtypes[reference_precision],
+            device_map=manifest.get("reference_device_map"),
         )
     reference_device = case.get("reference_device", "cuda")
     assert reference_device in {"cpu", "cuda"}, reference_device
-    model = model.eval().to(reference_device)
-    inputs = _render_prompt(tokenizer, prompt, case).to(model.device)
+    model = model.eval()
+    if not manifest.get("reference_device_map") or case.get("reference_decode_modelopt_mixed", False):
+        model = model.to(reference_device)
+    return model
+
+
+def _hf_reference(
+    model_dir: Path,
+    manifest: dict,
+    case: dict,
+    prompt: str,
+    actual_ids: list[int],
+    torch,
+    *,
+    reference_model=None,
+) -> tuple[list[int], str, float | None, str]:
+    from transformers import AutoTokenizer
+
+    trust_remote_code = bool(manifest.get("trust_remote_code", False))
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_dir,
+        local_files_only=True,
+        trust_remote_code=trust_remote_code,
+    )
+    inputs = _reference_inputs(model_dir, manifest, tokenizer, prompt, case)
+    model = reference_model
+    if model is None:
+        model = _load_reference_model(model_dir, manifest, case, torch)
+    inputs = inputs.to(model.device)
     prompt_ids = inputs["input_ids"][0].tolist()
     if "expected_prompt_token_ids" in case:
         assert prompt_ids == case["expected_prompt_token_ids"]
@@ -567,6 +688,9 @@ def _assert_correctness(
     if expected_answers:
         assert any(answer.casefold() in actual_decoded.casefold() for answer in expected_answers)
 
+    for keyword in case.get("expected_keywords", ()):
+        assert keyword.casefold() in actual_text.casefold(), keyword
+
     del sampling_support
     assert actual_text
     assert _normalized_edit_distance(actual_text, reference_text) <= _text_threshold(thresholds)
@@ -588,7 +712,7 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     with evidence_stage("build"):
         _build_bundle(manifest, model_dir, bundle)
     with evidence_stage("compare"):
-        _assert_rank_sections(binary, bundle, tp_size)
+        edge = _assert_rank_sections(binary, bundle, tp_size, manifest["task"])
     with evidence_stage("native"):
         payload = _run_native(
             binary,
@@ -597,7 +721,7 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
             prompt,
             case,
             tp_size,
-            tmp_path,
+            tmp_path, edge=edge,
         )
     record_evidence("native", payload)
     reruns = int(case.get("determinism_reruns", 0))
@@ -610,7 +734,7 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
                 prompt,
                 case,
                 tp_size,
-                tmp_path,
+                tmp_path, edge=edge,
             )
         record_evidence("native", repeated)
         with evidence_stage("compare"):

@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Transformers knows the embedding_gemma2 model type from 5.19.0; the family's requirements pin a commit with it.
+reference:
+  requirements: families/embeddinggemma2/requirements.txt
+
+# Build for the actual STS-B and SciFact prompts: SciFact documents keep their first 256 tokens, and with BOS and
+# EOS they need 258, over the catalog's 256. The runtime tokenizer counts every prompt as Transformers does with
+# special tokens, so no extra tokens. Both sides still receive the same benchmark requests.
+candidate:
+  build: {name: embeddinggemma2-text-bf16-benchmark}
+  benchmark_sequence_length: {extra_tokens: 0}

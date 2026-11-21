@@ -13,9 +13,39 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import pickle
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
+
+
+class _ModuleState:
+    """Archive attributes only; no upstream model code is imported or run."""
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+
+
+class _CheckpointUnpickler(pickle.Unpickler):
+    def find_class(self, module: str, name: str) -> Any:
+        if module.startswith("ultralytics."):
+            return _ModuleState
+        return super().find_class(module, name)
+
+
+def _collect(node: Any, prefix: str, tensors: dict[str, Any]) -> None:
+    """Read the persisted parameters and persistent buffers, as state_dict does."""
+    state = vars(node)
+    for store in ("_parameters", "_buffers"):
+        for name, tensor in state.get(store, {}).items():
+            if store == "_buffers" and name in state.get("_non_persistent_buffers_set", ()):
+                continue
+            if tensor is not None:
+                tensors[f"{prefix}{name}"] = tensor
+    for name, child in state.get("_modules", {}).items():
+        if child is not None:
+            _collect(child, f"{prefix}{name}.", tensors)
 
 
 @dataclass(frozen=True)
@@ -41,16 +71,23 @@ class Checkpoint:
     def from_archive(cls, path: Path) -> "Checkpoint":
         import torch
 
-        # An Ultralytics archive pickles its own model class, so it cannot be
-        # read with weights_only. The manifest pins the revision it comes from.
-        blob = torch.load(str(path), map_location="cpu", weights_only=False)
+        # Only load trusted checkpoints: PyTorch archives still use pickle.
+        # Replace upstream classes locally, without changing sys.modules or
+        # importing upstream model code.
+        archive_pickle = SimpleNamespace(
+            __name__=__name__, Unpickler=_CheckpointUnpickler, load=pickle.load
+        )
+        blob = torch.load(
+            str(path), map_location="cpu", weights_only=False, pickle_module=archive_pickle
+        )
         model = blob.get("model") if isinstance(blob, dict) else None
         if model is None:
             raise ValueError(f"YOLO11 archive has no model entry: {path}")
         names = getattr(model, "names", None)
         if not isinstance(names, dict) or not names:
             raise ValueError(f"YOLO11 archive has no class names: {path}")
-        state = model.state_dict()
+        state: dict[str, Any] = {}
+        _collect(model, "", state)
         tensors = {
             str(key): value.detach().to(torch.float32).numpy()
             for key, value in state.items()

@@ -1,0 +1,10 @@
+{
+  "model_type": "pointnet",
+  "architectures": [
+    "PointNet"
+  ],
+  "num_points": 4096,
+  "num_classes": 13,
+  "input_dim": 9,
+  "segmentation": true
+}

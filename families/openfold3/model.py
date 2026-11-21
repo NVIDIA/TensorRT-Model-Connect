@@ -131,6 +131,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("openfold3 does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("openfold3 owns its mixed-precision policy")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("openfold3 does not support MTP speculative decoding")
     root = resolve_package_root(request.model_dir)
     if root is None:
         raise ValueError(f"unsupported OpenFold3 package: {request.model_dir}")

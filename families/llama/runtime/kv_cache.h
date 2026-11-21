@@ -10,7 +10,9 @@
 //
 // Manages per-layer K/V device tensors and position tracking. Native TensorRT
 // KV engines update these buffers in place; standard engines use present rows
-// plus an attention mask.
+// plus an attention mask. Runtime-sized engines (dynamic cache rows) bind only
+// the valid prefix of the allocation, rounded up to a row bucket, so attention
+// cost follows the context rather than the allocated capacity.
 
 #include "families/llama/runtime/inference_state.h"
 #include "trtmc/runtime/device_tensor.h"
@@ -32,6 +34,7 @@ struct LlamaKvCacheNames {
     std::vector<std::string> present_v;
     std::string cache_write_indices{"cache_write_indices"};
     std::string key_value_lengths{"key_value_lengths"};
+    std::string key_positions{"key_positions"};
     std::string position_id{"position_id"};
     std::string attention_mask{"attention_mask"};
 };
@@ -57,6 +60,10 @@ class LlamaKvCache : public LlamaInferenceState {
     std::size_t device_memory_bytes() const override;
     const char* state_type() const override { return "dense_kv_cache"; }
     bool ok() const override;
+
+    // Rows a native engine with a `key_positions` input attends over: the
+    // valid context rounded up to the 32-row bucket, capped at the capacity.
+    int32_t active_key_rows(int32_t valid_rows) const;
 
     // --- LlamaKvCache-specific methods (not on the interface) ---
 
@@ -99,6 +106,11 @@ class LlamaKvCache : public LlamaInferenceState {
     void write_batched_mask(TensorMap& inputs, int32_t seq_len);
     void write_bidirectional_mask(TensorMap& inputs, int32_t seq_len);
     void write_decode_mask(TensorMap& inputs);
+    // Cache rows the next step binds: the allocation for static engines, the
+    // bucketed valid prefix for runtime-sized ones.
+    int32_t step_cache_rows() const;
+    void bind_dynamic_cache_rows(ITrtModule& module, int32_t cache_rows);
+    void rebind_cache_rows(int32_t cache_rows);
 
     std::vector<DeviceTensor> cache_k_; // [num_layers], shape [max_length, kv_dim]
     std::vector<DeviceTensor> cache_v_; // [num_layers]
@@ -115,10 +127,15 @@ class LlamaKvCache : public LlamaInferenceState {
     std::vector<int32_t> pos_buf_vec_;
     int32_t cache_write_index_{0};
     int32_t key_value_length_{0};
+    // 0..capacity-1; bound with length active_key_rows() when the native
+    // engine slices its cache to the active rows.
+    std::vector<int32_t> key_positions_;
+    bool slices_active_rows_{false};
     bool has_position_input_{false};
     bool binding_mode_initialized_{false};
     bool native_kv_update_enabled_{false};
     bool dynamic_binding_enabled_{false};
+    int32_t bound_cache_rows_{0};
     DType cache_dtype_{DType::kFloat32};
     std::size_t cache_element_size_{sizeof(float)};
     LlamaKvCacheNames names_;

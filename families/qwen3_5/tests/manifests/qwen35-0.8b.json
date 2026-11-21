@@ -1,6 +1,7 @@
 {
   "name": "qwen35-0.8b",
   "hf_id": "Qwen/Qwen3.5-0.8B",
+  "hf_revision": "2fc06364715b967f1860aea9cf38778875588b17",
   "bundle": "qwen35-0.8b.bundle",
   "family": "qwen3_5",
   "task": "text_generation",

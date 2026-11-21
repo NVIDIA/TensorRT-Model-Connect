@@ -54,6 +54,29 @@ if TYPE_CHECKING:
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
+def _make_sinusoidal_pos_embed(n_pos: int, dim: int) -> np.ndarray:
+    """Generate sinusoidal positional embeddings matching MarianSinusoidalPositionalEmbedding."""
+    position_enc = np.array(
+        [[pos / np.power(10000.0, 2 * (j // 2) / dim) for j in range(dim)] for pos in range(n_pos)],
+        dtype=np.float64,
+    )
+    sentinel = dim // 2 if dim % 2 == 0 else (dim // 2) + 1
+    out = np.empty((n_pos, dim), dtype=np.float32)
+    out[:, 0:sentinel] = np.sin(position_enc[:, 0::2]).astype(np.float32)
+    out[:, sentinel:] = np.cos(position_enc[:, 1::2]).astype(np.float32)
+    return out
+
+
+def _load_embed_tokens(readers, preferred_key: str) -> np.ndarray:
+    """Load token embedding tensor, falling back to shared embedding keys."""
+    for key in (preferred_key, "model.shared.weight", "shared.weight"):
+        if _has_tensor(readers, key):
+            return _load_tensor(readers, key).astype(np.float32)
+    raise KeyError(
+        f"Tensor not found: {preferred_key} (fallback keys 'model.shared.weight', 'shared.weight' also absent)"
+    )
+
+
 class _MarianModel:
     def ensure_tokenizer_json(
         self,
@@ -86,11 +109,19 @@ class _MarianModel:
         weights["_dec_ffn"] = dec_ffn
         weights["_max_position_embeddings"] = max_position_embeddings
 
-        enc_embed = _load_tensor(readers, "model.encoder.embed_tokens.weight").astype(np.float32)
+        act_fn = str(raw.get("activation_function", getattr(config, "hidden_act", None) or "swish")).lower()
+        weights["_activation_function"] = "silu" if act_fn == "swish" else act_fn
+
+        enc_embed = _load_embed_tokens(readers, "model.encoder.embed_tokens.weight")
         weights["enc_embedding"] = enc_embed
-        weights["enc_pos_embedding"] = _load_tensor(
-            readers, "model.encoder.embed_positions.weight"
-        ).astype(np.float32)
+        if _has_tensor(readers, "model.encoder.embed_positions.weight"):
+            weights["enc_pos_embedding"] = _load_tensor(
+                readers, "model.encoder.embed_positions.weight"
+            ).astype(np.float32)
+        else:
+            weights["enc_pos_embedding"] = _make_sinusoidal_pos_embed(
+                max_position_embeddings, config.hidden_size or enc_embed.shape[1]
+            )
 
         for i in range(enc_layers):
             hf = f"model.encoder.layers.{i}"
@@ -129,11 +160,16 @@ class _MarianModel:
                 readers, f"{hf}.final_layer_norm.bias"
             ).astype(np.float32)
 
-        dec_embed = _load_tensor(readers, "model.decoder.embed_tokens.weight").astype(np.float32)
+        dec_embed = _load_embed_tokens(readers, "model.decoder.embed_tokens.weight")
         weights["dec_embedding"] = dec_embed
-        weights["dec_pos_embedding"] = _load_tensor(
-            readers, "model.decoder.embed_positions.weight"
-        ).astype(np.float32)
+        if _has_tensor(readers, "model.decoder.embed_positions.weight"):
+            weights["dec_pos_embedding"] = _load_tensor(
+                readers, "model.decoder.embed_positions.weight"
+            ).astype(np.float32)
+        else:
+            weights["dec_pos_embedding"] = _make_sinusoidal_pos_embed(
+                max_position_embeddings, config.hidden_size or dec_embed.shape[1]
+            )
 
         for i in range(dec_layers):
             hf = f"model.decoder.layers.{i}"
@@ -579,7 +615,8 @@ def _build_marian_encoder(config, weights, *, verbose=False, precision="fp32"):
             weights[f"{pfx}.b_fc1"],
             dtype=work_np_dtype,
         )
-        act = graph_ops.add_activation(network, fc1, "silu", dtype=work_np_dtype)
+        act_fn = weights.get("_activation_function", "silu")
+        act = graph_ops.add_activation(network, fc1, act_fn, dtype=work_np_dtype)
         fc2 = graph_ops.add_bias_sum(
             network,
             graph_ops.add_matmul_rhs_constant(
@@ -795,7 +832,8 @@ def _add_marian_decoder_layer(
         weights[f"{prefix}.fc1_bias"],
         dtype=dtype,
     )
-    act = graph_ops.add_activation(network, fc1, "silu", dtype=dtype)
+    act_fn = weights.get("_activation_function", "silu")
+    act = graph_ops.add_activation(network, fc1, act_fn, dtype=dtype)
     fc2 = graph_ops.add_bias_sum(
         network,
         graph_ops.add_matmul_rhs_constant(
@@ -912,6 +950,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("Marian does not support quantized builds")
     if request.fp32_layers:
         raise NotImplementedError("Marian does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Marian does not support MTP speculative decoding")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )

@@ -58,12 +58,17 @@ def add_matmul_rhs_constant(
         np.asarray(rhs_weights).reshape(rhs_shape),
         dtype=dtype,
     )
+    out_dtype = lhs.dtype
+    if lhs.dtype == trt.float16:
+        # TensorRT's strongly typed FP16 GEMM accumulates in FP16, an error that grows with the
+        # reduction length. FP32 operands, exact for FP16 values, make it accumulate in FP32 at the same speed.
+        lhs = network.add_cast(lhs, trt.float32).get_output(0)
     rhs = _cast_back_to_trt_dtype(network, rhs, lhs.dtype)
     mm = network.add_matrix_multiply(
         lhs, trt.MatrixOperation.NONE,
         rhs, trt.MatrixOperation.NONE,
     )
-    return _cast_back_to_trt_dtype(network, mm.get_output(0), lhs.dtype)
+    return _cast_back_to_trt_dtype(network, mm.get_output(0), out_dtype)
 
 
 def add_bias_sum(
@@ -143,7 +148,9 @@ def add_activation(
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Dispatch activation by name: 'silu', 'gelu_new', 'gelu', 'relu', 'relu2'/'squared_relu'."""
-    if activation_type in ("gelu_new", "gelu"):
+    if activation_type == "gelu":
+        return network.add_activation(inp, trt.ActivationType.GELU_ERF).get_output(0)
+    elif activation_type == "gelu_new":
         return add_gelu_new(network, inp, dtype=dtype)
     elif activation_type == "relu":
         act = network.add_activation(inp, trt.ActivationType.RELU)

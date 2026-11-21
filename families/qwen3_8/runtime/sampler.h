@@ -53,6 +53,15 @@ Qwen38SamplingParams qwen38_sampling_params_from_config(const TextGenerationConf
 void qwen38_apply_repetition_penalty(std::vector<float>& logits, float penalty,
                                      const std::vector<int32_t>& token_history);
 
+// The exact existing target filters, exposed for family-owned rejection sampling.
+std::vector<float> qwen38_probabilities(const float* logits, int32_t vocab_size,
+                                        const Qwen38SamplingParams& params);
+double qwen38_uniform(uint64_t& rng);
+int32_t qwen38_draw_probabilities(const std::vector<float>& probabilities, uint64_t& rng);
+// Accept with min(1,p/q); on rejection sample normalized positive (p-q).
+int32_t qwen38_verify_proposal(int32_t token, const std::vector<float>& target,
+                               const std::vector<float>& draft, uint64_t& rng, bool& accepted);
+
 std::unique_ptr<Qwen38ISampler> create_qwen38_sampler(const Qwen38SamplingParams& params);
 
 } // namespace trtmc

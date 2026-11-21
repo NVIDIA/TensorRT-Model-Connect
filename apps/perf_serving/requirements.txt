@@ -1,9 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # trtmc-perf-serve on top of the TRTMC runtime environment (which provides torch and transformers).
+# Transformers needs accelerate to load native references straight onto the GPU (device_map); 5.2 needs 1.1 or newer.
+accelerate>=1.1.0
+# The generic reference adapters load timm/ classifiers with timm and image pipelines with Diffusers, pinned as
+# the families pin them: both versions are part of the platform fingerprint (trtmc_perf_serving.platform).
+diffusers==0.39.0
 fastapi
 numpy
 pillow
 python-multipart
 soundfile
+timm==1.0.28
 uvicorn

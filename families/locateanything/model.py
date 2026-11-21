@@ -27,9 +27,11 @@ from .checkpoint_mapper import (
     _open_safetensors,
     _transpose_2d,
 )
+from . import graph_ops
 from .config import ModelConfig
 from .parallel import normalize_parallel_config
 from .default_decoder import build_standard_decoder_engine
+from .quantization import calibrate_locateanything
 
 if TYPE_CHECKING:
     from typing import Any as QuantContext
@@ -50,8 +52,10 @@ class _LocateAnythingModel:
         self,
         model_dir: str,
         config: ModelConfig,
+        *,
+        quant_ctx=None,
     ) -> WeightDict:
-        return _load_locateanything_text_weights(model_dir, config)
+        return _load_locateanything_text_weights(model_dir, config, quant_ctx=quant_ctx)
 
     def build_engine(
         self,
@@ -193,8 +197,14 @@ def _first_int(value: object, default: int) -> int:
 def _load_locateanything_text_weights(
     model_dir: str,
     config: ModelConfig,
+    *,
+    quant_ctx=None,
 ) -> WeightDict:
-    """Load the Qwen text decoder from LocateAnything safetensors."""
+    """Load the Qwen text decoder from LocateAnything safetensors.
+
+    Projections owned by ``quant_ctx`` are not loaded: the engine consumes the FP8 bytes the
+    context quantized itself, so the decoder keeps a shape-only placeholder.
+    """
     from pathlib import Path
 
     model_dir_path = Path(model_dir)
@@ -225,6 +235,15 @@ def _load_locateanything_text_weights(
     kv_attention_size = 0
     mlp_size = 0
 
+    def _projection(prefix: str, hf_prefix: str, engine_key: str, hf_stem: str) -> np.ndarray:
+        """One projection as [in, out], or a shape-only placeholder when it is quantized."""
+        name = f"{prefix}.{engine_key}"
+        if quant_ctx is not None and quant_ctx.should_quantize(name):
+            w = quant_ctx.scales[name].weight
+            return np.broadcast_to(np.zeros((), dtype=np.float32), (w.in_features, w.out_features))
+        raw = _load_tensor(readers, f"{hf_prefix}.{hf_stem}.weight")
+        return _transpose_2d(raw, hf_stem.rsplit(".", 1)[-1])
+
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
         hf_prefix = f"{layer_prefix}.{layer_idx}"
@@ -236,20 +255,15 @@ def _load_locateanything_text_weights(
             readers, f"{hf_prefix}.post_attention_layernorm.weight"
         ).astype(np.float32)
 
-        q_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.weight")
-        k_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.weight")
-        v_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.v_proj.weight")
-        o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
+        weights[f"{prefix}.w_q"] = _projection(prefix, hf_prefix, "w_q", "self_attn.q_proj")
+        weights[f"{prefix}.w_k"] = _projection(prefix, hf_prefix, "w_k", "self_attn.k_proj")
+        weights[f"{prefix}.w_v"] = _projection(prefix, hf_prefix, "w_v", "self_attn.v_proj")
+        weights[f"{prefix}.w_o"] = _projection(prefix, hf_prefix, "w_o", "self_attn.o_proj")
 
         if attention_size == 0:
-            attention_size = q_raw.shape[0]
+            attention_size = weights[f"{prefix}.w_q"].shape[1]
         if kv_attention_size == 0:
-            kv_attention_size = k_raw.shape[0]
-
-        weights[f"{prefix}.w_q"] = _transpose_2d(q_raw, "q_proj")
-        weights[f"{prefix}.w_k"] = _transpose_2d(k_raw, "k_proj")
-        weights[f"{prefix}.w_v"] = _transpose_2d(v_raw, "v_proj")
-        weights[f"{prefix}.w_o"] = _transpose_2d(o_raw, "o_proj")
+            kv_attention_size = weights[f"{prefix}.w_k"].shape[1]
 
         for proj_name, weight_key in [
             ("q_bias", "self_attn.q_proj.bias"),
@@ -262,16 +276,12 @@ def _load_locateanything_text_weights(
                     np.float32
                 )
 
-        gate_raw = _load_tensor(readers, f"{hf_prefix}.mlp.gate_proj.weight")
-        up_raw = _load_tensor(readers, f"{hf_prefix}.mlp.up_proj.weight")
-        down_raw = _load_tensor(readers, f"{hf_prefix}.mlp.down_proj.weight")
+        weights[f"{prefix}.w_gate"] = _projection(prefix, hf_prefix, "w_gate", "mlp.gate_proj")
+        weights[f"{prefix}.w_up"] = _projection(prefix, hf_prefix, "w_up", "mlp.up_proj")
+        weights[f"{prefix}.w_down"] = _projection(prefix, hf_prefix, "w_down", "mlp.down_proj")
 
         if mlp_size == 0:
-            mlp_size = gate_raw.shape[0]
-
-        weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate")
-        weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up")
-        weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down")
+            mlp_size = weights[f"{prefix}.w_gate"].shape[1]
 
     final_norm_key = _first_existing_tensor(
         readers,
@@ -335,12 +345,19 @@ def _detect_layer_prefix(readers) -> str:
     raise RuntimeError("Cannot find LocateAnything text decoder layer weights")
 
 
-def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
+def _native_tokenizer(model_dir: Path):
+    """Load the checkpoint's fast tokenizer, including vocab/merges-only exports."""
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True, local_files_only=True)
+    if not tokenizer.is_fast:
+        raise ValueError("LocateAnything requires a fast tokenizer for native serialization")
+    return tokenizer.backend_tokenizer
+
+
+def _tokenizer_runtime_contract(tokenizer) -> dict[str, object]:
     """Resolve this family's exact native-tokenizer framing."""
 
-    from tokenizers import Tokenizer
-
-    tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
     default_ids = list(tokenizer.encode("hello").ids)
     plain_ids = list(tokenizer.encode("hello", add_special_tokens=False).ids)
     if default_ids == plain_ids:
@@ -369,6 +386,8 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one LocateAnything vision-language bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("LocateAnything does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("locateanything does not support dynamic_kv_cache")
 
@@ -389,13 +408,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.task != "vision_language_generation":
         raise ValueError("locateanything supports only task=vision_language_generation")
-    if (
-        request.tensor_parallel_size != 1
-        or request.quantization not in {None, "none"}
-        or request.fp32_layers
-    ):
-        raise NotImplementedError("LocateAnything supports only single-device non-quantized builds")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"LocateAnything does not support quantization={request.quantization!r}"
+        )
+    if request.tensor_parallel_size != 1 or request.fp32_layers:
+        raise NotImplementedError("LocateAnything supports only single-device builds")
+    quantized = request.quantization == "fp8"
+    if quantized and str(request.precision).lower() != "fp16":
+        raise NotImplementedError("locateanything fp8 quantization requires precision fp16")
     model_dir = Path(request.model_dir)
+    tokenizer = _native_tokenizer(model_dir)
     config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() != "locateanything":
         raise ValueError(f"LocateAnything does not support model_type={config.model_type!r}")
@@ -403,14 +426,15 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     max_length = int(request.max_sequence_length or min(config.max_position_embeddings, 256))
     config.raw["_model_dir"] = str(model_dir)
     model = _LocateAnythingModel()
-    weights = model.load_weights(str(model_dir), config)
+    quant_ctx = calibrate_locateanything(model_dir, graph_ops, "fp8", config) if quantized else None
+    weights = model.load_weights(str(model_dir), config, quant_ctx=quant_ctx)
     config.raw["_decoder_engine_role"] = "prefill"
     prefill = model.build_engine(
         config,
         weights,
         max_length,
         precision=precision,
-        quant_ctx=None,
+        quant_ctx=quant_ctx,
         verbose=request.verbose,
         parallel_config=None,
     )
@@ -420,7 +444,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         weights,
         max_length,
         precision=precision,
-        quant_ctx=None,
+        quant_ctx=quant_ctx,
         verbose=request.verbose,
         parallel_config=None,
     )
@@ -453,10 +477,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     writer.add_bytes("engine.plan", decode)
     writer.add_bytes("prefill.plan", prefill)
     writer.add_bytes("vision.plan", vision)
-    runtime.update(_tokenizer_runtime_contract(model_dir))
+    runtime.update(_tokenizer_runtime_contract(tokenizer))
+    writer.add_bytes("tokenizer.json", tokenizer.to_str().encode("utf-8"))
     writer.add_json("runtime.json", runtime)
     for filename in (
-        "tokenizer.json",
         "tokenizer_config.json",
         "chat_template.jinja",
         "vocab.json",

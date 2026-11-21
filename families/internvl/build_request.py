@@ -35,13 +35,21 @@ class BuildRequest:
     max_batch_size: ClassVar[int] = 1
     tensor_parallel_size: int = 1
     context_parallel_size: ClassVar[int] = 1
-    quantization: ClassVar[str | None] = None
     fp32_layers: ClassVar[tuple[int, ...]] = ()
     dynamic_kv_cache: ClassVar[bool] = False
+    mtp_seq_len: ClassVar[int | None] = None
+    int4_gemm_plugin_version: int | None = None
+    edge_builder_python: Path | None = None
+    quantization: str | None = None
     verbose: bool = False
     graph_transform: GraphTransform | None = None
 
     def __post_init__(self) -> None:
+        if self.int4_gemm_plugin_version is not None and (
+            type(self.int4_gemm_plugin_version) is not int
+            or self.int4_gemm_plugin_version not in {1, 2}
+        ):
+            raise ValueError("int4_gemm_plugin_version must be 1 or 2")
         if not self.precision:
             raise ValueError("precision must be non-empty")
         _validate_id("family", self.family)
@@ -75,19 +83,17 @@ def coerce_request(request: object) -> BuildRequest:
     if isinstance(request, BuildRequest):
         return request
     unsupported = {
+        "mtp_seq_len": None,
         "image_height": None,
         "image_width": None,
         "video_num_frames": None,
         "max_batch_size": 1,
         "context_parallel_size": 1,
-        "quantization": None,
         "fp32_layers": (),
         "dynamic_kv_cache": False,
     }
     for name, default in unsupported.items():
         value = getattr(request, name, default)
-        if name == "quantization" and value == "none":
-            continue
         if name == "fp32_layers" and isinstance(value, (list, tuple)) and not value:
             continue
         if value != default:
@@ -95,4 +101,7 @@ def coerce_request(request: object) -> BuildRequest:
     names = {field.name for field in fields(BuildRequest)}
     if unknown := set(vars(request)) - names - set(unsupported):
         raise ValueError(f"unknown internvl build inputs: {sorted(unknown)}")
-    return BuildRequest(**{name: getattr(request, name) for name in names})
+    values = {name: getattr(request, name) for name in names - {"int4_gemm_plugin_version", "edge_builder_python"}}
+    values["int4_gemm_plugin_version"] = getattr(request, "int4_gemm_plugin_version", None)
+    values["edge_builder_python"] = getattr(request, "edge_builder_python", None)
+    return BuildRequest(**values)

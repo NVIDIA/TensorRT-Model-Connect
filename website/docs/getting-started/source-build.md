@@ -77,8 +77,81 @@ Python dependencies remain in `families/<family>/requirements.txt`. See
 identity and receipts, managed toolchain catalogs, and the explicit
 existing-interpreter local path.
 
+YOLOv5, YOLOv8, YOLOv10, and YOLO11 builds do not require the `ultralytics`
+package. Supply your own appropriately licensed checkpoint; Model Connect does
+not include model weights. The `.pt` readers require PyTorch and accept only
+trusted checkpoints, because the archive format uses pickle.
+
+Their accuracy references live under each family's `tests/reference/` and use
+ordinary PyTorch layers with torchvision suppression where applicable. Neither
+builds nor tests install or import the Ultralytics package. E2E references run
+with the normal test interpreter; standalone qualification declares its optional
+dependencies in `tests/requirements.txt`. The reference implementations and their
+dependency declarations are excluded from the wheel. Checkpoint identifiers and
+serialized class names still identify the upstream model format. The references
+use the same checkpoints and preserve the existing accuracy thresholds. Selected
+E2E tests also check both the original and mirrored image against numeric
+snapshots recorded before the upstream package was removed. The snapshots pin
+checkpoint and image hashes; they contain predictions, not model weights.
+
 The manual commands below remain the direct source-build path and show the
 operations performed by development mode.
+
+## Select native families
+
+CMake configures all discovered families by default. To configure one family,
+pass `-DTRTMC_BUILD_FAMILIES=qwen`; for several families, pass a quoted
+semicolon-separated list. An empty list, `-DTRTMC_BUILD_FAMILIES=""`, configures
+only the shared runtime, backends, applications, and their tests. This lets a
+CLI/backend-only build avoid unselected families' optional native prerequisites.
+Unknown family names fail configuration. Omitting the option or setting it to
+`*` preserves the default of configuring every family.
+
+## Optional Edge-LLM 0.12.0 migration build
+
+The default Edge-enabled source build still uses 0.11.0. To build against the
+0.12.0 C++ SDK, set both `-DTRTMC_ENABLE_EDGELLM=ON` and
+`-DTRTMC_EDGELLM_RELEASE=0.12.0` at configure time. Keep the 0.12 Python
+builder in a separate environment: its Transformers requirement is different
+from Model Connect's shared pin. This option provisions the native SDK; it
+does not port any family adapter. See the [native SDK setup](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/cmake/edge_llm/README.md)
+for provisioning options. Follow each family's instructions for model builds.
+
+Build on the GPU where the SDK will run. Pass its numeric architecture:
+for example, `-DCMAKE_CUDA_ARCHITECTURES=100` on GB200 or
+`-DCMAKE_CUDA_ARCHITECTURES=103` on GB300. The 0.12 provider selects the
+matching accelerated compiler target (`100a` or `103a`) for both the SDK
+and its consumers. The device check and installed receipt remain numeric.
+This compiler selection does not qualify a model on that GPU.
+
+## Optional Edge-LLM Python tools
+
+After preparing the source-build prerequisites below, use CPython 3.12 to
+install this checkout with the pinned Edge-LLM builder and Python runtime
+from PyPI through the normal package extra:
+
+```bash
+python -m pip install -e '.[edgellm]'
+python -c 'import tensorrt; from tensorrt_edgellm import runtime; runtime.load()'
+```
+
+This editable source installation still builds Model Connect's native targets;
+the extra does not provide a Python-only build mode.
+
+The Edge wheel does not install the platform CUDA or TensorRT libraries. Its native
+payload must match the executing platform, GPU, and CUDA/TensorRT stack; see
+the [Edge-LLM 0.11.0 installation guide](https://nvidia.github.io/TensorRT-Edge-LLM/0.11.0/user_guide/getting_started/installation.html).
+A successful package installation alone is not a model qualification result.
+
+This extra provides Python tools, not the C++ SDK linked by the existing native
+family adapters. Those adapters still use the separately pinned
+[optional CMake SDK dependency](https://github.com/NVIDIA/TensorRT-Model-Connect/tree/main/cmake/edge_llm).
+Installing this extra does not switch a family's builder or runtime.
+
+The base wheel includes the direct builder. Use a separate environment for
+Edge-LLM's optional `export` or `tools` extras: their Transformers pin differs
+from Model Connect's pin. Do not override either project's requirements to
+force the environments together.
 
 ## 1. Select the GPU and start the container
 
@@ -141,6 +214,11 @@ cmake --build "$TRTMC_BUILD_DIR" --parallel "$(nproc)" --target \
 
 export PATH="$PWD/$TRTMC_BUILD_DIR:$PATH"
 ```
+
+The command above builds the Qwen family. If you configured with
+`-DTRTMC_BUILD_FAMILIES=""`, omit `trtmc_model_qwen` from the target list. For a
+specific family selection, replace it with the corresponding selected targets,
+such as `trtmc_model_qwen2_5_omni` for `-DTRTMC_BUILD_FAMILIES=qwen2_5_omni`.
 
 To run the optional text server from this build, install its Python control
 plane dependencies with `python -m pip install -e '.[serve]' -C py-only=true`.

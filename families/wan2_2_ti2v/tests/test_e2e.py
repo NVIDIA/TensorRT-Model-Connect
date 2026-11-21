@@ -20,11 +20,11 @@ import numpy as np
 import pytest
 from tensorrt_model_connect import BuildRequest, build
 
-from .frame_accuracy import compare_png_sequences
+from .frame_accuracy import active_transition_fraction, compare_png_sequences
 from .official_reference import generate as generate_official_reference
 
 FAMILY = "wan2_2_ti2v"
-TASKS = frozenset({"image_generation"})
+TASKS = frozenset({"image_generation", "initial_image_text_to_video"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
@@ -224,6 +224,36 @@ def _asset(raw: str) -> Path:
     return path
 
 
+def _initial_image(manifest: dict, tmp_path: Path) -> Path:
+    """A deterministic initial image of the built size: sky over sea, sand and a low sun."""
+    from PIL import Image
+
+    width, height = int(manifest["image_width"]), int(manifest["image_height"])
+    y = np.linspace(0.0, 1.0, height)[:, None]
+    x = np.linspace(0.0, 1.0, width)[None, :]
+    image = np.empty((height, width, 3))
+    image[..., 0] = 110 + 120 * y
+    image[..., 1] = 170 - 40 * y + 30 * x
+    image[..., 2] = 240 - 150 * y
+    sun = ((x - 0.7) * width) ** 2 + ((y - 0.3) * height) ** 2 < (0.12 * min(width, height)) ** 2
+    image[sun] = (255, 210, 80)
+    path = tmp_path / "initial-image.png"
+    Image.fromarray(np.clip(image, 0, 255).astype(np.uint8), mode="RGB").save(path)
+    record_evidence("inputs", {"initial_image": str(path)})
+    return path
+
+
+def _psnr_uint8(left: Path, right: Path) -> float:
+    from PIL import Image
+
+    with Image.open(left) as first, Image.open(right) as second:
+        difference = np.asarray(first.convert("RGB"), np.float64) - np.asarray(
+            second.convert("RGB"), np.float64
+        )
+    mse = float(np.mean(difference**2))
+    return float("inf") if mse == 0.0 else 10.0 * np.log10(255.0**2 / mse)
+
+
 def _case_text(case: dict) -> str:
     inputs = case.get("inputs") or {}
     value = str(case.get("prompt") or case.get("test_prompt") or inputs.get("prompt") or "")
@@ -297,6 +327,7 @@ def _native(
     manifest: dict,
     case: dict,
     tmp_path: Path,
+    image: Path | None = None,
 ):
     manifest["task"]
     frames = int(manifest["video_num_frames"]) if "video_num_frames" in manifest else 1
@@ -319,6 +350,8 @@ def _native(
     ]
     if case.get("negative_prompt"):
         arguments.extend(("--negative-prompt", str(case["negative_prompt"])))
+    if image is not None:
+        arguments.extend(("--image", str(image)))
     for key, option in (("guidance_scale", "--guidance-scale"), ("cfg_scale", "--cfg-scale")):
         if key in case:
             arguments.extend((option, str(float(case[key]))))
@@ -327,7 +360,9 @@ def _native(
     return payload
 
 
-def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: Path):
+def _official_reference(
+    model_dir: Path, manifest: dict, case: dict, tmp_path: Path, image: Path | None = None
+):
     backend = case.get("reference_backend")
     if backend == "invariant_only":
         return {"_invariant_only": True}
@@ -344,6 +379,7 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
         flow_shift=float(case.get("flow_shift", 5.0)),
         seed=int(case["seed"]),
         timeout_s=int(case.get("runtime_timeout_s", 14400)),
+        image=image,
         **(
             {"negative_prompt": str(case["negative_prompt"])} if case.get("negative_prompt") else {}
         ),
@@ -425,10 +461,15 @@ def _frame_stats(paths: list[Path]) -> dict[str, float | int | bool]:
     }
 
 
-def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
-    assert manifest["task"] == "image_generation"
+def _assert_parity(
+    actual, expected, manifest: dict, case: dict, thresholds: dict, image: Path | None = None
+) -> None:
+    assert manifest["task"] in TASKS
     actual_paths = [Path(path) for path in actual["frames"]]
     assert actual_paths and all(path.is_file() for path in actual_paths)
+    if image is not None:
+        # Image-to-video decodes the clean first latent, so frame 0 is the image through the VAE.
+        assert _psnr_uint8(image, actual_paths[0]) >= float(thresholds["min_first_frame_psnr"])
     stats = _frame_stats(actual_paths)
     if "exact_num_frames" in thresholds:
         assert len(actual_paths) == int(thresholds["exact_num_frames"])
@@ -445,9 +486,17 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
         assert float(stats["std"]) >= float(thresholds["min_pixel_std"])
 
     if expected.get("_invariant_only"):
+        # Without a reference, the case still rejects a video that never changes.
+        if "min_active_transition_fraction" in thresholds:
+            assert active_transition_fraction([str(path) for path in actual_paths]) >= float(
+                thresholds["min_active_transition_fraction"]
+            )
         return
 
     expected_paths = [Path(path) for path in expected["frame_paths"]]
+    if image is not None:
+        # The reference must start from the image as well.
+        assert _psnr_uint8(image, expected_paths[0]) >= float(thresholds["min_first_frame_psnr"])
     accuracy = compare_png_sequences(
         [str(path) for path in expected_paths],
         [str(path) for path in actual_paths],
@@ -472,6 +521,7 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
         assert accuracy["temporal_profile_correlation"] >= float(
             thresholds["min_temporal_profile_correlation"]
         )
+    if "min_active_transition_fraction" in thresholds:
         assert accuracy["trt_active_transition_fraction"] >= float(
             thresholds["min_active_transition_fraction"]
         )
@@ -529,6 +579,55 @@ def test_semantic_artifacts_reject_unpaired_frames(monkeypatch, tmp_path: Path) 
         _write_semantic_artifacts(case, [actual], [])
 
 
+def _l0_image_to_video(tmp_path: Path):
+    from PIL import Image
+
+    _, manifest, case = CASES["wan22-ti2v-5b-i2v-l0"]
+    height, width = int(manifest["image_height"]), int(manifest["image_width"])
+    ramp = np.linspace(40, 200, width)[None, :, None]
+    first = np.broadcast_to(ramp, (height, width, 3)).astype(np.int16)
+    image = tmp_path / "image.png"
+    Image.fromarray(first.astype(np.uint8)).save(image)
+    return manifest, case, _thresholds("wan22-ti2v-5b-i2v-l0"), first, image
+
+
+def _frames(root: Path, first: np.ndarray, step: int, name: str = "frame-{:06d}.png") -> list[str]:
+    """Five frames that start from ``first`` and brighten by ``step`` levels a frame."""
+    from PIL import Image
+
+    root.mkdir()
+    paths = []
+    for index in range(5):
+        path = root / name.format(index)
+        Image.fromarray(np.clip(first + step * index, 0, 255).astype(np.uint8)).save(path)
+        paths.append(str(path))
+    return paths
+
+
+def test_l0_image_to_video_rejects_a_video_that_never_changes(tmp_path: Path) -> None:
+    manifest, case, thresholds, first, image = _l0_image_to_video(tmp_path)
+    expected = {"_invariant_only": True}
+
+    moving = {"frames": _frames(tmp_path / "moving", first, 2)}
+    _assert_parity(moving, expected, manifest, case, thresholds, image)
+    frozen = {"frames": _frames(tmp_path / "frozen", first, 0)}
+    with pytest.raises(AssertionError):
+        _assert_parity(frozen, expected, manifest, case, thresholds, image)
+
+
+def test_image_to_video_reference_must_start_from_the_image(tmp_path: Path) -> None:
+    from PIL import Image
+
+    manifest, case, thresholds, first, image = _l0_image_to_video(tmp_path)
+    actual = {"frames": _frames(tmp_path / "native", first, 2)}
+    expected = {"frame_paths": _frames(tmp_path / "reference", first, 2, "frame_{:04d}.png")}
+
+    _assert_parity(actual, expected, manifest, case, thresholds, image)
+    Image.fromarray(np.zeros(first.shape, dtype=np.uint8)).save(expected["frame_paths"][0])
+    with pytest.raises(AssertionError):
+        _assert_parity(actual, expected, manifest, case, thresholds, image)
+
+
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
@@ -536,14 +635,22 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
+    image = _initial_image(manifest, tmp_path) if case.get("initial_image") else None
     with evidence_stage("build"):
         _build(model_dir, bundle, manifest)
     with evidence_stage("native"):
-        actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
+        actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path, image)
     record_evidence("native", native_snapshot(actual))
     with evidence_stage("reference"):
-        expected = _official_reference(model_dir, manifest, case, tmp_path)
+        expected = _official_reference(model_dir, manifest, case, tmp_path, image)
     record_report_views(actual, expected, tmp_path / "paired-report-views")
     record_evidence("reference", reference_snapshot(expected))
     with evidence_stage("compare"):
-        _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+        _assert_parity(
+            actual,
+            expected,
+            manifest,
+            case,
+            record_evidence("thresholds", _thresholds(case_name)),
+            image,
+        )

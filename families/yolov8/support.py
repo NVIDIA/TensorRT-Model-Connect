@@ -11,6 +11,6 @@ from tensorrt_model_connect.model_support import family_support
 # prefix, so a directory holding some other yolov8-ish file is not claimed.
 describe = family_support(
     required_files=("yolov8n.pt",),
-    tasks=("object_detection",),
-    default_task="object_detection",
+    tasks=("image_to_boxes",),
+    default_task="image_to_boxes",
 )

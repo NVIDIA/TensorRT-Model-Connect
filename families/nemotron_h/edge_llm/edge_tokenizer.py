@@ -88,7 +88,7 @@ def prepare_tokenizer(checkpoint: Path, engine: Path, destination: Path, raw: di
     destination.mkdir(parents=True)
     # Runtime token IDs come from the byte-exact retained source vocabulary.
     shutil.copy2(checkpoint / "tokenizer.json", destination / "tokenizer.json")
-    shutil.copy2(engine / "processed_chat_template.json", destination / "processed_chat_template.json")
+    shutil.copy2(engine / "chat_template.jinja", destination / "chat_template.jinja")
     (destination / "tokenizer_config.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )

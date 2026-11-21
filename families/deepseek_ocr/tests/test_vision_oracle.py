@@ -20,7 +20,12 @@ from families.deepseek_ocr.tests.vision_oracle import (
 
 
 def test_every_deepseek_ocr_case_requires_the_vision_oracle() -> None:
-    assert set(CASES) == {"deepseek-ocr", "deepseek-ocr-l0", "deepseek-ocr-l0-tp2"}
+    assert set(CASES) == {
+        "deepseek-ocr",
+        "deepseek-ocr-l0",
+        "deepseek-ocr-l0-tp2",
+        "deepseek-ocr-fp8",
+    }
 
 
 def _bundle(path, sections: dict[str, bytes]) -> None:
@@ -56,6 +61,7 @@ def test_native_pixels_follow_the_family_runtime_contract() -> None:
         image,
         {
             "fixed_image_size": 4,
+            "preprocessor_type": "simple_chw",
             "image_mean": [0.5, 0.5, 0.5],
             "image_std": [0.5, 0.5, 0.5],
         },
@@ -69,6 +75,17 @@ def test_vision_gate_is_the_active_half_cosine_contract() -> None:
     assert assert_vision_parity([[1.0, 1.0]], [[1.0, 0.0]]) > 0.5
     with pytest.raises(AssertionError):
         assert_vision_parity([[1.0, 0.0]], [[-1.0, 0.0]])
+
+
+def test_padded_pixels_keep_white_text_area_and_mean_color_border() -> None:
+    pixels = _native_pixels(Image.new("RGB", (13, 16), "white"), {
+        "fixed_image_size": 16, "preprocessor_type": "pad_center_chw",
+        "image_mean": [0.5] * 3, "image_std": [0.5] * 3,
+    })
+    assert pixels.shape == (1, 3, 16, 16)
+    np.testing.assert_allclose(pixels[:, :, :, 2:15], 1.0)
+    np.testing.assert_allclose(pixels[:, :, :, :2], -1 / 255, atol=1e-7)
+    np.testing.assert_allclose(pixels[:, :, :, 15:], -1 / 255, atol=1e-7)
 
 
 @pytest.mark.parametrize("features", [[0.0, 0.0], [float("inf"), 1.0]])

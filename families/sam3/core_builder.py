@@ -652,6 +652,10 @@ def build_sam3_core_engine(
         "sam3_text_features", trt.float32, (1, text_seq_len, hidden_size)
     )
     text_mask_in = network.add_input("sam3_text_attention_mask", trt.int32, (1, text_seq_len))
+    # Transformers' Sam3Model has no geometry prompt for a text-only image request, while Meta's
+    # video predictor always appends the empty-geometry CLS. The caller selects it per request:
+    # 0 masks the CLS out of every prompt consumer, 1 keeps it.
+    geometry_attention_mask = network.add_input("sam3_geometry_prompt_mask", trt.int32, (1, 1))
 
     fpn_hidden = []
     fpn_position = []
@@ -702,12 +706,6 @@ def build_sam3_core_engine(
     text_features = prompt_concat.get_output(0)
     prompt_seq_len = text_seq_len + 1
 
-    geometry_attention_mask = _const(
-        network,
-        (1, 1),
-        np.ones((1, 1), dtype=np.int32),
-        dtype=np.int32,
-    )
     prompt_mask_concat = network.add_concatenation([text_mask_in, geometry_attention_mask])
     prompt_mask_concat.axis = 1
     prompt_attention_mask = prompt_mask_concat.get_output(0)

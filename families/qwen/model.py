@@ -14,7 +14,6 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .bundle_provenance import checkpoint_identity
 from .config import ModelConfig
 from .parallel import ParallelConfig
 from .checkpoint_mapper import WeightDict, load_standard_weights
@@ -254,8 +253,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task != "text_generation":
-        raise ValueError("qwen supports only task=text_generation")
+    if request.task != "text_continuation":
+        raise ValueError("qwen supports only task=text_continuation")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     model_type = str(config.model_type).lower()
@@ -283,6 +282,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError(f"Qwen does not support quantization={request.quantization!r}")
     if request.fp32_layers:
         raise NotImplementedError("Qwen does not expose mixed-precision layer selection")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Qwen does not support MTP speculative decoding")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
@@ -388,13 +389,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             tensor_parallel_mode="tensor_parallel" if parallel.enabled else "single",
         ),
     )
-    writer.add_json("checkpoint_provenance.json", {
-        "version": 1, "checkpoint": checkpoint_identity(model_dir),
-        "build": {"precision": precision, "max_sequence_length": max_sequence_length,
-                  "tensor_parallel_size": parallel.tp_size,
-                  "quantization": request.quantization or "none",
-                  "fp32_layers": list(request.fp32_layers)},
-    })
     for filename in _BUNDLE_FILES:
         path = model_dir / filename
         if path.is_file():

@@ -9,6 +9,7 @@
 
 #include <edgellm/cpp/runtime/llmRuntimeUtils.h>
 #include <edgellm/cpp/runtime/streaming.h>
+#include <utility>
 
 namespace trtmc::nemotron_h::edge_llm {
 
@@ -24,7 +25,10 @@ inline trt_edgellm::rt::LLMGenerationRequest make_request(const std::string& pro
             : prompt;
     trt_edgellm::rt::LLMGenerationRequest request{};
     request.requests.resize(1);
-    request.requests.front().messages.push_back({"user", {{"text", formatted}}});
+    trt_edgellm::rt::Message message{};
+    message.role = "user";
+    message.contents = {{"text", formatted}};
+    request.requests.front().messages.push_back(std::move(message));
     auto ids = tokenizer.encode(formatted);
     if (config.use_chat_template && !chat_format.empty() && ids.size() >= 2 && bos_id >= 0 &&
         ids[0] == bos_id && ids[1] == bos_id)

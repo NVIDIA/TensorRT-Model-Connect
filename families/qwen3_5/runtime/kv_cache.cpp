@@ -41,8 +41,8 @@ Qwen35KvCache::Qwen35KvCache(int32_t num_layers, int32_t max_length, int32_t kv_
     present_v_.reserve(static_cast<std::size_t>(num_layers));
 
     for (int32_t i = 0; i < num_layers; ++i) {
-        cache_k_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
-        cache_v_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
+        cache_k_.push_back(DeviceTensor::zeros({max_length, kv_dim}, cache_dtype_, stream));
+        cache_v_.push_back(DeviceTensor::zeros({max_length, kv_dim}, cache_dtype_, stream));
         present_k_.emplace_back(std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
         present_v_.emplace_back(std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
     }
@@ -173,6 +173,12 @@ void Qwen35KvCache::bind_to(ITrtModule& module) {
     has_position_input_ = module.has_input(names_.position_id);
     for (int32_t i = 0; i < num_layers_; ++i) {
         const auto layer = static_cast<std::size_t>(i);
+        for (const auto* name : {&names_.cache_k[layer], &names_.cache_v[layer],
+                                 &names_.present_k[layer], &names_.present_v[layer]}) {
+            if (module.tensor_dtype(*name) != cache_dtype_)
+                throw std::runtime_error(
+                    "qwen3_5 decoder KV storage dtype disagrees with runtime.json");
+        }
         module.bind_external(names_.cache_k[layer], cache_k_[layer].data());
         module.bind_external(names_.cache_v[layer], cache_v_[layer].data());
         module.bind_external(names_.present_k[layer], present_k_[layer].data());
@@ -181,9 +187,14 @@ void Qwen35KvCache::bind_to(ITrtModule& module) {
 }
 
 void Qwen35KvCache::bind_cache_inputs(ITrtModule& module) {
-    has_position_input_ = module.has_input(names_.position_id);
+    // A verifier borrows cache data, not the target decoder's input schema.
+    // Keep has_position_input_ from bind_to(); verification uses position_ids.
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
+        if (module.tensor_dtype(names_.cache_k[li]) != cache_dtype_ ||
+            module.tensor_dtype(names_.cache_v[li]) != cache_dtype_)
+            throw std::runtime_error(
+                "qwen3_5 consumer KV storage dtype disagrees with runtime.json");
         module.bind_external(names_.cache_k[li], cache_k_[li].data());
         module.bind_external(names_.cache_v[li], cache_v_[li].data());
     }
@@ -234,6 +245,19 @@ void Qwen35KvCache::append_prefill_kv(const std::vector<const void*>& prefill_k,
                         block_bytes, cudaMemcpyDeviceToDevice, stream_);
     }
     position_ += seq_len;
+}
+
+void Qwen35KvCache::append_prefill_from(const ITrtModule& module, int32_t seq_len) {
+    std::vector<const void*> keys(static_cast<std::size_t>(num_layers_));
+    std::vector<const void*> values(static_cast<std::size_t>(num_layers_));
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        const auto layer = static_cast<std::size_t>(i);
+        keys[layer] = module.device_ptr(names_.present_k[layer]);
+        values[layer] = module.device_ptr(names_.present_v[layer]);
+        if (keys[layer] == nullptr || values[layer] == nullptr)
+            throw std::runtime_error("qwen3_5 prefill context has no present K/V output");
+    }
+    append_prefill_kv(keys, values, seq_len);
 }
 
 void Qwen35KvCache::set_position(int32_t position) {

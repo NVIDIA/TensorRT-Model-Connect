@@ -30,7 +30,7 @@ def _load_cases() -> dict[str, tuple[dict, dict]]:
     for path in sorted((_TEST_DIR / "manifests").glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == _FAMILY, path
-        assert manifest["task"] == "text_generation", path
+        assert manifest["task"] == "text_continuation", path
         assert isinstance(manifest["precision"], str), path
         assert isinstance(manifest["max_sequence_length"], int), path
         assert isinstance(manifest["tensor_parallel_size"], int), path
@@ -142,7 +142,7 @@ def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
             model_dir=model_dir,
             output_path=bundle,
             family=_FAMILY,
-            task="text_generation",
+            task="text_continuation",
             precision=manifest["precision"],
             max_sequence_length=manifest["max_sequence_length"],
             tensor_parallel_size=manifest["tensor_parallel_size"],
@@ -165,7 +165,7 @@ def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int) -> None:
     record_evidence("native", {"stdout": getattr(inspected, "stdout", None), "stderr": getattr(inspected, "stderr", None)})
     payload = json.loads(inspected.stdout)
     assert payload["family"] == _FAMILY
-    assert payload["task"] == "text_generation"
+    assert payload["task"] == "text_continuation"
     if tp_size > 1:
         rank_sections = {
             name
@@ -249,7 +249,17 @@ def _run_native(
 
 def _render_prompt(tokenizer, prompt: str, case: dict):
     if not case.get("use_chat_template", False):
-        return tokenizer(prompt, return_tensors="pt")
+        inputs = tokenizer(prompt, return_tensors="pt")
+        ids = inputs["input_ids"][0].tolist()
+        eos = tokenizer.eos_token_id
+        explicit_eos = bool(tokenizer.eos_token and prompt.endswith(tokenizer.eos_token))
+        # Native continuation prompts omit only HF's automatically appended EOS.
+        # Preserve the leading special token and any EOS supplied in the prompt.
+        if len(ids) > 1 and ids[-1] == eos and (not explicit_eos or ids[-2] == eos):
+            for name in ("input_ids", "attention_mask", "token_type_ids"):
+                if name in inputs:
+                    inputs[name] = inputs[name][:, :-1]
+        return inputs
     options = {"tokenize": False, "add_generation_prompt": True}
     if "enable_thinking" in case:
         options["enable_thinking"] = case["enable_thinking"]
@@ -365,6 +375,7 @@ def _hf_reference(
     )
     inputs = _render_prompt(tokenizer, prompt, case).to(model.device)
     prompt_ids = inputs["input_ids"][0].tolist()
+    record_evidence("inputs", {"reference_prompt_token_ids": prompt_ids})
     if "expected_prompt_token_ids" in case:
         assert prompt_ids == case["expected_prompt_token_ids"]
 
@@ -538,3 +549,8 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
         _record_text_diagnostics(payload["token_ids"], reference[0])
     with evidence_stage("compare"):
         _assert_correctness(payload, case, record_evidence("thresholds", _thresholds(case_name)), *reference)
+    if tp_size == 1:
+        from families.xglm.tests.sdk import check_consumers
+
+        with evidence_stage("sdk"):
+            check_consumers(bundle, runtime_root, prompt, case, payload, model_dir, tmp_path)

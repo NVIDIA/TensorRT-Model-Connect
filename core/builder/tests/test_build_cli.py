@@ -195,6 +195,68 @@ def test_console_build_reuses_the_existing_builder(monkeypatch) -> None:
     assert calls == [arguments]
 
 
+@pytest.mark.parametrize(
+    ("arguments", "diagnostic"),
+    [
+        (["example/model", "-o", "out.bundle", "--max-sequnce-length", "128"], "unrecognized arguments"),
+        (["--max-sequnce-length", "128", "example/model", "-o", "out.bundle"], "unrecognized arguments"),
+        (["example/model", "-o", "out.bundle", "unexpected"], "unrecognized arguments"),
+        (["example/model", "-o", "out.bundle", "--precision", "fp8"], "invalid choice"),
+        (["example/model", "--output"], "expected one argument"),
+    ],
+)
+def test_console_build_rejects_invalid_arguments_before_model_resolution(
+    monkeypatch, capsys, arguments: list[str], diagnostic: str
+) -> None:
+    from tensorrt_model_connect import __main__ as launcher
+
+    monkeypatch.setattr(
+        build_cli, "_resolve_model",
+        lambda *_: pytest.fail("invalid build arguments reached model resolution"),
+    )
+
+    with pytest.raises(SystemExit) as error:
+        launcher.main(["build", *arguments])
+
+    assert error.value.code == 2
+    assert diagnostic in capsys.readouterr().err
+
+
+def test_console_build_resolves_a_valid_remote_model(monkeypatch, tmp_path: Path) -> None:
+    from tensorrt_model_connect import __main__ as launcher
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"model_type":"example_model"}', encoding="utf-8")
+    downloads = []
+    requests = []
+
+    def snapshot_download(**kwargs):
+        downloads.append(kwargs)
+        return str(model)
+
+    monkeypatch.setitem(
+        sys.modules, "huggingface_hub", SimpleNamespace(snapshot_download=snapshot_download)
+    )
+    monkeypatch.setattr(build_cli, "resolve_family", lambda metadata: (
+        "example_owner", FamilySupport(("owner_default",), "owner_default")
+    ))
+    monkeypatch.setattr(build_cli, "build", requests.append)
+    output = tmp_path / "out.bundle"
+
+    assert launcher.main([
+        "build", "example/model", "--revision", "revision-1", "-o", str(output)
+    ]) == 0
+
+    assert downloads == [{
+        "repo_id": "example/model", "revision": "revision-1",
+        "ignore_patterns": ["*flax_model*", "*tf_model*"],
+    }]
+    assert len(requests) == 1
+    assert requests[0].model_dir == model
+    assert requests[0].output_path == output
+
+
 def test_console_prepare_reuses_the_existing_builder(monkeypatch) -> None:
     from tensorrt_model_connect import __main__ as launcher
 

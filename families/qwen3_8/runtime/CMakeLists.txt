@@ -6,9 +6,16 @@ add_library(trtmc_model_qwen3_8 SHARED
   chat_templates.cpp
   hybrid_state.cpp
   kv_cache.cpp
+  mtp_scheduler.cpp
+  dspark.cpp
+  dflash2.cpp
   pipeline.cpp
+  native_visual.cpp
+  native_media.cpp
+  tensor_parallel.cpp
   plugin.cpp
   plugin_helpers.cpp
+  prefill_runner.cpp
   recurrent_state.cpp
   sampler.cpp
 )
@@ -20,6 +27,7 @@ target_link_libraries(trtmc_model_qwen3_8 PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_model_qwen3_8 PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
@@ -49,8 +57,23 @@ if(TRTMC_BUILD_TESTS)
     COMMAND test_qwen3_8_recurrent_output_initializers
   )
 
+  # Keep native mock fixtures in the existing test, but load the family DSO
+  # through the public loader for real bundles. Prelinking the optional Edge
+  # DSO exposes its private CUDA symbols globally, unlike the ordinary CLI.
   add_executable(test_qwen3_8_recurrent_pipeline
     ${PROJECT_SOURCE_DIR}/families/qwen3_8/tests/cpp/test_qwen3_8_recurrent_pipeline.cpp
+    bpe_tokenizer.cpp
+    chat_templates.cpp
+    hybrid_state.cpp
+    kv_cache.cpp
+    mtp_scheduler.cpp
+    dspark.cpp
+    dflash2.cpp
+    pipeline.cpp
+    prefill_runner.cpp
+    native_visual.cpp
+    recurrent_state.cpp
+    sampler.cpp
   )
   target_include_directories(test_qwen3_8_recurrent_pipeline PRIVATE
     ${PROJECT_SOURCE_DIR}
@@ -62,9 +85,10 @@ if(TRTMC_BUILD_TESTS)
     ${TRTMC_CUDA_INCLUDE_DIR}
   )
   target_link_libraries(test_qwen3_8_recurrent_pipeline PRIVATE
-    trtmc_model_qwen3_8
     trtmc_backend_trt
     trtmc_core
+    trtmc::c
+    nlohmann_json::nlohmann_json
     ${TRTMC_TRT_LIBRARY}
     ${TRTMC_CUDART_LIBRARY}
   )

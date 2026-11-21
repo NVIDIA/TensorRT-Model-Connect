@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import absolute, execution
 from .aiperf_runner import AiperfRun
+from .artifacts import resolve_path, recorded_path
 
 ALIGNMENT = "conversation-id/v1"
 
@@ -102,7 +103,7 @@ def batches(out: Path) -> list[dict]:
     return [item for item in values if not item.get("superseded") and item["batch_id"] not in superseded]
 
 
-def aligned_batches(recorded: list[dict]) -> list[dict]:
+def aligned_batches(recorded: list[dict], out: Path | None = None) -> list[dict]:
     """Reassociate saved timing rows with their actual inputs without changing timings or work."""
     aligned = []
     for batch in recorded:
@@ -112,7 +113,7 @@ def aligned_batches(recorded: list[dict]) -> list[dict]:
         roots = {row["output_ref"]["aiperf_run"] for row in batch["records"]}
         if len(roots) != 1:
             raise ValueError("execution batch contains multiple run directories")
-        run = AiperfRun(Path(next(iter(roots))), batch["aiperf_exit"], [])
+        run = AiperfRun(resolve_path(out, next(iter(roots))) if out is not None else Path(next(iter(roots))), batch["aiperf_exit"], [])
         raw = run.raw_records()
         indices = run.conversation_indices()
         units = {str(row["sample_id"]): row["unit_id"] for row in batch["records"]}
@@ -130,6 +131,8 @@ def aligned_batches(recorded: list[dict]) -> list[dict]:
             if unit is None:
                 raise ValueError("original evaluation unit is missing from the saved execution batch")
             rows.append({**row, "sample_id": identity, "unit_id": unit})
+            if batch["identity"].get("side") == "candidate":
+                rows[-1]["capacity_rejection"] = absolute.capacity_rejection(source)
         aligned.append({**batch, "records": rows, "alignment": ALIGNMENT})
     return aligned
 
@@ -151,7 +154,7 @@ def recover(out: Path, model: dict, report: dict, archive: SelectionArchive) -> 
                 roots = {row["output_ref"]["aiperf_run"] for row in batch["records"]}
                 if len(roots) != 1:
                     raise ValueError(f"{out}: accuracy batch has {len(roots)} run directories")
-                run = AiperfRun(Path(next(iter(roots))), batch["aiperf_exit"], [])
+                run = AiperfRun(resolve_path(out, next(iter(roots))) if out is not None else Path(next(iter(roots))), batch["aiperf_exit"], [])
                 problems = archive.selection(run)
                 if plans is not None and plans != problems:
                     raise ValueError(f"{out}: native and TRTMC original question/gold selections differ")
@@ -174,24 +177,25 @@ def recover(out: Path, model: dict, report: dict, archive: SelectionArchive) -> 
         kept = {key: value for key, value in entry.items()
                 if key in ("native", "candidate_replicas", "candidate_mps", "sides_concurrent", "informational")}
         updates[entry["suite"]] = {**judged, **kept, "alignment": ALIGNMENT}
-    aligned = aligned_batches(recorded)
+    aligned = aligned_batches(recorded, out)
     from . import judge
 
     same_work = lambda mine, theirs: judge.work_check(  # noqa: E731
         {"work": [mine] if mine is not None else []}, {"work": [theirs] if theirs is not None else []}) is None
     session = execution.Session(out, {}, lambda: None, lambda value: value, same_work, batches=aligned)
     performance = [item for item in report.get("performance", []) if item.get("kind") != "natural_dataset"]
-    performance.extend(session.natural_performance())
+    accuracy = [updates.get(entry["suite"], entry) for entry in report.get("accuracy", [])]
+    performance.extend(session.natural_performance(accuracy))
     # Validate the whole report before publishing any corrected evidence.
     for path, grades in pending_exports:
         partial = path.with_suffix(".tmp")
         partial.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in grades))
         partial.replace(path)
-    result = {**report, "accuracy": [updates.get(entry["suite"], entry) for entry in report.get("accuracy", [])],
+    result = {**report, "accuracy": accuracy,
               "performance": performance}
     result["accuracy_alignment"] = {"version": ALIGNMENT, "suites": sorted(updates), "runs": evidence,
                                      "original_responses_reused": True}
     aligned_path = out / "execution.aligned.jsonl"
     aligned_path.write_text("".join(json.dumps(batch, ensure_ascii=False) + "\n" for batch in aligned))
-    result["execution"] = {**report.get("execution", {}), "records": str(aligned_path), "alignment": ALIGNMENT}
+    result["execution"] = {**report.get("execution", {}), "records": recorded_path(out, aligned_path), "alignment": ALIGNMENT}
     return result

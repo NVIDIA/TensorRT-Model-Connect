@@ -32,6 +32,11 @@ from .weights import (
     _target_np_dtype,
 )
 from .config import ModelConfig
+from .quantization import (
+    calibrate_timm_vgg,
+    configure_fp8_build,
+    refuse_quantized_checkpoint,
+)
 
 
 if TYPE_CHECKING:
@@ -154,6 +159,7 @@ class _TimmVggModel:
         *,
         precision: str,
         verbose: bool = False,
+        quantization: str | None = None,
     ) -> bytes:
         if precision == "fp16":
             work_np_dtype, work_trt_dtype = np.float16, trt.float16
@@ -161,6 +167,8 @@ class _TimmVggModel:
             work_np_dtype, work_trt_dtype = np.float32, trt.float32
         else:
             raise ValueError(f"Unsupported timm_vgg precision: {precision}")
+        if quantization is not None and precision != "fp16":
+            raise ValueError(f"timm_vgg FP8 needs precision fp16, got {precision!r}")
 
         cfg = config.raw.get("_timm_vgg_config")
         if cfg is None:
@@ -171,6 +179,16 @@ class _TimmVggModel:
         layers = cfg["layers"]
         num_pools = cfg["num_pools"]
 
+        quant_ctx = None
+        if quantization is not None:
+            quant_ctx = calibrate_timm_vgg(
+                list(cfg["conv_indices"]),
+                (image_h, image_w),
+                weights,
+                quantization,
+                precision=precision,
+            )
+
         divisor = 1 << num_pools
         if image_h % divisor != 0 or image_w % divisor != 0:
             raise ValueError(f"timm_vgg input {image_h}x{image_w} must be divisible by {divisor}")
@@ -178,7 +196,8 @@ class _TimmVggModel:
             print(
                 "[trtmc build] timm_vgg: "
                 f"image={image_h}x{image_w}, convs={len(cfg['conv_indices'])}, "
-                f"pools={num_pools}, classes={num_classes}, precision={precision}",
+                f"pools={num_pools}, classes={num_classes}, precision={precision}, "
+                f"quantization={quantization or 'none'}",
                 file=sys.stderr,
             )
 
@@ -191,6 +210,7 @@ class _TimmVggModel:
         trt_config.max_aux_streams = 0
         trt_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+        configure_fp8_build(trt_config, quant_ctx)
 
         pixel_values = network.add_input("pixel_values", trt.float32, (1, 3, image_h, image_w))
         hidden = pixel_values
@@ -201,43 +221,59 @@ class _TimmVggModel:
             if kind == "pool":
                 hidden = graph_ops.add_max_pool2d(network, hidden, _POOL_KERNEL, _POOL_STRIDE, 0)
                 continue
-            w = weights[f"features.{index}.weight"]
-            hidden = graph_ops.add_conv2d(
-                network,
-                hidden,
-                w,
-                weights[f"features.{index}.bias"],
-                int(w.shape[0]),
-                _CONV_KERNEL,
-                padding=_CONV_PADDING,
-                dtype=work_np_dtype,
-            )
+            module = f"features.{index}"
+            w = weights[f"{module}.weight"]
+            if quant_ctx is not None and quant_ctx.should_quantize(module):
+                hidden = quant_ctx.convolution(
+                    network, hidden, module, weights[f"{module}.bias"], padding=_CONV_PADDING
+                )
+            else:
+                hidden = graph_ops.add_conv2d(
+                    network,
+                    hidden,
+                    w,
+                    weights[f"{module}.bias"],
+                    int(w.shape[0]),
+                    _CONV_KERNEL,
+                    padding=_CONV_PADDING,
+                    dtype=work_np_dtype,
+                )
             hidden = graph_ops.add_relu(network, hidden)
 
         # timm implements the VGG head as convolutions: fc1 is a feat_h x feat_w
         # convolution and fc2 is 1x1, so the head runs on the feature map.
         fc1_w = weights["pre_logits.fc1.weight"]
-        hidden = graph_ops.add_conv2d(
-            network,
-            hidden,
-            fc1_w,
-            weights["pre_logits.fc1.bias"],
-            int(fc1_w.shape[0]),
-            (int(fc1_w.shape[2]), int(fc1_w.shape[3])),
-            dtype=work_np_dtype,
-        )
+        if quant_ctx is not None and quant_ctx.should_quantize("pre_logits.fc1"):
+            hidden = quant_ctx.convolution(
+                network, hidden, "pre_logits.fc1", weights["pre_logits.fc1.bias"]
+            )
+        else:
+            hidden = graph_ops.add_conv2d(
+                network,
+                hidden,
+                fc1_w,
+                weights["pre_logits.fc1.bias"],
+                int(fc1_w.shape[0]),
+                (int(fc1_w.shape[2]), int(fc1_w.shape[3])),
+                dtype=work_np_dtype,
+            )
         hidden = graph_ops.add_relu(network, hidden)
 
         fc2_w = weights["pre_logits.fc2.weight"]
-        hidden = graph_ops.add_conv2d(
-            network,
-            hidden,
-            fc2_w,
-            weights["pre_logits.fc2.bias"],
-            int(fc2_w.shape[0]),
-            (1, 1),
-            dtype=work_np_dtype,
-        )
+        if quant_ctx is not None and quant_ctx.should_quantize("pre_logits.fc2"):
+            hidden = quant_ctx.convolution(
+                network, hidden, "pre_logits.fc2", weights["pre_logits.fc2.bias"]
+            )
+        else:
+            hidden = graph_ops.add_conv2d(
+                network,
+                hidden,
+                fc2_w,
+                weights["pre_logits.fc2.bias"],
+                int(fc2_w.shape[0]),
+                (1, 1),
+                dtype=work_np_dtype,
+            )
         hidden = graph_ops.add_relu(network, hidden)
 
         head_w = weights["head.fc.weight"]
@@ -292,10 +328,15 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_vgg does not support context parallelism")
     if request.task != "classification":
         raise ValueError("timm_vgg supports only task=classification")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("timm_vgg does not support quantization")
+    quantization = None if request.quantization in {None, "none"} else str(request.quantization)
+    if quantization not in {None, "fp8"}:
+        raise NotImplementedError(
+            f"timm_vgg supports quantization fp8 or none, got {request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("timm_vgg does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("timm_vgg does not support MTP speculative decoding")
     if request.max_sequence_length not in {None, 1}:
         raise NotImplementedError("timm_vgg supports only max_sequence_length=1")
 
@@ -305,6 +346,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if model_type not in _SUPPORTED_MODEL_TYPES:
         raise ValueError(f"timm VGG does not support model_type={config.model_type!r}")
     precision = str(request.precision).lower()
+    if quantization is not None:
+        refuse_quantized_checkpoint(model_dir, _open_safetensors(model_dir).tensor_map)
     model = _TimmVggModel()
     weights = model.load_weights(str(model_dir), config, precision=precision)
     plan = model.build_engine(
@@ -312,6 +355,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         weights,
         precision=precision,
         verbose=bool(request.verbose),
+        quantization=quantization,
     )
     writer.set_header(family="timm_vgg", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)

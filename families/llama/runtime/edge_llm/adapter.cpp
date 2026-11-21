@@ -11,9 +11,15 @@
 #include <cstdlib>
 #include <cuda_runtime_api.h>
 #include <dlfcn.h>
+#ifdef TRTMC_LLAMA_EDGE_012
+#include <tensorrt_edgellm/common/trtInterop.h>
+#include <tensorrt_edgellm/runtime/llmInferenceRuntime.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#else
 #include <edgellm/cpp/common/logger.h>
 #include <edgellm/cpp/runtime/llmInferenceRuntime.h>
 #include <edgellm/cpp/runtime/streaming.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -81,7 +87,7 @@ class Artifacts {
         }
         std::vector<std::string> required_files{
             "edge_llm/engine/tokenizer.json", "edge_llm/engine/tokenizer_config.json",
-            "edge_llm/engine/processed_chat_template.json", "edge_llm/checkpoint/config.json"};
+            "edge_llm/engine/chat_template.jinja", "edge_llm/checkpoint/config.json"};
         if (marker.value("execution_variant", "autoregressive") == "eagle3") {
             for (const auto* name :
                  {"spec_base.engine", "spec_draft.engine", "base_config.json", "draft_config.json"})
@@ -150,7 +156,12 @@ std::unique_ptr<void, CloseLibrary> load_plugin() {
                                  std::string(dlerror()));
     using Initialize = bool (*)(void*, const char*);
     auto initialize = reinterpret_cast<Initialize>(dlsym(plugin.get(), "initEdgellmPlugins"));
-    if (!initialize || !initialize(static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger), ""))
+#ifdef TRTMC_LLAMA_EDGE_012
+    auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::TrtLogger::instance());
+#else
+    auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger);
+#endif
+    if (!initialize || !initialize(logger, ""))
         throw std::runtime_error("Cannot initialize Llama3 Edge plugin");
     return plugin;
 }
@@ -182,9 +193,14 @@ make_runtime(const Artifacts& artifacts, const nlohmann::json& marker, cudaStrea
     using Runtime = trt_edgellm::rt::LLMInferenceRuntime;
     if (marker.value("execution_variant", "autoregressive") == "eagle3") {
         trt_edgellm::rt::SpecDecodeDraftingConfig drafting{};
-        drafting.draftingTopK = 10;
         drafting.draftingStep = 6;
+#ifdef TRTMC_LLAMA_EDGE_012
+        drafting.draftTopK = 10;
+        drafting.verifyTokens = 60;
+#else
+        drafting.draftingTopK = 10;
         drafting.verifySize = 60;
+#endif
         return std::make_unique<Runtime>(
             artifacts.engine(), "", std::unordered_map<std::string, std::string>{}, drafting,
             stream, trt_edgellm::rt::ContextCacheConfig{}, artifacts.checkpoint(),
@@ -254,12 +270,23 @@ class EdgeTask final : public ITextGeneration {
 ITask* create(const BundleReader& bundle) {
     const auto bytes = bundle.read_section("edge_llm.json");
     const auto marker = nlohmann::json::parse(bytes.begin(), bytes.end());
-    if (marker.at("version") != 1 || marker.at("edge_revision") != kRevision ||
+    const auto& revision = marker.at("edge_revision");
+#ifdef TRTMC_LLAMA_EDGE_012
+    // External 0.12 SDK packages attest the release, not a Git checkout.
+    const bool compatible =
+        marker.at("edge_release") == "0.12.0" && (revision.is_null() || revision == kRevision);
+#else
+    const bool compatible = revision == kRevision;
+#endif
+    if (marker.at("version") != 1 || !compatible ||
         marker.at("max_sequence_length").get<int>() <= 1 ||
         marker.at("max_input_length").get<int>() <= 0 ||
         marker.at("max_input_length").get<int>() > marker.at("max_sequence_length").get<int>() ||
         marker.at("max_batch_size") != 1 || marker.at("precision") != "fp16" ||
-        marker.at("weight_format") != "fp16" ||
+        (marker.at("weight_format") != "fp16" && marker.at("weight_format") != "fp8" &&
+         marker.at("weight_format") != "nvfp4") ||
+        (marker.value("execution_variant", "autoregressive") == "eagle3" &&
+         marker.at("weight_format") != "fp16") ||
         (marker.value("execution_variant", "autoregressive") != "autoregressive" &&
          marker.value("execution_variant", "autoregressive") != "eagle3") ||
         !marker.at("artifacts").is_array())
