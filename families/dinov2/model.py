@@ -84,26 +84,20 @@ def _builder(verbose, quant_ctx=None):
     return builder, network, config
 
 
-def build_engine(weights, cfg, *, verbose=False, quant_ctx=None, dtype=np.float32) -> bytes:
-    builder, network, config = _builder(verbose, quant_ctx)
-    # The work precision of every layer: float32, or float16 for precision=fp16.
-    # Layer-norm statistics are taken in float32 either way (graph.add_layer_norm).
-    work_np = np.dtype(dtype).type
-    width = cfg["hidden_size"]
-    patch = cfg["patch_size"]
-    grid = cfg["grid"]
-    size = cfg["image_size"]
+def _add_embeddings(network, pixel_values, weights, cfg, work_np):
+    """Patch embedding, class token and position table in float32; the encoder's work dtype from there on.
 
-    # The engine I/O stays float32 at every precision, so the runtime and the
-    # bundle contract do not change; only the network between them narrows.
-    source = network.add_input("pixel_values", trt.float32, (1, 3, size, size))
-    if work_np != np.float32:
-        source = network.add_cast(source, trt.float16).get_output(0)
-
-    patches = g.add_conv2d(network, source,
+    In an FP16 engine, an FP16 patch convolution (FP16 pixels and weights, and an accumulation TensorRT may keep
+    in FP16) and the FP16 position add perturb every token before the first layer, and the FP16 encoder amplifies
+    that on high-detail images: on dinov2-base up to 4.4% relative error in the final features, against 1.3% for
+    the native FP16 model. The embeddings are a small share of the engine, so they stay float32 and the hidden
+    state is rounded once, at the encoder's input. FP32 builds are unchanged.
+    """
+    width, patch, grid = cfg["hidden_size"], cfg["patch_size"], cfg["grid"]
+    patches = g.add_conv2d(network, pixel_values,
                            weights["embeddings.patch_embeddings.projection.weight"],
                            weights["embeddings.patch_embeddings.projection.bias"],
-                           stride=(patch, patch), dtype=work_np)
+                           stride=(patch, patch), dtype=np.float32)
     flat = network.add_shuffle(patches)
     flat.reshape_dims = (width, grid * grid)
     flat.second_transpose = (1, 0)
@@ -111,7 +105,7 @@ def build_engine(weights, cfg, *, verbose=False, quant_ctx=None, dtype=np.float3
     # The class token is prepended, so row 0 of the table belongs to it.
     class_token = g.add_constant(network, (1, width),
                                  np.asarray(weights["embeddings.cls_token"]).reshape(1, width),
-                                 dtype=work_np)
+                                 dtype=np.float32)
     concat = network.add_concatenation([class_token, flat.get_output(0)])
     concat.axis = 0
     hidden = concat.get_output(0)
@@ -122,7 +116,23 @@ def build_engine(weights, cfg, *, verbose=False, quant_ctx=None, dtype=np.float3
     table = position.interpolate_position_table(
         weights["embeddings.position_embeddings"], cfg["trained_grid"], grid)
     hidden = g.add_sum(network, hidden,
-                       g.add_constant(network, (grid * grid + 1, width), table, dtype=work_np))
+                       g.add_constant(network, (grid * grid + 1, width), table, dtype=np.float32))
+    if work_np != np.float32:
+        hidden = network.add_cast(hidden, trt.float16).get_output(0)
+    return hidden
+
+
+def build_engine(weights, cfg, *, verbose=False, quant_ctx=None, dtype=np.float32) -> bytes:
+    builder, network, config = _builder(verbose, quant_ctx)
+    # The work precision of every layer: float32, or float16 for precision=fp16.
+    # Layer-norm statistics are taken in float32 either way (graph.add_layer_norm).
+    work_np = np.dtype(dtype).type
+    size = cfg["image_size"]
+
+    # The engine I/O stays float32 at every precision, so the runtime and the
+    # bundle contract do not change; only the network between them narrows.
+    source = network.add_input("pixel_values", trt.float32, (1, 3, size, size))
+    hidden = _add_embeddings(network, source, weights, cfg, work_np)
 
     hidden = encoder_builder.build_layers(network, hidden, weights, cfg, dtype=work_np,
                                           quant=quant_ctx)
@@ -176,7 +186,9 @@ def build(request, writer) -> None:
     # is 6.2e-02, so no feature tolerance can catch that defect in fp16; the
     # fp16 E2E case adds a check that does not depend on that margin
     # (test_e2e.py). A float32 residual stream or a float32 softmax was
-    # measured and recovers nothing: the error is in the fp16 matmuls.
+    # measured and recovers nothing: the error is in the fp16 matmuls and,
+    # on high-detail images, in the fp16 embeddings, which therefore stay
+    # float32 (_add_embeddings).
     precision = str(request.precision).lower()
     if precision not in _WORK_DTYPES:
         raise NotImplementedError(
