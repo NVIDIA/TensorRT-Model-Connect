@@ -49,7 +49,12 @@ int main(int argc, char** argv) {
     check(*create(sequence), u8"ＡＢ", {3, 4, 5});
     auto identity = fixture;
     identity["normalizer"] = nullptr;
-    check(*create(identity), u8"ＡＢ", {3, 0, 0});
+    check(*create(identity), u8"ＡＢ", {3, 0});
+    check(*create(identity), "YY", {3, 0});
+    check(*create(identity), u8"🫨🫩", {3, 0});
+    check(*create(identity), u8"AＡＢB", {3, 4, 0, 5});
+    check(*create(identity), "AA", {3, 4, 4});
+    check(*create(identity), u8"ＡＢ ＡＢ", {3, 0, 3, 0});
     check(*create(identity), "AB", {3, 4, 5});
 
     const std::vector<std::string> corrupt_maps = {
