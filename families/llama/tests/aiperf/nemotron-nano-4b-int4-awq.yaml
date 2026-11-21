@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The native reference runs the bundle's own INT4-AWQ weights in PyTorch (the committed AWQ scales and group-128
+# rounding, reference/prepare_int4_awq.py), so the comparison measures the TensorRT implementation, not INT4
+# quantization, and MMLU holds the bundle to the unquantized margin.
+reference:
+  prepare: families/llama/reference/prepare_int4_awq.py
+  model_directory: trtmc-reference/nemotron-nano-4b-int4-awq
+benchmarks:
+  mmlu:
+    quantized_gate: {margin: 1.0}

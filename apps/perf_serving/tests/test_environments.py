@@ -58,6 +58,32 @@ def test_environments_are_keyed_by_requirements_and_reused(tmp_path, monkeypatch
     assert created.parent.parent.name.endswith("-r1") and (stale / "keep.txt").read_text() == "x"  # never overlaid
 
 
+def test_a_preparation_script_alone_gets_an_environment_without_installs(tmp_path, monkeypatch):
+    prepare = tmp_path / "fam" / "prepare_checkpoint.py"
+    prepare.parent.mkdir()
+    prepare.write_text("pass\n")
+    commands = []
+
+    def run(command, log, timeout):
+        commands.append(command)
+        if command[1:3] == ["-m", "venv"]:
+            environment = Path(command[-1])
+            (environment / "bin").mkdir(parents=True)
+            (environment / "bin/python").write_text("")
+            (environment / "lib/python3/site-packages").mkdir(parents=True)
+
+    monkeypatch.setattr(environments, "_run", run)
+    monkeypatch.setattr(environments, "_freeze", lambda python: "numpy==1\n")
+    python = environments.reference_python(None, tmp_path / "envs", prepare=prepare)
+    environment = python.parent.parent
+    assert environment.name.startswith("prepare_checkpoint-")
+    assert not any(command[1:4] == ["-m", "pip", "install"] for command in commands)  # nothing to install
+    assert commands[-1] == [str(python), str(prepare.resolve()), str(environment)]
+    assert environments.reference_python(None, tmp_path / "envs", prepare=prepare) == python  # reused
+    with pytest.raises(RuntimeError, match="requirements or a preparation script"):
+        environments.reference_python(None, tmp_path / "envs")
+
+
 def test_a_non_isolated_install_provides_the_build_backend_first(tmp_path, monkeypatch):
     requirements = tmp_path / "fam" / "requirements.txt"
     requirements.parent.mkdir()

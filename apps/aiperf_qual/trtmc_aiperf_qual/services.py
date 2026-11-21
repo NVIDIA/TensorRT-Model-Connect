@@ -81,11 +81,12 @@ def reference_python(environment: Environment, model: Mapping[str, Any]) -> str:
     """The native reference's interpreter: the serving one, or an environment that layers the model's
     ``reference.requirements`` (a file relative to the repository) on it, created once and cached."""
     reference = model.get("reference") or {}
-    if not reference.get("requirements"):
+    if not reference.get("requirements") and not reference.get("prepare"):
         return str(environment["serve_python"])
     command = [str(environment["serve_python"]), "-m", "trtmc_perf_serving", "reference-env",
-               "--requirements", str(environment.path("repo") / reference["requirements"]),
                "--root", str(environment.path("reference_env_root"))]
+    if reference.get("requirements"):
+        command += ["--requirements", str(environment.path("repo") / reference["requirements"])]
     if reference.get("build_isolation") is False:
         command.append("--no-build-isolation")
     if reference.get("prepare"):
@@ -161,9 +162,13 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
             command.append("--trust-remote-code")
         if deterministic:
             command.append("--deterministic")
-        if reference.get("model"):
+        if reference.get("model_directory"):  # written into the reference environment by reference.prepare
+            if not python:
+                raise ServiceError("a reference model_directory needs the model's reference environment")
+            command += ["--reference-model", str((Path(python).parent.parent / reference["model_directory"]).resolve())]
+        elif reference.get("model"):
             command += ["--reference-model", reference["model"]]
-        if reference.get("revision"):
+        if reference.get("revision") and not reference.get("model_directory"):  # a local directory has none
             command += ["--reference-revision", str(reference["revision"])]
         if reference.get("options"):
             command += ["--reference-options", json.dumps(reference["options"])]

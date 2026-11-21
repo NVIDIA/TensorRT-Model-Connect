@@ -117,7 +117,8 @@ def run_key(environment: Environment, model: Mapping[str, Any]) -> str:
     reference interpreters. A finished result counts only under the same key."""
     mode = "smoke" if environment.values.get("smoke") else "formal"
     pythons = {str(environment.values.get("serve_python") or ""), sys.executable}
-    if (model.get("reference") or {}).get("requirements") and environment.values.get("reference_env_root"):
+    reference = model.get("reference") or {}
+    if (reference.get("requirements") or reference.get("prepare")) and environment.values.get("reference_env_root"):
         try:
             pythons.add(reference_python(environment, dict(model)))
         except Exception:  # noqa: BLE001 - the run itself reports the environment failure
