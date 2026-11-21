@@ -1,0 +1,7 @@
+{
+  "threshold_overrides": {
+    "min_pixel_std": 0.05,
+    "psnr": 17.0,
+    "ssim": 0.9
+  }
+}
