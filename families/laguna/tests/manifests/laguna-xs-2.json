@@ -1,0 +1,39 @@
+{
+  "name": "laguna-xs-2",
+  "hf_id": "poolside/Laguna-XS.2",
+  "hf_revision": "a397bde04501591d0ac3d74a5d9d0a4ec298ffb8",
+  "bundle": "laguna-xs-2.bundle",
+  "family": "laguna",
+  "task": "text_continuation",
+  "precision": "bf16",
+  "reference_precision": "fp32",
+  "max_sequence_length": 2048,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "laguna-xs-2-chat",
+      "prompt": "What is the largest planet in our solar system? Answer in one word.",
+      "max_new_tokens": 16,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "expected_continuation_text": "Jupiter"
+    },
+    {
+      "name": "laguna-xs-2-code",
+      "prompt": "Write a Python function named is_prime(n) that returns True when n is a prime number. Reply with the code only.",
+      "max_new_tokens": 96,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "expected_continuation_text": "def is_prime"
+    },
+    {
+      "name": "laguna-xs-2-beyond-window",
+      "premerge": true,
+      "prompt": "Keep this in mind: the access code for the archive room is 7319-QZ.\n\nThe archive keeps the maintenance history of the old harbour railway. The line was opened to carry coal from the quarries in the hills to the ships waiting at the eastern pier. Over the years it also carried timber, salt and, for a short time, passengers who wanted to see the coast from the cliffs above the bay. Each locomotive had a logbook in which the drivers wrote the date, the weather, the load and anything unusual that happened during the shift.\n\nMost entries are short. A driver might note that the boiler was slow to reach pressure on a cold morning, that a wagon coupling had been replaced, or that sheep had wandered onto the track near the second tunnel. Some entries are longer and describe storms that washed gravel over the rails, or the winter when snow closed the upper section for nine days and the crews cleared it by hand.\n\nThe archive staff sorted the logbooks by locomotive and then by year. They also kept the workshop ledgers, which list every part that was ordered, the supplier, the price and the engine that received it. Comparing the ledgers with the logbooks shows how long each repair lasted and which suppliers delivered parts that failed early.\n\nVisitors often ask about the bridge over the river mouth. It was rebuilt twice: first after a flood weakened the stone piers, and again when heavier engines arrived and the original iron girders were judged too light. The drawings for both reconstructions are stored in flat drawers near the reading desk, together with the survey notes of the engineers who inspected the site.\n\nThe station clock is another favourite subject. It was wound every Monday by the stationmaster, and the archive holds a small notebook in which he recorded whether it had gained or lost time during the week. The notebook covers more than twenty years and shows the clock drifting more in hot summers than in winter.\n\nResearchers interested in the people of the railway can read the staff registers. They give the names of drivers, firemen, guards and porters, their dates of employment and the stations where they worked. Several families appear across three generations, with sons joining the same depot where their fathers and grandfathers had worked before them.\n\nThe last regular train ran on a grey afternoon in early spring. The final logbook entry is brief: the driver wrote the date, the words \"line closed\" and his initials. The locomotive was later sold to a museum inland, where it still stands under a roof with its tender and two of the original coal wagons.\n\nQuestion: What is the access code for the archive room? Reply with the code only.",
+      "max_new_tokens": 16,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "expected_continuation_text": "7319-QZ"
+    }
+  ]
+}
