@@ -1,0 +1,21 @@
+{
+  "name": "qwen3-next-bf16",
+  "hf_id": "Qwen/Qwen3-Coder-Next",
+  "hf_revision": "a7fbcb5c0e12d62a448eaa0e260346bf5dcc0feb",
+  "family": "qwen3_next",
+  "task": "text_generation",
+  "precision": "bf16",
+  "bundle": "qwen3-coder-next-bf16.bundle",
+  "max_sequence_length": 1024,
+  "tensor_parallel_size": 1,
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "qwen3-next-bf16-logits",
+      "premerge": true,
+      "prompt": "def add(a, b):\n    return",
+      "max_new_tokens": 4,
+      "reference_precision": "bf16"
+    }
+  ]
+}
