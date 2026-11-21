@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -93,6 +94,130 @@ static std::vector<int32_t> encode_prompt(const ITokenizer& tokenizer,
         ids.erase(ids.begin());
     }
     return ids;
+}
+
+namespace {
+
+using internal::ConfigField;
+using internal::ConfigKind;
+
+Span<const ConfigField> continuation_fields() {
+    static const std::vector<ConfigField> fields{
+        {"max_new_tokens", ConfigKind::I64, std::int64_t{128}, "Generated token budget"},
+        {"temperature", ConfigKind::F64, 1.0, "Sampling temperature"},
+        {"top_k", ConfigKind::I64, std::int64_t{1}, "Top-k sampling"},
+        {"top_p", ConfigKind::F64, 1.0, "Nucleus sampling"},
+        {"min_p", ConfigKind::F64, 0.0, "Minimum relative probability"},
+        {"seed", ConfigKind::I64, std::int64_t{-1}, "Sampling seed; -1 is unspecified"},
+        {"eos_token_id", ConfigKind::I64, std::int64_t{-1}, "EOS token ID; -1 default"},
+        {"use_chat_template", ConfigKind::Bool, false, "Apply the checkpoint chat template"},
+        {"enable_thinking", ConfigKind::Bool, true, "Checkpoint thinking control"},
+        {"stop_on_boxed_answer", ConfigKind::Bool, false, "Stop when boxed answer appears"},
+        {"stop_check_interval", ConfigKind::I64, std::int64_t{16}, "Interval for stop check"},
+    };
+    return {fields.data(), fields.size()};
+}
+
+} // namespace
+
+std::vector<internal::TaskInstance> Gpt2TextGenerationPipeline::task_bindings() {
+    return {internal::bind<internal::ITextContinuation>(*this, continuation_fields())};
+}
+
+TextGenerationConfig
+Gpt2TextGenerationPipeline::request_config(internal::ConfigView supplied) const {
+    const auto fields = continuation_fields();
+    internal::validate_config(fields, supplied);
+    const auto integer = [&](std::string_view name) {
+        const auto value = *internal::config_get<std::int64_t>(supplied, fields, name);
+        if (value < std::numeric_limits<std::int32_t>::min() ||
+            value > std::numeric_limits<std::int32_t>::max()) {
+            throw internal::ConfigError(std::string("gpt2 config integer out of range: ") +
+                                        std::string(name));
+        }
+        return static_cast<std::int32_t>(value);
+    };
+    const auto number = [&](std::string_view name) {
+        const auto value = *internal::config_get<double>(supplied, fields, name);
+        if (!std::isfinite(value) || value < 0.0 ||
+            value > static_cast<double>(std::numeric_limits<float>::max())) {
+            throw internal::ConfigError(std::string("gpt2 sampling value out of range: ") +
+                                        std::string(name));
+        }
+        return static_cast<float>(value);
+    };
+    TextGenerationConfig result;
+    result.max_new_tokens = integer("max_new_tokens");
+    if (result.max_new_tokens <= 0)
+        throw internal::ConfigError("gpt2 max_new_tokens must be positive");
+    result.top_k = integer("top_k");
+    if (result.top_k < 0)
+        throw internal::ConfigError("gpt2 top_k must be non-negative");
+    result.seed = integer("seed");
+    result.eos_token_id = integer("eos_token_id");
+    if (result.eos_token_id != -1 &&
+        (result.eos_token_id < 0 || result.eos_token_id >= config_.vocab_size)) {
+        throw internal::ConfigError("gpt2 eos_token_id out of vocabulary range");
+    }
+    result.stop_check_interval = integer("stop_check_interval");
+    if (result.stop_check_interval < 1)
+        throw internal::ConfigError("gpt2 stop_check_interval must be at least 1");
+    result.temperature = number("temperature");
+    result.top_p = number("top_p");
+    if (result.top_p > 1.0F)
+        throw internal::ConfigError("gpt2 top_p must be between 0 and 1");
+    result.min_p = number("min_p");
+    if (result.min_p > 1.0F)
+        throw internal::ConfigError("gpt2 min_p must be between 0 and 1");
+    result.use_chat_template = *internal::config_get<bool>(supplied, fields, "use_chat_template");
+    if (result.use_chat_template && config_.chat_template_format.empty()) {
+        throw internal::ConfigError("gpt2 chat template requested but none configured");
+    }
+    result.enable_thinking = *internal::config_get<bool>(supplied, fields, "enable_thinking");
+    result.stop_on_boxed_answer =
+        *internal::config_get<bool>(supplied, fields, "stop_on_boxed_answer");
+    return result;
+}
+
+TextResult Gpt2TextGenerationPipeline::run(const internal::TextContinuationRequest& request,
+                                           internal::ConfigView config) {
+    const auto cfg = request_config(config);
+    std::vector<int32_t> input_ids;
+    if (const auto* text = std::get_if<std::string_view>(&request.prefix)) {
+        input_ids = encode_prompt(*tokenizer_, config_, std::string(*text), cfg);
+    } else {
+        if (cfg.use_chat_template)
+            throw std::invalid_argument("gpt2 token-ID input cannot apply a chat template");
+        const auto tokens = std::get<Span<const std::int32_t>>(request.prefix);
+        for (std::size_t i = 0; i < tokens.size(); ++i) {
+            const auto id = tokens[i];
+            if (id < 0 || id >= config_.vocab_size)
+                throw std::invalid_argument("token ID out of vocabulary bounds");
+        }
+        input_ids.assign(tokens.begin(), tokens.end());
+    }
+    if (input_ids.empty())
+        throw std::invalid_argument("gpt2 prompt cannot be empty");
+    if (input_ids.size() > static_cast<std::size_t>(config_.prefill_max_length))
+        throw std::invalid_argument("gpt2 prompt exceeds the prefill profile");
+    if (input_ids.size() + static_cast<std::size_t>(cfg.max_new_tokens) >
+        static_cast<std::size_t>(config_.prefill_max_length))
+        throw std::invalid_argument("gpt2 generation exceeds maximum sequence capacity");
+
+    int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
+    auto sp = gpt2_sampling_params_from_config(cfg, eos);
+    last_setup_ms_ = 0.0;
+    auto timed = generate_from_ids(input_ids, cfg.max_new_tokens, sp, cfg);
+
+    std::vector<int32_t> new_tokens(timed.token_ids.begin() +
+                                        static_cast<std::ptrdiff_t>(input_ids.size()),
+                                    timed.token_ids.end());
+    std::string decoded_text = tokenizer_->decode(new_tokens);
+
+    auto result = TextResult{std::move(decoded_text), std::move(new_tokens), timed.prefill_ms,
+                             timed.decode_ms};
+    result.setup_ms = last_setup_ms_;
+    return result;
 }
 
 TextResult Gpt2TextGenerationPipeline::generate(const std::string& prompt,

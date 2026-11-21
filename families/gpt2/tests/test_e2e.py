@@ -31,7 +31,7 @@ def _load_cases() -> dict[str, tuple[dict, dict]]:
     for path in sorted((_TEST_DIR / "manifests").glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == _FAMILY, path
-        assert manifest["task"] == "text_generation", path
+        assert manifest["task"] == "text_continuation", path
         assert isinstance(manifest["precision"], str), path
         assert isinstance(manifest["max_sequence_length"], int), path
         assert isinstance(manifest["tensor_parallel_size"], int), path
@@ -118,7 +118,7 @@ def _validation_bundle(manifest: dict, model_dir: Path, default: Path, binary: P
             _build_bundle(manifest, model_dir, default)
         return default
     revision = _validation_revision(manifest)
-    assert manifest["task"] == "text_generation", "prebuilt validation supports text generation only"
+    assert manifest["task"] == "text_continuation", "prebuilt validation supports text continuation only"
     bundle = Path(value)
     assert bundle.is_file() and bundle.stat().st_size > 0, bundle
     provenance = _prebuilt_provenance(binary, bundle, model_dir, manifest, revision)
@@ -139,7 +139,7 @@ def _prebuilt_provenance(
 ) -> dict:
     """Compare the core build provenance with the selected, pinned HF snapshot."""
     info = _inspect(binary, bundle)
-    assert (info.get("family"), info.get("task")) == (_FAMILY, "text_generation"), (
+    assert (info.get("family"), info.get("task")) == (_FAMILY, "text_continuation"), (
         "prebuilt bundle has the wrong family or task"
     )
     provenance = info.get("provenance")
@@ -218,7 +218,7 @@ def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
             model_dir=model_dir,
             output_path=bundle,
             family=_FAMILY,
-            task="text_generation",
+            task="text_continuation",
             precision=manifest["precision"],
             max_sequence_length=manifest["max_sequence_length"],
             tensor_parallel_size=manifest["tensor_parallel_size"],
@@ -241,7 +241,7 @@ def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int) -> None:
     record_evidence("native", {"stdout": getattr(inspected, "stdout", None), "stderr": getattr(inspected, "stderr", None)})
     payload = json.loads(inspected.stdout)
     assert payload["family"] == _FAMILY
-    assert payload["task"] == "text_generation"
+    assert payload["task"] == "text_continuation"
     if tp_size > 1:
         rank_sections = {
             name
@@ -557,6 +557,63 @@ def _assert_correctness(
     assert _normalized_edit_distance(actual_text, reference_text) <= _text_threshold(thresholds)
 
 
+def _assert_sdk_consumers(
+    runtime_root: Path,
+    bundle: Path,
+    manifest: dict,
+    case: dict,
+    prompt: str,
+    tmp_path: Path,
+) -> None:
+    native_build_str = os.environ.get("TRTMC_NATIVE_BUILD_DIR")
+    if not native_build_str:
+        return
+    native_build = Path(native_build_str)
+    assert native_build.is_dir(), f"TRTMC_NATIVE_BUILD_DIR not found: {native_build}"
+
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = ":".join(
+        val for val in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if val
+    )
+    env["TRTMC_GPT2_PROMPT"] = prompt
+    tp_size = int(manifest.get("tensor_parallel_size", 1))
+    for language in ("c", "cpp"):
+        consumer = native_build / f"test_gpt2_sdk_{language}"
+        assert consumer.is_file(), f"missing family SDK consumer: {consumer.name}"
+        rendezvous_file = tmp_path / f"sdk-{language}-nccl-rendezvous"
+        if rendezvous_file.exists():
+            rendezvous_file.unlink()
+        run_env = env.copy()
+        run_env["TRTMC_NCCL_RENDEZVOUS"] = str(rendezvous_file)
+        cmd = [str(consumer), str(bundle), str(runtime_root)]
+        if tp_size > 1:
+            mpirun = shutil.which("mpirun")
+            assert mpirun, "selected multi-GPU E2E requires mpirun"
+            cmd = [
+                mpirun,
+                "--tag-output",
+                "-x",
+                "LD_LIBRARY_PATH",
+                "-x",
+                "TRTMC_GPT2_PROMPT",
+                "-x",
+                "TRTMC_NCCL_RENDEZVOUS",
+                "-np",
+                str(tp_size),
+                *cmd,
+            ]
+        completed = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=run_env,
+            timeout=int(case.get("runtime_timeout_s", 600)),
+        )
+        assert "all tasks passed" in completed.stdout
+        record_evidence(f"sdk_{language}", {"stdout": completed.stdout})
+
+
 @pytest.mark.parametrize("case_name", sorted(_CASES))
 def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     manifest, case = _CASES[case_name]
@@ -614,3 +671,6 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
         _record_text_diagnostics(payload["token_ids"], reference[0])
     with evidence_stage("compare"):
         _assert_correctness(payload, case, record_evidence("thresholds", _thresholds(case_name)), *reference)
+    if os.environ.get("TRTMC_NATIVE_BUILD_DIR"):
+        with evidence_stage("sdk"):
+            _assert_sdk_consumers(runtime_root, bundle, manifest, case, prompt, tmp_path)
