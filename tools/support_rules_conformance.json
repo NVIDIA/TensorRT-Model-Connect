@@ -1,0 +1,153 @@
+{
+  "description": "Shared conformance cases for any support-rule parser. Each case gives the families' support.json documents, one model, and the expected decision. A document set to null was listed in the repository but not read. Status is supported (exactly one family accepts), unsupported (none), conflict (more than one), or incomplete (a family needs a document that was not read).",
+  "cases": [
+    {
+      "name": "model_type_selects_one_family",
+      "families": {
+        "alpha": {"schema_version": 1, "rules": [{"if": {"/config/model_type": {"in": ["alpha", "alpha_v2"]}}, "then": {"tasks": ["generation", "embedding"], "default_task": "generation"}}]},
+        "beta": {"schema_version": 1, "rules": [{"if": {"/config/model_type": {"in": ["beta"]}}, "then": {"tasks": ["detection"], "default_task": "detection"}}]}
+      },
+      "model": {"config": {"model_type": "alpha_v2"}, "files": ["config.json"]},
+      "expected": {"status": "supported", "family": "alpha", "support": {"tasks": ["generation", "embedding"], "default_task": "generation"}}
+    },
+    {
+      "name": "no_family_matches",
+      "families": {
+        "alpha": {"schema_version": 1, "rules": [{"if": {"/config/model_type": {"in": ["alpha"]}}, "then": {"tasks": ["generation"], "default_task": "generation"}}]}
+      },
+      "model": {"config": {"model_type": "gamma"}, "files": ["config.json"]},
+      "expected": {"status": "unsupported"}
+    },
+    {
+      "name": "strings_are_case_sensitive",
+      "families": {
+        "alpha": {"schema_version": 1, "rules": [{"if": {"/config/model_type": {"in": ["alpha"]}}, "then": {"tasks": ["generation"], "default_task": "generation"}}]}
+      },
+      "model": {"config": {"model_type": "Alpha"}, "files": ["config.json"]},
+      "expected": {"status": "unsupported"}
+    },
+    {
+      "name": "two_families_match_is_a_conflict",
+      "families": {
+        "alpha": {"schema_version": 1, "rules": [{"if": {"/config/model_type": {"in": ["shared"]}}, "then": {"tasks": ["generation"], "default_task": "generation"}}]},
+        "beta": {"schema_version": 1, "rules": [{"if": {"/config/architectures": {"contains_any": ["SharedModel"]}}, "then": {"tasks": ["generation"], "default_task": "generation"}}]}
+      },
+      "model": {"config": {"model_type": "shared", "architectures": ["SharedModel"]}, "files": ["config.json"]},
+      "expected": {"status": "conflict"}
+    },
+    {
+      "name": "unread_listed_document_is_incomplete",
+      "families": {
+        "alpha": {"schema_version": 1, "rules": [{"if": {"/config/model_type": {"in": ["alpha"]}}, "then": {"tasks": ["generation"], "default_task": "generation"}}]}
+      },
+      "model": {"config": null, "files": ["config.json", "model.safetensors"]},
+      "expected": {"status": "incomplete"}
+    },
+    {
+      "name": "unlisted_document_is_empty_not_incomplete",
+      "families": {
+        "alpha": {"schema_version": 1, "rules": [{"if": {"/config": {"nonempty": false}, "files_all": ["model.pt"]}, "then": {"tasks": ["geometry"], "default_task": "geometry"}}]}
+      },
+      "model": {"config": null, "files": ["model.pt"]},
+      "expected": {"status": "supported", "family": "alpha", "support": {"tasks": ["geometry"], "default_task": "geometry"}}
+    },
+    {
+      "name": "first_matching_rule_decides",
+      "families": {
+        "alpha": {"schema_version": 1, "rules": [
+          {"if": {"/config/model_type": {"in": ["alpha"]}, "files_all": ["modules.json"]}, "then": {"tasks": ["embedding"], "default_task": "embedding", "default_precision": "bf16"}},
+          {"if": {"/config/model_type": {"in": ["alpha"]}}, "then": {"tasks": ["generation"], "default_task": "generation"}}
+        ]}
+      },
+      "model": {"config": {"model_type": "alpha"}, "files": ["config.json", "modules.json"]},
+      "expected": {"status": "supported", "family": "alpha", "support": {"tasks": ["embedding"], "default_task": "embedding", "default_precision": "bf16"}}
+    },
+    {
+      "name": "reject_stops_later_rules",
+      "families": {
+        "alpha": {"schema_version": 1, "rules": [
+          {"if": {"/config/text_config": {"type": "object"}, "/config/text_config/gate": {"exists": true}, "/config/text_config/dense": {"exists": false}}, "then": "reject"},
+          {"if": {"/config/model_type": {"in": ["shared"]}}, "then": {"tasks": ["generation"], "default_task": "generation"}}
+        ]},
+        "beta": {"schema_version": 1, "rules": [
+          {"if": {"/config/model_type": {"in": ["shared"]}, "/config/text_config/gate": {"exists": true}, "/config/text_config/dense": {"exists": false}}, "then": {"tasks": ["generation"], "default_task": "generation", "default_precision": "bf16"}}
+        ]}
+      },
+      "model": {"config": {"model_type": "shared", "text_config": {"gate": "sigmoid"}}, "files": ["config.json"]},
+      "expected": {"status": "supported", "family": "beta", "support": {"tasks": ["generation"], "default_task": "generation", "default_precision": "bf16"}}
+    },
+    {
+      "name": "repo_id_lists_exact_checkpoints",
+      "families": {
+        "alpha": {"schema_version": 1, "rules": [{"if": {"/repo_id": {"in": ["owner/alpha-small", "owner/alpha-large"]}}, "then": {"tasks": ["detection"], "default_task": "detection"}}]}
+      },
+      "model": {"repo_id": "owner/alpha-large", "revision": "0123abcd", "config": {}, "files": ["model.safetensors"]},
+      "expected": {"status": "supported", "family": "alpha", "support": {"tasks": ["detection"], "default_task": "detection"}}
+    },
+    {
+      "name": "adapter_base_model_and_files",
+      "families": {
+        "alpha": {"schema_version": 1, "rules": [{"if": {"/adapter_config/base_model_name_or_path": {"equals": "owner/base"}, "files_all": ["adapter_config.json", "adapter_model.safetensors"]}, "then": {"tasks": ["generation"], "default_task": "generation"}}]}
+      },
+      "model": {"adapter_config": {"base_model_name_or_path": "owner/base"}, "files": ["adapter_config.json", "adapter_model.safetensors"]},
+      "expected": {"status": "supported", "family": "alpha", "support": {"tasks": ["generation"], "default_task": "generation"}}
+    },
+    {
+      "name": "files_none_excludes",
+      "families": {
+        "alpha": {"schema_version": 1, "rules": [{"if": {"/config/model_type": {"in": ["alpha"]}, "files_none": ["head_config.json"]}, "then": {"tasks": ["generation"], "default_task": "generation"}}]}
+      },
+      "model": {"config": {"model_type": "alpha"}, "files": ["config.json", "head_config.json"]},
+      "expected": {"status": "unsupported"}
+    },
+    {
+      "name": "prefix_type_and_nonempty",
+      "families": {
+        "alpha": {"schema_version": 1, "rules": [{"if": {"/config/task": {"equals": "detect"}, "/config/model": {"prefix": "alpha"}, "/config/names": {"type": "object", "nonempty": true}}, "then": {"tasks": ["detection"], "default_task": "detection"}}]}
+      },
+      "model": {"config": {"task": "detect", "model": "alpha-n.yaml", "names": {"0": "person"}}, "files": ["config.json"]},
+      "expected": {"status": "supported", "family": "alpha", "support": {"tasks": ["detection"], "default_task": "detection"}}
+    },
+    {
+      "name": "equals_compares_type_and_value",
+      "families": {
+        "alpha": {"schema_version": 1, "rules": [{"if": {"/config/flag": {"equals": 1}}, "then": {"tasks": ["generation"], "default_task": "generation"}}]}
+      },
+      "model": {"config": {"flag": true}, "files": ["config.json"]},
+      "expected": {"status": "unsupported"}
+    },
+    {
+      "name": "equals_uses_json_number_equality_and_deep_comparison",
+      "families": {
+        "alpha": {"schema_version": 1, "rules": [{"if": {"/config/size": {"equals": 2}, "/config/shape": {"equals": {"dims": [1, 2], "packed": false}}}, "then": {"tasks": ["generation"], "default_task": "generation"}}]}
+      },
+      "model": {"config": {"size": 2.0, "shape": {"packed": false, "dims": [1.0, 2]}}, "files": ["config.json"]},
+      "expected": {"status": "supported", "family": "alpha", "support": {"tasks": ["generation"], "default_task": "generation"}}
+    },
+    {
+      "name": "json_pointer_escapes",
+      "families": {
+        "alpha": {"schema_version": 1, "rules": [{"if": {"/config/a~1b/c~0d": {"equals": "x"}}, "then": {"tasks": ["generation"], "default_task": "generation"}}]}
+      },
+      "model": {"config": {"a/b": {"c~d": "x"}}, "files": ["config.json"]},
+      "expected": {"status": "supported", "family": "alpha", "support": {"tasks": ["generation"], "default_task": "generation"}}
+    },
+    {
+      "name": "pipeline_class_from_model_index",
+      "families": {
+        "alpha": {"schema_version": 1, "rules": [{"if": {"/model_index/_class_name": {"in": ["AlphaPipeline"]}}, "then": {"tasks": ["image_generation"], "default_task": "image_generation"}}]}
+      },
+      "model": {"config": null, "model_index": {"_class_name": "AlphaPipeline"}, "files": ["model_index.json"]},
+      "expected": {"status": "supported", "family": "alpha", "support": {"tasks": ["image_generation"], "default_task": "image_generation"}}
+    }
+  ],
+  "invalid": [
+    {"name": "unknown_schema_version", "document": {"schema_version": 2, "rules": [{"if": {"/repo_id": {"in": ["a/b"]}}, "then": "reject"}]}},
+    {"name": "unknown_test", "document": {"schema_version": 1, "rules": [{"if": {"/config/x": {"like": "a"}}, "then": "reject"}]}},
+    {"name": "unknown_condition", "document": {"schema_version": 1, "rules": [{"if": {"model_type": {"in": ["a"]}}, "then": "reject"}]}},
+    {"name": "unknown_document", "document": {"schema_version": 1, "rules": [{"if": {"/weights/x": {"exists": true}}, "then": "reject"}]}},
+    {"name": "empty_conditions", "document": {"schema_version": 1, "rules": [{"if": {}, "then": "reject"}]}},
+    {"name": "missing_default_task", "document": {"schema_version": 1, "rules": [{"if": {"/repo_id": {"in": ["a/b"]}}, "then": {"tasks": ["generation"]}}]}},
+    {"name": "in_needs_a_list", "document": {"schema_version": 1, "rules": [{"if": {"/config/model_type": {"in": "alpha"}}, "then": "reject"}]}}
+  ]
+}
