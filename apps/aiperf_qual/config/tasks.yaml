@@ -202,6 +202,7 @@ tasks:
   text_generation: &generate_text
     absolute: [mmlu]
     performance: {output_grader: parity_token_exact, output_grader_params: {min_prefix: 8, accept_equal_text: true}}
+  conditional_text_generation: *generate_text
   text_continuation: *generate_text  # the Task SDK name of the migrated decoder LMs (qwen3, #1558)
 
   vision_language_generation:
