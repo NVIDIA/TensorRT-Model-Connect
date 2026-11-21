@@ -1,0 +1,9 @@
+{
+  "checkpoint": "vllm-sr/d3-edge",
+  "revision": "bee5e872f75b9c5d1405767bf244a6948b95c0af",
+  "transformers": "5.17.0",
+  "torch": "2.14.1+cpu",
+  "image": "RGB8 256x256; flattened byte i has value i % 256",
+  "patches": "Qwen2VLImageProcessor torchvision backend; FP32 normalized pixels rounded to BF16",
+  "indices_weights": "transformers.vision_utils.get_vision_interpolation_indices_and_weights(grid=[[1,16,16]],num_grid_per_side=48,align_corners=True,spatial_merge_size=2); transposed to [4,256]"
+}

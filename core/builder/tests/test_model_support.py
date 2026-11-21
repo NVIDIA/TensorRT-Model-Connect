@@ -47,6 +47,9 @@ def test_family_support_rejects_invalid_declarations() -> None:
         FamilySupport(tasks=("not-valid",), default_task="not-valid")
     with pytest.raises(ValueError, match="default_precision"):
         FamilySupport(tasks=("generation",), default_task="generation", default_precision="int8")
+    for priority in (-1, True, 0.5):
+        with pytest.raises(ValueError, match="match_priority"):
+            FamilySupport(tasks=("generation",), default_task="generation", match_priority=priority)
 
 
 def test_load_model_metadata_reads_only_standard_identity_files(tmp_path: Path) -> None:
@@ -119,6 +122,16 @@ def test_resolve_family_requires_exactly_one_match(monkeypatch) -> None:
         ("alpha", FamilySupport(("generation",), "generation")),
         ("beta", FamilySupport(("generation",), "generation")),
     )
+
+    specialized = FamilySupport(("generation",), "generation", match_priority=1)
+    modules["families.beta.support"] = SimpleNamespace(describe=lambda value: specialized)
+    assert resolve_family(metadata) == ("beta", specialized)
+    assert resolve_family(metadata, "alpha") == (
+        "alpha", FamilySupport(("generation",), "generation")
+    )
+    modules["families.alpha.support"] = modules["families.beta.support"]
+    with pytest.raises(AmbiguousFamilyError, match="multiple families.*alpha, beta"):
+        resolve_family(metadata)
 
 
 def test_explicit_family_selects_only_that_compatible_owner(monkeypatch) -> None:
