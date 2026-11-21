@@ -120,7 +120,7 @@ def _unsafe_012_tp2_vision(request, target: dict) -> bool:
     if not (
         request.tensor_parallel_size == 2
         and request.task in {"vision_language_generation", "images_text_to_text"}
-        and request.precision == "fp16"
+        and request.precision.lower() == "fp16"
         and request.max_sequence_length == 8192
         and (target["os"], target["arch"], target["sm"]) == ("linux", "x86_64", 80)
         and target.get("cuda_version") == "13.4"
