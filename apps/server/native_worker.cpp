@@ -226,6 +226,9 @@ int run_protocol(const Json& ready, const Operations& operations, std::istream& 
                 request = Json::parse(std::string_view(buffer.data(), size));
             } catch (const nlohmann::json::parse_error&) {
                 throw ProtocolError("request is not valid JSON");
+            } catch (const nlohmann::json::out_of_range&) {
+                // Note (Jiaxin Deng): Numeric overflow is a parse-time client error.
+                throw ProtocolError("request contains an out-of-range JSON number");
             }
             id = request_id(request);
             if (id.is_null())

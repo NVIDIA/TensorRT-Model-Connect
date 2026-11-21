@@ -161,3 +161,27 @@ def test_surrogate_text_is_rejected_before_worker_acquisition(location, surrogat
         valid = client.post("/v1/responses", json={"model": "test/model", "input": "\U0001f600"})
         assert valid.status_code == 200
         assert registry.requests[-1][1]["prompt"] == "\U0001f600"
+
+
+@pytest.mark.parametrize("route", ["/v1/completions", "/v1/chat/completions", "/v1/responses"])
+@pytest.mark.parametrize("field", ["seed", "top_k"])
+@pytest.mark.parametrize("value", [2**63, 10**400], ids=["i64-overflow", "json-overflow"])
+def test_config_integer_overflow_is_rejected_before_worker_acquisition(route, field, value):
+    registry = TextRegistry()
+    registry.saturated = True
+    payload = {"model": "test/model"}
+    if route == "/v1/completions":
+        payload["prompt"] = "Capital?"
+    elif route == "/v1/chat/completions":
+        payload["messages"] = [{"role": "user", "content": "Capital?"}]
+    else:
+        payload["input"] = "Capital?"
+    with make_client(registry) as client:
+        invalid = client.post(route, json={**payload, field: value})
+        assert invalid.status_code == 400
+        assert invalid.json()["error"]["param"] == field
+        assert not registry.requests
+        registry.saturated = False
+        valid = client.post(route, json={**payload, field: 2**63 - 1})
+        assert valid.status_code == 200
+        assert registry.requests[-1][1]["config"][field] == 2**63 - 1

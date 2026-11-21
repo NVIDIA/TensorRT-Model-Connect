@@ -55,8 +55,8 @@ class GenerationRequest(StrictRequest):
     temperature: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     top_p: float | None = Field(default=None, ge=0, le=1)
     min_p: float | None = Field(default=None, ge=0, le=1)
-    top_k: int | None = Field(default=None, ge=0)
-    seed: int | None = Field(default=None, ge=0)
+    top_k: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    seed: int | None = Field(default=None, ge=0, le=2**63 - 1)
     enable_thinking: bool | None = None
     n: int = Field(default=1, ge=1)
     stream: bool = False
@@ -93,8 +93,8 @@ class ResponsesRequest(StrictRequest):
     temperature: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     top_p: float | None = Field(default=None, ge=0, le=1)
     min_p: float | None = Field(default=None, ge=0, le=1)
-    top_k: int | None = Field(default=None, ge=0)
-    seed: int | None = Field(default=None, ge=0)
+    top_k: int | None = Field(default=None, ge=0, le=2**63 - 1)
+    seed: int | None = Field(default=None, ge=0, le=2**63 - 1)
     enable_thinking: bool | None = None
     stream: Literal[False] = False
     store: Literal[False] = False
