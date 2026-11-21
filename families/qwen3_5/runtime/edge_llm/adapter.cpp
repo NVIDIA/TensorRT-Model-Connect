@@ -12,9 +12,15 @@
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <dlfcn.h>
+#ifdef TRTMC_QWEN35_EDGE_012
+#include <tensorrt_edgellm/common/trtInterop.h>
+#include <tensorrt_edgellm/runtime/llmInferenceRuntime.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#else
 #include <edgellm/cpp/common/logger.h>
 #include <edgellm/cpp/runtime/llmInferenceRuntime.h>
 #include <edgellm/cpp/runtime/streaming.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -169,7 +175,12 @@ std::unique_ptr<void, CloseLibrary> load_plugin() {
                                  std::string(dlerror()));
     using Initialize = bool (*)(void*, const char*);
     auto initialize = reinterpret_cast<Initialize>(dlsym(plugin.get(), "initEdgellmPlugins"));
-    if (!initialize || !initialize(static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger), ""))
+#ifdef TRTMC_QWEN35_EDGE_012
+    auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::TrtLogger::instance());
+#else
+    auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger);
+#endif
+    if (!initialize || !initialize(logger, ""))
         throw std::runtime_error("Cannot initialize Qwen3.5 Edge plugin");
     return plugin;
 }
@@ -195,6 +206,15 @@ make_runtime(const Artifacts& artifacts, const nlohmann::json& marker, cudaStrea
                                 ? artifacts.engine()
                                 : "";
     if (marker.value("tensor_parallel_size", 1) == 2) {
+#ifdef TRTMC_QWEN35_EDGE_012
+        trt_edgellm::rt::DeploymentOptions config{};
+        config.engineDir = artifacts.engine();
+        config.multimodalEngineDir = multimodal;
+        config.checkpointDir = artifacts.checkpoint();
+        config.parallelConfig.tensorParallelSize = 2;
+        config.parallelConfig.launchMode = trt_edgellm::rt::ParallelLaunchMode::kThread;
+        return std::make_unique<Runtime>(std::move(config));
+#else
         Runtime::ParallelExecutionConfig config{};
         config.parallelConfig.tensorParallelSize = 2;
         config.parallelConfig.launchMode = trt_edgellm::rt::ParallelLaunchMode::kThread;
@@ -202,15 +222,24 @@ make_runtime(const Artifacts& artifacts, const nlohmann::json& marker, cudaStrea
         return std::make_unique<Runtime>(artifacts.engine(), multimodal,
                                          std::unordered_map<std::string, std::string>{},
                                          std::move(config));
+#endif
     }
     const auto variant = marker.value("execution_variant", "autoregressive");
     if (variant == "dflash" || variant == "dflash_ddtree" || variant == "mtp") {
         trt_edgellm::rt::SpecDecodeDraftingConfig drafting{};
+#ifdef TRTMC_QWEN35_EDGE_012
+        drafting.draftTopK = variant == "dflash_ddtree" ? 4 : 1;
+        drafting.draftingStep = variant == "mtp" ? 3 : 1;
+        if (variant != "mtp")
+            drafting.proposalTokens = 15; // 16-token block includes the verification root.
+        drafting.verifyTokens = variant == "mtp" ? 4 : 16;
+#else
         drafting.draftingTopK = variant == "dflash_ddtree" ? 4 : 1;
         drafting.draftingStep = variant == "mtp" ? 3 : 1;
         drafting.verifySize = variant == "mtp" ? 4 : 16;
         if (variant == "dflash" || variant == "dflash_ddtree")
             drafting.dflashBlockSize = 16;
+#endif
         return std::make_unique<Runtime>(
             artifacts.engine(), multimodal, std::unordered_map<std::string, std::string>{},
             drafting, stream, trt_edgellm::rt::ContextCacheConfig{}, artifacts.checkpoint(),
@@ -303,7 +332,7 @@ class EdgeTask final : public ITextGeneration,
         auto request = make_request(prompt, config, default_max_new_tokens(), !bytes.empty());
         if (!bytes.empty()) {
             trt_edgellm::rt::Tensor tensor({1, height, width, 3}, trt_edgellm::rt::DeviceType::kCPU,
-                                           nvinfer1::DataType::kUINT8);
+                                           EdgeDataType::kUINT8);
             std::memcpy(tensor.rawPointer(), bytes.data(), bytes.size());
             request.requests.front().imageBuffers.emplace_back(std::move(tensor));
         }
@@ -359,7 +388,13 @@ class EdgeTask final : public ITextGeneration,
 ITask* create(const BundleReader& bundle) {
     const auto bytes = bundle.read_section("edge_llm.json");
     const auto marker = nlohmann::json::parse(bytes.begin(), bytes.end());
-    if (marker.at("version") != 1 || marker.at("edge_revision") != kRevision ||
+    const auto& revision = marker.at("edge_revision");
+#ifdef TRTMC_QWEN35_EDGE_012
+    const bool compatible = marker.at("edge_release") == "0.12.0" && (revision.is_null() || revision == kRevision);
+#else
+    const bool compatible = revision == kRevision;
+#endif
+    if (marker.at("version") != 1 || !compatible ||
         marker.at("max_sequence_length").get<int>() <= 1 ||
         marker.at("max_input_length").get<int>() <= 0 ||
         marker.at("max_input_length").get<int>() > marker.at("max_sequence_length").get<int>() ||

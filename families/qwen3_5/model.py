@@ -539,7 +539,7 @@ class _Qwen35Model:
         export_hidden_state: bool = False,
         feature_layers: tuple[int, ...] = (),
         prefill_rows: int | None = None,
-    ) -> bytes:
+    ) -> memoryview:
         """Build hybrid TRT engine with DeltaNet + attention layers.
 
         ``prefill_rows`` builds the prefill engine of a split bundle instead:
@@ -931,7 +931,7 @@ class _Qwen35Model:
         if plan is None:
             raise RuntimeError("TensorRT engine build failed")
 
-        return bytes(plan)
+        return memoryview(plan)
 
     def _load_mtp_weights(self, readers, weights, config):
         """Load the actual embedded head without unpacking prepared projections."""
@@ -959,7 +959,7 @@ class _Qwen35Model:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
         verbose: bool = False, media_inputs: bool = False,
-    ) -> bytes:
+    ) -> memoryview:
         """Build the MTP (multi-token-prediction) draft-head TRT engine.
 
         Follows the pinned Qwen3.5 embedded-draft forward pass:
@@ -1177,14 +1177,14 @@ class _Qwen35Model:
         if plan is None:
             raise RuntimeError("TensorRT MTP engine build failed")
 
-        return bytes(plan)
+        return memoryview(plan)
 
 
     def build_engine_multi_token(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, seq_len: int, *, precision: str = "fp32",
         verbose: bool = False, media_inputs: bool = False,
-    ) -> bytes:
+    ) -> memoryview:
         """Build a TRT engine that processes `seq_len` NEW tokens in one call,
         emitting `seq_len` rows of logits -- one prediction per position.
 
@@ -1560,7 +1560,7 @@ class _Qwen35Model:
         if plan is None:
             raise RuntimeError("TensorRT multi-token engine build failed")
 
-        return bytes(plan)
+        return memoryview(plan)
 
 
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
@@ -2619,7 +2619,8 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
     nvfp4 = quantization == "nvfp4" or getattr(quant_ctx, "has_nvfp4_weights", False)
     split = (not visual and not require_mtp and draft_config is None and not nvfp4
              and _two_engines_fit(_host_weight_bytes(weights), _gpu_memory_bytes()))
-    plan = model.build_engine(
+    # Stage the target before building the other engines; do not retain its serialized bytes.
+    writer.add_bytes("engine.plan", model.build_engine(
         config,
         weights,
         max_sequence_length,
@@ -2630,9 +2631,7 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
         quant_ctx=quant_ctx,
         export_hidden_state=require_mtp,
         feature_layers=() if draft_config is None else draft_config.feature_layers,
-    )
-
-    writer.add_bytes("engine.plan", plan)
+    ))
     if split:
         writer.add_bytes("prefill.plan", model.build_engine(
             config, weights, max_sequence_length, precision=precision,

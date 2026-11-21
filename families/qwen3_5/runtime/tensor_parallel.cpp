@@ -150,7 +150,7 @@ class TensorParallelTask final : public ITextGeneration,
     }
     ~TensorParallelTask() { clear(); }
     const char* task() const noexcept override {
-        return media_ ? "images_text_to_text" : "text_generation";
+        return primary_task_.c_str();
     }
     int32_t default_max_new_tokens() const override { return default_max_new_tokens_; }
     std::vector<api::TaskInstance> task_bindings() override { return bindings_; }
@@ -181,6 +181,8 @@ class TensorParallelTask final : public ITextGeneration,
 
   private:
     void cache_task_metadata() {
+        // Both ranks use the bundle's task. Keep an owning copy across rank recovery.
+        primary_task_ = ranks_[0]->task();
         default_max_new_tokens_ =
             dynamic_cast<ITextGeneration&>(*ranks_[0]).default_max_new_tokens();
         if (!media_)
@@ -311,6 +313,7 @@ class TensorParallelTask final : public ITextGeneration,
             throw std::runtime_error("Qwen native TP rank outputs disagree");
         return std::move(results[0]);
     }
+    std::string primary_task_;
     NativeRankFactory factory_;
     bool media_;
     int32_t default_max_new_tokens_{};
