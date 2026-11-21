@@ -1,0 +1,42 @@
+{
+  "name": "nemotron-3-embed-1b-fp32",
+  "hf_id": "nvidia/Nemotron-3-Embed-1B-BF16",
+  "hf_revision": "c0c9fea93ea424587517f2c59e20db9f1d6bf615",
+  "family": "ministral3",
+  "task": "text_to_embedding",
+  "bundle": "nemotron-3-embed-1b-fp32.bundle",
+  "precision": "fp32",
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "nemotron-3-embed-1b-fp32",
+      "queries": [
+        "How do I reverse the order of the words in a sentence with Python?",
+        "Which planet in the solar system has the strongest winds?",
+        "What did a lighthouse keeper do during a storm?",
+        "How should fresh basil be stored so that it does not wilt?"
+      ],
+      "documents": [
+        "def reverse_words(sentence):\n    words = sentence.split()\n    return \" \".join(reversed(words))\n\n\nprint(reverse_words(\"the quick brown fox\"))",
+        "Neptune has the fastest winds measured on any planet: gusts in its upper atmosphere exceed two thousand kilometres per hour, far stronger than any storm on Earth.",
+        "During a storm the keeper trimmed the wick, wound the clockwork that turned the lens, sounded the fog signal and logged every passing ship until the weather cleared.",
+        "Fresh basil keeps best like cut flowers: trim the stems, stand them in a glass of water at room temperature away from direct sun, and loosely cover the leaves with a bag."
+      ]
+    },
+    {
+      "name": "nemotron-3-embed-1b-fp32-multilingual",
+      "queries": [
+        "北京是哪个国家的首都？",
+        "¿Cuál es el río más largo de Europa?",
+        "प्रकाश संश्लेषण क्या है?",
+        "富士山の高さはどれくらいですか？"
+      ],
+      "documents": [
+        "Beijing is the capital of the People's Republic of China.",
+        "Die Wolga ist mit rund 3.530 Kilometern der längste Fluss Europas.",
+        "La photosynthèse est le processus par lequel les plantes convertissent la lumière du soleil en énergie chimique.",
+        "يبلغ ارتفاع جبل فوجي حوالي 3776 مترًا، وهو أعلى جبل في اليابان."
+      ]
+    }
+  ]
+}
