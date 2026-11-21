@@ -1,0 +1,22 @@
+{
+  "name": "stable-audio-open-1.0-fp32",
+  "hf_id": "stabilityai/stable-audio-open-1.0",
+  "hf_revision": "f21265c1e2710b3bd2386596943f0007f55f802e",
+  "bundle": "stable-audio-open-1.0-fp32.bundle",
+  "family": "stable_audio",
+  "task": "text_to_audio",
+  "precision": "fp32",
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "stable-audio-open-1.0-fp32-hammer",
+      "prompt": "The sound of a hammer hitting a wooden surface.",
+      "seed": 0,
+      "config": {
+        "negative_prompt": "Low quality.",
+        "audio_end_in_s": 10.0,
+        "num_inference_steps": 100
+      }
+    }
+  ]
+}
