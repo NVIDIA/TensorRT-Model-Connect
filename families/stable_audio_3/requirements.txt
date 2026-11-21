@@ -1,0 +1,7 @@
+# Builder: BF16 safetensors through NumPy.
+ml-dtypes==0.6.0
+# Official stable-audio-3 reference (tests/official_reference.py): the versions its uv.lock pins.
+einops==0.8.2
+transformers==5.8.0
+# Imported by the reference's autoencoder module; unpinned so that it matches the installed torch.
+torchaudio
