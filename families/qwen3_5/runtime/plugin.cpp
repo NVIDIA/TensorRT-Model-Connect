@@ -161,11 +161,19 @@ DType state_dtype(const std::string& precision) {
 }
 
 std::string chat_template(const BundleReader& bundle) {
-    const auto* section = bundle.find_section("chat_template.jinja");
-    if (section == nullptr || section->length == 0)
+    if (const auto* section = bundle.find_section("chat_template.jinja");
+        section != nullptr && section->length != 0) {
+        const auto data = bundle.read_section("chat_template.jinja");
+        return {data.begin(), data.end()};
+    }
+    // Base checkpoints store the same template inline instead of as a Jinja file.
+    const auto* config = bundle.find_section("tokenizer_config.json");
+    if (config == nullptr || config->length == 0)
         return {};
-    const auto data = bundle.read_section("chat_template.jinja");
-    return {data.begin(), data.end()};
+    const auto metadata =
+        nlohmann::json::parse(require_text_section(bundle, "tokenizer_config.json"));
+    const auto tmpl = metadata.find("chat_template");
+    return tmpl != metadata.end() && tmpl->is_string() ? tmpl->get<std::string>() : std::string{};
 }
 
 } // namespace

@@ -33,7 +33,10 @@ DENSE_CONFIGS = {
 }
 
 
-def candidate(request, raw: dict) -> bool:
+_DENSE_27B = (64, 5120, 17408, 24, 4, 248320)
+
+
+def candidate(request, raw: dict, *, include_27b_tp1: bool = False) -> bool:
     """Return whether this family's model/request contract can delegate to Edge."""
     config = raw.get("text_config", raw)
     if not isinstance(config, dict):
@@ -46,8 +49,8 @@ def candidate(request, raw: dict) -> bool:
     topology_matches = (
         request.tensor_parallel_size == 1 and shape in DENSE_CONFIGS
     ) or (
-        request.tensor_parallel_size == 2
-        and shape == (64, 5120, 17408, 24, 4, 248320)
+        (request.tensor_parallel_size == 2 or (include_27b_tp1 and request.tensor_parallel_size == 1))
+        and shape == _DENSE_27B
     )
     quantization = raw.get("quantization_config")
     kv_scheme = quantization.get("kv_cache_scheme") if isinstance(quantization, dict) else None
@@ -86,7 +89,7 @@ def candidate(request, raw: dict) -> bool:
         and (
             request.task == "text_generation"
             or (
-                request.task == "vision_language_generation"
+                request.task in {"vision_language_generation", "images_text_to_text"}
                 and isinstance(raw.get("vision_config"), dict)
             )
         )
@@ -100,6 +103,42 @@ def candidate(request, raw: dict) -> bool:
             value is None
             for value in (request.image_height, request.image_width, request.video_num_frames)
         )
+    )
+
+
+def _routing_candidate(request, raw: dict) -> bool:
+    """Recognize 27B TP1 for native fallback or the opt-in SDK only."""
+    if candidate(request, raw):
+        return True
+    config = raw.get("text_config", raw)
+    return (isinstance(config, dict) and config.get("num_hidden_layers") == 64
+            and candidate(request, raw, include_27b_tp1=True))
+
+
+def _unsafe_012_tp2_vision(request, target: dict) -> bool:
+    """Match the original-weight TP2 image profile that faults in both 0.12 runners."""
+    if not (
+        request.tensor_parallel_size == 2
+        and request.task in {"vision_language_generation", "images_text_to_text"}
+        and request.precision.lower() == "fp16"
+        and request.max_sequence_length == 8192
+        and (target["os"], target["arch"], target["sm"]) == ("linux", "x86_64", 80)
+        and target.get("cuda_version") == "13.4"
+        and target.get("tensorrt_version") == "11.4.0.106"
+    ):
+        return False
+    from cuda.bindings import runtime as cuda
+
+    def checked(result):
+        status, value = result
+        if status != cuda.cudaError_t.cudaSuccess:
+            raise RuntimeError(f"Cannot inspect Qwen3.5 TP2 devices: {status}")
+        return value
+
+    # Match the observed pair, not all SM80s or all devices without peer access.
+    names = [checked(cuda.cudaGetDeviceProperties(rank)).name for rank in (0, 1)]
+    return all(name == b"NVIDIA A100-PCIE-40GB" for name in names) and all(
+        not checked(cuda.cudaDeviceCanAccessPeer(src, dst)) for src, dst in ((0, 1), (1, 0))
     )
 
 
@@ -125,7 +164,7 @@ def build(request, writer, native, *, draft_dir: Path | None = None,
     config = raw.get("text_config", raw)
     if not isinstance(config, dict):
         raise ValueError("checkpoint text_config must contain an object")
-    if not candidate(request, raw):
+    if not _routing_candidate(request, raw):
         native(request, writer)
         return
     if draft_dir is None and spec_type is None and not edge_llm.package_present():
@@ -152,6 +191,23 @@ def build(request, writer, native, *, draft_dir: Path | None = None,
                       if edge_llm.checkpoint_quantization(Path(request.model_dir), raw) == "none"
                       else QUANTIZED_EDGE_DISPATCH)
             adapter = routes.get(key)
+            release = edge_llm.selected_release()
+            if release == "0.12.0":
+                # For original weights, let the installed SDK validate its own
+                # architecture list. Retain the existing prepared-weight routes.
+                if (routes is EDGE_DISPATCH and target["os"] == "linux"
+                        and target["arch"] in {"aarch64", "x86_64"}):
+                    if _unsafe_012_tp2_vision(request, target):
+                        _LOG.warning(
+                            "Qwen3.5 27B: Edge 0.12 TP2 image prefill fails on the tested "
+                            "A100 pair. Building the unchanged request with native TensorRT."
+                        )
+                        adapter = None
+                    else:
+                        adapter = edge_llm.prepare
+            elif request.tensor_parallel_size == 1 and config.get("num_hidden_layers") == 64:
+                # The default 0.11 Edge route for the 27B checkpoint is TP2 only.
+                adapter = None
             if adapter is not None:
                 options = {} if draft_dir is None else {"draft_dir": draft_dir}
                 if spec_type is not None:
@@ -192,7 +248,7 @@ def build_paired(request, writer, execution) -> None:
 
     if request.tensor_parallel_size != 1:
         raise ValueError("Qwen3.5 speculative execution requires single-device generation")
-    if request.task not in {"text_generation", "vision_language_generation"}:
+    if request.task not in {"text_generation", "vision_language_generation", "images_text_to_text"}:
         raise ValueError("Qwen3.5 speculative execution requires text or image generation")
     if execution.variant == "mtp":
         if execution.checkpoints:
@@ -200,10 +256,7 @@ def build_paired(request, writer, execution) -> None:
         raw = json.loads((request.model_dir / "config.json").read_text())
         base = raw.get("text_config", raw)
         if (
-            not candidate(request, raw)
-            or (base.get("hidden_size"), base.get("num_hidden_layers")) not in {
-                (1024, 24), (2048, 24), (2560, 32), (4096, 32),
-            }
+            not _routing_candidate(request, raw)
             or base.get("mtp_num_hidden_layers") != 1
             or edge_llm.checkpoint_quantization(request.model_dir, raw) not in {"none", "nvfp4"}
         ):
@@ -225,11 +278,11 @@ def build_paired(request, writer, execution) -> None:
     draft_dir = execution.checkpoints[0].model_dir
     raw = json.loads((request.model_dir / "config.json").read_text())
     draft = json.loads((draft_dir / "config.json").read_text())
-    if not candidate(request, raw):
+    if not _routing_candidate(request, raw):
         raise ValueError("Qwen3.5 DFlash requires an admitted dense base request")
     base = raw.get("text_config", raw)
-    if (base.get("hidden_size"), base.get("num_hidden_layers")) not in {(2560, 32), (4096, 32)}:
-        raise ValueError("Qwen3.5 DFlash is qualified only for the recorded 4B/9B base profiles")
+    if (base.get("hidden_size"), base.get("num_hidden_layers")) not in {(2560, 32), (4096, 32), (5120, 64)}:
+        raise ValueError("Qwen3.5 DFlash requires a documented 4B, 9B or 27B target topology")
     if not isinstance(draft, dict) or draft.get("architectures") != ["DFlashDraftModel"]:
         raise ValueError("Expected a DFlashDraftModel companion")
     for name in ("hidden_size", "vocab_size"):

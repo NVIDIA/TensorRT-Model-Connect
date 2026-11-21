@@ -248,6 +248,22 @@ family's options. `trtmc qwen3_5 build --help` works offline without
 a checkpoint or GPU imports. This uses the existing
 [family CLI protocol](../extend/family-cli.md), not an extension to the shared parser.
 
+The default Edge SDK remains 0.11.0. To opt in to 0.12.0, configure
+`-DTRTMC_EDGELLM_RELEASE=0.12.0`, build with `--precision fp16`, and, if
+needed, supply `--edge-builder-python /absolute/path/to/python` to select
+a matching wheel or source installation. This does not replace the native SDK.
+The 2B, 4B and 9B ordinary FP16 text profiles, including their Base
+checkpoints, passed the short reference and the greedy/sampled release checks.
+The 4B embedded MTP profile passed the short, long greedy and input-limit
+checks. The original 4B, 9B and 27B DFlash pairs passed the measured short
+and long greedy checks with both linear and top-k-four tree decoding. Some other
+ordinary text profiles remain runnable but miss sampled quality; see the
+family recipe below for the per-checkpoint results and tested scope.
+For the 27B TP2 image case, the recipe also identifies a tested A100 pair
+where both Edge runners failed in prefill and MC selects native TensorRT.
+Use `--task images_text_to_text` for ordered images; the legacy single-image
+task is `vision_language_generation`.
+
 The Qwen3.5 family maps the recorded original-source dense 0.8B/2B/4B/9B
 configurations (Instruct and Base), embedded MTP, and explicit 4B/9B DFlash
 pairs to the pinned Edge-LLM 0.11.0 SDK on native x86 SM80/SM120, FP16 compute,
