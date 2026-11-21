@@ -312,7 +312,8 @@ std::vector<int32_t> viterbi_encode(const std::string& text, const Trie& trie, i
             ids.push_back(unk_id);
             break;
         }
-        ids.push_back(best[pos].token_id);
+        if (best[pos].token_id != unk_id || ids.empty() || ids.back() != unk_id)
+            ids.push_back(best[pos].token_id);
         pos = best[pos].prev_pos;
     }
 
