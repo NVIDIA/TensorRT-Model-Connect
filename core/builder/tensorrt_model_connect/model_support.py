@@ -143,7 +143,10 @@ def load_model_metadata(model_dir: str | Path) -> ModelMetadata:
 
     root = Path(model_dir)
     config = _read_object(root / "config.json")
-    model_index = _read_object(root / "model_index.json")
+    index_path = root / "model_index.json"
+    if not index_path.exists():
+        index_path = root / "modular_model_index.json"
+    model_index = _read_object(index_path)
     files = tuple(
         sorted(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file())
     )
