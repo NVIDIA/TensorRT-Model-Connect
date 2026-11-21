@@ -1,0 +1,4 @@
+# Standalone reference dependencies; keep aligned with the family declaration.
+transformers @ https://github.com/huggingface/transformers/archive/07cc8e8c1b19160cfba6893ceb3099dc8f09d90c.tar.gz
+accelerate>=1.1.0
+safetensors>=0.8.0
