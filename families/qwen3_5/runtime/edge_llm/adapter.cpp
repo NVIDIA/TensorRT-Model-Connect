@@ -390,7 +390,8 @@ ITask* create(const BundleReader& bundle) {
     const auto marker = nlohmann::json::parse(bytes.begin(), bytes.end());
     const auto& revision = marker.at("edge_revision");
 #ifdef TRTMC_QWEN35_EDGE_012
-    const bool compatible = marker.at("edge_release") == "0.12.0" && (revision.is_null() || revision == kRevision);
+    const bool compatible =
+        marker.at("edge_release") == "0.12.0" && (revision.is_null() || revision == kRevision);
 #else
     const bool compatible = revision == kRevision;
 #endif

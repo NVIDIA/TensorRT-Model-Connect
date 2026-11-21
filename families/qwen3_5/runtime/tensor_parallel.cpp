@@ -149,9 +149,7 @@ class TensorParallelTask final : public ITextGeneration,
         }
     }
     ~TensorParallelTask() { clear(); }
-    const char* task() const noexcept override {
-        return primary_task_.c_str();
-    }
+    const char* task() const noexcept override { return primary_task_.c_str(); }
     int32_t default_max_new_tokens() const override { return default_max_new_tokens_; }
     std::vector<api::TaskInstance> task_bindings() override { return bindings_; }
     TextResult generate(const std::string& text, const TextGenerationConfig& cfg) override {
