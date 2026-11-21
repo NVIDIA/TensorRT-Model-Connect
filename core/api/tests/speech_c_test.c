@@ -192,6 +192,15 @@ static void test_offline(const char* path, const char* root) {
     status_is(status, TRTMC_UNSUPPORTED, error,
               "offline session exposes no false realtime interface");
     core->model_release(model);
+    check(api->session_api->header.byte_size >= sizeof(trtmc_speech_session_api_v1) &&
+              api->session_api->append_text != NULL,
+          "session exposes optional text tail");
+    status = api->session_api->append_text(session, (trtmc_string_view){NULL, 1}, &error);
+    status_is(status, TRTMC_INVALID_ARGUMENT, error, "C text rejects null nonempty storage");
+    status = api->session_api->append_text(session, str("01234567890123456"), &error);
+    status_is(status, TRTMC_AGAIN, error, "C text backpressure accepts no input");
+    status = api->session_api->append_text(session, str("hello"), &error);
+    status_is(status, TRTMC_OK, error, "C text works after model handle release");
     const float audio[] = {0, 0, 0.25F, 0.5F};
     status = api->session_api->append_audio(session, audio, 4, &error);
     status_is(status, TRTMC_OK, error, "offline append after model release");
