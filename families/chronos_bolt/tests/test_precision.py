@@ -109,7 +109,7 @@ def _request(model_dir: Path, **overrides):
         video_num_frames=None,
         max_batch_size=1,
         context_parallel_size=1,
-        task="time_series_forecast",
+        task="series_to_quantile_forecast",
         model_dir=str(model_dir),
         precision="fp32",
         max_sequence_length=None,
