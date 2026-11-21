@@ -10,6 +10,7 @@
 #include "stb_image_resize2.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -26,8 +27,12 @@ constexpr std::int32_t kPillowPrecisionBits = 22;
 constexpr std::int64_t kPillowScale = std::int64_t{1} << kPillowPrecisionBits;
 constexpr std::int64_t kPillowRounding = std::int64_t{1} << (kPillowPrecisionBits - 1);
 
-struct PillowSpan {
-    std::int32_t first{0};
+// One axis of the Pillow resize. Output index i reads count[i] source samples from
+// first[i] on, with the fixed-point weights at weights[offset[i]] on.
+struct PillowPlan {
+    std::vector<std::int32_t> first;
+    std::vector<std::int32_t> count;
+    std::vector<std::size_t> offset;
     std::vector<std::int32_t> weights;
 };
 
@@ -41,12 +46,16 @@ double pillow_cubic(double value) {
     return 0.0;
 }
 
-std::vector<PillowSpan> make_pillow_plan(std::int32_t input_size, std::int32_t output_size) {
+PillowPlan make_pillow_plan(std::int32_t input_size, std::int32_t output_size) {
     const double scale = static_cast<double>(input_size) / output_size;
     const double filter_scale = std::max(scale, 1.0);
     const double support = 2.0 * filter_scale;
     const double inverse_filter_scale = 1.0 / filter_scale;
-    std::vector<PillowSpan> plan(static_cast<std::size_t>(output_size));
+    PillowPlan plan;
+    plan.first.resize(static_cast<std::size_t>(output_size));
+    plan.count.resize(static_cast<std::size_t>(output_size));
+    plan.offset.resize(static_cast<std::size_t>(output_size));
+    std::vector<double> floating;
     for (std::int32_t output_index = 0; output_index < output_size; ++output_index) {
         const double center = (static_cast<double>(output_index) + 0.5) * scale;
         const auto first =
@@ -56,9 +65,7 @@ std::vector<PillowSpan> make_pillow_plan(std::int32_t input_size, std::int32_t o
         if (end <= first)
             throw std::runtime_error("timm ViT Pillow resize produced empty support");
 
-        auto& span = plan[static_cast<std::size_t>(output_index)];
-        span.first = first;
-        std::vector<double> floating(static_cast<std::size_t>(end - first));
+        floating.resize(static_cast<std::size_t>(end - first));
         double total = 0.0;
         for (std::int32_t index = first; index < end; ++index) {
             const double weight =
@@ -68,7 +75,10 @@ std::vector<PillowSpan> make_pillow_plan(std::int32_t input_size, std::int32_t o
         }
         if (!std::isfinite(total) || total == 0.0)
             throw std::runtime_error("timm ViT Pillow resize has invalid coefficients");
-        span.weights.reserve(floating.size());
+        const auto slot = static_cast<std::size_t>(output_index);
+        plan.first[slot] = first;
+        plan.count[slot] = end - first;
+        plan.offset[slot] = plan.weights.size();
         for (double weight : floating) {
             const double scaled = weight / total * static_cast<double>(kPillowScale);
             if (!std::isfinite(scaled) ||
@@ -76,62 +86,35 @@ std::vector<PillowSpan> make_pillow_plan(std::int32_t input_size, std::int32_t o
                 scaled > static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
                 throw std::runtime_error("timm ViT Pillow resize coefficient overflowed");
             }
-            span.weights.push_back(
+            plan.weights.push_back(
                 static_cast<std::int32_t>(scaled < 0.0 ? scaled - 0.5 : scaled + 0.5));
         }
     }
     return plan;
 }
 
-std::uint8_t apply_pillow_span(const std::uint8_t* source, std::int32_t stride,
-                               const PillowSpan& span) {
-    std::int64_t sum = kPillowRounding;
-    for (std::size_t index = 0; index < span.weights.size(); ++index) {
-        sum += static_cast<std::int64_t>(
-                   source[(span.first + static_cast<std::int32_t>(index)) * stride]) *
-               span.weights[index];
+// One source row as bytes: std::lround(std::clamp(value, 0.0F, 1.0F) * 255.0F) for every
+// value but a NaN, which reads as 0. Two loops, so that each vectorizes: the first only
+// selects, the second only computes. The clamped value times 255 lies in [0, 255],
+// doubling it is exact, and floor((floor(2 * s) + 1) / 2) rounds s to nearest with halves
+// up, as lround does there. The second loop holds no floating-point add, so no compiler can
+// contract it into another result.
+void to_pillow_bytes(const float* source, float* clamped, std::uint8_t* bytes, std::size_t count) {
+    for (std::size_t index = 0; index < count; ++index) {
+        const float positive = source[index] > 0.0F ? source[index] : 0.0F;
+        clamped[index] = positive < 1.0F ? positive : 1.0F;
     }
-    if (sum <= 0)
-        return 0;
-    return static_cast<std::uint8_t>(std::min<std::int64_t>(sum >> kPillowPrecisionBits, 255));
+    for (std::size_t index = 0; index < count; ++index) {
+        bytes[index] = static_cast<std::uint8_t>(
+            (static_cast<std::int32_t>(clamped[index] * 255.0F * 2.0F) + 1) >> 1);
+    }
 }
 
-std::vector<float> resize_pillow_bicubic(const float* source, std::int32_t input_h,
-                                         std::int32_t input_w, std::int32_t output_h,
-                                         std::int32_t output_w) {
-    std::vector<std::uint8_t> input(static_cast<std::size_t>(input_h) * input_w * 3U);
-    std::transform(source, source + input.size(), input.begin(), [](float value) {
-        return static_cast<std::uint8_t>(std::lround(std::clamp(value, 0.0F, 1.0F) * 255.0F));
-    });
-
-    const auto horizontal_plan = make_pillow_plan(input_w, output_w);
-    std::vector<std::uint8_t> horizontal(static_cast<std::size_t>(input_h) * output_w * 3U);
-    for (std::int32_t y = 0; y < input_h; ++y) {
-        for (std::int32_t x = 0; x < output_w; ++x) {
-            const auto& span = horizontal_plan[static_cast<std::size_t>(x)];
-            for (std::int32_t channel = 0; channel < 3; ++channel) {
-                const auto source_offset = static_cast<std::size_t>(y) * input_w * 3U + channel;
-                const auto target = (static_cast<std::size_t>(y) * output_w + x) * 3U + channel;
-                horizontal[target] = apply_pillow_span(input.data() + source_offset, 3, span);
-            }
-        }
-    }
-
-    const auto vertical_plan = make_pillow_plan(input_h, output_h);
-    std::vector<float> output(static_cast<std::size_t>(output_h) * output_w * 3U);
-    for (std::int32_t y = 0; y < output_h; ++y) {
-        const auto& span = vertical_plan[static_cast<std::size_t>(y)];
-        for (std::int32_t x = 0; x < output_w; ++x) {
-            for (std::int32_t channel = 0; channel < 3; ++channel) {
-                const auto source_offset = static_cast<std::size_t>(x) * 3U + channel;
-                const auto target = (static_cast<std::size_t>(y) * output_w + x) * 3U + channel;
-                output[target] = static_cast<float>(apply_pillow_span(
-                                     horizontal.data() + source_offset, output_w * 3, span)) /
-                                 255.0F;
-            }
-        }
-    }
-    return output;
+std::uint8_t pillow_sum_to_byte(std::int64_t sum) {
+    if (sum <= 0)
+        return 0;
+    const std::int64_t value = sum >> kPillowPrecisionBits;
+    return static_cast<std::uint8_t>(value < 255 ? value : 255);
 }
 
 stbir_filter resolve_timm_vit_resize_filter(const std::string& interpolation) {
@@ -163,6 +146,122 @@ int32_t torchvision_center_crop_offset(int32_t resized, int32_t target) {
     const int32_t half = difference / 2;
     // torchvision uses Python round(), whose .5 ties round to the nearest even integer.
     return (difference % 2 != 0 && half % 2 != 0) ? half + 1 : half;
+}
+
+// Pillow's two-pass 8-bit bicubic resize, torchvision's center crop and the
+// normalization, computed for the cropped output only. Every output value is the one the
+// whole-image passes give: the same weights, the same integer sums (an integer sum does
+// not depend on the order of its terms), the same rounding and the same float expression.
+std::vector<float> preprocess_pillow_bicubic(const float* source, std::int32_t input_h,
+                                             std::int32_t input_w, std::int32_t resized_h,
+                                             std::int32_t resized_w,
+                                             const TimmVitPreprocessConfig& config) {
+    const std::int32_t output_h = config.input_image_h;
+    const std::int32_t output_w = config.input_image_w;
+    const std::int32_t crop_y = torchvision_center_crop_offset(resized_h, output_h);
+    const std::int32_t crop_x = torchvision_center_crop_offset(resized_w, output_w);
+
+    // The source columns the cropped output columns read.
+    const auto horizontal_plan = make_pillow_plan(input_w, resized_w);
+    std::int32_t column_begin = input_w;
+    std::int32_t column_end = 0;
+    for (std::int32_t x = 0; x < output_w; ++x) {
+        const auto slot = static_cast<std::size_t>(crop_x + x);
+        const std::int32_t first = horizontal_plan.first[slot];
+        const std::int32_t end = first + horizontal_plan.count[slot];
+        column_begin = first < column_begin ? first : column_begin;
+        column_end = end > column_end ? end : column_end;
+    }
+    // The source rows the cropped output rows read.
+    const auto vertical_plan = make_pillow_plan(input_h, resized_h);
+    std::int32_t row_begin = input_h;
+    std::int32_t row_end = 0;
+    for (std::int32_t y = 0; y < output_h; ++y) {
+        const auto slot = static_cast<std::size_t>(crop_y + y);
+        const std::int32_t first = vertical_plan.first[slot];
+        const std::int32_t end = first + vertical_plan.count[slot];
+        row_begin = first < row_begin ? first : row_begin;
+        row_end = end > row_end ? end : row_end;
+    }
+
+    // Horizontal pass: one source row to bytes, then one sum per channel of each pixel.
+    const auto row_values = static_cast<std::size_t>(output_w) * 3U;
+    const auto source_values = static_cast<std::size_t>(column_end - column_begin) * 3U;
+    std::vector<float> source_clamped(source_values);
+    std::vector<std::uint8_t> source_bytes(source_values);
+    std::vector<std::uint8_t> horizontal(static_cast<std::size_t>(row_end - row_begin) *
+                                         row_values);
+    std::uint8_t* bytes = source_bytes.data();
+    for (std::int32_t y = row_begin; y < row_end; ++y) {
+        const float* source_row =
+            source + (static_cast<std::size_t>(y) * input_w + column_begin) * 3U;
+        to_pillow_bytes(source_row, source_clamped.data(), bytes, source_values);
+
+        std::uint8_t* target =
+            horizontal.data() + static_cast<std::size_t>(y - row_begin) * row_values;
+        for (std::int32_t x = 0; x < output_w; ++x) {
+            const auto slot = static_cast<std::size_t>(crop_x + x);
+            const std::int32_t* weights =
+                horizontal_plan.weights.data() + horizontal_plan.offset[slot];
+            const std::uint8_t* taps =
+                bytes + static_cast<std::size_t>(horizontal_plan.first[slot] - column_begin) * 3U;
+            const std::int32_t count = horizontal_plan.count[slot];
+            std::int64_t red = kPillowRounding;
+            std::int64_t green = kPillowRounding;
+            std::int64_t blue = kPillowRounding;
+            for (std::int32_t tap = 0; tap < count; ++tap) {
+                const std::int64_t weight = weights[tap];
+                red += taps[tap * 3] * weight;
+                green += taps[tap * 3 + 1] * weight;
+                blue += taps[tap * 3 + 2] * weight;
+            }
+            target[x * 3] = pillow_sum_to_byte(red);
+            target[x * 3 + 1] = pillow_sum_to_byte(green);
+            target[x * 3 + 2] = pillow_sum_to_byte(blue);
+        }
+    }
+
+    // The normalized value of each byte, by the per-pixel expression: a byte to [0, 1],
+    // minus the mean, over the std.
+    std::array<std::array<float, 256>, 3> normalized{};
+    for (std::size_t channel = 0; channel < 3; ++channel) {
+        for (std::size_t level = 0; level < 256; ++level) {
+            normalized[channel][level] =
+                (static_cast<float>(level) / 255.0F - config.image_mean[channel]) /
+                config.image_std[channel];
+        }
+    }
+
+    // Vertical pass: a whole-row sweep per tap into one row of sums, then the planar,
+    // normalized output row.
+    const auto output_plane = static_cast<std::size_t>(output_h) * output_w;
+    std::vector<float> pixel_values(3U * output_plane);
+    std::vector<std::int64_t> sums(row_values);
+    for (std::int32_t y = 0; y < output_h; ++y) {
+        const auto slot = static_cast<std::size_t>(crop_y + y);
+        const std::int32_t* weights = vertical_plan.weights.data() + vertical_plan.offset[slot];
+        const std::int32_t count = vertical_plan.count[slot];
+        std::int64_t* row_sums = sums.data();
+        for (std::size_t index = 0; index < row_values; ++index)
+            row_sums[index] = kPillowRounding;
+        for (std::int32_t tap = 0; tap < count; ++tap) {
+            const std::uint8_t* row =
+                horizontal.data() +
+                static_cast<std::size_t>(vertical_plan.first[slot] + tap - row_begin) * row_values;
+            const std::int64_t weight = weights[tap];
+            for (std::size_t index = 0; index < row_values; ++index)
+                row_sums[index] += row[index] * weight;
+        }
+        for (std::size_t channel = 0; channel < 3; ++channel) {
+            float* output = pixel_values.data() + channel * output_plane +
+                            static_cast<std::size_t>(y) * output_w;
+            const float* table = normalized[channel].data();
+            for (std::int32_t x = 0; x < output_w; ++x)
+                output[x] =
+                    table[pillow_sum_to_byte(row_sums[static_cast<std::size_t>(x) * 3U + channel])];
+        }
+    }
+    return pixel_values;
 }
 
 } // namespace
@@ -215,8 +314,8 @@ std::vector<float> preprocess_timm_vit_image(const float* image_pixels, int32_t 
 
     std::vector<float> resized;
     if (config.interpolation == "bicubic") {
-        resized =
-            resize_pillow_bicubic(image_pixels, image_height, image_width, resized_h, resized_w);
+        return preprocess_pillow_bicubic(image_pixels, image_height, image_width, resized_h,
+                                         resized_w, config);
     } else {
         resized.resize(static_cast<std::size_t>(resized_h) * resized_w * 3U);
         if (stbir_resize(image_pixels, image_width, image_height,
