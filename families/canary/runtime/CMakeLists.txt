@@ -45,6 +45,7 @@ if(TRTMC_BUILD_TESTS)
       test_canary_decode_policy
       test_canary_host_plan
       test_canary_mel_spectrogram
+      test_canary_task_contract
   )
     add_executable(${test_name}
       ${PROJECT_SOURCE_DIR}/families/canary/tests/cpp/${test_name}.cpp
@@ -59,5 +60,18 @@ if(TRTMC_BUILD_TESTS)
     target_link_libraries(${test_name} PRIVATE trtmc_model_canary)
     target_compile_options(${test_name} PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME ${test_name} COMMAND ${test_name})
+  endforeach()
+
+  foreach(_language IN ITEMS c cpp)
+    add_executable(test_canary_sdk_${_language}
+      ${PROJECT_SOURCE_DIR}/families/canary/tests/sdk_consumer.${_language}
+    )
+    target_link_libraries(test_canary_sdk_${_language} PRIVATE trtmc_c)
+    target_compile_options(test_canary_sdk_${_language} PRIVATE
+      -Wall -Wextra -Wpedantic
+    )
+    set_target_properties(test_canary_sdk_${_language} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
   endforeach()
 endif()

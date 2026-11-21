@@ -18,7 +18,7 @@ import pytest
 from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "canary"
-TASKS = frozenset({"transcription"})
+TASKS = frozenset({"speech_transcription", "speech_translation"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
@@ -332,7 +332,7 @@ def test_build_extracts_tokenizer_without_mutating_read_only_snapshot(
                 model_dir=snapshot,
                 output_path=tmp_path / "canary.bundle",
                 family=FAMILY,
-                task="transcription",
+                task="speech_transcription",
                 precision="fp16",
             ),
             writer,
@@ -477,7 +477,7 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
 
 
 def test_contract_rejects_empty_reference() -> None:
-    manifest = {"task": "transcription"}
+    manifest = {"task": "speech_transcription"}
     thresholds = {"contract_ned_threshold": 0.1}
     with pytest.raises(AssertionError, match="empty transcript"):
         _assert_parity({"text": ""}, {"text": ""}, manifest, {}, thresholds)
