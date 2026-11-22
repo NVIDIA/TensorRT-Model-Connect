@@ -45,6 +45,37 @@ int main(int argc, char** argv) {
     check(*tokenizer, std::string("A\0B", 3), {3, 4, 0, 5});
     check(*tokenizer, "", {});
 
+    auto map_b = fixture["normalizer"];
+    map_b["precompiled_charsmap"] = data.at("normalizer_maps").at("B_to_A");
+    auto maps = fixture;
+    maps["normalizer"] = {{"type", "Sequence"}, {"normalizers", {fixture["normalizer"], map_b}}};
+    check(*create(maps), u8"ＡＢ", {3, 4, 4});
+    maps["normalizer"]["normalizers"] = {map_b, fixture["normalizer"]};
+    check(*create(maps), u8"ＡＢ", {3, 4, 5});
+    auto map_a = fixture["normalizer"];
+    map_a["precompiled_charsmap"] = data.at("normalizer_maps").at("a_to_A");
+    maps["normalizer"]["normalizers"] = {{{"type", "Lowercase"}}, map_a};
+    check(*create(maps), "A", {3, 4});
+    maps["normalizer"]["normalizers"] = {map_a, {{"type", "Lowercase"}}};
+    check(*create(maps), "A", {3, 0});
+    maps["normalizer"]["normalizers"] = {{{"type", "Lowercase"}},
+                                         {{"type", "Sequence"}, {"normalizers", {map_a}}}};
+    check(*create(maps), "A", {3, 4});
+    auto whitespace = fixture;
+    whitespace["pre_tokenizer"] = {
+        {"type", "Sequence"},
+        {"pretokenizers", {{{"type", "WhitespaceSplit"}}, fixture["pre_tokenizer"]}}};
+    check(*create(whitespace), u8"A\u1680B", {3, 4, 3, 5});
+    check(*create(whitespace), u8"A\u0085B", {3, 4, 3, 5});
+    check(*create(whitespace), "A\vB\fA", {3, 4, 3, 5, 3, 4});
+    auto suffix = fixture;
+    suffix["normalizer"]["precompiled_charsmap"] = data.at("valid_charsmaps").at("ascii_suffix");
+    check(*create(suffix), u8"ﬁ", {3, 0});
+    suffix["normalizer"]["precompiled_charsmap"] = data.at("valid_charsmaps").at("empty_suffix");
+    check(*create(suffix), u8"ﬁ", {});
+    suffix["normalizer"]["precompiled_charsmap"] = data.at("valid_charsmaps").at("unicode_pool");
+    check(*create(suffix), "AB", {3, 4, 5});
+
     auto sequence = fixture;
     sequence["normalizer"] = {{"type", "Sequence"}, {"normalizers", {fixture["normalizer"]}}};
     check(*create(sequence), u8"ＡＢ", {3, 4, 5});

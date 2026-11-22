@@ -54,6 +54,7 @@ class PrecompiledNormalizer {
         mReplacements.assign(bytes.begin() + 4 + trie_bytes, bytes.end());
         if (mReplacements.back() != '\0')
             throw std::runtime_error("Invalid Precompiled charsmap string pool");
+        validate_replacements();
         if (label(mUnits[0]) != 0 || (mUnits[0] & 256) != 0 || offset(mUnits[0]) == 0)
             throw std::runtime_error("Invalid Precompiled charsmap root");
         for (size_t i = 0; i < mUnits.size(); ++i) {
@@ -64,8 +65,11 @@ class PrecompiledNormalizer {
                     throw std::runtime_error("Invalid Precompiled charsmap trie offset");
                 if ((unit & 256) != 0 && (mUnits[child] & 0x80000000U) == 0)
                     throw std::runtime_error("Invalid Precompiled charsmap leaf");
-            } else if ((unit & 0x7fffffffU) >= mReplacements.size()) {
-                throw std::runtime_error("Invalid Precompiled charsmap replacement offset");
+            } else {
+                const auto replacement = unit & 0x7fffffffU;
+                if (replacement >= mReplacements.size() ||
+                    (static_cast<unsigned char>(mReplacements[replacement]) & 0xc0) == 0x80)
+                    throw std::runtime_error("Invalid Precompiled charsmap replacement offset");
             }
         }
     }
@@ -111,6 +115,28 @@ class PrecompiledNormalizer {
             }
         }
         return false;
+    }
+
+    void validate_replacements() const {
+        for (size_t pos = 0; pos < mReplacements.size();) {
+            const auto first = static_cast<unsigned char>(mReplacements[pos]);
+            const size_t length = first < 0x80                     ? 1
+                                  : first >= 0xc2 && first <= 0xdf ? 2
+                                  : first >= 0xe0 && first <= 0xef ? 3
+                                  : first >= 0xf0 && first <= 0xf4 ? 4
+                                                                   : 0;
+            if (length == 0 || length > mReplacements.size() - pos)
+                throw std::runtime_error("Invalid Precompiled replacement UTF-8");
+            for (size_t i = 1; i < length; ++i) {
+                if ((static_cast<unsigned char>(mReplacements[pos + i]) & 0xc0) != 0x80)
+                    throw std::runtime_error("Invalid Precompiled replacement UTF-8");
+            }
+            const auto cp = roberta_unicode::codepoint(mReplacements, pos, pos + length);
+            if ((length == 3 && cp < 0x800) || (length == 4 && cp < 0x10000) ||
+                (cp >= 0xd800 && cp <= 0xdfff) || cp > 0x10ffff)
+                throw std::runtime_error("Invalid Precompiled replacement UTF-8");
+            pos += length;
+        }
     }
 
     static uint32_t label(uint32_t unit) { return unit & 0x800000ffU; }
@@ -413,9 +439,21 @@ class UnigramTokenizer final : public ITokenizer {
         int32_t id;
     };
 
+    struct NormalizerStep {
+        enum class Type { Precompiled, Lowercase };
+        Type type;
+        std::unique_ptr<PrecompiledNormalizer> precompiled;
+    };
+
     std::string normalize_text(const std::string& text) const {
-        auto normalized = mPrecompiled ? mPrecompiled->normalize(text) : text;
-        return mLowercase ? lowercase_ascii(std::move(normalized)) : normalized;
+        std::string normalized = text;
+        for (const auto& step : mNormalizerSteps) {
+            if (step.type == NormalizerStep::Type::Precompiled)
+                normalized = step.precompiled->normalize(normalized);
+            else
+                normalized = lowercase_ascii(std::move(normalized));
+        }
+        return normalized;
     }
 
     const AddedToken* added_token_at(const std::string& text, size_t pos, bool normalized) const {
@@ -566,15 +604,22 @@ class UnigramTokenizer final : public ITokenizer {
 
     void apply_normalizer_config(const nlohmann::json& norm) {
         const std::string ntype = norm.value("type", "");
+        if (ntype == "Sequence") {
+            for (const auto& sub : norm.at("normalizers"))
+                apply_normalizer_config(sub);
+            return;
+        }
         if (ntype == "Precompiled") {
             if (!norm.contains("precompiled_charsmap") ||
                 !norm.at("precompiled_charsmap").is_string())
                 throw std::runtime_error("Precompiled normalizer requires precompiled_charsmap");
-            mPrecompiled = std::make_unique<PrecompiledNormalizer>(norm.at("precompiled_charsmap"));
+            mNormalizerSteps.push_back(
+                {NormalizerStep::Type::Precompiled,
+                 std::make_unique<PrecompiledNormalizer>(norm.at("precompiled_charsmap"))});
             return;
         }
         if (ntype == "Lowercase") {
-            mLowercase = true;
+            mNormalizerSteps.push_back({NormalizerStep::Type::Lowercase, nullptr});
             return;
         }
         if (ntype == "Prepend") {
@@ -720,8 +765,7 @@ class UnigramTokenizer final : public ITokenizer {
     int32_t mUnkId = 0;
     float mUnkScore = -100.0f;
     bool mAddSpecialTokens = true;
-    std::unique_ptr<PrecompiledNormalizer> mPrecompiled;
-    bool mLowercase = false;
+    std::vector<NormalizerStep> mNormalizerSteps;
     bool mAddPrefixSpace = true;
 
     int32_t mBosId = -1;
