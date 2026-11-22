@@ -171,21 +171,25 @@ std::string lowercase_ascii(std::string text) {
 
 static const std::string kMetaspaceChar = "\xe2\x96\x81"; // ▁ U+2581
 
-inline bool is_ws(char c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+bool whitespace_at(const std::string& text, size_t pos) {
+    const auto end = roberta_unicode::codepoint_end(text, pos);
+    const auto cp = roberta_unicode::codepoint(text, pos, end);
+    return (cp >= 0x09 && cp <= 0x0D) || cp == 0x20 || cp == 0x85 || cp == 0xA0 || cp == 0x1680 ||
+           (cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 || cp == 0x2029 || cp == 0x202F ||
+           cp == 0x205F || cp == 0x3000;
 }
 
 std::vector<std::string> whitespace_split(const std::string& text) {
     std::vector<std::string> words;
     size_t i = 0;
     while (i < text.size()) {
-        while (i < text.size() && is_ws(text[i]))
-            ++i;
+        while (i < text.size() && whitespace_at(text, i))
+            i = roberta_unicode::codepoint_end(text, i);
         if (i >= text.size())
             break;
         size_t start = i;
-        while (i < text.size() && !is_ws(text[i]))
-            ++i;
+        while (i < text.size() && !whitespace_at(text, i))
+            i = roberta_unicode::codepoint_end(text, i);
         words.push_back(text.substr(start, i - start));
     }
     return words;
@@ -348,19 +352,22 @@ class UnigramTokenizer final : public ITokenizer {
             return mAddSpecialTokens ? make_special_frame({}) : std::vector<int32_t>{};
         }
 
-        // Normalize
-        std::string normalized = mPrecompiled ? mPrecompiled->normalize(text) : text;
-        if (mLowercase)
-            normalized = lowercase_ascii(std::move(normalized));
-
-        // Pre-tokenize: WhitespaceSplit → Metaspace
-        auto words = whitespace_split(normalized);
         std::vector<int32_t> ids;
-        for (size_t i = 0; i < words.size(); ++i) {
-            // Metaspace: prepend ▁ to each word
-            std::string processed = kMetaspaceChar + words[i];
-            auto word_ids = viterbi_encode(processed, mTrie, mUnkId, mUnkScore);
-            ids.insert(ids.end(), word_ids.begin(), word_ids.end());
+        for (const auto& raw : split_added_tokens(text, false)) {
+            if (raw.id >= 0) {
+                ids.push_back(raw.id);
+                continue;
+            }
+            for (const auto& segment : split_added_tokens(normalize_text(raw.text), true)) {
+                if (segment.id >= 0) {
+                    ids.push_back(segment.id);
+                    continue;
+                }
+                for (const auto& word : whitespace_split(segment.text)) {
+                    auto word_ids = viterbi_encode(kMetaspaceChar + word, mTrie, mUnkId, mUnkScore);
+                    ids.insert(ids.end(), word_ids.begin(), word_ids.end());
+                }
+            }
         }
 
         if (mAddSpecialTokens)
@@ -394,6 +401,65 @@ class UnigramTokenizer final : public ITokenizer {
 
   private:
     UnigramTokenizer() = default;
+
+    struct AddedToken {
+        std::string content;
+        int32_t id;
+        bool normalized, lstrip, rstrip;
+    };
+
+    struct Segment {
+        std::string text;
+        int32_t id;
+    };
+
+    std::string normalize_text(const std::string& text) const {
+        auto normalized = mPrecompiled ? mPrecompiled->normalize(text) : text;
+        return mLowercase ? lowercase_ascii(std::move(normalized)) : normalized;
+    }
+
+    std::vector<Segment> split_added_tokens(const std::string& text, bool normalized) const {
+        std::vector<Segment> segments;
+        size_t pos = 0;
+        while (pos < text.size()) {
+            const AddedToken* best = nullptr;
+            size_t start = std::string::npos;
+            for (const auto& token : mAddedTokens) {
+                if (token.normalized != normalized)
+                    continue;
+                const auto found = text.find(token.content, pos);
+                if (found != std::string::npos &&
+                    (found < start ||
+                     (found == start && (!best || token.content.size() > best->content.size())))) {
+                    start = found;
+                    best = &token;
+                }
+            }
+            if (!best) {
+                segments.push_back({text.substr(pos), -1});
+                break;
+            }
+            size_t content_end = start;
+            if (best->lstrip) {
+                content_end = pos;
+                for (size_t cursor = pos; cursor < start;) {
+                    const auto next = roberta_unicode::codepoint_end(text, cursor);
+                    if (!whitespace_at(text, cursor))
+                        content_end = next;
+                    cursor = next;
+                }
+            }
+            if (content_end > pos)
+                segments.push_back({text.substr(pos, content_end - pos), -1});
+            segments.push_back({{}, best->id});
+            pos = start + best->content.size();
+            if (best->rstrip) {
+                while (pos < text.size() && whitespace_at(text, pos))
+                    pos = roberta_unicode::codepoint_end(text, pos);
+            }
+        }
+        return segments;
+    }
 
     static std::string decode_metaspace(const std::string& text) {
         std::string result;
@@ -544,6 +610,14 @@ class UnigramTokenizer final : public ITokenizer {
             int32_t tok_id = tok.value("id", -1);
             std::string content = tok.value("content", "");
             if (tok_id >= 0 && !content.empty()) {
+                if (tok.value("single_word", false))
+                    throw std::runtime_error("Unigram single_word added tokens are not supported");
+                const bool normalized = tok.value("normalized", !tok.value("special", false));
+                auto pattern = normalized ? normalize_text(content) : content;
+                if (pattern.empty())
+                    throw std::runtime_error("Unigram added token normalizes to an empty string");
+                mAddedTokens.push_back({std::move(pattern), tok_id, normalized,
+                                        tok.value("lstrip", false), tok.value("rstrip", false)});
                 if (static_cast<size_t>(tok_id) >= mIdToToken.size()) {
                     mIdToToken.resize(static_cast<size_t>(tok_id) + 1);
                     mScores.resize(static_cast<size_t>(tok_id) + 1, 0.0f);
@@ -627,6 +701,7 @@ class UnigramTokenizer final : public ITokenizer {
     std::vector<float> mScores;
     std::unordered_map<std::string, int32_t> mTokenToId;
     std::unordered_set<int32_t> mDecodeSkipIds;
+    std::vector<AddedToken> mAddedTokens;
     Trie mTrie;
 
     int32_t mUnkId = 0;

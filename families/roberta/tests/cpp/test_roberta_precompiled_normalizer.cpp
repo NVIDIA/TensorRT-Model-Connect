@@ -62,6 +62,63 @@ int main(int argc, char** argv) {
     check(*framed, u8"ＡＢ", {1, 3, 0, 2});
     check(*framed, "", {1, 2});
     check(*create(identity), "AB", {3, 4, 5});
+    check(*create(identity), u8"A\u0085B", {3, 4, 3, 5});
+    check(*create(identity), "A\vB\fA", {3, 4, 3, 5, 3, 4});
+
+    auto added = fixture;
+    added["pre_tokenizer"] = {
+        {"type", "Sequence"},
+        {"pretokenizers", {{{"type", "WhitespaceSplit"}}, fixture["pre_tokenizer"]}}};
+    added["added_tokens"] = {
+        {{"id", 0}, {"content", "<unk>"}, {"normalized", false}, {"special", true}},
+        {{"id", 1}, {"content", "<s>"}, {"normalized", false}, {"special", true}},
+        {{"id", 2}, {"content", "</s>"}, {"normalized", false}, {"special", true}},
+        {{"id", 12},
+         {"content", "<mask>"},
+         {"normalized", false},
+         {"lstrip", true},
+         {"rstrip", true},
+         {"special", true}},
+        {{"id", 13}, {"content", u8"[Ａ]"}, {"normalized", false}},
+        {{"id", 14}, {"content", u8"[Ｂ]"}, {"normalized", true}},
+        {{"id", 15}, {"content", "<mask>x"}, {"normalized", false}},
+    };
+    auto with_added = create(added);
+    check(*with_added, "<mask>", {12});
+    check(*with_added, "A<mask>B", {3, 4, 12, 3, 5});
+    check(*with_added, "<s>A</s>", {1, 3, 4, 2});
+    check(*with_added, "<unk><unk>", {0, 0});
+    check(*with_added, "<mask>x", {15});
+    check(*with_added, u8"[Ａ]", {13});
+    check(*with_added, "[A]", {3, 0, 4, 0});
+    check(*with_added, u8"[Ｂ]", {14});
+    check(*with_added, "[B]", {14});
+    check(*with_added, u8"＜mask＞", {3, 0});
+    auto added_identity = added;
+    added_identity["normalizer"] = nullptr;
+    auto stripped = create(added_identity);
+    check(*stripped, u8"A\u0085<mask>\u00a0B", {3, 4, 12, 3, 5});
+    check(*stripped, u8"<mask>\u3000<mask>", {12, 12});
+    check(*stripped, "A <mask> B", {3, 4, 12, 3, 5});
+    const auto added_data = added.dump();
+    auto added_frame = trtmc::CreateUnigramTokenizer(added_data.data(), added_data.size(), true);
+    check(*added_frame, "<s><unk><unk></s>", {1, 1, 0, 0, 2, 2});
+    auto single_word = added;
+    single_word["added_tokens"][3]["single_word"] = true;
+    try {
+        create(single_word);
+        std::cerr << "Accepted unsupported single_word added token\n";
+        ++failures;
+    } catch (const std::runtime_error&) {
+    }
+    auto empty_pattern = added;
+    empty_pattern["added_tokens"][5]["content"] = u8"\u00ad";
+    try {
+        create(empty_pattern);
+        std::cerr << "Accepted added token that normalizes to empty\n";
+        ++failures;
+    } catch (const std::runtime_error&) {
+    }
 
     const std::vector<std::string> corrupt_maps = {
         "", "!!!!", "AAAAA", "AAAAAA==", "AAQAAA==", "AAQAAAE=", "AAQAAAA===",
