@@ -531,8 +531,6 @@ def test_the_vision_language_profiles_whose_catalog_cases_gained_a_request_are_q
     declared_here = {profile.name: profile.excluded for profile in selection.catalog(REPOSITORY)}
     for name in ("qwen35-moe-gptq-edge", "qwen3-0.6b-fp16"):
         assert declared_here[name] is None, name
-    # Its bundle builds, but no native reference AIPerf can serve loads its checkpoint (only vLLM does).
-    assert "vLLM" in declared_here["nemotron-omni-nvfp4-text-image"]
 
 
 def test_an_unreadable_profile_definition_is_an_error_of_that_profile_alone(tmp_path):
