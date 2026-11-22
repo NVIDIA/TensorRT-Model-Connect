@@ -418,22 +418,28 @@ class UnigramTokenizer final : public ITokenizer {
         return mLowercase ? lowercase_ascii(std::move(normalized)) : normalized;
     }
 
+    const AddedToken* added_token_at(const std::string& text, size_t pos, bool normalized) const {
+        const AddedToken* best = nullptr;
+        for (const auto& token : mAddedTokens) {
+            if (token.normalized == normalized &&
+                (!best || token.content.size() > best->content.size()) &&
+                text.compare(pos, token.content.size(), token.content) == 0) {
+                best = &token;
+            }
+        }
+        return best;
+    }
+
     std::vector<Segment> split_added_tokens(const std::string& text, bool normalized) const {
         std::vector<Segment> segments;
         size_t pos = 0;
         while (pos < text.size()) {
             const AddedToken* best = nullptr;
-            size_t start = std::string::npos;
-            for (const auto& token : mAddedTokens) {
-                if (token.normalized != normalized)
-                    continue;
-                const auto found = text.find(token.content, pos);
-                if (found != std::string::npos &&
-                    (found < start ||
-                     (found == start && (!best || token.content.size() > best->content.size())))) {
-                    start = found;
-                    best = &token;
-                }
+            size_t start = pos;
+            for (; start < text.size(); ++start) {
+                best = added_token_at(text, start, normalized);
+                if (best)
+                    break;
             }
             if (!best) {
                 segments.push_back({text.substr(pos), -1});
@@ -454,7 +460,8 @@ class UnigramTokenizer final : public ITokenizer {
             segments.push_back({{}, best->id});
             pos = start + best->content.size();
             if (best->rstrip) {
-                while (pos < text.size() && whitespace_at(text, pos))
+                while (pos < text.size() && whitespace_at(text, pos) &&
+                       !added_token_at(text, pos, normalized))
                     pos = roberta_unicode::codepoint_end(text, pos);
             }
         }

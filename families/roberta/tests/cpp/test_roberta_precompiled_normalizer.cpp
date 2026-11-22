@@ -100,6 +100,12 @@ int main(int argc, char** argv) {
     check(*stripped, u8"A\u0085<mask>\u00a0B", {3, 4, 12, 3, 5});
     check(*stripped, u8"<mask>\u3000<mask>", {12, 12});
     check(*stripped, "A <mask> B", {3, 4, 12, 3, 5});
+    auto whitespace_token = added_identity;
+    whitespace_token["added_tokens"].push_back(
+        {{"id", 16}, {"content", " "}, {"normalized", false}});
+    auto with_whitespace = create(whitespace_token);
+    check(*with_whitespace, "<mask> ", {12, 16});
+    check(*with_whitespace, "<mask> <mask>", {12, 16, 12});
     const auto added_data = added.dump();
     auto added_frame = trtmc::CreateUnigramTokenizer(added_data.data(), added_data.size(), true);
     check(*added_frame, "<s><unk><unk></s>", {1, 1, 0, 0, 2, 2});
