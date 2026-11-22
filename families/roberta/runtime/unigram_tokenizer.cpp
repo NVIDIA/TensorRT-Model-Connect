@@ -4,6 +4,7 @@
  */
 
 #include "families/roberta/runtime/tokenizer.h"
+#include "families/roberta/runtime/unicode_grapheme.h"
 
 #include <algorithm>
 #include <cassert>
@@ -73,36 +74,45 @@ class PrecompiledNormalizer {
         std::string result;
         result.reserve(text.size());
         for (size_t pos = 0; pos < text.size();) {
-            size_t node = offset(mUnits[0]);
-            size_t matched = 0;
+            const auto end = roberta_unicode::grapheme_end(text, pos);
             size_t replacement = 0;
-            for (size_t i = pos; i < text.size(); ++i) {
-                const auto byte = static_cast<unsigned char>(text[i]);
-                if (byte == 0)
-                    break;
-                node ^= byte;
-                const auto unit = mUnits[node];
-                if (label(unit) != byte)
-                    break;
-                node ^= offset(unit);
-                if ((unit & 256) != 0) {
-                    matched = i - pos + 1;
-                    replacement = mUnits[node] & 0x7fffffffU;
-                }
-            }
-            if (matched != 0) {
+            if (end - pos < 6 && transform(text, pos, end, replacement)) {
                 result.append(mReplacements.data() + replacement);
-                pos += matched;
-            } else {
-                const auto length = std::min(utf8_char_len(text, pos), text.size() - pos);
-                result.append(text, pos, length);
-                pos += length;
+                pos = end;
+                continue;
+            }
+            while (pos < end) {
+                const auto next = roberta_unicode::codepoint_end(text, pos);
+                if (transform(text, pos, next, replacement))
+                    result.append(mReplacements.data() + replacement);
+                else
+                    result.append(text, pos, next - pos);
+                pos = next;
             }
         }
         return result;
     }
 
   private:
+    bool transform(const std::string& text, size_t start, size_t end, size_t& replacement) const {
+        size_t node = offset(mUnits[0]);
+        for (size_t pos = start; pos < end; ++pos) {
+            const auto byte = static_cast<unsigned char>(text[pos]);
+            if (byte == 0)
+                break;
+            node ^= byte;
+            const auto unit = mUnits[node];
+            if (label(unit) != byte)
+                break;
+            node ^= offset(unit);
+            if ((unit & 256) != 0) {
+                replacement = mUnits[node] & 0x7fffffffU;
+                return true;
+            }
+        }
+        return false;
+    }
+
     static uint32_t label(uint32_t unit) { return unit & 0x800000ffU; }
     static uint32_t offset(uint32_t unit) { return (unit >> 10) << ((unit & 512) >> 6); }
 

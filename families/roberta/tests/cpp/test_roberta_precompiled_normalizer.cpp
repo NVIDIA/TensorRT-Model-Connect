@@ -4,6 +4,7 @@
  */
 
 #include "families/roberta/runtime/tokenizer.h"
+#include "families/roberta/runtime/unicode_grapheme.h"
 
 #include <fstream>
 #include <iostream>
@@ -36,7 +37,8 @@ int main(int argc, char** argv) {
     check(*tokenizer, u8"① ﬁ", {3, 6, 3, 7});
     check(*tokenizer, u8"e\u0301", {3, 8});
     check(*tokenizer, u8"x\u0301", {3, 9});
-    check(*tokenizer, u8"x\u0301\u0327", {3, 10});
+    check(*tokenizer, u8"x\u0301\u0327", {3, 9});
+    check(*tokenizer, u8"e\u0301\u0327", {3, 8});
     check(*tokenizer, u8"A\u200bB", {3, 4, 3, 5});
     check(*tokenizer, u8"A\u00adB", {3, 4, 5});
     check(*tokenizer, u8"éz", {3, 8, 11});
@@ -91,6 +93,14 @@ int main(int argc, char** argv) {
         std::cerr << "Accepted missing charsmap\n";
         ++failures;
     } catch (const std::runtime_error&) {
+    }
+    for (const std::string& grapheme :
+         {std::string("\r\n"), std::string(u8"x\u0301\u0327"), std::string(u8"\u1100\u1161\u11a8"),
+          std::string(u8"\U0001f1fa\U0001f1f8"), std::string(u8"\U0001f469\u200d\U0001f4bb")}) {
+        if (trtmc::roberta_unicode::grapheme_end(grapheme + "A", 0) != grapheme.size()) {
+            std::cerr << "Incorrect grapheme boundary\n";
+            ++failures;
+        }
     }
     return failures == 0 ? 0 : 1;
 }
