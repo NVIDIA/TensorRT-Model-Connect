@@ -7,6 +7,7 @@
 #include "cli/io.h"
 #include "config.h"
 #include "task_runtime.h"
+#include "text_generation_config.h"
 #include "trtmc/action.hpp"
 #include "trtmc/audio.hpp"
 #include "trtmc/control.hpp"
@@ -175,24 +176,7 @@ std::vector<float> read_float32(const std::string& path) {
 }
 
 trtmc::TextGenerationConfig text_config(const Json& request) {
-    trtmc::TextGenerationConfig config;
-    config.max_new_tokens = optional_value<std::int32_t>(request, "max_new_tokens", 128);
-    config.temperature = optional_value<float>(request, "temperature", 1.0F);
-    config.top_k = optional_value<std::int32_t>(request, "top_k", 1);
-    config.top_p = optional_value<float>(request, "top_p", 1.0F);
-    config.min_p = optional_value<float>(request, "min_p", 0.0F);
-    config.seed = optional_value<std::int32_t>(request, "seed", -1);
-    config.guidance_scale = optional_value<float>(request, "guidance_scale", -1.0F);
-    config.cfg_scale = optional_value<float>(request, "cfg_scale", -1.0F);
-    config.num_steps = optional_value<std::int32_t>(request, "num_steps", -1);
-    config.text_generation_mode =
-        optional_value<std::string>(request, "text_generation_mode", "auto");
-    config.block_length = optional_value<std::int32_t>(request, "block_length", 0);
-    config.confidence_threshold = optional_value<float>(request, "confidence_threshold", -1.0F);
-    config.use_chat_template = optional_value<bool>(request, "use_chat_template", false);
-    config.enable_thinking = optional_value<bool>(request, "enable_thinking", true);
-    config.repetition_penalty = optional_value<float>(request, "repetition_penalty", 1.0F);
-    return config;
+    return trtmc::benchmark_worker::text_generation_config(request);
 }
 
 trtmc::ImageGenerationConfig image_config(const Json& request) {

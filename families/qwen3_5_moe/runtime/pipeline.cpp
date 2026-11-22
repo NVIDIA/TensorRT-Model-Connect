@@ -402,9 +402,8 @@ std::vector<int32_t> RecurrentPipeline::generate_paired(const std::vector<int32_
             }
         }
     }
-    std::cerr << "Qwen3.5-MoE " << (paired_draft_->tree() ? "dflash_ddtree" : "dflash")
-              << " rounds=" << rounds << " proposals=" << proposed << " accepted=" << accepted_count
-              << "\n";
+    std::cerr << "Qwen3.5-MoE " << paired_draft_->variant() << " rounds=" << rounds
+              << " proposals=" << proposed << " accepted=" << accepted_count << "\n";
     return output;
 }
 

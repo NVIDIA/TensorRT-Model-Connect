@@ -295,20 +295,40 @@ results from unexecuted combinations and known quality limitations.
 
 ### Optional Qwen3.5/3.6 MoE Edge execution
 
+On Edge 0.12, original-weight requests use the ONNX exporter and native SDK
+compilers (`TRTMC_EDGELLM_ONNX=ON`) because the direct builder expects
+individual experts rather than fused weights. The documented original Qwen3.6
+35B DFlash and JetSpec pairs use separate base and draft engine roles. Packed
+checkpoints keep the direct path. If Edge preparation fails, Model Connect
+warns and builds the requested configuration through the family’s native path.
+
 `trtmc qwen3_5_moe build MODEL -o model.bundle` owns the GPTQ Qwen3.5 35B-A3B
 and NVFP4 Qwen3.6 35B-A3B routes. Its family-local options select explicit
 DFlash companions, greedy DDTree, or the documented embedded NVFP4 MTP recipe.
 Visual bundles map the existing image and video Task interfaces directly to
 Edge preprocessing and runtime APIs. Shared model selection remains unchanged.
 
-The native SDK is pinned to official Edge-LLM 0.11.0. Compatible PyPI Python
-tools are discovered automatically; a source-built installation also works,
-and matching native headers, libraries and plugins remain required.
-Builds preserve each source checkpoint's weight quantization recipe, with FP16
-compute and single-device execution. The published NVFP4 checkpoint lacks
-exported K/V scales and therefore uses FP16 KV storage; prepared sources with
-actual exported scales retain FP8 KV. Larger/original checkpoints outside the
-measured memory admission are not advertised as qualified configurations.
+Edge-LLM 0.11.0 is the default. To use 0.12.0, build with
+`-DTRTMC_EDGELLM_RELEASE=0.12.0` on the target and install matching Python
+tools from PyPI or source. With 0.12.0, a documented JetSpec pair uses
+`--execution-variant jetspec --companion draft=PATH`; a DFlash draft is not
+interchangeable with a JetSpec draft.
+
+The native fallback preserves the checkpoint recipe. For example, the mixed
+Qwen3.6 35B NVFP4 source uses FP8 projections and W4A16 experts with FP16 KV.
+The prepared Qwen3.5 122B source uses W4A4 routed experts. Its metadata
+advertises FP8 KV, but the checkpoint lacks the text K scales that Edge 0.12
+requires for FP8 KV, so the adapter selects FP16 KV. This source check is not
+a full-model validation result. In ordinary decoding with
+Qwen3.5 35B GPTQ-Int4, both 0.12 Edge execution and native TensorRT matched
+the independent packed-checkpoint reference on the tested text and image
+requests. The original Qwen3.5 35B checkpoint also matched the independent reference
+on raw text, chat and image through both the 0.12 ONNX and native routes.
+For the original Qwen3.6 35B checkpoint, use the 0.12 ONNX flow:
+its ordinary vision bundle matched the independent reference token IDs on the
+tested raw-text, chat and image requests. With the documented JetSpec draft,
+Edge ONNX also matched the original target and reference on raw text and chat.
+These measurements do not qualify other checkpoints, pairs or modalities.
 
 Runtime availability is not an accuracy claim: speculative decoding and NVFP4
 repeatability have recorded quality failures. Those routes remain executable

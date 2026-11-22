@@ -1020,6 +1020,17 @@ if(TRTMC_BUILD_TESTS)
     target_compile_options(test_dataset_answer PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME dataset_answer COMMAND test_dataset_answer)
 
+    add_executable(test_text_generation_config
+      apps/benchmark/tests/native/test_text_generation_config.cpp)
+    target_include_directories(test_text_generation_config PRIVATE
+      ${PROJECT_SOURCE_DIR}/apps/benchmark/native
+      ${PROJECT_SOURCE_DIR}/core/runtime/include
+    )
+    target_link_libraries(test_text_generation_config PRIVATE nlohmann_json::nlohmann_json)
+    target_compile_options(test_text_generation_config PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME text_generation_config COMMAND test_text_generation_config)
+    set_tests_properties(text_generation_config PROPERTIES LABELS "cpu")
+
     add_library(trtmc_dataset_test_family SHARED apps/benchmark/tests/native/dataset_family.cpp)
     target_include_directories(trtmc_dataset_test_family PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
     target_link_libraries(trtmc_dataset_test_family PRIVATE trtmc_core nlohmann_json::nlohmann_json)

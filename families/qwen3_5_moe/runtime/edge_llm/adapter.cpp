@@ -12,9 +12,15 @@
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <dlfcn.h>
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+#include <tensorrt_edgellm/common/trtInterop.h>
+#include <tensorrt_edgellm/runtime/llmInferenceRuntime.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#else
 #include <edgellm/cpp/common/logger.h>
 #include <edgellm/cpp/runtime/llmInferenceRuntime.h>
 #include <edgellm/cpp/runtime/streaming.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -79,10 +85,17 @@ class Artifacts {
                 !bundle.find_section(name))
                 throw std::runtime_error("Invalid Qwen3.5-MoE Edge artifact: " + name);
         }
-        std::vector<std::string> required{
-            "edge_llm/engine/tokenizer.json", "edge_llm/engine/tokenizer_config.json",
-            "edge_llm/engine/chat_template.jinja", "edge_llm/checkpoint/config.json",
-            "edge_llm/checkpoint/model.safetensors.index.json"};
+        std::vector<std::string> required{"edge_llm/engine/tokenizer.json",
+                                          "edge_llm/engine/tokenizer_config.json",
+                                          "edge_llm/engine/chat_template.jinja"};
+        engine_sidecars_ = marker.value("edge_build_flow", "direct") == "onnx";
+        if (engine_sidecars_) {
+            required.push_back("edge_llm/engine/embedding.safetensors");
+            required.push_back("edge_llm/engine/external_lm_head_weight.safetensors");
+        } else {
+            required.push_back("edge_llm/checkpoint/config.json");
+            required.push_back("edge_llm/checkpoint/model.safetensors.index.json");
+        }
         if (marker.value("execution_variant", "autoregressive") == "autoregressive") {
             required.insert(required.end(),
                             {"edge_llm/engine/llm.engine", "edge_llm/engine/config.json"});
@@ -91,7 +104,7 @@ class Artifacts {
                                              "edge_llm/engine/spec_draft.engine",
                                              "edge_llm/engine/base_config.json",
                                              "edge_llm/engine/draft_config.json"});
-            if (marker.at("execution_variant") != "mtp")
+            if (!engine_sidecars_ && marker.at("execution_variant") != "mtp")
                 required.push_back("edge_llm/checkpoint/draft/config.json");
         }
         if (marker.at("task") == IVisionLanguageGeneration::kTask) {
@@ -125,13 +138,16 @@ class Artifacts {
     Artifacts(const Artifacts&) = delete;
     Artifacts& operator=(const Artifacts&) = delete;
     std::string engine() const { return (root_ / "edge_llm/engine").string(); }
-    std::string checkpoint() const { return (root_ / "edge_llm/checkpoint").string(); }
+    std::string checkpoint() const {
+        return engine_sidecars_ ? std::string{} : (root_ / "edge_llm/checkpoint").string();
+    }
 
   private:
     void cleanup() noexcept {
         std::error_code ignored;
         fs::remove_all(root_, ignored);
     }
+    bool engine_sidecars_{false};
     fs::path root_;
 };
 
@@ -157,7 +173,12 @@ std::unique_ptr<void, CloseLibrary> load_plugin() {
                                  std::string(dlerror()));
     using Initialize = bool (*)(void*, const char*);
     auto initialize = reinterpret_cast<Initialize>(dlsym(plugin.get(), "initEdgellmPlugins"));
-    if (!initialize || !initialize(static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger), ""))
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+    auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::TrtLogger::instance());
+#else
+    auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger);
+#endif
+    if (!initialize || !initialize(logger, ""))
         throw std::runtime_error("Cannot initialize Qwen3.5-MoE Edge plugin");
     return plugin;
 }
@@ -195,17 +216,28 @@ make_runtime(const Artifacts& artifacts, const nlohmann::json& marker, cudaStrea
     const auto media =
         marker.at("task") == IVisionLanguageGeneration::kTask ? artifacts.engine() : "";
     const auto variant = marker.value("execution_variant", "autoregressive");
-    if (variant == "dflash" || variant == "dflash_ddtree" || variant == "mtp") {
+    if (variant == "dflash" || variant == "dflash_ddtree" || variant == "jetspec" ||
+        variant == "mtp") {
         trt_edgellm::rt::SpecDecodeDraftingConfig drafting{};
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+        drafting.draftTopK = variant == "jetspec" ? 7 : variant == "dflash_ddtree" ? 4 : 1;
+        drafting.draftingStep = variant == "mtp" ? 3 : 1;
+        if (variant != "mtp")
+            drafting.proposalTokens = 15; // A 16-token block includes the root.
+        drafting.verifyTokens = variant == "mtp" ? 4 : 16;
+#else
         drafting.draftingTopK = variant == "dflash_ddtree" ? 4 : 1;
         drafting.draftingStep = variant == "mtp" ? 3 : 1;
         drafting.verifySize = variant == "mtp" ? 4 : 16;
         if (variant != "mtp")
             drafting.dflashBlockSize = 16;
+#endif
         return std::make_unique<Runtime>(
             artifacts.engine(), media, std::unordered_map<std::string, std::string>{}, drafting,
             stream, trt_edgellm::rt::ContextCacheConfig{}, artifacts.checkpoint(),
-            variant == "mtp" ? "" : (fs::path(artifacts.checkpoint()) / "draft").string());
+            variant == "mtp" || artifacts.checkpoint().empty()
+                ? ""
+                : (fs::path(artifacts.checkpoint()) / "draft").string());
     }
     return std::make_unique<Runtime>(artifacts.engine(), media,
                                      std::unordered_map<std::string, std::string>{}, stream,
@@ -218,7 +250,8 @@ class EngineState {
     EngineState(const BundleReader& bundle, const nlohmann::json& marker)
         : artifacts_(bundle, marker), plugin_(load_plugin()),
           runtime_(make_runtime(artifacts_, marker, stream_.get())),
-          tree_(marker.value("execution_variant", "autoregressive") == "dflash_ddtree"),
+          tree_(marker.value("execution_variant", "autoregressive") == "dflash_ddtree" ||
+                marker.value("execution_variant", "autoregressive") == "jetspec"),
           capacity_(marker.at("max_sequence_length").get<int>()),
           input_limit_(marker.at("max_input_length").get<int>()) {
         validate_bundle_tokenizer(bundle, marker);
@@ -234,11 +267,18 @@ class EngineState {
         auto request = make_request(prompt, config, !bytes.empty());
         if (!bytes.empty()) {
             trt_edgellm::rt::Tensor tensor({1, height, width, 3}, trt_edgellm::rt::DeviceType::kCPU,
-                                           nvinfer1::DataType::kUINT8);
+                                           EdgeDataType::kUINT8);
             std::memcpy(tensor.rawPointer(), bytes.data(), bytes.size());
             request.requests.front().imageBuffers.emplace_back(std::move(tensor));
         }
         return execute(std::move(request));
+    }
+
+    TextResult continue_text(const api::TextContinuationRequest& input, api::ConfigView supplied) {
+        const auto* text = std::get_if<std::string_view>(&input.prefix);
+        if (!text)
+            throw std::invalid_argument("Qwen3.5-MoE accepts UTF-8 text prefixes only");
+        return generate(std::string(*text), nullptr, 0, 0, generation_config(supplied, false, 128));
     }
 
     TextResult execute(trt_edgellm::rt::LLMGenerationRequest request) {
@@ -280,10 +320,7 @@ class TextModel final : public ITextGeneration, public api::IModel, public api::
         return {api::bind<api::ITextContinuation>(*this, fields(false))};
     }
     TextResult run(const api::TextContinuationRequest& input, api::ConfigView supplied) override {
-        const auto* text = std::get_if<std::string_view>(&input.prefix);
-        if (!text)
-            throw std::invalid_argument("Qwen3.5-MoE accepts UTF-8 text prefixes only");
-        return generate(std::string(*text), generation_config(supplied, false, 128));
+        return state_.continue_text(input, supplied);
     }
     std::int32_t default_max_new_tokens() const override { return 128; }
     TextResult generate(const std::string& prompt, const TextGenerationConfig& config) override {
@@ -294,19 +331,30 @@ class TextModel final : public ITextGeneration, public api::IModel, public api::
     EngineState state_;
 };
 
-/// Complete VLM bundles expose only the vision interface; null images retain raw/chat controls.
+/// A complete VLM handles text continuation as well as conditioned media requests.
 class VisionModel final : public IVisionLanguageGeneration,
+                          public ITextGeneration,
                           public api::IModel,
+                          public api::ITextContinuation,
                           public api::IImagesTextToText,
                           public api::IVideoTextToText,
                           public api::IImageVideoTextToText {
   public:
     VisionModel(const BundleReader& bundle, const nlohmann::json& marker)
         : state_(bundle, marker) {}
+    const char* task() const noexcept override { return IVisionLanguageGeneration::kTask; }
+    std::int32_t default_max_new_tokens() const override { return 128; }
+    TextResult generate(const std::string& prompt, const TextGenerationConfig& config) override {
+        return state_.generate(prompt, nullptr, 0, 0, config);
+    }
     std::vector<api::TaskInstance> task_bindings() override {
-        return {api::bind<api::IImagesTextToText>(*this, fields(true)),
+        return {api::bind<api::ITextContinuation>(*this, fields(false)),
+                api::bind<api::IImagesTextToText>(*this, fields(true)),
                 api::bind<api::IVideoTextToText>(*this, fields(true)),
                 api::bind<api::IImageVideoTextToText>(*this, fields(true))};
+    }
+    TextResult run(const api::TextContinuationRequest& input, api::ConfigView supplied) override {
+        return state_.continue_text(input, supplied);
     }
     TextResult run(const api::ImagesTextToTextRequest& input, api::ConfigView supplied) override {
         return state_.execute(media_request(input, generation_config(supplied, true, 128), 128));
