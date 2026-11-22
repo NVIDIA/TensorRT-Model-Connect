@@ -106,7 +106,7 @@ def test_fp8_weight_rejects_all_zero() -> None:
 
 
 def test_every_projection_is_quantized(tiny) -> None:
-    """Three projections per layer: attention output and both feed-forward projections."""
+    """Two projections per layer: both feed-forward projections."""
     weights, config, _ = tiny
     ctx = create_quant_context(weights, config, "fp8")
     assert len(ctx.projections) == LAYERS * len(LAYER_PROJECTIONS) == len(projections(LAYERS))
@@ -115,24 +115,23 @@ def test_every_projection_is_quantized(tiny) -> None:
     fc2 = ctx.projections["layer.1.ff.layer_2"].weights[0]
     assert (fc2.out_features, fc2.in_features) == (D, FFN)
     assert ctx.has_fp8_weights
-    assert ctx.should_quantize("layer.0.rel_attn.o")
-    # Query, key and value stay in the work type (heavy-tailed input), and so does r.
-    assert not any(ctx.should_quantize(f"layer.0.rel_attn.{p}") for p in ("q", "k", "v", "qkv"))
+    # Query, key and value stay in the work type (heavy-tailed input), and so do the attention
+    # output projection and r.
+    assert not any(
+        ctx.should_quantize(f"layer.0.rel_attn.{p}") for p in ("q", "k", "v", "qkv", "o")
+    )
     assert not ctx.should_quantize("layer.0.rel_attn.r")
     assert not ctx.should_quantize("word_embedding")
 
 
 def test_weights_are_stored_as_out_in(tiny) -> None:
-    """Feed-forward weights are transposed to [out, in]; the output projection already is."""
+    """Feed-forward weights are transposed to [out, in]."""
     weights, config, _ = tiny
     ctx = create_quant_context(weights, config, "fp8")
     (fc1,) = ctx.projections["layer.0.ff.layer_1"].weights
     assert fc1.weight_scale == pytest.approx(float(np.abs(weights["layer.0.w_fc1"]).max()) / 448.0)
     restored = fc1.packed.view(ml_dtypes.float8_e4m3fn).astype(np.float32) * fc1.weight_scale
     np.testing.assert_allclose(restored.T, weights["layer.0.w_fc1"], atol=0.07 * 0.25)
-    (o,) = ctx.projections["layer.0.rel_attn.o"].weights
-    restored = o.packed.view(ml_dtypes.float8_e4m3fn).astype(np.float32) * o.weight_scale
-    np.testing.assert_allclose(restored, weights["layer.0.w_o"], atol=0.07 * 0.25)
 
 
 def test_outlier_projection_stays_unquantized(tiny) -> None:
@@ -148,7 +147,7 @@ def test_outlier_projection_stays_unquantized(tiny) -> None:
 def test_projection_without_an_entry_is_an_error(tiny) -> None:
     """A projection missing from the table raises; there is no silent fallback."""
     weights, config, scales = tiny
-    del scales["layer.0.rel_attn.o"]
+    del scales["layer.0.ff.layer_1"]
     with pytest.raises(ValueError, match="calibrate_fp8_scales.py"):
         create_quant_context(weights, config, "fp8")
 
@@ -209,7 +208,7 @@ def test_committed_scales_cover_every_projection() -> None:
 
 
 def test_calibration_tool_maps_module_names_to_table_names() -> None:
-    """Linear inputs come from ModelOpt, the attention output input from a hook."""
+    """The quantized projections are the feed-forward ``nn.Linear`` modules."""
     name = calibrate_fp8_scales.projection_name
     assert name("layer.3.ff.layer_1") == "layer.3.ff.layer_1"
     assert name("layer.11.ff.layer_2") == "layer.11.ff.layer_2"
@@ -217,11 +216,7 @@ def test_calibration_tool_maps_module_names_to_table_names() -> None:
     assert name("layer.0.rel_attn") is None
     assert name("word_embedding") is None
     assert name("transformer.layer.0.ff.layer_1") is None
-    attention = calibrate_fp8_scales.attention_name
-    assert attention("layer.5.rel_attn") == "layer.5.rel_attn.o"
-    assert attention("layer.5.rel_attn.layer_norm") is None
-    assert attention("layer.5.ff") is None
-    assert set(LAYER_PROJECTIONS) == {"rel_attn.o", "ff.layer_1", "ff.layer_2"}
+    assert set(LAYER_PROJECTIONS) == {"ff.layer_1", "ff.layer_2"}
 
 
 def test_calibration_tool_frames_like_the_runtime() -> None:
