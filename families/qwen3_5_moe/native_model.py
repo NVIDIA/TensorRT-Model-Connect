@@ -153,6 +153,7 @@ class _Qwen35MoeModel:
 
         weights = WeightDict()
         weights["_moe_config"] = text_cfg
+        weights["_nvfp4_routed_activations"] = (config.raw.get("quantization_config") or {}).get("quant_algo") == "NVFP4"
         weights.update(load_fp8_kv_scales(readers, layer_types))
 
         # Embedding
@@ -379,8 +380,9 @@ class _Qwen35MoeModel:
 
         text = weights["_moe_config"]
         mlp = f"{hf_prefix}.mlp"
-        def expert(name):
-            return ExpertWeights(*(load_projection(readers, f"{name}.{projection}")
+        def expert(name, *, routed=False):
+            quantize_input = routed and weights.get("_nvfp4_routed_activations", False)
+            return ExpertWeights(*(load_projection(readers, f"{name}.{projection}", quantize_nvfp4_input=quantize_input)
                                    for projection in ("gate_proj", "up_proj", "down_proj")))
         count, width = text["num_experts"], text["moe_intermediate_size"]
         fused_key = f"{mlp}.experts.gate_up_proj"
@@ -403,7 +405,7 @@ class _Qwen35MoeModel:
                 np.ascontiguousarray(down[i].T, dtype=dtype),
             ) for i in range(count))
         else:
-            experts = tuple(expert(f"{mlp}.experts.{i}") for i in range(count))
+            experts = tuple(expert(f"{mlp}.experts.{i}", routed=True) for i in range(count))
         weights[f"{prefix}.moe"] = MoEWeights(
             router=load_projection(readers, f"{mlp}.gate"),
             experts=experts,
@@ -424,7 +426,7 @@ class _Qwen35MoeModel:
         media_inputs: bool = False,
         export_hidden_state: bool = False,
         feature_layers: tuple[int, ...] = (),
-    ) -> bytes:
+    ) -> memoryview:
         """Build hybrid TRT engine with DeltaNet + attention layers."""
         hidden = config.hidden_size
         vocab = config.vocab_size
@@ -758,7 +760,7 @@ class _Qwen35MoeModel:
         if plan is None:
             raise RuntimeError("TensorRT engine build failed")
 
-        return bytes(plan)
+        return memoryview(plan)
 
     def _load_mtp_weights(self, readers, weights, config):
         """Load the actual embedded head without unpacking prepared projections."""
@@ -788,7 +790,7 @@ class _Qwen35MoeModel:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
         verbose: bool = False, media_inputs: bool = False,
-    ) -> bytes:
+    ) -> memoryview:
         """Build the MTP (multi-token-prediction) draft-head TRT engine.
 
         Follows the pinned Qwen3.5-MoE embedded-draft forward pass:
@@ -1006,14 +1008,14 @@ class _Qwen35MoeModel:
         if plan is None:
             raise RuntimeError("TensorRT MTP engine build failed")
 
-        return bytes(plan)
+        return memoryview(plan)
 
 
     def build_engine_multi_token(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, seq_len: int, *, precision: str = "fp32",
         verbose: bool = False, media_inputs: bool = False,
-    ) -> bytes:
+    ) -> memoryview:
         """Build a TRT engine that processes `seq_len` NEW tokens in one call,
         emitting `seq_len` rows of logits -- one prediction per position.
 
@@ -1389,7 +1391,7 @@ class _Qwen35MoeModel:
         if plan is None:
             raise RuntimeError("TensorRT multi-token engine build failed")
 
-        return bytes(plan)
+        return memoryview(plan)
 
 
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
@@ -2154,6 +2156,7 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
     )
 
     writer.add_bytes("engine.plan", plan)
+    del plan  # The section is staged; do not retain a full plan during the next build.
     if require_mtp:
         # Preserve the admitted three draft steps plus one target anchor.
         writer.add_bytes("mtp_engine.plan", model.build_mtp_engine(
@@ -2187,7 +2190,7 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
             "feature_layers": list(draft_config.feature_layers),
             "draft_rows": draft_config.block_size,
             "mask_token_id": draft_config.mask_token,
-            "draft_top_k": 4 if draft_variant == "dflash_ddtree" else 1,
+            "draft_top_k": {"jetspec": 7, "dflash_ddtree": 4, "dflash": 1}[draft_variant],
             "verify_size": 16,
         })
     writer.add_json(

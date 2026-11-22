@@ -41,7 +41,7 @@ def expected_mixed_layers() -> dict[str, dict]:
 
 
 def validate_config(raw: dict) -> None:
-    """Require the two ordinary catalog rows' hybrid, shared-expert and visual config."""
+    """Require a documented hybrid, shared-expert and visual topology."""
     text, visual = raw.get("text_config"), raw.get("vision_config")
     if not isinstance(text, dict) or not isinstance(visual, dict):
         raise ValueError("Full Qwen3.5-MoE text and visual configs are required")
@@ -74,12 +74,17 @@ def validate_config(raw: dict) -> None:
         "mtp_use_dedicated_embeddings": False,
         "mamba_ssm_dtype": "float32",
     }
+    if text.get("num_hidden_layers") == 48:
+        # The 122B-A10B has the same layer order and expert count, not the same widths.
+        expected.update(num_hidden_layers=48, hidden_size=3072, num_attention_heads=32,
+                        moe_intermediate_size=1024, shared_expert_intermediate_size=1024,
+                        linear_num_value_heads=64)
     if any(
         text.get(key) != value or type(text.get(key)) is not type(value)
         for key, value in expected.items()
     ):
         raise ValueError("Unsupported hybrid/shared-expert text configuration")
-    layers = ["full_attention" if (i + 1) % 4 == 0 else "linear_attention" for i in range(40)]
+    layers = ["full_attention" if (i + 1) % 4 == 0 else "linear_attention" for i in range(expected["num_hidden_layers"])]
     if (
         text.get("layer_types") != layers
         or text.get("full_attention_interval", 4) != 4
@@ -104,7 +109,7 @@ def validate_config(raw: dict) -> None:
         "patch_size": 16,
         "spatial_merge_size": 2,
         "temporal_patch_size": 2,
-        "out_hidden_size": 2048,
+        "out_hidden_size": expected["hidden_size"],
         "in_channels": 3,
     }
     if (
@@ -213,9 +218,16 @@ def source_policy(request, raw: dict) -> dict:
         if component.get("quantization_config") not in (None, {}):
             raise ValueError("Conflicting component-specific quantization metadata")
     quant = raw.get("quantization_config")
-    if not isinstance(quant, dict):
-        raise ValueError("Documented packed expert quantization is required")
-    if quant.get("quant_method") == "gptq":
+    if quant is None:
+        if (root / "hf_quant_config.json").exists() or raw["text_config"].get("dtype") != "bfloat16":
+            raise ValueError("Original expert weights require BF16 source metadata without a quantizer")
+        policy = {"weights": "none", "llm": "original_bf16_experts", "visual": "fp16",
+                  "kv": "fp16", "group_size": 0}
+    elif not isinstance(quant, dict):
+        raise ValueError("Invalid quantization metadata")
+    elif quant.get("quant_method") == "gptq":
+        if raw["text_config"]["num_hidden_layers"] != 40:
+            raise ValueError("This packed source recipe requires the 35B topology")
         if (root / "hf_quant_config.json").exists():
             raise ValueError("GPTQ cannot be overridden by a ModelOpt sidecar")
         if any(
@@ -255,7 +267,34 @@ def source_policy(request, raw: dict) -> dict:
             "kv": "fp16",
             "group_size": 128,
         }
+    elif quant.get("quant_method") == "modelopt" and quant.get("quant_algo") == "NVFP4":
+        text = raw["text_config"]
+        if text["num_hidden_layers"] != 48:
+            raise ValueError("Routed-only NVFP4 requires the documented 122B topology")
+        side = object_file(root / "hf_quant_config.json").get("quantization")
+        excluded = {"lm_head", "model.visual*", "mtp.layers.0*", "mtp*"}
+        for layer, kind in enumerate(text["layer_types"]):
+            prefix = f"model.language_model.layers.{layer}."
+            excluded.update(prefix + key for key in ("mlp.shared_expert*", "mlp.shared_expert_gate",
+                            "self_attn*" if kind == "full_attention" else "linear_attn*"))
+        if not isinstance(side, dict) or side.get("quant_algo") != "NVFP4" or side.get("group_size") != 16:
+            raise ValueError("Routed-only NVFP4 requires a matching group16 ModelOpt sidecar")
+        if set(quant.get("ignore", [])) != excluded or set(side.get("exclude_modules", [])) != excluded:
+            raise ValueError("Routed-only NVFP4 exclusions differ from the documented checkpoint")
+        group = {"dynamic": False, "num_bits": 4, "type": "float", "group_size": 16}
+        if quant.get("config_groups") != {"group_0": {"targets": ["Linear"], "weights": group,
+                                                      "input_activations": group}}:
+            raise ValueError("Routed-only experts require calibrated W4A4 group16")
+        if (side.get("kv_cache_quant_algo") != "FP8"
+                or quant.get("kv_cache_scheme") != {"dynamic": False, "num_bits": 8, "type": "float"}):
+            raise ValueError("Unexpected declared ModelOpt KV metadata")
+        # Edge resolves ModelOpt's global KV claim from actual LLM K-scale keys.
+        # This checkpoint has none; validate that fact against the original headers.
+        policy = {"weights": "nvfp4", "llm": "nvfp4_routed_experts_original_shared_head_attention",
+                  "visual": "fp16", "kv": "fp16", "group_size": 16}
     elif quant.get("quant_method") == "modelopt" and quant.get("quant_algo") == "MIXED_PRECISION":
+        if raw["text_config"]["num_hidden_layers"] != 40:
+            raise ValueError("This packed source recipe requires the 35B topology")
         side = object_file(root / "hf_quant_config.json").get("quantization")
         if (
             not isinstance(side, dict)

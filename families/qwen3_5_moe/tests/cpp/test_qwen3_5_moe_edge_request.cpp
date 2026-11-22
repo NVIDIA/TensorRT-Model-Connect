@@ -4,7 +4,11 @@
  */
 #include "families/qwen3_5_moe/runtime/edge_llm/media.h"
 
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+#include <tensorrt_edgellm/chatTemplate/chatTemplate.h>
+#else
 #include <edgellm/cpp/chatTemplate/chatTemplate.h>
+#endif
 #include <functional>
 #include <iostream>
 namespace edge = trtmc::qwen3_5_moe::edge_llm;

@@ -12,7 +12,20 @@ import subprocess
 from pathlib import Path, PurePosixPath
 
 from tensorrt_model_connect.bundle_writer import BUNDLE_MAGIC
-from families.qwen3_5_moe.edge_llm.builder import EDGE_REVISION
+
+EDGE_REVISIONS = {
+    "0.11.0": "95515c2f87fba8982db5a519f9022277667b3cc9",
+    "0.12.0": "513dcd18291e587c80928911a480761352f3c2d8",
+}
+
+
+def matches_edge_release(record: dict, release: str) -> bool:
+    """A release wheel may omit a source SHA explicitly, never the revision field."""
+    if (release not in EDGE_REVISIONS or record.get("edge_release", "0.11.0") != release
+            or "edge_revision" not in record):
+        return False
+    revision = record["edge_revision"]
+    return revision == EDGE_REVISIONS[release] or (release == "0.12.0" and revision is None)
 
 
 def write_json(path: Path, value: object) -> None:
@@ -93,7 +106,8 @@ def extract_bundle(bundle: Path, destination: Path, *, allow_native: bool = Fals
         if marker_size > 100 * 1024 * 1024:
             raise ValueError("Invalid Edge marker size")
         marker = json.loads(source.read(marker_size))
-        if marker["version"] != 1 or marker["edge_revision"] != EDGE_REVISION:
+        release = marker.get("edge_release", "0.11.0")
+        if marker["version"] != 1 or not matches_edge_release(marker, release):
             raise ValueError("Wrong Edge API revision")
         artifacts = marker["artifacts"]
         if (
@@ -326,7 +340,8 @@ def gpu(args) -> None:
     by_id = {row["id"]: row for row in actual["results"]}
     if marker["backend"] == "edge_llm":
         reference = json.loads((output / "direct.json").read_text())
-        assert reference["passed"] and actual["edge_revision"] == EDGE_REVISION
+        assert reference["passed"] and actual["edge_revision"] == marker["edge_revision"]
+        assert reference["edge_release"] == marker.get("edge_release", "0.11.0")
         for row in reference["results"]:
             assert row["token_ids"] == by_id[row["id"]]["token_ids"]
             assert row["text"] == by_id[row["id"]]["text"]
@@ -339,7 +354,8 @@ def gpu(args) -> None:
         {
             "passed": True,
             "backend": marker["backend"],
-            "revision": EDGE_REVISION if marker["backend"] == "edge_llm" else None,
+            "revision": marker.get("edge_revision"),
+            "edge_release": marker.get("edge_release", "0.11.0") if marker["backend"] == "edge_llm" else None,
             "checkpoint": args.checkpoint_id,
             "checkpoint_revision": args.checkpoint_revision,
             "task": marker["task"],
