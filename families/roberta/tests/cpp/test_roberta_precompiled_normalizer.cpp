@@ -106,6 +106,10 @@ int main(int argc, char** argv) {
     auto with_whitespace = create(whitespace_token);
     check(*with_whitespace, "<mask> ", {12, 16});
     check(*with_whitespace, "<mask> <mask>", {12, 16, 12});
+    whitespace_token["added_tokens"].back()["lstrip"] = true;
+    auto stripped_whitespace = create(whitespace_token);
+    check(*stripped_whitespace, "<mask> ", {12});
+    check(*stripped_whitespace, "<mask> B", {12, 3, 5});
     const auto added_data = added.dump();
     auto added_frame = trtmc::CreateUnigramTokenizer(added_data.data(), added_data.size(), true);
     check(*added_frame, "<s><unk><unk></s>", {1, 1, 0, 0, 2, 2});

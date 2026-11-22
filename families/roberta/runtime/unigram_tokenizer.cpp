@@ -433,18 +433,19 @@ class UnigramTokenizer final : public ITokenizer {
     std::vector<Segment> split_added_tokens(const std::string& text, bool normalized) const {
         std::vector<Segment> segments;
         size_t pos = 0;
-        while (pos < text.size()) {
+        size_t search_pos = 0;
+        while (search_pos < text.size()) {
             const AddedToken* best = nullptr;
-            size_t start = pos;
+            size_t start = search_pos;
             for (; start < text.size(); ++start) {
                 best = added_token_at(text, start, normalized);
                 if (best)
                     break;
             }
             if (!best) {
-                segments.push_back({text.substr(pos), -1});
                 break;
             }
+            search_pos = start + best->content.size();
             size_t content_end = start;
             if (best->lstrip) {
                 content_end = pos;
@@ -455,16 +456,21 @@ class UnigramTokenizer final : public ITokenizer {
                     cursor = next;
                 }
             }
+            size_t stop = search_pos;
+            if (best->rstrip) {
+                while (stop < text.size() && whitespace_at(text, stop))
+                    stop = roberta_unicode::codepoint_end(text, stop);
+            }
+            if (content_end > stop)
+                throw std::runtime_error("Unigram added-token strip ranges overlap out of order");
             if (content_end > pos)
                 segments.push_back({text.substr(pos, content_end - pos), -1});
-            segments.push_back({{}, best->id});
-            pos = start + best->content.size();
-            if (best->rstrip) {
-                while (pos < text.size() && whitespace_at(text, pos) &&
-                       !added_token_at(text, pos, normalized))
-                    pos = roberta_unicode::codepoint_end(text, pos);
-            }
+            if (content_end < stop)
+                segments.push_back({{}, best->id});
+            pos = stop;
         }
+        if (pos < text.size())
+            segments.push_back({text.substr(pos), -1});
         return segments;
     }
 
