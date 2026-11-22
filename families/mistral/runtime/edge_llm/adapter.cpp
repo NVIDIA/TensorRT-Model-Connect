@@ -22,6 +22,7 @@
 #include <tensorrt_edgellm/common/trtInterop.h>
 #include <tensorrt_edgellm/runtime/llmInferenceRuntime.h>
 #include <tensorrt_edgellm/runtime/streaming.h>
+#include <utility>
 #include <vector>
 
 namespace trtmc::mistral::edge_llm {
@@ -177,9 +178,13 @@ std::string bundle_raw_prefix(const BundleReader& bundle) {
 std::unique_ptr<trt_edgellm::rt::LLMInferenceRuntime> make_runtime(const Artifacts& artifacts,
                                                                    cudaStream_t stream) {
     using Runtime = trt_edgellm::rt::LLMInferenceRuntime;
-    return std::make_unique<Runtime>(artifacts.engine(), "",
-                                     std::unordered_map<std::string, std::string>{}, stream,
-                                     trt_edgellm::rt::ContextCacheConfig{}, artifacts.checkpoint());
+    int device;
+    check_cuda(cudaStreamGetDevice(stream, &device));
+    trt_edgellm::rt::DeploymentOptions options{};
+    options.engineDir = artifacts.engine();
+    options.checkpointDir = artifacts.checkpoint();
+    options.parallelConfig.devices = {device};
+    return std::make_unique<Runtime>(std::move(options), stream);
 }
 
 /// Thin persistent Edge API adapter; serialization prevents concurrent use of Edge request state.

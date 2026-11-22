@@ -5,6 +5,7 @@
 
 #include "families/mistral/runtime/chat_templates.h"
 
+#include <regex>
 #include <string>
 
 namespace trtmc {
@@ -57,9 +58,10 @@ std::string mistral_detect_chat_template_format(const std::string& jinja_templat
     if (jinja_template.find("<|im_start|>") != std::string::npos)
         return "chatml";
     if (jinja_template.find("[INST]") != std::string::npos) {
-        // Some Mistral templates attach [/INST] directly to the user text.
-        if (jinja_template.find("'[/INST]'") != std::string::npos ||
-            jinja_template.find("\"[/INST]\"") != std::string::npos)
+        // A separately concatenated space is significant, just like " [/INST]".
+        static const std::regex compact_close(
+            R"re((\[\s*['"]content['"]\s*\]|\.content)\s*[+~]\s*['"]\[/INST\]['"])re");
+        if (std::regex_search(jinja_template, compact_close))
             return "mistral_compact_close";
         return "mistral";
     }
