@@ -238,7 +238,9 @@ upstream checkout) in `config/models`; `trtmc-perf-serve reference-env` creates 
 the serving interpreter once, caches it by digest, and creates a fresh one next to it when its recorded
 `pip freeze` changed. Bundles build in the same environment, as CI installs a family's requirements before a
 build; trtmc-bench reuses a bundle only when its build receipt matches. A `reference.prepare` without requirements
-gets an environment of its own all the same (only what the script writes). A native reference that runs a
+gets an environment of its own all the same (only what the script writes). `reference.prepare_inputs` lists the
+files and directories the script reads besides itself (relative to the repository); their contents join the
+environment's digest, so a change to any of them prepares a fresh environment. A native reference that runs a
 checkpoint the prepare step writes into its environment names it with `reference.model_directory` (relative to the
 environment, as `candidate.model_directory`): the INT4-AWQ profile `nemotron-nano-4b-int4-awq` runs the bundle's
 own INT4 weights in PyTorch (`families/llama/reference/prepare_int4_awq.py`), so its comparison measures the

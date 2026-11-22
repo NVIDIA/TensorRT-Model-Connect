@@ -94,6 +94,9 @@ def build_parser() -> argparse.ArgumentParser:
     env.add_argument("--no-build-isolation", action="store_true", help="pip install --no-build-isolation")
     env.add_argument("--prepare", type=Path, help="a script run once with the environment's interpreter after "
                                                     "installing (for example an upstream checkout)")
+    env.add_argument("--prepare-input", type=Path, action="append", default=[],
+                     help="a file or directory the --prepare script reads; its contents key the environment "
+                          "(repeatable)")
 
     payload = commands.add_parser("payload", help="write aiperf mooncake_trace payloads for /v1/tasks")
     _profile_arguments(payload)
@@ -216,7 +219,7 @@ def reference_env(arguments: argparse.Namespace) -> int:
     from .environments import reference_python
 
     python = (reference_python(arguments.requirements, arguments.root, build_isolation=not arguments.no_build_isolation,
-                               prepare=arguments.prepare)
+                               prepare=arguments.prepare, prepare_inputs=arguments.prepare_input)
               if arguments.requirements or arguments.prepare else Path(sys.executable))
     print(json.dumps({"python": str(python), "requirements": str(arguments.requirements or "") or None}))
     return 0

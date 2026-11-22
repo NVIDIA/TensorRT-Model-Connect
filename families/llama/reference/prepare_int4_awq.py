@@ -10,6 +10,9 @@ The build quantizes with the committed AWQ scales (``quantization.quantize_awq_w
 comparison measures the TensorRT implementation, not INT4 quantization.
 
 usage (``reference.prepare``, run once per reference environment): python prepare_int4_awq.py <environment>
+
+The profile lists what this script reads besides itself (the quantizer, the committed AWQ scales, the manifests) as
+``reference.prepare_inputs``, so a change to any of them prepares a fresh environment instead of reusing stale weights.
 """
 
 from __future__ import annotations

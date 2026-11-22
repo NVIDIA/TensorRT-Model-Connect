@@ -5,7 +5,8 @@
 A model whose native reference needs packages the serving interpreter lacks (remote code, a
 family's own dependencies) runs in a virtual environment that sees this interpreter's packages and
 adds the requirements on top. Environments are cached by the digest of the requirements, the
-interpreter, and the install options, so each is created once per host. Each records its ``pip freeze``
+interpreter, the install options, and the preparation script with the inputs it declares, so each is created
+once per host. Each records its ``pip freeze``
 and is reused only while that is unchanged; a changed one is left in place and a fresh one created.
 """
 
@@ -17,16 +18,24 @@ import os
 import site
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 PIP_TIMEOUT_S = 7200  # native extensions (for example FlashAttention) build for a long time on aarch64
 
 
-def _digest(requirements: Path | None, build_isolation: bool, prepare: Path | None = None) -> str:
+def _digest(requirements: Path | None, build_isolation: bool, prepare: Path | None = None,
+            prepare_inputs: Sequence[Path] = ()) -> str:
     digest = hashlib.sha256(b"trtmc-perf-serve-reference-env-v1\0")
     digest.update(requirements.read_bytes() if requirements is not None else b"")
     if prepare is not None:
         digest.update(b"\0prepare\0" + prepare.read_bytes())
+    for root in prepare_inputs:  # what the script reads besides itself, by path below the input's parent
+        files = sorted(path for path in root.rglob("*") if path.is_file() and "__pycache__" not in path.parts) \
+            if root.is_dir() else [root]
+        for path in files:
+            digest.update(b"\0input\0" + str(path.relative_to(root.parent)).encode() + b"\0"
+                          + hashlib.sha256(path.read_bytes()).digest())
     digest.update(f"{sys.executable}\0{sys.version}\0build-isolation={build_isolation}".encode())
     return digest.hexdigest()
 
@@ -52,19 +61,27 @@ def _run(command: list[str], log: Path, timeout: int) -> None:
 
 
 def reference_python(requirements: Path | None, root: Path, *, build_isolation: bool = True,
-                     prepare: Path | None = None) -> Path:
+                     prepare: Path | None = None, prepare_inputs: Sequence[Path] = ()) -> Path:
     """The interpreter of the environment for ``requirements`` (created on first use); ``prepare`` runs once
     after the install, in the environment's directory (for example an upstream checkout). Without requirements
-    the environment only holds what ``prepare`` writes (for example a prepared checkpoint)."""
+    the environment only holds what ``prepare`` writes (for example a prepared checkpoint). ``prepare_inputs``
+    are the files and directories the script reads besides itself: a change to any of them prepares a fresh
+    environment, as a change to the script does."""
     if requirements is None and prepare is None:
         raise RuntimeError("a reference environment needs requirements or a preparation script")
+    if prepare_inputs and prepare is None:
+        raise RuntimeError("preparation inputs need a preparation script")
+    prepare_inputs = [path.resolve() for path in prepare_inputs]
+    for path in prepare_inputs:
+        if not path.exists():
+            raise RuntimeError(f"preparation input not found: {path}")
     if requirements is not None:
         requirements = requirements.resolve()
         if not requirements.is_file():
             raise RuntimeError(f"requirements file not found: {requirements}")
     if prepare is not None and not prepare.resolve().is_file():
         raise RuntimeError(f"preparation script not found: {prepare}")
-    expected = _digest(requirements, build_isolation, prepare.resolve() if prepare else None)
+    expected = _digest(requirements, build_isolation, prepare.resolve() if prepare else None, prepare_inputs)
     if requirements is None:
         name = prepare.stem
     else:

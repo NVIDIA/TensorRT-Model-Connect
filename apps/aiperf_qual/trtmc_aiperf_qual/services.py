@@ -91,6 +91,8 @@ def reference_python(environment: Environment, model: Mapping[str, Any]) -> str:
         command.append("--no-build-isolation")
     if reference.get("prepare"):
         command += ["--prepare", str(environment.path("repo") / reference["prepare"])]
+    for path in reference.get("prepare_inputs") or ():  # what the preparation reads besides itself
+        command += ["--prepare-input", str(environment.path("repo") / path)]
     completed = subprocess.run(command, capture_output=True, text=True, env=build_env(environment),
                                cwd=environment.path("repo"), timeout=10800)
     if completed.returncode != 0:

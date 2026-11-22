@@ -119,9 +119,12 @@ def test_a_preparation_script_alone_gets_a_reference_environment(tmp_path, monke
                                            stderr="")
 
     monkeypatch.setattr(services.subprocess, "run", run)
-    prepared = {"catalog_profile": "p", "reference": {"prepare": "families/f/reference/prepare.py"}}
+    prepared = {"catalog_profile": "p", "reference": {"prepare": "families/f/reference/prepare.py",
+                                                      "prepare_inputs": ["families/f/scales", "families/f/q.py"]}}
     assert services.reference_python(environment, prepared) == "/envs/e/bin/python"
     assert "--prepare" in seen[0] and "--requirements" not in seen[0]
+    inputs = [seen[0][index + 1] for index, value in enumerate(seen[0]) if value == "--prepare-input"]
+    assert inputs == [str(tmp_path / "families/f/scales"), str(tmp_path / "families/f/q.py")]
     assert services.reference_python(environment, {"catalog_profile": "p", "reference": {}}) == "python3"
     assert len(seen) == 1  # nothing to prepare or install: the serving interpreter
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -11,6 +12,7 @@ import pytest
 pytest.importorskip("tensorrt")
 pytest.importorskip("torch")
 
+from families.llama import quantization as llama_quantization  # noqa: E402
 from families.llama.reference import prepare_int4_awq  # noqa: E402
 
 
@@ -69,3 +71,19 @@ def test_only_int4_awq_manifests_are_prepared_and_a_finished_one_is_kept(tmp_pat
     written.clear()
     prepare_int4_awq.main(tmp_path / "env")
     assert written == []  # prepared once per reference environment
+
+
+def test_the_profile_declares_what_the_preparation_reads_as_its_inputs():
+    import yaml
+
+    root = prepare_int4_awq.ROOT
+    profile = yaml.safe_load(
+        (root / "families/llama/tests/aiperf/nemotron-nano-4b-int4-awq.yaml").read_text()
+    )
+    inputs = {root / path for path in profile["reference"]["prepare_inputs"]}
+    # A change to the quantizer, the committed scales or a manifest must prepare the reference weights again.
+    assert inputs == {
+        Path(llama_quantization.__file__).resolve(),
+        llama_quantization.AWQ_SCALES_DIR.resolve(),
+        prepare_int4_awq.MANIFESTS.resolve(),
+    }
