@@ -8,7 +8,7 @@ import pytest
 
 from families.qwen3_5_moe.tests.upstream_mmlu import (
     CONTROLS,
-    EDGE_REVISION,
+    EDGE_REVISIONS,
     ERROR_TEXT,
     REQUEST_COUNT,
     checked_predictions,
@@ -39,7 +39,7 @@ def public_report():
     return {
         "passed": True,
         "backend": "edge_llm",
-        "edge_revision": EDGE_REVISION,
+        "edge_revision": EDGE_REVISIONS["0.11.0"],
         "task": "text_generation",
         "results": [
             {"id": str(index), "text": "A", "token_ids": [65]} for index in range(REQUEST_COUNT)
@@ -102,10 +102,18 @@ def test_unsupported_media_roles_and_row_overrides_rejected(dataset):
         raw_prompt(row)
 
 
-def test_complete_public_output_keeps_full_scorer_denominator(dataset, public_report):
+@pytest.mark.parametrize("release", ["0.11.0", "0.12.0"])
+def test_complete_public_output_keeps_full_scorer_denominator(dataset, public_report, release):
     for row, text in zip(public_report["results"], ("", " ", "\n\n")):
         row["text"] = text
-    result = checked_predictions(dataset, public_report, "public")
+    if release == "0.12.0":
+        public_report["edge_release"] = release
+        with pytest.raises(ValueError, match="public Edge"):
+            checked_predictions(dataset, public_report, "public", release=release)
+        public_report["edge_revision"] = EDGE_REVISIONS[release]
+        with pytest.raises(ValueError, match="public Edge"):
+            checked_predictions(dataset, public_report, "public")
+    result = checked_predictions(dataset, public_report, "public", release=release)
     assert [r["output_text"] for r in result["responses"][:3]] == ["", " ", "\n\n"]
     assert len(result["responses"]) == REQUEST_COUNT
     assert result["responses"][-1]["request_idx"] == REQUEST_COUNT - 1

@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 
-from families.qwen3_5_moe.edge_llm.builder import EDGE_REVISION
+from families.qwen3_5_moe.tests.edge_validation import EDGE_REVISIONS
 
 REQUEST_COUNT = 14042
 THRESHOLD = 0.35
@@ -73,13 +73,14 @@ def public_requests(dataset: dict) -> list[dict]:
     ]
 
 
-def checked_predictions(dataset: dict, report: dict, kind: str) -> dict:
+def checked_predictions(dataset: dict, report: dict, kind: str, *, release: str = "0.11.0") -> dict:
     """Validate complete ordered public/native results before exposing them to upstream scoring.
 
     Args:
         dataset: Complete unchanged upstream input document.
         report: Actual persistent driver or native llm_inference JSON.
         kind: Either public or edge, identifying the corresponding output schema.
+        release: Selected release of the upstream scorer and public report.
 
     Returns:
         Official scorer input with every response retained.
@@ -90,10 +91,13 @@ def checked_predictions(dataset: dict, report: dict, kind: str) -> dict:
     rows = validate_dataset(dataset)
     if kind not in ("public", "edge"):
         raise ValueError("Unknown result kind")
+    if release not in EDGE_REVISIONS:
+        raise ValueError("Unknown upstream MMLU release")
     if kind == "public" and (
         report.get("passed") is not True
         or report.get("backend") != "edge_llm"
-        or report.get("edge_revision") != EDGE_REVISION
+        or report.get("edge_release", "0.11.0") != release
+        or report.get("edge_revision") != EDGE_REVISIONS[release]
         or report.get("task") != "text_generation"
     ):
         raise ValueError("Require successful public Edge text-task execution")
@@ -163,6 +167,7 @@ def main() -> None:
     parser.add_argument("--results", type=Path)
     parser.add_argument("--kind", choices=("public", "edge"))
     parser.add_argument("--edge-source", type=Path)
+    parser.add_argument("--edge-release", choices=tuple(EDGE_REVISIONS), default="0.11.0")
     args = parser.parse_args()
     dataset = json.loads(args.dataset.read_text())
     if args.action == "prepare":
@@ -171,14 +176,14 @@ def main() -> None:
         if args.results is None or args.kind is None or args.edge_source is None:
             parser.error("score requires --results, --kind and --edge-source")
         report = json.loads(args.results.read_text())
-        predictions = checked_predictions(dataset, report, args.kind)
+        predictions = checked_predictions(dataset, report, args.kind, release=args.edge_release)
         inputs = args.output.with_suffix(".scorer-input.json")
         inputs.write_text(json.dumps(predictions) + "\n")
         scorer = args.edge_source / "examples/accuracy/scripts/calculate_correctness.py"
         revision = subprocess.check_output(
             ["git", "-C", str(args.edge_source), "rev-parse", "HEAD"], text=True
         ).strip()
-        if revision != EDGE_REVISION:
+        if revision != EDGE_REVISIONS[args.edge_release]:
             raise ValueError("Reference scorer source is not the pinned Edge revision")
         subprocess.run(
             [
@@ -211,7 +216,8 @@ def main() -> None:
         completed.check_returncode()
         value = score_report(completed.stdout)
         value.update(
-            {"kind": args.kind, "dataset": str(args.dataset), "results": str(args.results)}
+            {"kind": args.kind, "edge_release": args.edge_release, "edge_revision": revision,
+             "dataset": str(args.dataset), "results": str(args.results)}
         )
     args.output.write_text(json.dumps(value, indent=2) + "\n")
     if args.action == "score" and not value["passed"]:

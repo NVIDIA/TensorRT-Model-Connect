@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 
 from tensorrt_model_connect.bundle_writer import BUNDLE_MAGIC
 
-_EDGE_REVISIONS = {
+EDGE_REVISIONS = {
     "0.11.0": "95515c2f87fba8982db5a519f9022277667b3cc9",
     "0.12.0": "513dcd18291e587c80928911a480761352f3c2d8",
 }
@@ -100,8 +100,8 @@ def extract_bundle(bundle: Path, destination: Path, *, allow_native: bool = Fals
         release = marker.get("edge_release", "0.11.0")
         revision = marker["edge_revision"]
         # Installed 0.12 wheels declare a release but do not claim a source commit.
-        if (marker["version"] != 1 or release not in _EDGE_REVISIONS or
-                not (revision == _EDGE_REVISIONS[release] or (release == "0.12.0" and revision is None))):
+        if (marker["version"] != 1 or release not in EDGE_REVISIONS or
+                not (revision == EDGE_REVISIONS[release] or (release == "0.12.0" and revision is None))):
             raise ValueError("Wrong Edge API revision")
         artifacts = marker["artifacts"]
         if (
