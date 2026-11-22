@@ -4,7 +4,7 @@
 # FLORES-200 devtest en->fr (all 1,012 sentences) as NLLB requests: the English sentence (taken out of
 # the chat prompt) with NLLB's language controls; gold is the reference.
 suite: flores200-en-fr-nllb-1012
-version: 1
+version: 2
 source:
   kind: json_manifest
   path: FLORES200_en_fr/flores200_en_fr_task_eval.json
@@ -27,5 +27,9 @@ request:
   do_sample: false
   source_language: eng_Latn
   source_language_token_id: 256047
+  # The source framing the family runtime applies (text, </s>, language): a reference tokenizer without
+  # src_lang (Transformers 5.2 loads NLLB's as a generic one) puts the language token in place of its final
+  # <unk> instead of leaving the <unk> there.
+  source_language_placement: replace-final-unk
   target_language: fra_Latn
   forced_bos_token_id: 256057
