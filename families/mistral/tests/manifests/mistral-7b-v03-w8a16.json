@@ -1,0 +1,44 @@
+{
+  "name": "mistral-7b-v03-w8a16",
+  "hf_id": "RedHatAI/Mistral-7B-Instruct-v0.3-quantized.w8a16",
+  "hf_revision": "5079e6662632d88ac726516beccf202c925402a0",
+  "bundle": "mistral-7b-v03-w8a16.bundle",
+  "family": "mistral",
+  "task": "text_generation",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "mistral-7b-v03-w8a16",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "What is the capital of Japan? Answer in one word.",
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "expected_answers": [
+        "Tokyo"
+      ],
+      "expected_prompt_token_ids": [
+        1,
+        3,
+        2592,
+        1117,
+        1040,
+        6333,
+        1070,
+        5488,
+        29572,
+        27075,
+        1065,
+        1392,
+        2475,
+        29491,
+        4
+      ]
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1,
+  "quantization": "w8a16"
+}
