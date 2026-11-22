@@ -107,19 +107,17 @@ int main(int argc, char** argv) {
         auto task = trtmc::load_task(args.at("--bundle"), args.at("--runtime-root"));
         auto* generator = dynamic_cast<trtmc::ITextGeneration*>(task.get());
         auto* vision = dynamic_cast<trtmc::IVisionLanguageGeneration*>(task.get());
-        const bool is_vision = bundle.info().task == "vision_language_generation";
-        const bool native_media =
-            !expected_edge && (is_vision || bundle.info().task == "images_text_to_text");
-        if (native_media) {
-            if (!generator || !vision ||
-                !dynamic_cast<trtmc::internal::IImagesTextToText*>(task.get()) ||
-                !dynamic_cast<trtmc::internal::IVideoTextToText*>(task.get()) ||
-                !dynamic_cast<trtmc::internal::IImageVideoTextToText*>(task.get()))
-                throw std::runtime_error("Native media bundle is missing its public task bindings");
-        } else if ((is_vision && (!vision || generator)) ||
-                   (!is_vision && (!generator || vision))) {
-            throw std::runtime_error("Bundle must expose exactly its selected task interface");
-        }
+        const bool media = bundle.info().task == "vision_language_generation" ||
+                           (!expected_edge && bundle.info().task == "images_text_to_text");
+        // A no-image CLI request uses ITextGeneration, even with a vision bundle.
+        if (!generator || static_cast<bool>(vision) != media)
+            throw std::runtime_error(
+                "Bundle does not implement its public text and vision interfaces");
+        if (media && (!dynamic_cast<trtmc::internal::ITextContinuation*>(task.get()) ||
+                      !dynamic_cast<trtmc::internal::IImagesTextToText*>(task.get()) ||
+                      !dynamic_cast<trtmc::internal::IVideoTextToText*>(task.get()) ||
+                      !dynamic_cast<trtmc::internal::IImageVideoTextToText*>(task.get())))
+            throw std::runtime_error("Vision bundle is missing a text or media Task API");
         if (std::string(task->task()) != bundle.info().task)
             throw std::runtime_error("Runtime task differs from the bundle task");
         report["task"] = task->task();
@@ -206,11 +204,7 @@ int main(int argc, char** argv) {
                     result = vision->generate(request.at("prompt").get<std::string>(),
                                               pixels.data(), h, w, config);
                 } else {
-                    result =
-                        generator
-                            ? generator->generate(request.at("prompt").get<std::string>(), config)
-                            : vision->generate(request.at("prompt").get<std::string>(), nullptr, 0,
-                                               0, config);
+                    result = generator->generate(request.at("prompt").get<std::string>(), config);
                 }
                 output["text"] = result.text;
                 output["token_ids"] = result.token_ids;

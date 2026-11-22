@@ -12,7 +12,11 @@ import subprocess
 from pathlib import Path, PurePosixPath
 
 from tensorrt_model_connect.bundle_writer import BUNDLE_MAGIC
-from families.qwen3_5_moe.edge_llm.builder import EDGE_REVISION
+
+_EDGE_REVISIONS = {
+    "0.11.0": "95515c2f87fba8982db5a519f9022277667b3cc9",
+    "0.12.0": "513dcd18291e587c80928911a480761352f3c2d8",
+}
 
 
 def write_json(path: Path, value: object) -> None:
@@ -93,7 +97,11 @@ def extract_bundle(bundle: Path, destination: Path, *, allow_native: bool = Fals
         if marker_size > 100 * 1024 * 1024:
             raise ValueError("Invalid Edge marker size")
         marker = json.loads(source.read(marker_size))
-        if marker["version"] != 1 or marker["edge_revision"] != EDGE_REVISION:
+        release = marker.get("edge_release", "0.11.0")
+        revision = marker["edge_revision"]
+        # Installed 0.12 wheels declare a release but do not claim a source commit.
+        if (marker["version"] != 1 or release not in _EDGE_REVISIONS or
+                not (revision == _EDGE_REVISIONS[release] or (release == "0.12.0" and revision is None))):
             raise ValueError("Wrong Edge API revision")
         artifacts = marker["artifacts"]
         if (
@@ -326,7 +334,8 @@ def gpu(args) -> None:
     by_id = {row["id"]: row for row in actual["results"]}
     if marker["backend"] == "edge_llm":
         reference = json.loads((output / "direct.json").read_text())
-        assert reference["passed"] and actual["edge_revision"] == EDGE_REVISION
+        assert reference["passed"] and actual["edge_revision"] == marker["edge_revision"]
+        assert reference["edge_release"] == marker.get("edge_release", "0.11.0")
         for row in reference["results"]:
             assert row["token_ids"] == by_id[row["id"]]["token_ids"]
             assert row["text"] == by_id[row["id"]]["text"]
@@ -339,7 +348,8 @@ def gpu(args) -> None:
         {
             "passed": True,
             "backend": marker["backend"],
-            "revision": EDGE_REVISION if marker["backend"] == "edge_llm" else None,
+            "revision": marker.get("edge_revision"),
+            "edge_release": marker.get("edge_release", "0.11.0") if marker["backend"] == "edge_llm" else None,
             "checkpoint": args.checkpoint_id,
             "checkpoint_revision": args.checkpoint_revision,
             "task": marker["task"],
