@@ -19,6 +19,15 @@ EDGE_REVISIONS = {
 }
 
 
+def matches_edge_release(record: dict, release: str) -> bool:
+    """A release wheel may omit a source SHA explicitly, never the revision field."""
+    if (release not in EDGE_REVISIONS or record.get("edge_release", "0.11.0") != release
+            or "edge_revision" not in record):
+        return False
+    revision = record["edge_revision"]
+    return revision == EDGE_REVISIONS[release] or (release == "0.12.0" and revision is None)
+
+
 def write_json(path: Path, value: object) -> None:
     """Write one human-readable validation artifact."""
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
@@ -98,10 +107,7 @@ def extract_bundle(bundle: Path, destination: Path, *, allow_native: bool = Fals
             raise ValueError("Invalid Edge marker size")
         marker = json.loads(source.read(marker_size))
         release = marker.get("edge_release", "0.11.0")
-        revision = marker["edge_revision"]
-        # Installed 0.12 wheels declare a release but do not claim a source commit.
-        if (marker["version"] != 1 or release not in EDGE_REVISIONS or
-                not (revision == EDGE_REVISIONS[release] or (release == "0.12.0" and revision is None))):
+        if marker["version"] != 1 or not matches_edge_release(marker, release):
             raise ValueError("Wrong Edge API revision")
         artifacts = marker["artifacts"]
         if (

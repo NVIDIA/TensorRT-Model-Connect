@@ -97,6 +97,7 @@ int main(int argc, char** argv) {
             const auto bytes = bundle.read_section("edge_llm.json");
             const auto marker = nlohmann::json::parse(bytes.begin(), bytes.end());
             report["backend"] = "edge_llm";
+            report["edge_release"] = marker.value("edge_release", "0.11.0");
             report["edge_revision"] = marker.at("edge_revision");
         }
         std::ifstream request_file(args.at("--requests"));

@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 
-from families.qwen3_5_moe.tests.edge_validation import EDGE_REVISIONS
+from families.qwen3_5_moe.tests.edge_validation import EDGE_REVISIONS, matches_edge_release
 
 REQUEST_COUNT = 14042
 THRESHOLD = 0.35
@@ -96,8 +96,7 @@ def checked_predictions(dataset: dict, report: dict, kind: str, *, release: str 
     if kind == "public" and (
         report.get("passed") is not True
         or report.get("backend") != "edge_llm"
-        or report.get("edge_release", "0.11.0") != release
-        or report.get("edge_revision") != EDGE_REVISIONS[release]
+        or not matches_edge_release(report, release)
         or report.get("task") != "text_generation"
     ):
         raise ValueError("Require successful public Edge text-task execution")

@@ -102,15 +102,19 @@ def test_unsupported_media_roles_and_row_overrides_rejected(dataset):
         raw_prompt(row)
 
 
-@pytest.mark.parametrize("release", ["0.11.0", "0.12.0"])
-def test_complete_public_output_keeps_full_scorer_denominator(dataset, public_report, release):
+@pytest.mark.parametrize(("release", "revision"), [
+    ("0.11.0", EDGE_REVISIONS["0.11.0"]),
+    ("0.12.0", EDGE_REVISIONS["0.12.0"]),
+    ("0.12.0", None),
+])
+def test_complete_public_output_keeps_full_scorer_denominator(dataset, public_report, release, revision):
     for row, text in zip(public_report["results"], ("", " ", "\n\n")):
         row["text"] = text
     if release == "0.12.0":
         public_report["edge_release"] = release
         with pytest.raises(ValueError, match="public Edge"):
             checked_predictions(dataset, public_report, "public", release=release)
-        public_report["edge_revision"] = EDGE_REVISIONS[release]
+        public_report["edge_revision"] = revision
         with pytest.raises(ValueError, match="public Edge"):
             checked_predictions(dataset, public_report, "public")
     result = checked_predictions(dataset, public_report, "public", release=release)
@@ -149,6 +153,7 @@ def test_public_execution_gaps_rejected(dataset, public_report, fault):
         ("passed", False),
         ("backend", "native"),
         ("edge_revision", "wrong"),
+        ("edge_revision", None),
         ("task", "vision_language_generation"),
     ],
 )
@@ -156,6 +161,14 @@ def test_public_execution_identity_required(dataset, public_report, field, value
     public_report[field] = value
     with pytest.raises(ValueError, match="public Edge"):
         checked_predictions(dataset, public_report, "public")
+    if field == "edge_revision":
+        public_report["edge_release"] = "0.12.0"
+        if value is not None:
+            with pytest.raises(ValueError, match="public Edge"):
+                checked_predictions(dataset, public_report, "public", release="0.12.0")
+        del public_report["edge_revision"]
+        with pytest.raises(ValueError, match="public Edge"):
+            checked_predictions(dataset, public_report, "public", release="0.12.0")
 
 
 def native_report(dataset):
