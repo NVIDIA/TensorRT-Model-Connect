@@ -15,7 +15,30 @@ FP8 W8A8 GEMMs (per-tensor weight scale from the BF16 weights, static per-tensor
 activation scale from `fp8_activation_scales.json`). The attention output
 projection, `lm_head` and the embedding stay in 16-bit. Only the model config
 `mistral-h3072-l34-i8640` (Riva-Translate-4B) has calibrated scales; other
-configs are refused. No other quantization is accepted.
+configs are refused.
+
+### Prepared GPTQ W8A16
+
+For `RedHatAI/Mistral-7B-Instruct-v0.3-quantized.w8a16`, use FP16 compute
+and the original packed weights. No calibration or second checkpoint is needed.
+A build with the matching Edge-LLM 0.12 C++ SDK can offload ordinary batch-one
+text generation to the Edge checkpoint-direct builder:
+
+```bash
+trtmc mistral build RedHatAI/Mistral-7B-Instruct-v0.3-quantized.w8a16 \
+  --revision 5079e6662632d88ac726516beccf202c925402a0 \
+  --precision fp16 --quantization w8a16 --max-sequence-length 256 \
+  --edge-builder-python /absolute/path/to/edge-env/bin/python -o mistral.bundle
+trtmc run mistral.bundle --prompt 'What is the capital of Japan? Answer in one word.' \
+  --use-chat-template true --enable-thinking false --max-new-tokens 10
+```
+
+With no matching SDK the native TensorRT builder uses the same checkpoint's
+signed INT8 values and FP16 channel scales for both prefill and decode. If the
+Edge builder fails, the family warns and retries native before writing bundle
+sections. An Edge bundle and a native bundle use different runtimes; inspect
+the bundle for `edge_llm.json` to distinguish them. TensorRT chooses the actual
+kernels; the weight format is not a throughput guarantee.
 
 ### NVFP4
 
