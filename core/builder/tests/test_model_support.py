@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,10 +14,13 @@ from tensorrt_model_connect.model_support import (
     AmbiguousFamilyError,
     FamilyResolutionError,
     FamilySupport,
+    IncompleteMetadataError,
     ModelMetadata,
+    decide_support,
     family_support,
     load_model_metadata,
     resolve_family,
+    support_from_json,
 )
 
 
@@ -294,3 +298,174 @@ def test_family_owned_exact_metadata_shapes_resolve_without_priority(
 ) -> None:
     family, _ = resolve_family(metadata)
     assert family == expected_family
+
+
+def _write_rules(tmp_path: Path, rules: list, name: str = "support") -> Path:
+    support_py = tmp_path / f"{name}.py"
+    support_py.write_text("", encoding="utf-8")
+    (tmp_path / f"{name}.json").write_text(
+        json.dumps({"schema_version": 1, "rules": rules}), encoding="utf-8"
+    )
+    return support_py
+
+
+GENERATION = {"tasks": ["generation"], "default_task": "generation"}
+
+
+def test_support_rules_use_the_first_matching_rule_and_reject_stops(tmp_path) -> None:
+    describe = support_from_json(
+        _write_rules(
+            tmp_path,
+            [
+                {"if": {"/config/variant": {"exists": True}}, "then": "reject"},
+                {
+                    "if": {"/config/model_type": {"in": ["alpha"]}, "files_all": ["extra.json"]},
+                    "then": {"tasks": ["embedding"], "default_task": "embedding", "default_precision": "bf16"},
+                },
+                {"if": {"/config/model_type": {"in": ["alpha"]}}, "then": GENERATION},
+            ],
+        )
+    )
+
+    plain = describe(ModelMetadata({"model_type": "alpha"}, {}, ("config.json",)))
+    extra = describe(ModelMetadata({"model_type": "alpha"}, {}, ("config.json", "extra.json")))
+    rejected = describe(ModelMetadata({"model_type": "alpha", "variant": 1}, {}, ("config.json",)))
+
+    assert plain == FamilySupport(("generation",), "generation")
+    assert extra == FamilySupport(("embedding",), "embedding", "bf16")
+    assert rejected is None
+    assert describe(ModelMetadata({"model_type": "Alpha"}, {}, ("config.json",))) is None
+
+
+@pytest.mark.parametrize(
+    ("test", "value", "expected"),
+    [
+        ({"in": ["a", "b"]}, "b", True),
+        ({"in": ["a"]}, ["a"], False),
+        ({"contains_any": ["X"]}, ["Y", "X"], True),
+        ({"contains_any": ["X"]}, "X", False),
+        ({"equals": {"k": 1}}, {"k": 1}, True),
+        ({"equals": 1}, 1.0, True),
+        ({"equals": {"k": 1}}, {"k": True}, False),
+        ({"equals": [1, "a"]}, [True, "a"], False),
+        ({"exists": False}, None, True),
+        ({"prefix": "yo"}, "yolo", True),
+        ({"prefix": "yo"}, 3, False),
+        ({"type": "object"}, {}, True),
+        ({"type": "number"}, True, False),
+        ({"nonempty": True}, {"a": 1}, True),
+        ({"nonempty": False}, [], True),
+    ],
+)
+def test_support_rule_tests_compare_exact_values(tmp_path, test, value, expected) -> None:
+    describe = support_from_json(
+        _write_rules(tmp_path, [{"if": {"/config/field": test}, "then": GENERATION}])
+    )
+    config = {} if value is None else {"field": value}
+
+    assert (describe(ModelMetadata(config, {}, ("config.json",))) is not None) is expected
+
+
+def test_support_rules_read_repo_identity_adapter_and_nested_pointers(tmp_path) -> None:
+    describe = support_from_json(
+        _write_rules(
+            tmp_path,
+            [
+                {"if": {"/repo_id": {"in": ["owner/model"]}}, "then": GENERATION},
+                {
+                    "if": {
+                        "/adapter_config/base_model_name_or_path": {"equals": "owner/base"},
+                        "/config/a~1b/c": {"equals": 1},
+                    },
+                    "then": GENERATION,
+                },
+            ],
+        )
+    )
+
+    assert describe(ModelMetadata({}, {}, (), repo_id="owner/model")) is not None
+    assert describe(
+        ModelMetadata(
+            {"a/b": {"c": 1}},
+            {},
+            ("config.json", "adapter_config.json"),
+            adapter_config={"base_model_name_or_path": "owner/base"},
+        )
+    ) is not None
+    assert describe(ModelMetadata({}, {}, (), repo_id="owner/other")) is None
+
+
+def test_support_rules_refuse_to_decide_when_a_listed_file_was_not_read(tmp_path) -> None:
+    describe = support_from_json(
+        _write_rules(
+            tmp_path,
+            [{"if": {"/config/text_config/gate": {"exists": False}}, "then": GENERATION}],
+        )
+    )
+
+    with pytest.raises(IncompleteMetadataError, match="config.json"):
+        describe(ModelMetadata(None, {}, ("config.json",)))
+    assert describe(ModelMetadata(None, {}, ("model.safetensors",))) is not None
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        ({"schema_version": 2, "rules": []}, "schema_version"),
+        ({"schema_version": 1, "rules": [{"if": {"/config/x": {"like": "a"}}, "then": GENERATION}]}, "unknown test"),
+        ({"schema_version": 1, "rules": [{"if": {"model_type": {"in": ["a"]}}, "then": GENERATION}]}, "unknown condition"),
+        ({"schema_version": 1, "rules": [{"if": {"/weights/x": {"exists": True}}, "then": GENERATION}]}, "unknown document"),
+        ({"schema_version": 1, "rules": [{"if": {}, "then": GENERATION}]}, "at least one condition"),
+        ({"schema_version": 1, "rules": [{"if": {"/repo_id": {"in": ["a/b"]}}, "then": {"tasks": ["x"], "default_task": "y"}}]}, "default_task"),
+    ],
+)
+def test_support_rules_reject_invalid_files(tmp_path, document, message) -> None:
+    (tmp_path / "support.py").write_text("", encoding="utf-8")
+    (tmp_path / "support.json").write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        support_from_json(tmp_path / "support.py")
+
+
+def test_decide_support_reports_supported_unsupported_conflict_and_incomplete(monkeypatch) -> None:
+    support_module = importlib.import_module("tensorrt_model_connect.model_support")
+    alpha = family_support(model_types=("alpha",), tasks=("generation",), default_task="generation")
+
+    def incomplete(metadata):
+        raise IncompleteMetadataError("config.json was not read")
+
+    modules = {
+        "families.alpha.support": SimpleNamespace(describe=alpha),
+        "families.beta.support": SimpleNamespace(describe=lambda metadata: None),
+    }
+    monkeypatch.setattr(
+        support_module, "_family_directories", lambda: [Path("alpha"), Path("beta")]
+    )
+    monkeypatch.setattr(importlib, "import_module", lambda name: modules[name])
+
+    supported = decide_support(ModelMetadata({"model_type": "alpha"}, {}))
+    unsupported = decide_support(ModelMetadata({"model_type": "other"}, {}))
+    modules["families.beta.support"] = SimpleNamespace(describe=alpha)
+    conflict = decide_support(ModelMetadata({"model_type": "alpha"}, {}))
+    modules["families.beta.support"] = SimpleNamespace(describe=incomplete)
+    pending = decide_support(ModelMetadata({"model_type": "alpha"}, {}))
+
+    assert (supported.status, supported.family) == ("supported", "alpha")
+    assert supported.support == FamilySupport(("generation",), "generation")
+    assert (unsupported.status, unsupported.family) == ("unsupported", None)
+    assert (conflict.status, conflict.matches) == ("conflict", ("alpha", "beta"))
+    assert (pending.status, pending.family) == ("incomplete", None)
+    assert pending.missing == ("beta",)
+    with pytest.raises(IncompleteMetadataError, match="beta"):
+        resolve_family(ModelMetadata({"model_type": "alpha"}, {}))
+
+
+def test_load_model_metadata_reads_adapter_and_remote_identity(tmp_path) -> None:
+    (tmp_path / "adapter_config.json").write_text(
+        '{"base_model_name_or_path": "owner/base"}', encoding="utf-8"
+    )
+
+    metadata = load_model_metadata(tmp_path, repo_id="owner/adapter", revision="abc123")
+
+    assert metadata.adapter_config == {"base_model_name_or_path": "owner/base"}
+    assert (metadata.repo_id, metadata.revision) == ("owner/adapter", "abc123")
