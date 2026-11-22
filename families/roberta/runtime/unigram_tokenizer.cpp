@@ -205,16 +205,21 @@ bool whitespace_at(const std::string& text, size_t pos) {
            cp == 0x205F || cp == 0x3000;
 }
 
-std::vector<std::string> whitespace_split(const std::string& text) {
+std::vector<std::string> whitespace_split(const std::string& text, bool unicode_whitespace) {
     std::vector<std::string> words;
+    const auto is_space = [&](size_t pos) {
+        return unicode_whitespace ? whitespace_at(text, pos)
+                                  : text[pos] == ' ' || text[pos] == '\t' || text[pos] == '\n' ||
+                                        text[pos] == '\r';
+    };
     size_t i = 0;
     while (i < text.size()) {
-        while (i < text.size() && whitespace_at(text, i))
+        while (i < text.size() && is_space(i))
             i = roberta_unicode::codepoint_end(text, i);
         if (i >= text.size())
             break;
         size_t start = i;
-        while (i < text.size() && !whitespace_at(text, i))
+        while (i < text.size() && !is_space(i))
             i = roberta_unicode::codepoint_end(text, i);
         words.push_back(text.substr(start, i - start));
     }
@@ -389,7 +394,7 @@ class UnigramTokenizer final : public ITokenizer {
                     ids.push_back(segment.id);
                     continue;
                 }
-                for (const auto& word : whitespace_split(segment.text)) {
+                for (const auto& word : whitespace_split(segment.text, mWhitespaceSplit)) {
                     auto word_ids = viterbi_encode(kMetaspaceChar + word, mTrie, mUnkId, mUnkScore);
                     ids.insert(ids.end(), word_ids.begin(), word_ids.end());
                 }
@@ -646,12 +651,17 @@ class UnigramTokenizer final : public ITokenizer {
         auto& pt = j["pre_tokenizer"];
         std::string ptype = pt.value("type", "");
 
+        if (ptype == "WhitespaceSplit")
+            mWhitespaceSplit = true;
+
         if (ptype == "Metaspace") {
             mAddPrefixSpace = pt.value("add_prefix_space", true);
         } else if (ptype == "Sequence") {
             // Look for Metaspace inside the sequence
             if (pt.contains("pretokenizers")) {
                 for (auto& sub : pt["pretokenizers"]) {
+                    if (sub.value("type", "") == "WhitespaceSplit")
+                        mWhitespaceSplit = true;
                     if (sub.value("type", "") == "Metaspace") {
                         mAddPrefixSpace = sub.value("add_prefix_space", true);
                         break;
@@ -767,6 +777,7 @@ class UnigramTokenizer final : public ITokenizer {
     bool mAddSpecialTokens = true;
     std::vector<NormalizerStep> mNormalizerSteps;
     bool mAddPrefixSpace = true;
+    bool mWhitespaceSplit = false;
 
     int32_t mBosId = -1;
     int32_t mEosId = -1;

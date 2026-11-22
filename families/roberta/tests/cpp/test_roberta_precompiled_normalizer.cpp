@@ -68,6 +68,10 @@ int main(int argc, char** argv) {
     check(*create(whitespace), u8"A\u1680B", {3, 4, 3, 5});
     check(*create(whitespace), u8"A\u0085B", {3, 4, 3, 5});
     check(*create(whitespace), "A\vB\fA", {3, 4, 3, 5, 3, 4});
+    auto metaspace_only = fixture;
+    metaspace_only["normalizer"] = nullptr;
+    check(*create(metaspace_only), u8"A\u1680B", {3, 4, 0, 5});
+    check(*create(metaspace_only), u8"A\u0085B", {3, 4, 0, 5});
     auto suffix = fixture;
     suffix["normalizer"]["precompiled_charsmap"] = data.at("valid_charsmaps").at("ascii_suffix");
     check(*create(suffix), u8"ﬁ", {3, 0});
@@ -93,8 +97,10 @@ int main(int argc, char** argv) {
     check(*framed, u8"ＡＢ", {1, 3, 0, 2});
     check(*framed, "", {1, 2});
     check(*create(identity), "AB", {3, 4, 5});
-    check(*create(identity), u8"A\u0085B", {3, 4, 3, 5});
-    check(*create(identity), "A\vB\fA", {3, 4, 3, 5, 3, 4});
+    auto split_identity = identity;
+    split_identity["pre_tokenizer"] = whitespace["pre_tokenizer"];
+    check(*create(split_identity), u8"A\u0085B", {3, 4, 3, 5});
+    check(*create(split_identity), "A\vB\fA", {3, 4, 3, 5, 3, 4});
 
     auto added = fixture;
     added["pre_tokenizer"] = {
