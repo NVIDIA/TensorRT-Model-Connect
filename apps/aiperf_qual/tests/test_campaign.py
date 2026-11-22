@@ -68,6 +68,19 @@ def test_ensure_bundle_lets_trtmc_bench_decide_reuse_by_its_build_receipt(tmp_pa
     assert bundles.ensure_bundle(environment, _model("m", "org/m"), tmp_path / "out")["status"] == "built"
 
 
+def test_trtmc_bench_gets_the_qualification_build_time_limit(tmp_path, monkeypatch):
+    environment = Environment({"repo": str(tmp_path), "bundle_root": str(tmp_path / "engines")})
+    report = tmp_path / "limit.txt"
+    probe = [sys.executable, "-c", "import os, pathlib, sys; "
+             f"pathlib.Path({str(report)!r}).write_text(os.environ.get('TRTMC_BENCH_BUILD_TIMEOUT_S', '')); sys.exit(1)"]
+    monkeypatch.setattr(bundles, "build_command", lambda *args: probe)
+    bundles.ensure_bundle(environment, _model("m", "org/m"), tmp_path / "out")
+    assert report.read_text() == str(bundles.BUILD_TIMEOUT_S)  # not trtmc-bench's own 1 h default
+    environment = Environment({**environment.values, "build_env": {"TRTMC_BENCH_BUILD_TIMEOUT_S": "60"}})
+    bundles.ensure_bundle(environment, _model("m", "org/m"), tmp_path / "out")
+    assert report.read_text() == "60"  # an environment that states its own limit keeps it
+
+
 def test_ensure_bundle_records_a_failed_build_under_the_gpu_lock(tmp_path, monkeypatch):
     environment = Environment({"repo": str(tmp_path), "bundle_root": str(tmp_path / "engines"),
                                "gpu_lock": str(tmp_path / "gpu.lock")})
