@@ -36,6 +36,9 @@ set_target_properties(trtmc_model_bert PROPERTIES
 install(TARGETS trtmc_model_bert
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/UNICODE-LICENSE.txt
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/trtmc/families/bert
+)
 
 # The application adapter can load a model; the model never depends on its loader.
 add_library(trtmc_cli_bert SHARED cli.cpp)

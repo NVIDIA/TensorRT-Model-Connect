@@ -54,6 +54,7 @@ class PrecompiledNormalizer {
         mReplacements.assign(bytes.begin() + 4 + trie_bytes, bytes.end());
         if (mReplacements.back() != '\0')
             throw std::runtime_error("Invalid Precompiled charsmap string pool");
+        validate_replacements();
         if (label(mUnits[0]) != 0 || (mUnits[0] & 256) != 0 || offset(mUnits[0]) == 0)
             throw std::runtime_error("Invalid Precompiled charsmap root");
         for (size_t i = 0; i < mUnits.size(); ++i) {
@@ -64,8 +65,11 @@ class PrecompiledNormalizer {
                     throw std::runtime_error("Invalid Precompiled charsmap trie offset");
                 if ((unit & 256) != 0 && (mUnits[child] & 0x80000000U) == 0)
                     throw std::runtime_error("Invalid Precompiled charsmap leaf");
-            } else if ((unit & 0x7fffffffU) >= mReplacements.size()) {
-                throw std::runtime_error("Invalid Precompiled charsmap replacement offset");
+            } else {
+                const auto replacement = unit & 0x7fffffffU;
+                if (replacement >= mReplacements.size() ||
+                    (static_cast<unsigned char>(mReplacements[replacement]) & 0xc0) == 0x80)
+                    throw std::runtime_error("Invalid Precompiled charsmap replacement offset");
             }
         }
     }
@@ -76,8 +80,6 @@ class PrecompiledNormalizer {
         for (size_t pos = 0; pos < text.size();) {
             const auto end = bert_unicode::grapheme_end(text, pos);
             size_t replacement = 0;
-            // Match the checkpoint fast normalizer's short-grapheme lookup before its character
-            // fallback.
             if (end - pos < 6 && transform(text, pos, end, replacement)) {
                 result.append(mReplacements.data() + replacement);
                 pos = end;
@@ -113,6 +115,28 @@ class PrecompiledNormalizer {
             }
         }
         return false;
+    }
+
+    void validate_replacements() const {
+        for (size_t pos = 0; pos < mReplacements.size();) {
+            const auto first = static_cast<unsigned char>(mReplacements[pos]);
+            const size_t length = first < 0x80                     ? 1
+                                  : first >= 0xc2 && first <= 0xdf ? 2
+                                  : first >= 0xe0 && first <= 0xef ? 3
+                                  : first >= 0xf0 && first <= 0xf4 ? 4
+                                                                   : 0;
+            if (length == 0 || length > mReplacements.size() - pos)
+                throw std::runtime_error("Invalid Precompiled replacement UTF-8");
+            for (size_t i = 1; i < length; ++i) {
+                if ((static_cast<unsigned char>(mReplacements[pos + i]) & 0xc0) != 0x80)
+                    throw std::runtime_error("Invalid Precompiled replacement UTF-8");
+            }
+            const auto cp = bert_unicode::codepoint(mReplacements, pos, pos + length);
+            if ((length == 3 && cp < 0x800) || (length == 4 && cp < 0x10000) ||
+                (cp >= 0xd800 && cp <= 0xdfff) || cp > 0x10ffff)
+                throw std::runtime_error("Invalid Precompiled replacement UTF-8");
+            pos += length;
+        }
     }
 
     static uint32_t label(uint32_t unit) { return unit & 0x800000ffU; }
@@ -173,21 +197,25 @@ std::string lowercase_ascii(std::string text) {
 
 static const std::string kMetaspaceChar = "\xe2\x96\x81"; // ▁ U+2581
 
-inline bool is_ws(char c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+bool whitespace_at(const std::string& text, size_t pos) {
+    const auto end = bert_unicode::codepoint_end(text, pos);
+    const auto cp = bert_unicode::codepoint(text, pos, end);
+    return (cp >= 0x09 && cp <= 0x0D) || cp == 0x20 || cp == 0x85 || cp == 0xA0 || cp == 0x1680 ||
+           (cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 || cp == 0x2029 || cp == 0x202F ||
+           cp == 0x205F || cp == 0x3000;
 }
 
 std::vector<std::string> whitespace_split(const std::string& text) {
     std::vector<std::string> words;
     size_t i = 0;
     while (i < text.size()) {
-        while (i < text.size() && is_ws(text[i]))
-            ++i;
+        while (i < text.size() && whitespace_at(text, i))
+            i = bert_unicode::codepoint_end(text, i);
         if (i >= text.size())
             break;
         size_t start = i;
-        while (i < text.size() && !is_ws(text[i]))
-            ++i;
+        while (i < text.size() && !whitespace_at(text, i))
+            i = bert_unicode::codepoint_end(text, i);
         words.push_back(text.substr(start, i - start));
     }
     return words;
@@ -351,9 +379,7 @@ class UnigramTokenizer final : public ITokenizer {
         }
 
         // Normalize
-        std::string normalized = mPrecompiled ? mPrecompiled->normalize(text) : text;
-        if (mLowercase)
-            normalized = lowercase_ascii(std::move(normalized));
+        std::string normalized = normalize_text(text);
 
         // Pre-tokenize: WhitespaceSplit → Metaspace
         auto words = whitespace_split(normalized);
@@ -396,6 +422,23 @@ class UnigramTokenizer final : public ITokenizer {
 
   private:
     UnigramTokenizer() = default;
+
+    struct NormalizerStep {
+        enum class Type { Precompiled, Lowercase };
+        Type type;
+        std::unique_ptr<PrecompiledNormalizer> precompiled;
+    };
+
+    std::string normalize_text(const std::string& text) const {
+        std::string normalized = text;
+        for (const auto& step : mNormalizerSteps) {
+            if (step.type == NormalizerStep::Type::Precompiled)
+                normalized = step.precompiled->normalize(normalized);
+            else
+                normalized = lowercase_ascii(std::move(normalized));
+        }
+        return normalized;
+    }
 
     static std::string decode_metaspace(const std::string& text) {
         std::string result;
@@ -489,15 +532,22 @@ class UnigramTokenizer final : public ITokenizer {
 
     void apply_normalizer_config(const nlohmann::json& norm) {
         const std::string ntype = norm.value("type", "");
+        if (ntype == "Sequence") {
+            for (const auto& sub : norm.at("normalizers"))
+                apply_normalizer_config(sub);
+            return;
+        }
         if (ntype == "Precompiled") {
             if (!norm.contains("precompiled_charsmap") ||
                 !norm.at("precompiled_charsmap").is_string())
                 throw std::runtime_error("Precompiled normalizer requires precompiled_charsmap");
-            mPrecompiled = std::make_unique<PrecompiledNormalizer>(norm.at("precompiled_charsmap"));
+            mNormalizerSteps.push_back(
+                {NormalizerStep::Type::Precompiled,
+                 std::make_unique<PrecompiledNormalizer>(norm.at("precompiled_charsmap"))});
             return;
         }
         if (ntype == "Lowercase") {
-            mLowercase = true;
+            mNormalizerSteps.push_back({NormalizerStep::Type::Lowercase, nullptr});
             return;
         }
         if (ntype == "Prepend") {
@@ -634,8 +684,7 @@ class UnigramTokenizer final : public ITokenizer {
     int32_t mUnkId = 0;
     float mUnkScore = -100.0f;
     bool mAddSpecialTokens = true;
-    std::unique_ptr<PrecompiledNormalizer> mPrecompiled;
-    bool mLowercase = false;
+    std::vector<NormalizerStep> mNormalizerSteps;
     bool mAddPrefixSpace = true;
 
     int32_t mBosId = -1;
