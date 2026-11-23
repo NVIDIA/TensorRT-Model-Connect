@@ -4,6 +4,10 @@
 find_package(ICU COMPONENTS uc i18n QUIET)
 if(NOT ICU_FOUND)
   message(STATUS "Skipping p_h3_image: install ICU development packages for Unicode tokenization")
+  add_custom_target(trtmc_model_p_h3_image
+    COMMAND ${CMAKE_COMMAND} -E echo "P-H3-Image runtime requires ICU uc and i18n development packages"
+    COMMAND ${CMAKE_COMMAND} -E false
+    VERBATIM)
   return()
 endif()
 add_library(trtmc_model_p_h3_image SHARED bpe_tokenizer.cpp plugin.cpp)
