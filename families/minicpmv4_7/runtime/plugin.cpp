@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/minicpmv4_7/runtime/engine_io.h"
 #include "families/minicpmv4_7/runtime/image_preprocess.h"
 #include "families/minicpmv4_7/runtime/prompt.h"
 #include "families/minicpmv4_7/runtime/request.h"
@@ -121,6 +122,20 @@ RuntimeConfig parse_runtime(const BundleReader& bundle) {
     return config;
 }
 
+// Fails unless the engine holds every tensor the runtime binds by name, as the builder writes it.
+void require_io(const ITrtModule& module, const std::vector<EngineTensor>& expected,
+                const char* engine) {
+    const auto name = first_mismatch(expected, [&](const char* tensor) -> ReportedTensor {
+        const bool input = module.has_input(tensor);
+        if (!input && !module.has_output(tensor))
+            return {};
+        return {true, input, module.tensor_dtype(tensor), module.tensor_shape(tensor)};
+    });
+    if (!name.empty())
+        throw std::runtime_error(std::string("minicpmv4_7 ") + engine +
+                                 " engine tensor disagrees with runtime.json: " + name);
+}
+
 class Model final : public internal::IModel, public internal::IImagesTextToText {
   public:
     explicit Model(const FamilyContext& context)
@@ -129,21 +144,19 @@ class Model final : public internal::IModel, public internal::IImagesTextToText 
             throw std::runtime_error("minicpmv4_7 bundle task must be images_text_to_text");
         const auto vision_plan = require_section(context.reader, "vision.plan");
         vision_ = context.backend.create_module(vision_plan.data(), vision_plan.size(), {});
-        if (!vision_ || !vision_->ok() || !vision_->has_output("image_features") ||
-            vision_->tensor_dtype("image_features") != config_.work)
+        if (!vision_ || !vision_->ok())
             throw std::runtime_error("minicpmv4_7 vision engine failed to load");
+        const int64_t patch = config_.processor.patch_size;
+        require_io(*vision_, vision_io(config_.work, 3 * patch * patch, config_.hidden), "vision");
         vision_->set_timing_label("minicpmv4_7 vision");
         {
             const auto plan = require_section(context.reader, "decoder.plan");
             decoder_ = context.backend.create_module(plan.data(), plan.size(), {});
         }
-        if (!decoder_ || !decoder_->ok() || !decoder_->has_output("logits"))
+        if (!decoder_ || !decoder_->ok())
             throw std::runtime_error("minicpmv4_7 decoder engine failed to load");
         decoder_->set_timing_label("minicpmv4_7 decoder");
-        if (decoder_->tensor_dtype("visual_embedding") != config_.work ||
-            decoder_->tensor_shape("visual_embedding") != std::vector<int64_t>{1, config_.hidden} ||
-            decoder_->tensor_shape("logits") != std::vector<int64_t>{1, config_.vocab})
-            throw std::runtime_error("minicpmv4_7 decoder disagrees with runtime.json");
+        require_io(*decoder_, decoder_io(config_.work, config_.hidden, config_.vocab), "decoder");
         state_ = std::make_unique<DecoderState>(config_.state, decoder_->stream());
         state_->bind(*decoder_);
         const auto tokenizer_json = require_section(context.reader, "tokenizer.json");

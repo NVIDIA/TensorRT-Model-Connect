@@ -5,10 +5,11 @@
 
 // Host-only contract of the MiniCPM-V 4.7 runtime against values recorded from the provider
 // (transformers 5.22.2, tokenizers 0.23.1): image slicing, vision position ids, canvas M-RoPE,
-// the chat format, request preparation, the generation budget and sampling, BPE merge order, the
-// tokenizer's NFC and its token ids.
+// the chat format, request preparation, the engines' I/O, the generation budget and sampling, BPE
+// merge order, the tokenizer's NFC and its token ids.
 
 #include "families/minicpmv4_7/runtime/bpe_merge.h"
+#include "families/minicpmv4_7/runtime/engine_io.h"
 #include "families/minicpmv4_7/runtime/image_preprocess.h"
 #include "families/minicpmv4_7/runtime/prompt.h"
 #include "families/minicpmv4_7/runtime/request.h"
@@ -19,6 +20,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -344,6 +346,74 @@ void request_preparation() {
            "Float32 pixels scale to bytes");
 }
 
+// Every engine tensor the runtime binds by name must be there in its direction, with the builder's
+// dtype and static dimensions; a dimension each call sets (-1) takes any extent.
+void engine_io() {
+    using trtmc::DType;
+    const auto vision = vision_io(DType::kBFloat16, 588, 8);
+    const auto decoder = decoder_io(DType::kBFloat16, 8, 32);
+    std::map<std::string, ReportedTensor> built;
+    for (const auto* tensors : {&vision, &decoder})
+        for (const auto& tensor : *tensors) {
+            auto shape = tensor.shape;
+            for (auto& extent : shape)
+                extent = extent == -1 ? 64 : extent;
+            built[tensor.name] = {true, tensor.input, tensor.dtype, shape};
+        }
+    const auto mismatch = [](const std::vector<EngineTensor>& expected,
+                             const std::map<std::string, ReportedTensor>& engine) {
+        return first_mismatch(expected, [&](const char* name) {
+            const auto found = engine.find(name);
+            return found == engine.end() ? ReportedTensor{} : found->second;
+        });
+    };
+    const auto changed = [&](const char* name, const std::function<void(ReportedTensor&)>& edit) {
+        auto engine = built;
+        edit(engine[name]);
+        return engine;
+    };
+    expect(mismatch(vision, built).empty() && mismatch(decoder, built).empty(),
+           "engine I/O as the builder writes it");
+    // vision.py and decoder.py: FP32 pixels and logits, INT32 ids and offsets, the working dtype
+    // for the visual embedding.
+    const auto dtype_of = [](const std::vector<EngineTensor>& tensors, const std::string& name) {
+        for (const auto& tensor : tensors)
+            if (name == tensor.name)
+                return tensor.dtype;
+        return DType::kInt8;
+    };
+    expect(dtype_of(vision, "pixel_patches") == DType::kFloat32 &&
+               dtype_of(vision, "merge_index") == DType::kInt32 &&
+               dtype_of(decoder, "token_id") == DType::kInt32 &&
+               dtype_of(decoder, "rotary_position_offsets") == DType::kInt32 &&
+               dtype_of(decoder, "visual_embedding") == DType::kBFloat16 &&
+               dtype_of(decoder, "logits") == DType::kFloat32,
+           "the builder's engine dtypes");
+    expect(mismatch(decoder, changed("logits", [](auto& t) { t.dtype = DType::kFloat16; })) ==
+                   "logits" &&
+               mismatch(decoder, changed("logits", [](auto& t) { t.dtype = DType::kBFloat16; })) ==
+                   "logits",
+           "half-precision logits rejected");
+    expect(mismatch(vision, changed("pixel_patches", [](auto& t) { t.dtype = DType::kFloat16; })) ==
+                   "pixel_patches" &&
+               mismatch(decoder, changed("token_id", [](auto& t) { t.dtype = DType::kFloat32; })) ==
+                   "token_id",
+           "inputs of another dtype rejected");
+    expect(mismatch(decoder, changed("rotary_position_offsets", [](auto& t) { t.shape = {4}; })) ==
+                   "rotary_position_offsets" &&
+               mismatch(vision, changed("image_features", [](auto& t) { t.shape = {64, 9}; })) ==
+                   "image_features" &&
+               mismatch(vision,
+                        changed("pixel_patches", [](auto& t) { t.shape = {64, 3, 14, 14}; })) ==
+                   "pixel_patches",
+           "another static dimension or rank rejected");
+    expect(mismatch(decoder, changed("use_visual_embedding", [](auto& t) { t.present = false; })) ==
+                   "use_visual_embedding" &&
+               mismatch(decoder, changed("visual_embedding", [](auto& t) { t.input = false; })) ==
+                   "visual_embedding",
+           "a missing tensor or one in the other direction rejected");
+}
+
 void sampling() {
     // Non-finite logits fail on both paths instead of reaching the orderings and the weights.
     const float nan = std::numeric_limits<float>::quiet_NaN();
@@ -433,6 +503,7 @@ int main() {
     canvas();
     conversation();
     request_preparation();
+    engine_io();
     generation();
     sampling();
     bpe_merges();
