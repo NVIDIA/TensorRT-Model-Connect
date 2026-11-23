@@ -1,2 +1,3 @@
-# The repository base image supplies TensorRT, PyTorch and safetensors.
+# PyTorch reads BF16 safetensors weights and runs the upstream reference.
+torch>=2.6
 transformers==5.2.0
