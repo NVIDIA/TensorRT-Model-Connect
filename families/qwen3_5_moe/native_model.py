@@ -2399,9 +2399,30 @@ def _two_engines_fit(weight_bytes: int, gpu_bytes: int | None) -> bool:
     return False
 
 
-def _checkpoint_bytes(model_dir: Path) -> int:
-    """Size of the checkpoint's weight files: what each engine carries, packed experts included."""
-    return sum(path.stat().st_size for path in Path(model_dir).glob("*.safetensors"))
+def _checkpoint_bytes(readers) -> int:
+    """Size of the shards the loader mapped: what each engine carries, packed experts included."""
+    return sum(len(reader.mapping) for reader in readers)
+
+
+def _wants_prefill_engine(weights, readers, *, tensor_parallel_size: int, require_mtp: bool,
+                          has_draft: bool) -> bool:
+    """Whether the bundle adds the chunked prefill engine: single-GPU GPTQ without MTP or a draft, if it fits."""
+    return (not require_mtp and not has_draft and tensor_parallel_size == 1
+            and _dense_prefill_experts(weights)
+            and _two_engines_fit(_checkpoint_bytes(readers), _gpu_memory_bytes()))
+
+
+def _stage_prefill_engine(writer, build) -> bool:
+    """Stage ``prefill.plan`` from ``build()``. The engine is optional: if its build fails, the bundle keeps
+    the single-engine layout and prompts run through the decode engine."""
+    try:
+        plan = build()
+    except (RuntimeError, MemoryError) as error:
+        print(f"Skipping the prefill engine: its build failed ({error}); prompts run through the decode engine",
+              file=sys.stderr)
+        return False
+    writer.add_bytes("prefill.plan", plan)
+    return True
 
 
 def _dense_prefill_experts(weights) -> bool:
@@ -2506,9 +2527,8 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
     if require_mtp:
         model._load_mtp_weights(readers, weights, config)
     # Single-GPU GPTQ bundles add an engine that prefills the prompt (text and media rows) in chunks.
-    split = (not require_mtp and draft_config is None and int(request.tensor_parallel_size or 1) == 1
-             and _dense_prefill_experts(weights)
-             and _two_engines_fit(_checkpoint_bytes(model_dir), _gpu_memory_bytes()))
+    split = _wants_prefill_engine(weights, readers, tensor_parallel_size=int(request.tensor_parallel_size or 1),
+                                  require_mtp=require_mtp, has_draft=draft_config is not None)
     plan = model.build_engine(
         config,
         weights,
@@ -2524,7 +2544,7 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
     writer.add_bytes("engine.plan", plan)
     del plan  # The section is staged; do not retain a full plan during the next build.
     if split:
-        writer.add_bytes("prefill.plan", model.build_engine(
+        split = _stage_prefill_engine(writer, lambda: model.build_engine(
             config, weights, max_sequence_length, precision=precision,
             verbose=bool(request.verbose), media_inputs=visual, prefill_rows=PREFILL_MAX_TOKENS,
         ))
