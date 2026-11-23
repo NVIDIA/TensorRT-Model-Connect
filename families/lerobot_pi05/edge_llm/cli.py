@@ -13,7 +13,7 @@ from typing import ClassVar
 from urllib.request import urlopen
 
 from huggingface_hub.constants import HF_HUB_OFFLINE
-from tensorrt_model_connect.build import BuildRequest, build as publish
+from tensorrt_model_connect.build import build as publish
 from tensorrt_model_connect.model_support import load_model_metadata, resolve_family
 from ..openpi import POLICIES
 
@@ -27,13 +27,13 @@ _CHECKPOINTS = {
 
 @dataclass(frozen=True)
 class OpenPiBuildRequest:
-    """Inputs exposed by the family CLI; the generic LeRobot build keeps its own contract."""
+    """Inputs owned by the family CLI; a named policy selects the openpi action contract."""
 
     model_dir: Path
     output_path: Path
     precision: str
     verbose: bool
-    pi05_policy_config: str
+    pi05_policy_config: str | None = None
     edge_builder_python: Path | None = None
 
     family: ClassVar[str] = "lerobot_pi05"
@@ -46,7 +46,7 @@ class OpenPiBuildRequest:
     max_batch_size: ClassVar[int] = 1
     tensor_parallel_size: ClassVar[int] = 1
     context_parallel_size: ClassVar[int] = 1
-    quantization: ClassVar[None] = None
+    quantization: str | None = None
     fp32_layers: ClassVar[tuple[int, ...]] = ()
     dynamic_kv_cache: ClassVar[bool] = False
     graph_transform: ClassVar[None] = None
@@ -85,9 +85,9 @@ def build(*, model: str, output: Path, pi05_policy_config: str | None = None, re
             source = Path(snapshot_download(model, revision=revision or pinned,
                                            allow_patterns=["*.json", "*.safetensors", "tokenizer.model"]))
         _, support = resolve_family(load_model_metadata(source), "lerobot_pi05")
-        publish(BuildRequest(model_dir=source, output_path=output, family="lerobot_pi05",
-                             task=support.default_task, precision=precision or support.default_precision,
-                             verbose=verbose, quantization=quantization))
+        publish(OpenPiBuildRequest(model_dir=source, output_path=output,
+                                   precision=precision or support.default_precision,
+                                   verbose=verbose, quantization=quantization))
         return 0
     precision = precision or "fp16"
     if pi05_policy_config not in POLICIES or precision != "fp16" or quantization not in (None, "none"):
