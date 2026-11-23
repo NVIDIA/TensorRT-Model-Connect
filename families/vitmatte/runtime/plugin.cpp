@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "image_preprocess.h"
 #include "trtmc/internal/model.h"
 #include "trtmc/internal/perception.h"
 #include "trtmc/runtime/family_factory.h"
@@ -41,10 +42,8 @@ class Pipeline final : public internal::IModel, public internal::IImageTrimapToA
             for (uint32_t channel = 0; channel < 3; ++channel) {
                 const float value =
                     byte ? static_cast<const uint8_t*>(image.data)[index * 3 + channel]
-                         : static_cast<const float*>(image.data)[index * 3 + channel] * 255.0F;
-                if (!std::isfinite(value) || value < 0 || value > 255)
-                    throw std::invalid_argument("Invalid ViTMatte RGB value");
-                pixels[channel * area + index] = (value - 127.5F) / 127.5F;
+                         : static_cast<const float*>(image.data)[index * 3 + channel];
+                pixels[channel * area + index] = normalize_rgb(value, byte);
             }
             const auto state = trimap.states[index];
             if (state > 2)

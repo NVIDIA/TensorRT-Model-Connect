@@ -107,7 +107,7 @@ def _native_test_binary(name: str) -> Path:
 
 
 def _record_comparison(tmp_path, label, native, reference, checks):
-    """Retain the output pair and the result of already enforced comparisons."""
+    """Retain both outputs and the checks, including comparisons about to fail."""
     if not evidence_enabled():
         return
     import numpy as np
@@ -287,7 +287,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     torch.backends.cudnn.allow_tf32 = False
     with evidence_stage("reference"):
         reference = (
-            VitMatteForImageMatting.from_pretrained(directory, dtype=torch.float32)
+            VitMatteForImageMatting.from_pretrained(directory, torch_dtype=torch.float32)
             .eval()
             .to("cuda")
         )
@@ -370,12 +370,6 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         maximum = float(np.max(np.abs(error)))
         rmse = float(np.sqrt(np.mean(error**2)))
         record_evidence("metrics", {"sample": index, "max_abs_error": maximum, "rmse": rmse})
-        with evidence_stage("comparison"):
-            assert maximum <= case["max_abs_error"]
-        with evidence_stage("comparison"):
-            assert rmse <= case["max_rmse"]
-        with evidence_stage("comparison"):
-            assert np.count_nonzero((actual > 0.05) & (actual < 0.95)) > 100
         _record_comparison(
             tmp_path,
             f"alpha-{index}",
@@ -398,4 +392,10 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                 },
             ],
         )
+        with evidence_stage("comparison"):
+            assert maximum <= case["max_abs_error"]
+        with evidence_stage("comparison"):
+            assert rmse <= case["max_rmse"]
+        with evidence_stage("comparison"):
+            assert np.count_nonzero((actual > 0.05) & (actual < 0.95)) > 100
         print(f"ViTMatte trimap={index}: max_abs={maximum:.8g}, RMSE={rmse:.8g}")
