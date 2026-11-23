@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "families/pika_h3_flex/runtime/engine.h"
+#include "families/pika_h3_flex/runtime/math.h"
 #include "families/pika_h3_flex/runtime/random.h"
 #include "families/pika_h3_flex/runtime/tokenizer.h"
 #include "trtmc/internal/model.h"
@@ -297,6 +298,7 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     validate_latent_statistics(cfg.at("vae"), 24, "video");
     validate_latent_statistics(cfg.at("audio_vae"), 32, "audio");
     const auto tokenizer = loader.section("tokenizer.json");
+    initialize_math();
     return new Pipeline(std::move(loader),
                         CreateBpeTokenizer(tokenizer.data(), tokenizer.size(), false),
                         std::move(cfg));

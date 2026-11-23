@@ -595,3 +595,96 @@ def test_bf16_modulation_residual_and_affine(case_name, tmp_path):
     stream.synchronize()
     for name, value in actual.items():
         assert torch.equal(value, expected[name]), name
+
+
+def test_transformer_math_matches_pytorch(case_name, tmp_path):
+    """Learned BF16 norms, separate LoRA projections and SDPA retain their arithmetic."""
+    import tensorrt as trt
+    import torch
+    from families.pika_h3_flex.transformer_graph import TransformerGraph
+
+    _runtime()
+    generator = torch.Generator("cpu").manual_seed(42)
+
+    def weight(*shape):
+        return (torch.randn(shape, generator=generator) * 0.02).bfloat16()
+
+    data = {
+        "norm.weight": weight(5120) + 1,
+        "linear.weight": weight(64, 5120),
+        "linear.bias": weight(64),
+        **{f"attn.to_{kind}.weight": weight(256, 5120) for kind in ("q", "k", "v")},
+        "attn.norm_q.weight": weight(128) + 1,
+        "attn.norm_k.weight": weight(128) + 1,
+        "attn.to_out.0.weight": weight(5120, 256),
+    }
+    adapter = {
+        "linear.lora_A.default.weight": weight(8, 5120),
+        "linear.lora_B.default.weight": weight(64, 8),
+    }
+
+    class Weights:
+        def __init__(self, values):
+            self.data, self.index, self.adapter = values, dict.fromkeys(values), None
+
+        def read(self, name):
+            return self.data[name].float().numpy()
+
+    weights = Weights(data)
+    weights.adapter = Weights(adapter)
+    logger = trt.Logger(trt.Logger.WARNING)
+    graph = TransformerGraph(weights, logger, 1, 23, 64)
+    hidden = graph.net.add_input("hidden", trt.bfloat16, (-1, 5120))
+    graph.output(graph.norm(hidden, "norm", 1e-6), "rms")
+    graph.output(graph.norm(hidden, "norm", 1e-6, round_before_affine=True), "qwen_rms")
+    graph.output(graph.linear(hidden, "linear"), "linear")
+    graph.output(graph.silu(hidden), "silu")
+    graph.output(graph.attention(hidden, "attn", 2, 128, 1e-6), "attention")
+    path = tmp_path / "transformer-math.plan"
+    with path.open("wb") as stream:
+        graph.save(stream)
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(path.read_bytes())
+    assert engine is not None
+    context = engine.create_execution_context()
+    parameters = {name: value.cuda() for name, value in data.items()}
+    adapters = {name: value.cuda() for name, value in adapter.items()}
+
+    for rows in (23, 61):
+        inputs = torch.randn((rows, 5120), generator=generator).bfloat16().cuda()
+        normalized = inputs.float() * torch.rsqrt(inputs.float().square().mean(-1, True) + 1e-6)
+        linear = torch.nn.functional.linear(
+            inputs, parameters["linear.weight"], parameters["linear.bias"]
+        )
+        update = torch.nn.functional.linear(
+            torch.nn.functional.linear(inputs, adapters["linear.lora_A.default.weight"]),
+            adapters["linear.lora_B.default.weight"],
+        )
+        projections = []
+        for kind in ("q", "k", "v"):
+            value = torch.nn.functional.linear(inputs, parameters[f"attn.to_{kind}.weight"])
+            value = value.reshape(1, rows, 2, 128)
+            if kind != "v":
+                value = torch.nn.functional.rms_norm(
+                    value, (128,), parameters[f"attn.norm_{kind}.weight"], 1e-6
+                )
+            projections.append(value.permute(0, 2, 1, 3))
+        attended = torch.nn.functional.scaled_dot_product_attention(*projections)
+        attended = attended.permute(0, 2, 1, 3).reshape(rows, 256)
+        expected = {
+            "rms": torch.nn.functional.rms_norm(inputs, (5120,), parameters["norm.weight"], 1e-6),
+            "qwen_rms": normalized.bfloat16() * parameters["norm.weight"],
+            "linear": linear + update,
+            "silu": torch.nn.functional.silu(inputs),
+            "attention": torch.nn.functional.linear(attended, parameters["attn.to_out.0.weight"]),
+        }
+        assert context.set_input_shape("hidden", tuple(inputs.shape))
+        actual = {name: torch.empty_like(value) for name, value in expected.items()}
+        for name, value in {"hidden": inputs, **actual}.items():
+            context.set_tensor_address(name, value.data_ptr())
+        torch.cuda.synchronize()
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            assert context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+        torch.cuda.synchronize()
+        for name, value in actual.items():
+            assert torch.equal(value, expected[name]), (rows, name)

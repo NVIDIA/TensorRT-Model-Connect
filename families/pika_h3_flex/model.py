@@ -12,6 +12,7 @@ import tensorrt as trt
 from . import audio_decoder, denoiser, video_decoder
 from .graph import Graph, Weights
 from .text import _text_layer
+from .transformer_graph import TransformerGraph
 
 
 def build(request, writer):
@@ -97,8 +98,8 @@ def build(request, writer):
     logger = trt.Logger(trt.Logger.VERBOSE if request.verbose else trt.Logger.WARNING)
     writer.set_header(family="pika_h3_flex", task=request.task, backend=request.backend)
 
-    def emit(weights, name, populate, bounds=(1, min(64, length), length)):
-        graph = Graph(weights, logger, *bounds)
+    def emit(weights, name, populate, bounds=(1, min(64, length), length), graph_type=Graph):
+        graph = graph_type(weights, logger, *bounds)
         populate(graph)
         with writer.open_section(name + ".plan") as section:
             graph.save(section)
@@ -131,9 +132,19 @@ def build(request, writer):
         emit(tw, "text.embedding", embedding)
         # hidden_states[50] is before the remaining 14 layers and final norm.
         for layer in range(50):
-            emit(tw, f"text.layer.{layer}", lambda g, layer=layer: _text_layer(g, tc, layer))
-        emit(dw, "denoise.prepare", lambda g: denoiser._prepare(g, dc, video_rows, audio_rows))
-        emit(dw, "denoise.time", lambda g: denoiser._time(g, dc))
+            emit(
+                tw,
+                f"text.layer.{layer}",
+                lambda g, layer=layer: _text_layer(g, tc, layer),
+                graph_type=TransformerGraph,
+            )
+        emit(
+            dw,
+            "denoise.prepare",
+            lambda g: denoiser._prepare(g, dc, video_rows, audio_rows),
+            graph_type=TransformerGraph,
+        )
+        emit(dw, "denoise.time", lambda g: denoiser._time(g, dc), graph_type=TransformerGraph)
         bounds = tuple(video_rows + audio_rows + n for n in (1, min(64, length), length))
         for layer in range(50):
             emit(
@@ -141,8 +152,15 @@ def build(request, writer):
                 f"denoise.layer.{layer}",
                 lambda g, layer=layer: denoiser._denoise_layer(g, dc, layer),
                 bounds,
+                graph_type=TransformerGraph,
             )
-        emit(dw, "denoise.head", lambda g: denoiser._denoise_head(g, dc), bounds)
+        emit(
+            dw,
+            "denoise.head",
+            lambda g: denoiser._denoise_head(g, dc),
+            bounds,
+            graph_type=TransformerGraph,
+        )
         emit(vw, "video.input", lambda g: video_decoder.input_graph(g, vc))
         for layer in range(36):
             emit(

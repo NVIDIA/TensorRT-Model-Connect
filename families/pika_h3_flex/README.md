@@ -11,6 +11,14 @@ frame timestamps and 165333 interleaved stereo audio frames at 32 kHz, starting
 at time zero. The build uses BF16 text/denoiser computation and the published
 mixed FP32 projection boundaries, with FP32 video and audio decoders.
 
+The transformer graphs preserve the checkpoint's BF16 normalization, dense,
+LoRA, activation and attention boundaries through family-owned LibTorch
+bindings on the public TVM-FFI interface. Timestep features and projections
+retain their FP32 arithmetic. The native runtime registers these bindings
+before loading transformer engines; building and running requires matching
+LibTorch CUDA libraries and the TVM-FFI bridge. The FP32 media decoders use
+TensorRT operations.
+
 `seed` selects the portable CPU-generator stream, defaulting to 42. The runtime
 draws video noise, audio noise, then fresh video/audio noise for each of the six
 sampling steps. Tests compare this stream to the upstream CPU generator before

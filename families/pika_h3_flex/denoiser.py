@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-import numpy as np
 import tensorrt as trt
 
 
@@ -41,15 +40,8 @@ def _prepare(g, cfg, rows, audio_rows):
 def _time(g, cfg):
     timestep = g.net.add_input("timestep", trt.float32, (-1, 1))
     g.profiles["timestep"] = ((1, 1), (2, 1), (2, 1))
-    half = cfg["freq_dim"] // 2
-    frequency = np.exp(-np.log(10000.0) * np.arange(half, dtype=np.float32) / half).astype(
-        np.float32
-    )
-    angles = g.mul(timestep, g.const(frequency.reshape(1, -1), trt.float32))
-    cosine = g.net.add_unary(angles, trt.UnaryOperation.COS).get_output(0)
-    sine = g.net.add_unary(angles, trt.UnaryOperation.SIN).get_output(0)
     embedded = g.linear(
-        g.silu(g.linear(g.concat([cosine, sine], 1), "time_embedder.linear_1")),
+        g.silu(g.linear(g.time_features(timestep, cfg["freq_dim"]), "time_embedder.linear_1")),
         "time_embedder.linear_2",
     )
     # Every AdaLN projection applies SiLU in FP32, then converts to BF16.

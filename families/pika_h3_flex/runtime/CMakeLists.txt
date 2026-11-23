@@ -44,6 +44,21 @@ set_target_properties(trtmc_model_pika_h3_flex PROPERTIES
   BUILD_RPATH "\$ORIGIN;${TORCH_INSTALL_PREFIX}/lib"
   INSTALL_RPATH "\$ORIGIN;\$ORIGIN/../../torch/lib;${TORCH_INSTALL_PREFIX}/lib")
 install(TARGETS trtmc_model_pika_h3_flex LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+target_sources(trtmc_model_pika_h3_flex PRIVATE math_init.cpp)
+if(TARGET trtmc_byok_tvm_ffi)
+  target_sources(trtmc_model_pika_h3_flex PRIVATE math.cpp)
+  target_compile_definitions(trtmc_model_pika_h3_flex PRIVATE TRTMC_PIKA_HAS_MATH=1)
+  target_include_directories(trtmc_model_pika_h3_flex SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
+  target_link_libraries(trtmc_model_pika_h3_flex PRIVATE
+    trtmc_byok_tvm_ffi ${TRTMC_TVM_FFI_LIBRARY} torch_cuda c10_cuda ${CMAKE_DL_LIBS})
+  # LibTorch's CUDA dispatcher registrations must survive in a native process
+  # even when no Python interpreter has loaded torch_cuda beforehand.
+  target_link_options(trtmc_model_pika_h3_flex PRIVATE "LINKER:--no-as-needed")
+else()
+  target_compile_definitions(trtmc_model_pika_h3_flex PRIVATE TRTMC_PIKA_HAS_MATH=0)
+endif()
+set_property(TARGET trtmc_model_pika_h3_flex APPEND PROPERTY
+  INSTALL_RPATH "\$ORIGIN/../../tvm_ffi/lib;${TRTMC_TVM_FFI_LIBRARY_DIR}")
 if(TRTMC_BUILD_TESTS)
   add_executable(test_pika_h3_flex_runtime ${PROJECT_SOURCE_DIR}/families/pika_h3_flex/tests/cpp/test_runtime.cpp)
   target_link_libraries(test_pika_h3_flex_runtime PRIVATE trtmc_c nlohmann_json::nlohmann_json)
