@@ -5,8 +5,8 @@
 
 // Host-only contract of the MiniCPM-V 4.7 runtime against values recorded from the provider
 // (transformers 5.22.2, tokenizers 0.23.1): image slicing, vision position ids, canvas M-RoPE,
-// the chat format, request preparation, the generation budget and sampling, BPE merge order and
-// the tokenizer's NFC.
+// the chat format, request preparation, the generation budget and sampling, BPE merge order, the
+// tokenizer's NFC and its token ids.
 
 #include "families/minicpmv4_7/runtime/bpe_merge.h"
 #include "families/minicpmv4_7/runtime/image_preprocess.h"
@@ -406,6 +406,19 @@ void normalization() {
     expect(tokenizer_nfc("x\u1df6\u0316") == "x\u1df6\u0316", "no reordering across it");
 }
 
+// tokenizer.json ids are JSON integers checked before narrowing, so 2^32 + 5, -(2^32 - 5) or 9.5
+// never stand for the ids 5 or 9.
+void token_ids() {
+    const auto id = [](const char* text, int32_t end) {
+        return tokenizer_json_id(nlohmann::json::parse(text), end);
+    };
+    expect(id("0", 10) == 0 && id("5", 10) == 5 && id("9", 10) == 9, "token ids in range");
+    expect(!id("9.5", 10) && !id("5.0", 10), "fractional token ids");
+    expect(!id("4294967301", 10) && !id("-4294967291", 10), "token ids that narrow into range");
+    expect(!id("10", 10) && !id("-1", 10) && !id("\"5\"", 10) && !id("null", 10),
+           "out-of-range and non-numeric token ids");
+}
+
 } // namespace
 
 int main() {
@@ -418,6 +431,7 @@ int main() {
     sampling();
     bpe_merges();
     normalization();
+    token_ids();
     if (failures == 0)
         std::cout << "minicpmv4_7 host contract: all checks passed\n";
     return failures == 0 ? 0 : 1;

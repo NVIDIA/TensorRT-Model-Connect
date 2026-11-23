@@ -15,6 +15,7 @@
 #include <array>
 #include <cstdint>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <unicode/normalizer2.h>
@@ -412,10 +413,10 @@ class BpeTokenizer final : public ITokenizer {
         token_to_id_.reserve(kFullVocabSize);
         std::vector<bool> seen(kBaseVocabSize);
         for (const auto& [token, value] : values.items()) {
-            require_schema(value.is_number_integer(), "contains a non-integer vocabulary ID");
-            const auto id = value.get<std::int32_t>();
-            require_schema(id >= 0 && id < kBaseVocabSize,
-                           "contains an out-of-range vocabulary ID");
+            const auto parsed = tokenizer_json_id(value, kBaseVocabSize);
+            require_schema(parsed.has_value(),
+                           "contains a non-integer or out-of-range vocabulary ID");
+            const std::int32_t id = *parsed;
             require_schema(!seen[static_cast<std::size_t>(id)],
                            "contains a duplicate vocabulary ID");
             seen[static_cast<std::size_t>(id)] = true;
@@ -440,9 +441,9 @@ class BpeTokenizer final : public ITokenizer {
             const auto& value = values.at(index);
             require_schema(value.is_object() && value.size() == 7,
                            "contains an invalid added-token entry");
-            const std::int32_t id = value.at("id").get<std::int32_t>();
+            const auto parsed = tokenizer_json_id(value.at("id"), kFullVocabSize);
             const std::string content = value.at("content").get<std::string>();
-            require_schema(id == kBaseVocabSize + static_cast<std::int32_t>(index) &&
+            require_schema(parsed == kBaseVocabSize + static_cast<std::int32_t>(index) &&
                                !content.empty() && value.at("single_word") == false &&
                                value.at("lstrip") == false && value.at("rstrip") == false &&
                                value.at("normalized") == false,
@@ -450,6 +451,7 @@ class BpeTokenizer final : public ITokenizer {
             require_schema(std::all_of(content.begin(), content.end(),
                                        [](unsigned char byte) { return byte < 0x80U; }),
                            "contains a non-ASCII added token");
+            const std::int32_t id = *parsed;
             vocabulary_[static_cast<std::size_t>(id)] = content;
             require_schema(token_to_id_.emplace(content, id).second,
                            "contains duplicate added-token content");
@@ -567,6 +569,18 @@ std::string tokenizer_nfc(std::string_view text) {
     std::string result;
     normalize(text).toUTF8String(result);
     return result;
+}
+
+std::optional<std::int32_t> tokenizer_json_id(const nlohmann::json& value, std::int32_t end) {
+    // The parser stores non-negative integers as unsigned and negative ones as signed values.
+    if (value.is_number_unsigned()) {
+        if (const auto id = value.get<std::uint64_t>(); id < static_cast<std::uint64_t>(end))
+            return static_cast<std::int32_t>(id);
+    } else if (value.is_number_integer()) {
+        if (const auto id = value.get<std::int64_t>(); id >= 0 && id < end)
+            return static_cast<std::int32_t>(id);
+    }
+    return std::nullopt;
 }
 
 } // namespace trtmc::minicpmv4_7

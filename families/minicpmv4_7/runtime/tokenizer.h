@@ -8,6 +8,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <nlohmann/json_fwd.hpp>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -32,5 +34,9 @@ std::unique_ptr<ITokenizer> CreateBpeTokenizer(const char* tokenizer_json_data,
 // The tokenizer's NFC with the Unicode 9.0 data of the tokenizers library: a character assigned
 // later stays in place and bounds the normalization around it.
 std::string tokenizer_nfc(std::string_view text);
+
+// A tokenizer.json token id: the value when it is a JSON integer in [0, end), checked before it
+// is narrowed to 32 bits, so a fractional or wider value never stands for a valid id.
+std::optional<std::int32_t> tokenizer_json_id(const nlohmann::json& value, std::int32_t end);
 
 } // namespace trtmc::minicpmv4_7

@@ -80,13 +80,14 @@ def _token_metadata(model_dir: Path, config) -> tuple[dict, dict]:
     return ids, provider_recipes(tokenizer)
 
 
-def _eos_ids(model_dir: Path) -> list[int]:
+def _eos_ids(model_dir: Path, vocab_size: int) -> list[int]:
+    """End-of-sequence ids from ``generation_config.json``; each must be a decoder token id."""
     path = model_dir / "generation_config.json"
     raw = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     value = raw.get("eos_token_id")
     ids = [value] if type(value) is int else value
-    if not isinstance(ids, list) or not ids or any(type(i) is not int or i < 0 for i in ids):
-        raise ValueError("minicpmv4_7 requires generation_config.json eos_token_id")
+    if not isinstance(ids, list) or not ids or any(type(i) is not int or not 0 <= i < vocab_size for i in ids):
+        raise ValueError(f"minicpmv4_7 requires generation_config.json eos_token_id ids in [0, {vocab_size})")
     return ids
 
 
@@ -156,7 +157,7 @@ def build(request, writer) -> None:
         raise ValueError("minicpmv4_7 processor patch size disagrees with the vision tower")
     check_tokenizer_contract(model_dir, text.vocab_size)
     token_ids, prompts = _token_metadata(model_dir, config)
-    eos = _eos_ids(model_dir)
+    eos = _eos_ids(model_dir, text.vocab_size)
     writer.set_header(family="minicpmv4_7", task=request.task, backend=request.backend)
 
     checkpoint = Checkpoint(model_dir)
