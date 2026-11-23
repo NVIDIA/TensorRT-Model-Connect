@@ -50,7 +50,7 @@ def generate(normalization: Path, categories: Path) -> str:
     lines = [
         "/*",
         " * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
-        " * SPDX-License-Identifier: Apache-2.0 AND Unicode-3.0",
+        " * SPDX-License-Identifier: Apache-2.0",
         " */",
         "#pragma once",
         "// Note (Jiaxin Deng): Reference NFD and Mn tables use different Unicode versions.",
