@@ -605,6 +605,69 @@ def test_machine_model_list_is_validated(config, message):
         selection.select(config, CATALOG)
 
 
+def _platform(root, name, text):
+    (root / "platforms").mkdir(parents=True, exist_ok=True)
+    (root / "platforms" / f"{name}.yaml").write_text(text)
+
+
+def test_a_platforms_exclusions_follow_the_machines_own_and_its_deadlines_yield_to_the_machines(tmp_path):
+    from trtmc_aiperf_qual.config import load_environment
+
+    _platform(tmp_path / "config", "small", "models:\n  exclude:\n    - {profile: flux-2-dev*, reason: 128 GB}\n"
+                                            "deadlines: {qwen36-27b: 86400, flux-2-dev: 7200}\n")
+    path = tmp_path / "machine.yaml"
+    path.write_text("platform: small\nrepo: /repo\nmodels:\n  include: all\n  exclude:\n"
+                    "    - {profile: qwen36-27b, reason: no root here}\ndeadlines: {qwen36-27b: 3600}\n")
+    environment = load_environment(path, root=tmp_path / "config")
+    assert environment.values["platform"] == "small" and environment.values["repo"] == "/repo"
+    assert environment.values["models"] == {"include": "all", "exclude": [
+        {"profile": "qwen36-27b", "reason": "no root here"},
+        {"profile": "flux-2-dev*", "reason": "platform small: 128 GB"}]}
+    assert environment.values["deadlines"] == {"qwen36-27b": 3600, "flux-2-dev": 7200}
+    selected, excluded = selection.select(environment.values["models"], CATALOG)
+    assert _names(selected) == ["qwen3-0.6b-fp16"]
+    assert [item["reason"] for item in excluded] == ["no root here", "platform small: 128 GB", "platform small: 128 GB"]
+
+
+def test_an_environment_without_a_platform_is_read_as_written(tmp_path):
+    from trtmc_aiperf_qual.config import load_environment
+
+    path = tmp_path / "machine.yaml"
+    path.write_text("repo: /repo\nmodels: {include: all}\n")
+    assert load_environment(path, root=tmp_path / "config").values == {"repo": "/repo", "models": {"include": "all"}}
+
+
+@pytest.mark.parametrize("platform, machine, message", [
+    (None, "platform: other\n", "unknown platform 'other'; config/platforms has: small"),
+    ("models: {include: [qwen*]}\n", "platform: small\n", "models may only hold exclude"),
+    ("models: {exclude: [{profile: flux-2-dev}]}\n", "platform: small\n", "list of {profile, reason}"),
+    ("models: {exclude: [{profile: flux-2-dev, reason: ' '}]}\n", "platform: small\n", "list of {profile, reason}"),
+    ("deadlines: {flux-2-dev: 0}\n", "platform: small\n", "positive seconds"),
+    ("retention: {bundle: retain}\n", "platform: small\n", "unknown keys retention"),
+    ("models: {exclude: []}\n", "platform: small\nmodels: {exclude: flux-2-dev}\n", "must be a list"),
+])
+def test_a_platform_and_its_use_are_validated(tmp_path, platform, machine, message):
+    from trtmc_aiperf_qual.config import load_environment
+
+    _platform(tmp_path / "config", "small", platform or "models: {exclude: []}\n")
+    path = tmp_path / "machine.yaml"
+    path.write_text(machine)
+    with pytest.raises(ConfigError, match=message.replace("{", r"\{").replace("}", r"\}")):
+        load_environment(path, root=tmp_path / "config")
+
+
+def test_every_platform_of_the_repository_loads_and_names_ready_catalog_profiles():
+    from trtmc_aiperf_qual.config import platforms, with_platform
+
+    names = {profile.name for profile in selection.catalog(REPOSITORY)}
+    assert {"gb300", "dgx-spark", "jetson-thor"} <= set(platforms())
+    for platform in platforms():
+        values = with_platform({"platform": platform})
+        for rule in values["models"]["exclude"]:
+            assert rule["profile"] in names and rule["reason"].startswith(f"platform {platform}: "), rule
+        assert set(values["deadlines"]) <= names, platform
+
+
 def test_summary_omits_exclusions_but_keeps_an_actual_result_from_another_host(tmp_path):
     root = tmp_path / "gb300-1"
     campaign.write_exclusions(root, [{"profile": "flux-2-dev", "task": "image_generation", "reason": "80 GB GPU"},
