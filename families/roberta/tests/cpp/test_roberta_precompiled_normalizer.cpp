@@ -140,6 +140,18 @@ int main(int argc, char** argv) {
     auto stripped = create(added_identity);
     check(*stripped, u8"A<mask>▁B", {3, 4, 12, 3, 5});
     check(*stripped, u8"▁AB", {3, 4, 5});
+    auto meta_identity = added_identity;
+    meta_identity["pre_tokenizer"] = fixture["pre_tokenizer"];
+    auto meta = create(meta_identity);
+    check(*meta, " ", {3});
+    check(*meta, "A ", {3, 4, 3});
+    check(*meta, " A", {3, 4});
+    check(*meta, "A  B", {3, 4, 3, 3, 5});
+    check(*meta, u8"▁ ", {3, 3});
+    check(*meta, u8"<mask>▁ ", {12, 3, 3});
+    auto no_crossing = meta_identity;
+    no_crossing["model"]["vocab"].push_back({u8"▁A▁B", 100.0});
+    check(*create(no_crossing), u8"A▁B", {3, 4, 3, 5});
     check(*stripped, u8"A\u0085<mask>\u00a0B", {3, 4, 12, 3, 5});
     check(*stripped, u8"<mask>\u3000<mask>", {12, 12});
     check(*stripped, "A <mask> B", {3, 4, 12, 3, 5});
