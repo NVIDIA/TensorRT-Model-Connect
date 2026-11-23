@@ -30,15 +30,25 @@ def sdk(target, explicit_python):
         if not receipt.is_file():
             continue
         info = json.loads(receipt.read_text())
+        if not isinstance(info, dict):
+            raise ValueError("Bolt Edge SDK receipt must be a JSON object")
+        architectures = info.get("architectures")
+        cuda_version = info.get("cuda_version")
+        if not (
+            isinstance(architectures, list)
+            and all(type(sm) is int for sm in architectures)
+            and isinstance(cuda_version, str)
+        ):
+            raise ValueError("Bolt Edge SDK receipt has invalid architectures or CUDA version")
         if not (
             info.get("version") == RELEASE
             and info.get("schema_version") == 2
             and "release_revision" in info
             and info["release_revision"] in (None, REVISION)
             and info.get("arch") == target["arch"]
-            and target["sm"] in info.get("architectures", [])
+            and target["sm"] in architectures
             and info.get("tensorrt_version") == target["tensorrt_version"]
-            and ".".join(info.get("cuda_version", "").split(".")[:2]) == target["cuda_version"]
+            and ".".join(cuda_version.split(".")[:2]) == target["cuda_version"]
         ):
             raise ValueError("Bolt needs a matching Edge 0.12 SDK with the W2A16 kernels")
         plugin_name = info.get("plugin")
