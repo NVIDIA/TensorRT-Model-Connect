@@ -64,6 +64,12 @@
 - Write repository documentation, code comments, user-facing messages, and PR
   text in English. Preserve non-English model inputs, tokenizer data, and test
   fixtures when they are required to validate multilingual functionality.
+- List every image, audio, video, or PDF file under `families/` or `examples/`
+  in `ASSET_LICENSES.md`: one list item per file, starting with its full path
+  in backticks, in the section that states its origin and license. Byte-identical
+  copies get items of their own. Add, move, or remove the item in the change that
+  adds, moves, or removes the file. A family README or NOTICE points to
+  `ASSET_LICENSES.md` instead of restating a media file's license.
 - Never change the test passing criteria for the purpose of passing CI. If you believe the test is faulty, escalate to a human
 
 ## Repo Skills

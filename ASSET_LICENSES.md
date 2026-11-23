@@ -27,58 +27,111 @@ The following paths contain byte-identical copies of an original photograph
 provided by the project maintainer who took the photograph and authorized its
 inclusion and redistribution in this repository under the Apache License 2.0:
 
-- `families/idefics3/tests/data/test_img.jpeg`
+- `families/birefnet/tests/data/test_img.jpeg`
+- `families/clip/tests/data/test_img.jpeg`
+- `families/deformable_detr/tests/data/test_img.jpeg`
+- `families/depth_anything/tests/data/test_img.jpeg`
 - `families/detr/tests/data/test_img.jpeg`
-- `families/vjepa2/tests/data/test_img.jpeg`
-
-- `families/layoutlmv3/tests/data/test_img.jpeg`
 - `families/dinov3/tests/data/test_img.jpeg`
 - `families/gemma3n/tests/data/test_img.jpeg`
+- `families/grounding_dino/tests/data/test_img.jpeg`
+- `families/idefics3/tests/data/test_img.jpeg`
 - `families/internvl/tests/data/test_img.jpeg`
 - `families/lance/tests/data/test_img.jpeg`
+- `families/layoutlmv3/tests/data/test_img.jpeg`
+- `families/llava/tests/data/test_img.jpeg`
 - `families/locateanything/tests/data/test_img.jpeg`
 - `families/moge/tests/data/test_img.jpeg`
 - `families/molmo2/tests/data/test_img.jpeg`
 - `families/oneformer/tests/data/test_img.jpeg`
+- `families/owlv2/tests/data/test_img.jpeg`
 - `families/paligemma/tests/data/test_img.jpeg`
 - `families/phi4_multimodal/tests/data/test_img.jpeg`
+- `families/qwen3_5/tests/data/test_img.jpeg`
+- `families/qwen3_5_moe/tests/data/test_img.jpeg`
+- `families/qwen3_vl_moe/tests/data/test_img.jpeg`
 - `families/qwen_image/tests/data/test_img.jpeg`
 - `families/qwen_vl/tests/data/test_img.jpeg`
-- `families/qwen3_vl_moe/tests/data/test_img.jpeg`
 - `families/rt_detr/tests/data/test_img.jpeg`
+- `families/rt_detr_v2/tests/data/test_img.jpeg`
 - `families/sam/tests/data/test_img.jpeg`
 - `families/sam3/tests/data/test_img.jpeg`
 - `families/segformer/tests/data/test_img.jpeg`
 - `families/smolvlm/tests/data/test_img.jpeg`
+- `families/timm_convnext/tests/data/test_img.jpeg`
+- `families/timm_crossvit/tests/data/test_img.jpeg`
 - `families/timm_densenet/tests/data/test_img.jpeg`
+- `families/timm_dpn/tests/data/test_img.jpeg`
 - `families/timm_efficientnet/tests/data/test_img.jpeg`
+- `families/timm_ghostnet/tests/data/test_img.jpeg`
+- `families/timm_hrnet/tests/data/test_img.jpeg`
 - `families/timm_inception/tests/data/test_img.jpeg`
+- `families/timm_inception_resnet/tests/data/test_img.jpeg`
+- `families/timm_inception_v4/tests/data/test_img.jpeg`
 - `families/timm_mnasnet/tests/data/test_img.jpeg`
+- `families/timm_mobilenetv2/tests/data/test_img.jpeg`
 - `families/timm_mobilenetv3/tests/data/test_img.jpeg`
+- `families/timm_mobilenetv4/tests/data/test_img.jpeg`
+- `families/timm_mobilevit/tests/data/test_img.jpeg`
+- `families/timm_nfnet/tests/data/test_img.jpeg`
+- `families/timm_regnet/tests/data/test_img.jpeg`
 - `families/timm_repvgg/tests/data/test_img.jpeg`
+- `families/timm_res2net/tests/data/test_img.jpeg`
+- `families/timm_resnest/tests/data/test_img.jpeg`
 - `families/timm_resnet/tests/data/test_img.jpeg`
+- `families/timm_senet/tests/data/test_img.jpeg`
+- `families/timm_seresnet/tests/data/test_img.jpeg`
+- `families/timm_swin/tests/data/test_img.jpeg`
 - `families/timm_vgg/tests/data/test_img.jpeg`
 - `families/timm_vit/tests/data/test_img.jpeg`
+- `families/timm_xception/tests/data/test_img.jpeg`
+- `families/timm_xcit/tests/data/test_img.jpeg`
+- `families/vjepa2/tests/data/test_img.jpeg`
+- `families/yolo11/tests/data/test_img.jpeg`
+- `families/yolos/tests/data/test_img.jpeg`
+- `families/yolov10/tests/data/test_img.jpeg`
+- `families/yolov5/tests/data/test_img.jpeg`
+- `families/yolov8/tests/data/test_img.jpeg`
 
-`families/gemma3n/tests/data/test_img_car.jpeg` is a byte-identical copy of
-`families/timm_resnet/tests/data/test_img_car.jpeg`, a crop of the same
-photograph, and is distributed under the same terms.
+The following paths contain byte-identical copies of the same photograph decoded
+to RGB and saved losslessly as PNG (its pixels equal Pillow's decode of the
+`test_img.jpeg` copies listed above), distributed under the same terms:
 
-`families/swinv2/tests/data/test_img.png` is the same photograph decoded to RGB
-and saved losslessly as PNG (its pixels equal Pillow's decode of the
-`test_img.jpeg` copies listed above) and is distributed under the same terms.
+- `families/dinov2/tests/data/test_img.png`
+- `families/siglip/tests/data/test_img.png`
+- `families/swinv2/tests/data/test_img.png`
+- `families/vit/tests/data/test_img.png`
 
-`families/timm_resnet/tests/data/test_img_car.jpeg` is a crop of the same
-photograph (columns 260 to 639, rows 60 to 381, saved again as JPEG) and is
-distributed under the same terms.
+The following paths contain byte-identical copies of a crop of the same
+photograph (columns 260 to 639, rows 60 to 381, saved again as JPEG),
+distributed under the same terms:
+
+- `families/gemma3n/tests/data/test_img_car.jpeg`
+- `families/timm_resnet/tests/data/test_img_car.jpeg`
 
 ## Project-created image fixtures
 
 The following images were created for TensorRT Model Connect testing and are
 distributed under the Apache License 2.0 with the rest of the project:
 
+- Deterministic receipt and video frames written by the checked-in
+  `families/clef/tests/media_fixtures.py` for the model card's examples (the
+  card names a receipt image but does not distribute it); the receipt text uses
+  Pillow's built-in default font, Aileron Regular
+  (https://dotcolon.net/fonts/aileron, CC0 1.0 Universal):
+  - `families/clef/tests/fixtures/media/frame-0.png`
+  - `families/clef/tests/fixtures/media/frame-1.png`
+  - `families/clef/tests/fixtures/media/frame-2.png`
+  - `families/clef/tests/fixtures/media/frame-3.png`
+  - `families/clef/tests/fixtures/media/frame-4.png`
+  - `families/clef/tests/fixtures/media/receipt.png`
 - `families/deepseek_ocr/tests/data/orc_test_img.jpeg` — screenshot of
   project source text created for OCR regression testing
+- `families/fast_foundation_stereo/tests/data/office_left.png` — left view of a
+  rectified stereo pair generated with AI image generation for this repository,
+  not derived from external photography or from the upstream project's demo data
+- `families/fast_foundation_stereo/tests/data/office_right.png` — right view of
+  that pair, generated from the left view as a horizontal camera translation
 - `families/glm_ocr/tests/data/orc_test_img.jpeg` — byte-identical copy of
   `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the page the GLM-OCR E2E
   cases read
@@ -87,10 +140,31 @@ distributed under the Apache License 2.0 with the rest of the project:
   single-line GLM-OCR E2E cases
 - `families/lighton_ocr/tests/data/invoice.png` — synthetic invoice with
   invented data rendered by the family-owned `generate_fixture.py`
-- `families/phi4_multimodal/tests/data/dynamic-hd/synthetic-*.png` (7 images) —
-  synthetic test patterns written by the checked-in
+- `families/minicpm_ocr/tests/data/minicpm_ocr_block.png` — crop of
+  `minicpm_ocr_page.png` (columns 0 to 930 x rows 228 to 467) saved as PNG, the
+  OCR E2E input of an indented list
+- `families/minicpm_ocr/tests/data/minicpm_ocr_line.png` — crop of
+  `minicpm_ocr_page.png` (columns 0 to 869 x rows 0 to 35) saved as PNG, the OCR
+  E2E input of a text line
+- `families/minicpm_ocr/tests/data/minicpm_ocr_page.png` — the decoded pixels of
+  `families/deepseek_ocr/tests/data/orc_test_img.jpeg` saved losslessly as PNG, so
+  the native loader and the reference processor read identical pixels
+- `families/minicpm_ocr/tests/data/minicpm_ocr_paragraph.png` — crop of
+  `minicpm_ocr_page.png` (columns 0 to 930 x rows 52 to 199) saved as PNG, the
+  OCR E2E input of a paragraph
+- Synthetic test patterns written by the checked-in
   `families/phi4_multimodal/tests/data/dynamic-hd/generate.py` for Dynamic-HD
-  preprocessing goldens
+  preprocessing goldens:
+  - `families/phi4_multimodal/tests/data/dynamic-hd/synthetic-1200x800.png`
+  - `families/phi4_multimodal/tests/data/dynamic-hd/synthetic-3000x3000.png`
+  - `families/phi4_multimodal/tests/data/dynamic-hd/synthetic-300x700.png`
+  - `families/phi4_multimodal/tests/data/dynamic-hd/synthetic-4000x500.png`
+  - `families/phi4_multimodal/tests/data/dynamic-hd/synthetic-448x448.png`
+  - `families/phi4_multimodal/tests/data/dynamic-hd/synthetic-50x30.png`
+  - `families/phi4_multimodal/tests/data/dynamic-hd/synthetic-900x400.png`
+- `families/table_transformer/tests/data/structure-table.jpeg` — synthetic
+  scientific table with invented values, rendered for structure-recognition
+  parity testing; no external document or model output is embedded
 - `families/timm_inception/tests/data/orc_test_img.jpeg` — byte-identical copy of
   `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the input of the FP8
   E2E case (its top-1 class has a clear margin; the shared vehicle photograph
@@ -98,23 +172,15 @@ distributed under the Apache License 2.0 with the rest of the project:
 - `families/timm_inception_v4/tests/data/orc_test_img.jpeg` — byte-identical copy of
   `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the input of the FP8
   E2E case, chosen for its clear top-1 margin
-- `families/trocr/tests/data/printed_total.png`, `printed_thanks.png`,
-  `printed_receipt.png`, `printed_small.png`, `printed_tight.png` and
-  `printed_tall.png` — printed text lines written by the checked-in
+- Printed text lines written by the checked-in
   `families/trocr/tests/data/generate.py` with Pillow's built-in default font,
-  Aileron Regular (https://dotcolon.net/fonts/aileron, CC0 1.0 Universal)
-- `families/minicpm_ocr/tests/data/minicpm_ocr_page.png` — the decoded pixels of
-  `families/deepseek_ocr/tests/data/orc_test_img.jpeg` saved losslessly as PNG, so
-  the native loader and the reference processor read identical pixels
-- `families/minicpm_ocr/tests/data/minicpm_ocr_line.png`,
-  `minicpm_ocr_paragraph.png` and `minicpm_ocr_block.png` — crops of
-  `minicpm_ocr_page.png` (columns 0 to 869 x rows 0 to 35, columns 0 to 930 x
-  rows 52 to 199, and columns 0 to 930 x rows 228 to 467) saved as PNG, the OCR
-  E2E inputs of a text line, a paragraph and an indented list
-
-- `families/table_transformer/tests/data/structure-table.jpeg` — synthetic
-  scientific table with invented values, rendered for structure-recognition
-  parity testing; no external document or model output is embedded
+  Aileron Regular (https://dotcolon.net/fonts/aileron, CC0 1.0 Universal):
+  - `families/trocr/tests/data/printed_receipt.png`
+  - `families/trocr/tests/data/printed_small.png`
+  - `families/trocr/tests/data/printed_tall.png`
+  - `families/trocr/tests/data/printed_thanks.png`
+  - `families/trocr/tests/data/printed_tight.png`
+  - `families/trocr/tests/data/printed_total.png`
 
 ## Project overview media
 
@@ -146,24 +212,44 @@ Byte-identical copies are stored at:
 
 - `families/canary/tests/data/Recording.wav`
 - `families/nemotron_speech_streaming/tests/data/Recording.wav`
+- `families/parakeet_tdt/tests/data/Recording.wav`
 - `families/whisper/tests/data/Recording.wav`
 
-The WAV files below each corresponding `data/asr_probes/` directory are
+The WAV files below each family's `tests/data/asr_probes/` directory are
 deterministic transformations of that recording produced by the checked-in
-`generate_asr_probe_inputs.py` script. The same relative probe has the same
+`generate_asr_probe_inputs.py` script. A probe of a given name has the same
 content in all three model families:
 
-- `probe_01_clean_48k_stereo_baseline.wav`
-- `probe_02_clean_16k_mono_no_resample.wav`
-- `probe_03_clean_48k_mono_resample.wav`
-- `probe_04_clean_48k_stereo_gain_skew.wav`
-- `probe_05_low_volume_48k_stereo.wav`
-- `probe_06_leading_trailing_silence_48k_stereo.wav`
-- `probe_08_noisy_48k_stereo_snr20.wav`
+- `families/canary/tests/data/asr_probes/probe_01_clean_48k_stereo_baseline.wav`
+- `families/canary/tests/data/asr_probes/probe_02_clean_16k_mono_no_resample.wav`
+- `families/canary/tests/data/asr_probes/probe_03_clean_48k_mono_resample.wav`
+- `families/canary/tests/data/asr_probes/probe_04_clean_48k_stereo_gain_skew.wav`
+- `families/canary/tests/data/asr_probes/probe_05_low_volume_48k_stereo.wav`
+- `families/canary/tests/data/asr_probes/probe_06_leading_trailing_silence_48k_stereo.wav`
+- `families/canary/tests/data/asr_probes/probe_08_noisy_48k_stereo_snr20.wav`
+- `families/nemotron_speech_streaming/tests/data/asr_probes/probe_01_clean_48k_stereo_baseline.wav`
+- `families/nemotron_speech_streaming/tests/data/asr_probes/probe_02_clean_16k_mono_no_resample.wav`
+- `families/nemotron_speech_streaming/tests/data/asr_probes/probe_03_clean_48k_mono_resample.wav`
+- `families/nemotron_speech_streaming/tests/data/asr_probes/probe_04_clean_48k_stereo_gain_skew.wav`
+- `families/nemotron_speech_streaming/tests/data/asr_probes/probe_05_low_volume_48k_stereo.wav`
+- `families/nemotron_speech_streaming/tests/data/asr_probes/probe_06_leading_trailing_silence_48k_stereo.wav`
+- `families/nemotron_speech_streaming/tests/data/asr_probes/probe_08_noisy_48k_stereo_snr20.wav`
+- `families/whisper/tests/data/asr_probes/probe_01_clean_48k_stereo_baseline.wav`
+- `families/whisper/tests/data/asr_probes/probe_02_clean_16k_mono_no_resample.wav`
+- `families/whisper/tests/data/asr_probes/probe_03_clean_48k_mono_resample.wav`
+- `families/whisper/tests/data/asr_probes/probe_04_clean_48k_stereo_gain_skew.wav`
+- `families/whisper/tests/data/asr_probes/probe_05_low_volume_48k_stereo.wav`
+- `families/whisper/tests/data/asr_probes/probe_06_leading_trailing_silence_48k_stereo.wav`
+- `families/whisper/tests/data/asr_probes/probe_08_noisy_48k_stereo_snr20.wav`
 
-`families/hubert/tests/data/speech_16k_mono.wav` is a byte-identical copy of
-`probe_02_clean_16k_mono_no_resample.wav` and is distributed under the same
-terms.
+The following files are byte-identical copies of
+`probe_02_clean_16k_mono_no_resample.wav` and are distributed under the same
+terms:
+
+- `families/ast/tests/data/speech_16k_mono.wav`
+- `families/hubert/tests/data/speech_16k_mono.wav`
+- `families/nemotron_omni/tests/data/speech_16k_mono.wav`
+- `families/wav2vec2/tests/data/speech_16k_mono.wav`
 
 The PersonaPlex fixture contains the same maintainer-owned spoken recording,
 converted to mono 24 kHz float32 for official-reference regression tests:
@@ -177,21 +263,41 @@ fixture and is distributed under the Apache License 2.0:
 
 ## Nemotron VoiceChat report audio
 
-`families/nemotron_voicechat/tests/assets/sample_general_input.flac` is a
-lossless FLAC conversion of the public
-[`sample_general.wav`](https://github.com/NVIDIA%2DNeMo/Speech/blob/097dfe9e2f55baf653b83035868bdc89849f1b47/examples/speechlm2/sample_audio/sample_general.wav)
-fixture at Speech revision `097dfe9e2f55baf653b83035868bdc89849f1b47`,
-distributed under the Apache License 2.0.
+- `families/nemotron_voicechat/tests/assets/sample_general_input.flac` is a
+  lossless FLAC conversion of the public
+  [`sample_general.wav`](https://github.com/NVIDIA%2DNeMo/Speech/blob/097dfe9e2f55baf653b83035868bdc89849f1b47/examples/speechlm2/sample_audio/sample_general.wav)
+  fixture at Speech revision `097dfe9e2f55baf653b83035868bdc89849f1b47`,
+  distributed under the Apache License 2.0.
 
-`families/nemotron_voicechat/tests/assets/sample_general_reference.flac` is a
-lossless FLAC conversion of project-generated, seed-0 reference audio produced
-from that input by the public Speech implementation and
-`nvidia/NVIDIA-NemotronLabs-VoiceChat-11B` checkpoint at revision
-`359ada7b1c60851e40ff08065f9b0340244f27e0`. It is standalone-report evidence,
-not a waveform-equality acceptance gate. The checkpoint license imposes no
-restrictions or obligations on sharing its outputs, and this fixture is
-distributed under the Apache License 2.0 with the other project-generated
-golden data.
+- `families/nemotron_voicechat/tests/assets/sample_general_reference.flac` is a
+  lossless FLAC conversion of project-generated, seed-0 reference audio produced
+  from that input by the public Speech implementation and
+  `nvidia/NVIDIA-NemotronLabs-VoiceChat-11B` checkpoint at revision
+  `359ada7b1c60851e40ff08065f9b0340244f27e0`. It is standalone-report evidence,
+  not a waveform-equality acceptance gate. The checkpoint license imposes no
+  restrictions or obligations on sharing its outputs, and this fixture is
+  distributed under the Apache License 2.0 with the other project-generated
+  golden data.
+
+## Cosmos3-Edge example inputs
+
+The following files come from the public `nvidia/Cosmos3-Edge` checkpoint
+repository at revision `344d602b128d1bbdacb43b08d0a3626f46343e29`, which is
+distributed under the
+[OpenMDW License Agreement, version 1.1](https://openmdw.ai/license/1-1/), and
+are distributed under the same license.
+`families/nemotron_omni/tests/data/reference.json` records each file's source:
+
+- `families/nemotron_omni/tests/data/example_reasoning_input.png` — a
+  byte-identical copy of `assets/example_reasoning_input.png`
+- `families/nemotron_omni/tests/data/video-frame-0.png` — frame 0 (0.0 s) of
+  `assets/example_action_id_av_0_input.mp4`, decoded and saved losslessly as PNG
+- `families/nemotron_omni/tests/data/video-frame-20.png` — frame 20 (2.0 s) of
+  the same video
+- `families/nemotron_omni/tests/data/video-frame-40.png` — frame 40 (4.0 s) of
+  the same video
+- `families/nemotron_omni/tests/data/video-frame-60.png` — frame 60 (6.0 s) of
+  the same video
 
 ## LibriSpeech accuracy fixture
 
@@ -218,12 +324,14 @@ and is derived from LibriVox public-domain audiobooks.
 - Source and attribution: https://www.openslr.org/12/
 - License: https://creativecommons.org/licenses/by/4.0/
 
-`families/moss_transcribe_diarize/tests/data/continuation_20s.wav` and
-`families/moss_transcribe_diarize/tests/data/two_speakers_22s.wav` join
-utterances of several speakers from the same `test-clean` split, with 0.8 s of
-silence between utterances, as 16 kHz mono 16-bit PCM, and are distributed under
-the same license. `families/moss_transcribe_diarize/tests/data/README.md` lists
-the utterance IDs and their positions.
+The following files join utterances of several speakers from the same
+`test-clean` split, with 0.8 s of silence between utterances, as 16 kHz mono
+16-bit PCM, and are distributed under the same license.
+`families/moss_transcribe_diarize/tests/data/README.md` lists the utterance IDs
+and their positions:
+
+- `families/moss_transcribe_diarize/tests/data/continuation_20s.wav`
+- `families/moss_transcribe_diarize/tests/data/two_speakers_22s.wav`
 
 ## SANA world-model fixtures
 
@@ -263,7 +371,7 @@ under the MIT License. `recorded_observation.json` records the exact source
 revision, episode, frame, and tensor shapes.
 
 - Dataset: https://huggingface.co/datasets/lerobot/aloha_sim_transfer_cube_human/tree/6a43d500f101255823a9d2b9dc244eeb01a2cd31
-- `observation.images.top.png`: decoded RGB frame
+- `families/lerobot_act/tests/data/recorded_observation/observation.images.top.png`: decoded RGB frame
 - `observation.state.f32`: little-endian float32 joint state
 - `recorded_observation.json`: source and shape metadata
 
@@ -282,7 +390,13 @@ under CC-BY-4.0. Each `observation.json` records the source. `noise_seed0.f32` i
 LeRobot's preprocessor produced for them; none of these contains third-party content.
 
 - Dataset: https://huggingface.co/datasets/physical-intelligence/libero/tree/a4336d589d589045d1c56423ffdf3b88a0e19b1f
-- `recorded_observation/ep*_f*/image.png`, `wrist_image.png`: decoded RGB frames
+- Decoded RGB frames:
+  - `families/lerobot_pi05/tests/data/recorded_observation/ep0000_f000/image.png`
+  - `families/lerobot_pi05/tests/data/recorded_observation/ep0000_f000/wrist_image.png`
+  - `families/lerobot_pi05/tests/data/recorded_observation/ep0379_f060/image.png`
+  - `families/lerobot_pi05/tests/data/recorded_observation/ep0379_f060/wrist_image.png`
+  - `families/lerobot_pi05/tests/data/recorded_observation/ep0807_f070/image.png`
+  - `families/lerobot_pi05/tests/data/recorded_observation/ep0807_f070/wrist_image.png`
 - `recorded_observation/ep*_f*/observation.json`: state, task and source
 - `noise_seed0.f32`: little-endian float32 flow noise, 50 x 32
 - `reference/ep*_f*.{fp32,bf16}.f32`: little-endian float32 actions, 50 x 7
@@ -305,8 +419,20 @@ written for this test with the token ids LeRobot's preprocessor produced for the
 none of these contains third-party content beyond the frames above.
 
 - Dataset: https://huggingface.co/datasets/physical-intelligence/libero/tree/a4336d589d589045d1c56423ffdf3b88a0e19b1f
-- `recorded_observation/ep*_f*/image.png`, `wrist_image.png`: decoded RGB frames
-- `recorded_observation/ep*_f*/image.processed.png`, `wrist_image.processed.png`: the frames cropped and resized as LeRobot does
+- Decoded RGB frames:
+  - `families/lerobot_groot/tests/data/recorded_observation/ep1262_f040/image.png`
+  - `families/lerobot_groot/tests/data/recorded_observation/ep1262_f040/wrist_image.png`
+  - `families/lerobot_groot/tests/data/recorded_observation/ep1267_f080/image.png`
+  - `families/lerobot_groot/tests/data/recorded_observation/ep1267_f080/wrist_image.png`
+  - `families/lerobot_groot/tests/data/recorded_observation/ep1272_f000/image.png`
+  - `families/lerobot_groot/tests/data/recorded_observation/ep1272_f000/wrist_image.png`
+- The frames cropped and resized as LeRobot does:
+  - `families/lerobot_groot/tests/data/recorded_observation/ep1262_f040/image.processed.png`
+  - `families/lerobot_groot/tests/data/recorded_observation/ep1262_f040/wrist_image.processed.png`
+  - `families/lerobot_groot/tests/data/recorded_observation/ep1267_f080/image.processed.png`
+  - `families/lerobot_groot/tests/data/recorded_observation/ep1267_f080/wrist_image.processed.png`
+  - `families/lerobot_groot/tests/data/recorded_observation/ep1272_f000/image.processed.png`
+  - `families/lerobot_groot/tests/data/recorded_observation/ep1272_f000/wrist_image.processed.png`
 - `recorded_observation/ep*_f*/observation.json`: state, task and source
 - `noise_seed0.f32`: little-endian float32 flow noise, 40 x 132
 - `reference/ep*_f*.{fp32,bf16}.f32`, `reference/ep1272_f000.alternate.{fp32,bf16}.f32`: little-endian float32 actions, 16 x 7
