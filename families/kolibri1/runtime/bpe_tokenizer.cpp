@@ -16,6 +16,7 @@
 #include <stdexcept>
 #include <string>
 #include <unicode/regex.h>
+#include <unicode/uchar.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -145,455 +146,6 @@ static const ByteEncoderTables& byte_tables() {
     return tables;
 }
 
-// ─── Hand-written BPE pre-tokenizer ───
-//
-// Supports two regex variants:
-//
-// GPT-2 (used by GPT-2, Falcon, OPT):
-//   'contractions| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+
-//
-// Qwen3 (used by Qwen3, LLaMA-3, Mistral, Phi):
-//   (?i:contractions)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}|
-//   ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
-//
-// Key differences: Qwen3 allows any non-CR/LF/letter/digit as optional prefix before
-// letters, matches single digits, and has explicit newline handling.
-
-namespace pretok {
-
-enum class Variant { kGpt2, kQwen3, kBloom, kDeepSeek, kClip };
-
-// ── Character classification ──
-
-struct UnicodeRange {
-    char32_t lo, hi;
-};
-
-constexpr UnicodeRange kLetterRanges[] = {
-    {'A', 'Z'},         {'a', 'z'},       {0xB5, 0xB5},   // µ (micro sign, treated as letter)
-    {0xC0, 0xD6},       {0xD8, 0xF6},     {0xF8, 0x1BA},  // Latin-1 + Extended A/B
-    {0x1BC, 0x1BF},     {0x1C4, 0x293},   {0x295, 0x2AF}, // Latin Extended B cont.
-    {0x370, 0x373},     {0x376, 0x377},   {0x37B, 0x37D},   {0x37F, 0x37F}, // Greek
-    {0x386, 0x386},     {0x388, 0x38A},   {0x38C, 0x38C},   {0x38E, 0x3A1},
-    {0x3A3, 0x3F5},     {0x3F7, 0x481},   {0x48A, 0x52F},   // Greek + Cyrillic
-    {0x531, 0x556},     {0x559, 0x559},                     // Armenian
-    {0x560, 0x588},                                         // Armenian lowercase
-    {0x600, 0x6FF},                                         // Arabic
-    {0x900, 0x97F},                                         // Devanagari
-    {0xE00, 0xE7F},                                         // Thai
-    {0x10A0, 0x10C5},                                       // Georgian
-    {0x13A0, 0x13F5},                                       // Cherokee
-    {0x1C90, 0x1CBA},   {0x1CBD, 0x1CBF},                   // Georgian Extended
-    {0x1D00, 0x1D2B},   {0x1D6B, 0x1D77}, {0x1D79, 0x1D9A}, // Phonetic Extensions
-    {0x1E00, 0x1F15},   {0x1F18, 0x1F1D}, {0x1F20, 0x1F45}, // Latin Ext. Additional + Greek Ext.
-    {0x2C00, 0x2C5F},                                       // Glagolitic
-    {0x3040, 0x309F},                                       // Hiragana
-    {0x30A0, 0x30FF},                                       // Katakana
-    {0x3400, 0x4DBF},                                       // CJK Extension A
-    {0x4E00, 0x9FFF},                                       // CJK Unified Ideographs
-    {0xAC00, 0xD7AF},                                       // Hangul Syllables
-    {0xFB00, 0xFDFF},   // Alphabetic Presentation Forms + Arabic Forms
-    {0x10000, 0x1007F}, // Linear B Syllabary
-};
-
-inline bool is_letter(char32_t cp) {
-    for (const auto& r : kLetterRanges) {
-        if (cp >= r.lo && cp <= r.hi)
-            return true;
-    }
-    return false;
-}
-
-inline bool is_digit(char32_t cp) {
-    return (cp >= '0' && cp <= '9');
-}
-
-inline bool is_whitespace(char32_t cp) {
-    return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == 0x0B || cp == 0x0C // VT, FF
-           || cp == 0xA0                   // non-breaking space
-           || cp == 0x2000 || cp == 0x200A // en space through hair space
-           || cp == 0x3000;                // ideographic space
-}
-
-// BLOOM punctuation set: .,!?...
-constexpr char32_t kBloomPunct[] = {
-    '.',    ',', '!', '?',
-    0x2026, // ellipsis
-    0x3002, // ideographic full stop
-    0xFF0C, // fullwidth comma
-    0x3001, // ideographic comma
-    0x0964, // Devanagari danda
-    0x06D4, // Arabic full stop
-    0x060C, // Arabic comma
-};
-
-inline bool is_bloom_punct(char32_t cp) {
-    for (auto c : kBloomPunct) {
-        if (cp == c)
-            return true;
-    }
-    return false;
-}
-
-inline bool is_newline(char32_t cp) {
-    return cp == '\n' || cp == '\r';
-}
-
-// Is this char a valid optional prefix before a word?
-// GPT-2/BLOOM: only space (0x20)
-// Qwen3: any char except CR, LF, letter, digit
-// DeepSeek: any whitespace (\s?)
-inline bool is_prefix(char32_t cp, Variant v) {
-    if (v == Variant::kClip) {
-        return false;
-    }
-    if (v == Variant::kQwen3) {
-        return !is_newline(cp) && !is_letter(cp) && !is_digit(cp);
-    }
-    if (v == Variant::kDeepSeek) {
-        return is_whitespace(cp);
-    }
-    return cp == ' ';
-}
-
-// BLOOM word char: not whitespace and not BLOOM punctuation
-inline bool is_bloom_word_char(char32_t cp) {
-    // The serialized regex is `[^(\s|[.,!?…。，、।۔،])]`. Parentheses and
-    // the pipe are literal members of that negated character class.
-    return !is_whitespace(cp) && !is_bloom_punct(cp) && cp != '(' && cp != ')' && cp != '|';
-}
-
-// ── Scanning helpers (advance pointer past matching chars) ──
-
-inline void scan_letters(const char*& p, const char* end) {
-    while (p < end) {
-        const char* peek = p;
-        if (!is_letter(read_utf8(peek, end)))
-            break;
-        p = peek;
-    }
-}
-
-inline void scan_digits(const char*& p, const char* end, int max_group = 0) {
-    int count = 0;
-    while (p < end) {
-        if (max_group > 0 && count >= max_group)
-            break;
-        const char* peek = p;
-        if (!is_digit(read_utf8(peek, end)))
-            break;
-        p = peek;
-        ++count;
-    }
-}
-
-inline void scan_others(const char*& p, const char* end) {
-    while (p < end) {
-        const char* peek = p;
-        char32_t nc = read_utf8(peek, end);
-        if (is_whitespace(nc) || is_letter(nc) || is_digit(nc))
-            break;
-        p = peek;
-    }
-}
-
-inline void scan_newlines(const char*& p, const char* end) {
-    while (p < end) {
-        const char* peek = p;
-        if (!is_newline(read_utf8(peek, end)))
-            break;
-        p = peek;
-    }
-}
-
-inline void scan_all_whitespace(const char*& p, const char* end) {
-    while (p < end) {
-        const char* peek = p;
-        if (!is_whitespace(read_utf8(peek, end)))
-            break;
-        p = peek;
-    }
-}
-
-// Qwen3 regex branch: \s*[\r\n]+
-// Consume any leading whitespace up to the first newline, then consume the
-// contiguous newline run itself, but stop before whitespace that follows the
-// last newline.
-inline void scan_qwen3_newline_chunk(char32_t first_cp, const char*& p, const char* end) {
-    bool saw_newline = is_newline(first_cp);
-    while (p < end) {
-        const char* peek = p;
-        char32_t nc = read_utf8(peek, end);
-        if (!saw_newline) {
-            if (is_newline(nc)) {
-                saw_newline = true;
-                p = peek;
-                continue;
-            }
-            if (is_whitespace(nc)) {
-                p = peek;
-                continue;
-            }
-            break;
-        }
-        if (!is_newline(nc))
-            break;
-        p = peek;
-    }
-}
-
-inline void scan_bloom_words(const char*& p, const char* end) {
-    while (p < end) {
-        const char* peek = p;
-        if (!is_bloom_word_char(read_utf8(peek, end)))
-            break;
-        p = peek;
-    }
-}
-
-// Emit whitespace run, leaving last ws char for next token's optional prefix
-inline void emit_whitespace_leave_last(const char*& p, const char* end, const char* start,
-                                       std::vector<std::string>& result) {
-    const char* last_ws_start = start;
-    while (p < end) {
-        const char* peek = p;
-        char32_t nc = read_utf8(peek, end);
-        if (!is_whitespace(nc))
-            break;
-        last_ws_start = p;
-        p = peek;
-    }
-    if (p < end && last_ws_start > start) {
-        p = last_ws_start;
-    }
-    result.emplace_back(start, p);
-}
-
-// ── Contraction matching ──
-
-inline bool is_two_char_contraction(char c1, char c2) {
-    return (c1 == 'r' && c2 == 'e') || (c1 == 'v' && c2 == 'e') || (c1 == 'l' && c2 == 'l');
-}
-
-// Returns length of contraction suffix after apostrophe ('s 't 'm 'd 're 've 'll)
-inline int match_contraction_suffix(const char* p, const char* end) {
-    if (p >= end)
-        return 0;
-    char c = *p;
-    if (c == 's' || c == 't' || c == 'm' || c == 'd')
-        return 1;
-    if (p + 1 < end && is_two_char_contraction(c, p[1]))
-        return 2;
-    return 0;
-}
-
-// ── GPT-2/Qwen3 pre-tokenize dispatch helpers ──
-
-// Handle apostrophe: either contraction or "other" chars run
-inline bool try_contraction(char32_t cp, const char*& p, const char* end, const char* start,
-                            std::vector<std::string>& result) {
-    if (cp != '\'')
-        return false;
-    int suffix = match_contraction_suffix(p, end);
-    if (suffix > 0) {
-        p += suffix;
-    } else {
-        scan_others(p, end);
-    }
-    result.emplace_back(start, p);
-    return true;
-}
-
-// Handle optional prefix + letter/digit/other run
-inline bool try_prefix_run(char32_t cp, const char*& p, const char* end, const char* start,
-                           Variant variant, std::vector<std::string>& result) {
-    if (!is_prefix(cp, variant) || p >= end)
-        return false;
-    const char* after_prefix = p;
-    char32_t next_cp = read_utf8(p, end);
-
-    if (is_letter(next_cp)) {
-        scan_letters(p, end);
-        result.emplace_back(start, p);
-        return true;
-    }
-    if (is_digit(next_cp)) {
-        // The regex prefix [^\r\n\p{L}\p{N}]? only applies before \p{L}+ (letters).
-        // Digits are matched by standalone \p{N} — no prefix. Back up so the
-        // digit is handled by try_simple_run instead.
-        if (variant == Variant::kQwen3) {
-            p = after_prefix;
-            return false;
-        }
-        scan_digits(p, end);
-        result.emplace_back(start, p);
-        return true;
-    }
-    if (!is_whitespace(next_cp)) {
-        scan_others(p, end);
-        if (variant == Variant::kQwen3)
-            scan_newlines(p, end);
-        result.emplace_back(start, p);
-        return true;
-    }
-    // Prefix followed by whitespace — back up, let whitespace handler deal with it
-    p = after_prefix;
-    return false;
-}
-
-// Check if a whitespace run contains any newline character
-inline bool has_newline_in_ws(char32_t first_cp, const char* p, const char* end) {
-    if (is_newline(first_cp))
-        return true;
-    const char* scan = p;
-    while (scan < end) {
-        const char* peek = scan;
-        char32_t nc = read_utf8(peek, end);
-        if (!is_whitespace(nc))
-            break;
-        if (is_newline(nc))
-            return true;
-        scan = peek;
-    }
-    return false;
-}
-
-// Handle whitespace (Qwen3 newline sequences + general whitespace)
-inline bool try_whitespace_run(char32_t cp, const char*& p, const char* end, const char* start,
-                               Variant variant, std::vector<std::string>& result) {
-    if (!is_whitespace(cp))
-        return false;
-
-    // kClip is selected only for CLIP's Removed + inverted Split contract,
-    // which retains regex matches and removes the gaps. Whitespace therefore
-    // never reaches ByteLevel.
-    if (variant == Variant::kClip) {
-        scan_all_whitespace(p, end);
-        return true;
-    }
-
-    // Qwen3: \s*[\r\n]+ — newline sequences take priority
-    if (variant == Variant::kQwen3 && has_newline_in_ws(cp, p, end)) {
-        scan_qwen3_newline_chunk(cp, p, end);
-        result.emplace_back(start, p);
-        return true;
-    }
-
-    // General whitespace: leave last ws char for next token's prefix
-    emit_whitespace_leave_last(p, end, start, result);
-    return true;
-}
-
-// Handle letter or digit run (no prefix)
-inline bool try_simple_run(char32_t cp, const char*& p, const char* end, const char* start,
-                           Variant variant, std::vector<std::string>& result, int digit_group = 0) {
-    if (is_letter(cp)) {
-        scan_letters(p, end);
-        result.emplace_back(start, p);
-        return true;
-    }
-    if (is_digit(cp)) {
-        if (variant == Variant::kQwen3) {
-            if (digit_group > 1)
-                scan_digits(p, end, digit_group - 1);
-        } else if (variant != Variant::kClip) {
-            scan_digits(p, end);
-        }
-        result.emplace_back(start, p);
-        return true;
-    }
-    return false;
-}
-
-// ── Main pre-tokenize functions ──
-
-std::vector<std::string> pre_tokenize(const std::string& text, Variant variant,
-                                      int digit_group = 0) {
-    std::vector<std::string> result;
-    if (text.empty())
-        return result;
-
-    const char* p = text.data();
-    const char* end = p + text.size();
-
-    while (p < end) {
-        const char* start = p;
-        char32_t cp = read_utf8(p, end);
-
-        if (try_contraction(cp, p, end, start, result))
-            continue;
-        if (try_prefix_run(cp, p, end, start, variant, result))
-            continue;
-        if (try_whitespace_run(cp, p, end, start, variant, result))
-            continue;
-        if (try_simple_run(cp, p, end, start, variant, result, digit_group))
-            continue;
-
-        // Other chars (punctuation/symbols)
-        scan_others(p, end);
-        if (variant == pretok::Variant::kQwen3) {
-            // Qwen3's ` ?[^\s\p{L}\p{N}]+[\r\n]*` keeps trailing newlines
-            // attached to punctuation/symbol runs even without an optional prefix.
-            scan_newlines(p, end);
-        }
-        result.emplace_back(start, p);
-    }
-
-    return result;
-}
-
-// Return the end of a BLOOM Split-regex match beginning at `start`.
-// The regex is " ?[^(\s|[.,!?...])]+": an optional ASCII space followed by
-// one or more non-whitespace, non-punctuation characters.
-const char* bloom_match_end(const char* start, const char* end) {
-    const char* p = start;
-    char32_t cp = read_utf8(p, end);
-    if (cp == ' ') {
-        if (p >= end)
-            return nullptr;
-        cp = read_utf8(p, end);
-        if (!is_bloom_word_char(cp))
-            return nullptr;
-    } else if (!is_bloom_word_char(cp)) {
-        return nullptr;
-    }
-    scan_bloom_words(p, end);
-    return p;
-}
-
-// BLOOM uses Split(..., behavior="Isolated", invert=false) followed by
-// ByteLevel(use_regex=false). Regex matches are isolated, while every
-// contiguous unmatched span remains a single pre-token. In particular,
-// punctuation and adjacent newlines must stay together so BPE can merge
-// strings such as ".\n\n".
-std::vector<std::string> bloom_pre_tokenize(const std::string& text) {
-    std::vector<std::string> result;
-    if (text.empty())
-        return result;
-
-    const char* p = text.data();
-    const char* end = p + text.size();
-
-    while (p < end) {
-        const char* start = p;
-        if (const char* match_end = bloom_match_end(start, end)) {
-            result.emplace_back(start, match_end);
-            p = match_end;
-            continue;
-        }
-
-        // Preserve one contiguous unmatched span until the next regex match.
-        read_utf8(p, end);
-        while (p < end && bloom_match_end(p, end) == nullptr)
-            read_utf8(p, end);
-        result.emplace_back(start, p);
-    }
-
-    return result;
-}
-
-} // namespace pretok
-
 // ─── BpeTokenizer implementation ───
 
 class BpeTokenizer final : public ITokenizer {
@@ -695,7 +247,7 @@ class BpeTokenizer final : public ITokenizer {
         while (cursor < end) {
             const char* char_start = cursor;
             const char32_t cp = read_utf8(cursor, end);
-            if (mNormalizeWhitespace && pretok::is_whitespace(cp)) {
+            if (mNormalizeWhitespace && u_isUWhiteSpace(static_cast<UChar32>(cp))) {
                 if (!previous_was_whitespace) {
                     normalized.push_back(' ');
                 }
@@ -900,12 +452,6 @@ class BpeTokenizer final : public ITokenizer {
                 unicode.tempSubString(previous).toUTF8String(tail);
                 words.push_back(std::move(tail));
             }
-        } else if (!mUsePreTokenizer) {
-            words = fallback_pre_tokenize(text);
-        } else if (mPreTokenizerVariant == pretok::Variant::kBloom) {
-            words = pretok::bloom_pre_tokenize(text);
-        } else {
-            words = pretok::pre_tokenize(text, mPreTokenizerVariant, mPreTokenizerDigitGroup);
         }
 
         for (const auto& word : words) {
@@ -1070,17 +616,10 @@ class BpeTokenizer final : public ITokenizer {
                 result.append(text, start, pos - start);
             }
         }
-        return result;
-    }
-
-    // Generic pre-tokenizer used when no GPT-2 pattern is declared.
-
-    static std::vector<std::string> fallback_pre_tokenize(const std::string& text) {
-        std::vector<std::string> result;
-        if (text.empty())
-            return result;
-        result.push_back(text);
-        return result;
+        // Repair only after concatenating every token's bytes: UTF-8 can span tokens.
+        std::string repaired;
+        icu::UnicodeString::fromUTF8(result).toUTF8String(repaired);
+        return repaired;
     }
 
     // ─── BPE merge algorithm ───
@@ -1223,121 +762,6 @@ class BpeTokenizer final : public ITokenizer {
                   [](const auto& a, const auto& b) { return a.first.size() > b.first.size(); });
     }
 
-    // Parse digit group size from regex pattern like \p{N}{1,3} → 3.
-    // Returns 0 if no digit grouping found (single digit or unlimited).
-    static int parse_digit_group(const std::string& regex) {
-        // Search for "\p{N}{" — the standalone grouped variant, not [^\p{N}]
-        auto pos = regex.find("\\p{N}{");
-        if (pos == std::string::npos)
-            return 0;
-        auto open = pos + 6; // after "\\p{N}{"
-        auto close = regex.find('}', open);
-        if (close == std::string::npos)
-            return 0;
-        auto comma = regex.find(',', open);
-        if (comma == std::string::npos || comma >= close)
-            return 0;
-        return std::stoi(regex.substr(comma + 1, close - comma - 1));
-    }
-
-    static bool is_clip_split_regex(const std::string& regex) {
-        const bool has_boundary_token = regex.find("startoftext") != std::string::npos ||
-                                        regex.find("endoftext") != std::string::npos;
-        return has_boundary_token && regex.find("\\p{L}") != std::string::npos &&
-               regex.find("\\p{N}") != std::string::npos;
-    }
-
-    static pretok::Variant classify_clip_split(const nlohmann::json& split) {
-        const auto behavior = split.value("behavior", "");
-        const bool invert = split.value("invert", false);
-        if (behavior == "Removed" && invert)
-            return pretok::Variant::kClip;
-        if (behavior == "Isolated" && invert)
-            return pretok::Variant::kGpt2;
-        throw std::runtime_error("Unsupported CLIP Split contract: behavior=" + behavior +
-                                 ", invert=" + (invert ? "true" : "false"));
-    }
-
-    static bool is_qwen3_split_regex(const std::string& regex) {
-        return regex.find("[^\r\n") != std::string::npos ||
-               regex.find("[^\\r\\n") != std::string::npos;
-    }
-
-    static bool is_bloom_split_regex(const std::string& regex) {
-        return regex.find("[^(\\s") != std::string::npos ||
-               regex.find("[^(\\\\s") != std::string::npos;
-    }
-
-    // Classify one Split pre-tokenizer from both its pattern and contract.
-    static pretok::Variant classify_split(const nlohmann::json& split, int& digit_group_out) {
-        const auto regex = split["pattern"]["Regex"].get<std::string>();
-        if (is_clip_split_regex(regex))
-            return classify_clip_split(split);
-        if (is_qwen3_split_regex(regex)) {
-            digit_group_out = parse_digit_group(regex);
-            return pretok::Variant::kQwen3;
-        }
-        if (is_bloom_split_regex(regex)) {
-            return pretok::Variant::kBloom;
-        }
-        if (regex.find("\\s?[A-Za-z") != std::string::npos) {
-            return pretok::Variant::kDeepSeek;
-        }
-        return pretok::Variant::kGpt2;
-    }
-
-    // Detect variant from the Split inside a Sequence pre_tokenizer.
-    static pretok::Variant detect_split_variant(const nlohmann::json& pt, int& digit_group_out) {
-        digit_group_out = 0;
-        if (!pt.contains("pretokenizers"))
-            return pretok::Variant::kGpt2;
-        for (auto& sub : pt["pretokenizers"]) {
-            if (sub.value("type", "") != "Split")
-                continue;
-            if (!sub.contains("pattern") || !sub["pattern"].contains("Regex"))
-                continue;
-            return classify_split(sub, digit_group_out);
-        }
-        return pretok::Variant::kGpt2;
-    }
-
-    static bool is_space_split_pre_tokenizer(const nlohmann::json& pt, const std::string& pt_type) {
-        if (pt_type != "Split")
-            return false;
-        if (!pt.contains("pattern") || !pt["pattern"].contains("String"))
-            return false;
-        return pt["pattern"]["String"].get<std::string>() == " ";
-    }
-
-    void detect_pre_tokenizer(const nlohmann::json& j) {
-        mUsePreTokenizer = true;
-        mPreTokenizerVariant = pretok::Variant::kGpt2;
-
-        if (!j.contains("pre_tokenizer") || j["pre_tokenizer"].is_null())
-            return;
-        auto& pt = j["pre_tokenizer"];
-        std::string pt_type = pt.value("type", "");
-
-        if (pt_type == "ByteLevel") {
-            mPreTokenizerVariant = pretok::Variant::kGpt2;
-        } else if (pt_type == "Sequence") {
-            int digit_group = 0;
-            mPreTokenizerVariant = detect_split_variant(pt, digit_group);
-            mPreTokenizerDigitGroup = digit_group;
-        } else if (is_space_split_pre_tokenizer(pt, pt_type)) {
-            // Gemma SentencePiece-BPE tokenizers use a direct Split(" ")
-            // pre-tokenizer with spaces already normalized to U+2581.
-            mUsePreTokenizer = false;
-        } else if (pt_type == "Metaspace") {
-            mIsMetaspace = true;
-            mUsePreTokenizer = false;
-        } else if (pt_type.empty()) {
-            mUsePreTokenizer = false;
-        } else {
-            throw std::runtime_error("Unsupported pre_tokenizer type: " + pt_type);
-        }
-    }
-
     DecoderType classify_decoder_type(const nlohmann::json& j) const {
         if (!j.contains("decoder") || j["decoder"].is_null()) {
             return mIsMetaspace ? DecoderType::kMetaspace : DecoderType::kByteLevel;
@@ -1422,7 +846,6 @@ class BpeTokenizer final : public ITokenizer {
         parse_added_tokens(j);
         parse_post_processor(j);
         detect_normalizer(j);
-        detect_pre_tokenizer(j);
         const auto& pretokenizer = j.at("pre_tokenizer");
         if (pretokenizer.value("type", "") != "Sequence" ||
             pretokenizer.at("pretokenizers").size() != 2)
@@ -1613,7 +1036,6 @@ class BpeTokenizer final : public ITokenizer {
     std::unordered_set<int32_t> mLstripAddedTokenIds;
 
     bool mAddSpecialTokens = false;
-    bool mUsePreTokenizer = true;
     bool mIsMetaspace = false; // Set by detect_pre_tokenizer.
     bool mIsSentencePiece = false;
     bool mSentencePiecePrependAlways =
@@ -1631,8 +1053,6 @@ class BpeTokenizer final : public ITokenizer {
     // Vectors to support multiple BOS/EOS tokens (e.g. GLM-4: [gMASK] + <sop>)
     std::vector<int32_t> mPostBosIds;
     std::vector<int32_t> mPostEosIds;
-    pretok::Variant mPreTokenizerVariant = pretok::Variant::kGpt2;
-    int mPreTokenizerDigitGroup = 0; // 0=unlimited, 3=\p{N}{1,3} (LLaMA 3.1/GLM-4)
 
     DecoderType mDecoderType = DecoderType::kByteLevel;
 

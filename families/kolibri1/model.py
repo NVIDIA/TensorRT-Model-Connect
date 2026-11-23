@@ -71,6 +71,16 @@ class Graph:
     def mul(self, a, b):
         return self.op(a, b, trt.ElementWiseOperation.PROD)
 
+    def scale_attention(self, scores, head_dim):
+        # PyTorch uses FP32 opmath, then rounds the scaled logits back to FP16.
+        return self.cast(
+            self.mul(
+                self.cast(scores, trt.float32),
+                self.const(np.full((1,) * len(scores.shape), head_dim**-0.5), np.float32),
+            ),
+            trt.float16,
+        )
+
     def reshape(self, x, shape):
         layer = self.net.add_shuffle(x)
         layer.reshape_dims = shape
@@ -214,13 +224,7 @@ class Graph:
         ).get_output(0)
         # PyTorch's scalar operation evaluates at FP32 opmath precision before
         # rounding back to FP16. A half-stored scale changes every head's logits.
-        scores = self.cast(
-            self.mul(
-                self.cast(scores, trt.float32),
-                self.const(np.full((1, 1, 1, 1, 1), dim**-0.5), np.float32),
-            ),
-            trt.float16,
-        )
+        scores = self.scale_attention(scores, dim)
         scores = net.add_select(
             future, self.const(np.full((1, 1, 1, 1, 1), -65504)), scores
         ).get_output(0)
@@ -340,7 +344,7 @@ def build(request, writer):
         raise ValueError(
             "Unsupported Kolibri1 routing, position, or source quantization configuration"
         )
-    if not 2 <= length <= min(cfg["sliding_window"], cfg["max_position_embeddings"]):
+    if not 2 <= length <= min(513, cfg["sliding_window"], cfg["max_position_embeddings"]):
         raise ValueError("Kolibri1 fixed KV profile must fit within the sliding window")
     from transformers import AutoTokenizer
 
@@ -360,6 +364,7 @@ def build(request, writer):
         )
         with writer.open_section("embedding.plan") as section:
             graph.save(section)
+        del token
         del graph
         gc.collect()
         for layer in range(cfg["num_hidden_layers"]):

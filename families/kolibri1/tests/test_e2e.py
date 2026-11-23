@@ -134,10 +134,30 @@ def _record_comparison(tmp_path, label, native, reference, checks):
     )
 
 
+def _checkpoint_source(manifest: dict, path: Path, *, override: bool) -> Path:
+    """An arbitrary local directory does not establish the manifest's pinned identity."""
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": None if override else manifest["hf_id"],
+            "revision": None if override else manifest["hf_revision"],
+            "source": "local_override" if override else "pinned_snapshot",
+            "path": str(path.resolve()),
+            "revision_verified": not override,
+            "expected_repo_id": manifest["hf_id"],
+            "expected_revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    return path
+
+
 def _model_dir(manifest: dict) -> Path:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
-        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+        return _checkpoint_source(
+            manifest, _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR"), override=True
+        )
     from huggingface_hub import snapshot_download
 
     try:
@@ -148,7 +168,7 @@ def _model_dir(manifest: dict) -> Path:
         raise AssertionError(
             f"selected {FAMILY} E2E requires the exact cached checkpoint {manifest['hf_id']}"
         ) from error
-    return Path(snapshot)
+    return _checkpoint_source(manifest, Path(snapshot), override=False)
 
 
 def _runtime() -> tuple[Path, Path]:
@@ -186,14 +206,6 @@ def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
 def test_official_checkpoint_e2e(case_name, tmp_path):
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
-    record_evidence(
-        "checkpoint",
-        {
-            "repo_id": manifest["hf_id"],
-            "revision": manifest["hf_revision"],
-            "precision": manifest["precision"],
-        },
-    )
     record_evidence(
         "thresholds",
         {
@@ -239,16 +251,15 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             check=False,
             timeout=case.get("runtime_timeout_s", 3600),
         )
-    record_evidence(
-        "reference_process",
-        {
-            "argv": oracle.args,
-            "returncode": oracle.returncode,
-            "stdout": (oracle.stdout or "")[-4096:],
-            "stderr": (oracle.stderr or "")[-16384:],
-        },
-    )
-    with evidence_stage("comparison"):
+        record_evidence(
+            "reference_process",
+            {
+                "argv": oracle.args,
+                "returncode": oracle.returncode,
+                "stdout": (oracle.stdout or "")[-4096:],
+                "stderr": (oracle.stderr or "")[-16384:],
+            },
+        )
         assert oracle.returncode == 0, oracle.stderr + oracle.stdout
     print(oracle.stdout, end="", flush=True)
     expected = json.loads(expected_path.read_text())
@@ -272,16 +283,15 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             check=False,
             timeout=case.get("runtime_timeout_s", 3600),
         )
-    record_evidence(
-        "runtime_process",
-        {
-            "argv": completed.args,
-            "returncode": completed.returncode,
-            "stdout": (completed.stdout or "")[-4096:],
-            "stderr": (completed.stderr or "")[-16384:],
-        },
-    )
-    with evidence_stage("comparison"):
+        record_evidence(
+            "runtime_process",
+            {
+                "argv": completed.args,
+                "returncode": completed.returncode,
+                "stdout": (completed.stdout or "")[-4096:],
+                "stderr": (completed.stderr or "")[-16384:],
+            },
+        )
         assert completed.returncode == 0, completed.stderr + completed.stdout
     payload = json.loads(completed.stdout.splitlines()[-1])
     record_evidence("inputs", {"requests": requests})
@@ -336,7 +346,6 @@ def test_native_tokenizer(case_name):
 
 
 def test_fp16_scalar_and_silu_match_pytorch(case_name, tmp_path):
-    import numpy as np
     import tensorrt as trt
     import torch
     from families.kolibri1.model import Graph
@@ -345,13 +354,7 @@ def test_fp16_scalar_and_silu_match_pytorch(case_name, tmp_path):
     graph = Graph(None, {}, logger)
     value = graph.net.add_input("value", trt.float16, (1, 65536))
     graph.output(graph.silu(value), "silu")
-    graph.output(
-        graph.cast(
-            graph.mul(graph.cast(value, trt.float32), graph.const([[128**-0.5]], np.float32)),
-            trt.float16,
-        ),
-        "scaled",
-    )
+    graph.output(graph.scale_attention(value, 128), "scaled")
     path = tmp_path / "scalar-math.plan"
     with path.open("wb") as stream:
         graph.save(stream)
