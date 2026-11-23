@@ -11,6 +11,8 @@ from . import graph as g, encoder_builder, text_builder
 
 
 def _tower(raw):
+    if raw.get("hidden_act", "quick_gelu") != "quick_gelu":
+        raise NotImplementedError("CLIPSeg towers require hidden_act=quick_gelu")
     return dict(
         hidden_size=raw["hidden_size"],
         num_heads=raw["num_attention_heads"],
@@ -192,11 +194,20 @@ def build(request, writer):
     cfg = json.loads((directory / "config.json").read_text())
     prep = json.loads((directory / "preprocessor_config.json").read_text())
     size = prep["size"]["height"]
+    # Validate both towers and effective processor defaults before building either plan.
+    for name in ("text_config", "vision_config"):
+        _tower(cfg[name])
     if (
         cfg.get("model_type") != "clipseg"
         or not cfg.get("use_complex_transposed_convolution")
         or prep.get("resample") != 2
         or prep["size"]["width"] != size
+        or size <= 0
+        or size % cfg["vision_config"]["patch_size"]
+        or not prep.get("do_resize", True)
+        or not prep.get("do_rescale", True)
+        or prep.get("rescale_factor", 1 / 255) != 1 / 255
+        or not prep.get("do_normalize", True)
     ):
         raise NotImplementedError(
             "CLIPSeg requires the refined decoder and square bilinear preprocessing"

@@ -22,7 +22,8 @@ void check(bool condition, const char* name) {
 }
 
 void check_close(float actual, float expected, float tolerance, const char* name) {
-    if (std::fabs(actual - expected) > tolerance) {
+    if (!std::isfinite(actual) || !std::isfinite(expected) ||
+        !(std::fabs(actual - expected) <= tolerance)) {
         std::cerr << "FAIL: " << name << " actual=" << actual << " expected=" << expected << '\n';
         ++g_failures;
     }

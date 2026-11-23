@@ -82,7 +82,7 @@ std::uint8_t apply_pillow_span(const std::uint8_t* source, std::int32_t stride,
     std::int64_t sum = kPillowRounding;
     for (std::size_t index = 0; index < span.weights.size(); ++index) {
         sum += static_cast<std::int64_t>(
-                   source[(span.first + static_cast<std::int32_t>(index)) * stride]) *
+                   source[(static_cast<std::size_t>(span.first) + index) * stride]) *
                span.weights[index];
     }
     if (sum <= 0)
