@@ -274,6 +274,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         tokenizer = AutoTokenizer.from_pretrained(directory)
     tokenizer_json = tmp_path / "tokenizer.json"
     tokenizer_json.write_text(tokenizer.backend_tokenizer.to_str())
+    (tmp_path / "config.json").write_bytes((directory / "config.json").read_bytes())
     for text in [*[item["text"] for item in case["inputs"]], "Café e\u0301 １２３ 中文\tspaces  "]:
         completed = subprocess.run(
             [str(_native_test_binary("test_seamless_m4t_v2_tokenizer")), str(tokenizer_json), text],
