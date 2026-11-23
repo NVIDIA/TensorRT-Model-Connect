@@ -129,6 +129,22 @@ int main() {
         failures += std::string("miniature tokenizer: ") + error.what() + "\n";
     }
 
+    // Merges run one at a time, so a pair that a merge forms is merged before the waiting
+    // pairs it outranks. With (ab, a) ranked before (a, b), the reference tokenises "abab"
+    // as "aba" + "b", where merging every (a, b) at once would give "ab" + "ab".
+    try {
+        Json ranked = miniature();
+        ranked["model"]["merges"] = Json::array(
+            {Json::array({"ab", "a"}), Json::array({"a", "b"}), Json::array({"▁", "ab"})});
+        const auto tokenizer = load(ranked);
+        if (tokenizer->encode("abab") != std::vector<std::int32_t>{10, 6, kEos})
+            failures += "a pair formed by a merge did not take its rank\n";
+        if (tokenizer->encode("a ab") != std::vector<std::int32_t>{5, 8, kEos})
+            failures += "merge order: space marker merge\n";
+    } catch (const std::exception& error) {
+        failures += std::string("merge order: ") + error.what() + "\n";
+    }
+
     // What the runtime would tokenise differently from the reference is refused on load (the
     // builder refuses it first), and so is a malformed added-token record.
     const std::vector<Refusal> refusals = {

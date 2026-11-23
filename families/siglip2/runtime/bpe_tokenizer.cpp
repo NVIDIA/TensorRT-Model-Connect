@@ -7,10 +7,10 @@
 
 #include <algorithm>
 #include <cassert>
-#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <list>
 #include <nlohmann/json.hpp>
 #include <queue>
@@ -1024,56 +1024,64 @@ class BpeTokenizer final : public ITokenizer {
 
     // ─── BPE merge algorithm ───
 
-    struct MergeCandidate {
-        int rank;
-        std::string first;
-        std::string second;
-    };
-
-    MergeCandidate find_best_merge(const std::vector<std::string>& tokens) const {
-        MergeCandidate best{INT_MAX, "", ""};
-        for (size_t i = 0; i + 1 < tokens.size(); ++i) {
-            auto it =
-                mMergeRank.find(std::make_pair(std::cref(tokens[i]), std::cref(tokens[i + 1])));
-            if (it != mMergeRank.end() && it->second < best.rank) {
-                best = {it->second, tokens[i], tokens[i + 1]};
-            }
-        }
-        return best;
+    // The merge rank of an adjacent pair, or -1 if no merge joins it.
+    int merge_rank(const std::string& first, const std::string& second) const {
+        const auto it = mMergeRank.find(std::make_pair(first, second));
+        return it != mMergeRank.end() ? it->second : -1;
     }
 
-    static std::vector<std::string> merge_all_pairs(std::vector<std::string> tokens,
-                                                    const std::string& first,
-                                                    const std::string& second) {
-        std::string merged = first + second;
-        std::vector<std::string> result;
-        result.reserve(tokens.size());
-        for (size_t i = 0; i < tokens.size(); ++i) {
-            if (i + 1 < tokens.size() && tokens[i] == first && tokens[i + 1] == second) {
-                result.push_back(merged);
-                ++i; // skip next
-            } else {
-                result.push_back(std::move(tokens[i]));
-            }
-        }
-        return result;
-    }
-
-    // Optimized: merge ALL occurrences of the best pair per pass.
+    // Merges in the reference's order: always the adjacent pair with the lowest rank, the
+    // leftmost one on a tie, one merge at a time. A pair that a merge forms competes at once
+    // with the pairs already waiting, even when it outranks the pair just merged.
     std::vector<std::string> apply_merges(std::vector<std::string> tokens) const {
-        if (tokens.size() <= 1)
+        const int count = static_cast<int>(tokens.size());
+        if (count <= 1)
             return tokens;
 
-        while (true) {
-            auto best = find_best_merge(tokens);
-            if (best.rank == INT_MAX)
-                break;
-            tokens = merge_all_pairs(std::move(tokens), best.first, best.second);
-            if (tokens.size() <= 1)
-                break;
+        // Symbols form a list; a merge grows the left symbol and unlinks the right one.
+        std::vector<int> prev(count);
+        std::vector<int> next(count);
+        for (int i = 0; i < count; ++i) {
+            prev[i] = i - 1;
+            next[i] = i + 1 < count ? i + 1 : -1;
+        }
+        std::vector<bool> unlinked(count, false);
+        // (rank, index of the pair's left symbol), smallest first.
+        using Candidate = std::pair<int, int>;
+        std::priority_queue<Candidate, std::vector<Candidate>, std::greater<Candidate>> queue;
+        const auto enqueue = [&](int left) {
+            if (left < 0 || next[left] < 0)
+                return;
+            const int rank = merge_rank(tokens[left], tokens[next[left]]);
+            if (rank >= 0)
+                queue.emplace(rank, left);
+        };
+        for (int i = 0; i + 1 < count; ++i)
+            enqueue(i);
+
+        while (!queue.empty()) {
+            const auto [rank, left] = queue.top();
+            queue.pop();
+            // A queued pair is gone once its left symbol was merged into its own left
+            // neighbour or either symbol has grown; a rank names one pair.
+            if (unlinked[left] || next[left] < 0 ||
+                merge_rank(tokens[left], tokens[next[left]]) != rank)
+                continue;
+            const int right = next[left];
+            tokens[left] += tokens[right];
+            unlinked[right] = true;
+            next[left] = next[right];
+            if (next[right] >= 0)
+                prev[next[right]] = left;
+            enqueue(prev[left]);
+            enqueue(left);
         }
 
-        return tokens;
+        // The first symbol is never a right symbol, so the list starts there.
+        std::vector<std::string> merged;
+        for (int i = 0; i >= 0; i = next[i])
+            merged.push_back(std::move(tokens[i]));
+        return merged;
     }
 
     // ─── JSON parsing helpers ───
