@@ -34,7 +34,7 @@ the same V1 or V2 paired engine. Thinking mode also affects the output boundary:
 with thinking disabled, the chat template supplies the public-channel header
 in the prompt, not the generated tokens. Both routes omit checkpoint-declared
 special tokens from display text while retaining the actual generated IDs.
-The existing quality gate is unchanged.
+The scientific terms and generation budget are the same in both modes.
 
 For original floating checkpoints, request `--precision fp16 --quantization none`;
 the adapter uses original weights. Building a typed image/video task requires the
@@ -59,10 +59,10 @@ and profile, not for every GPU, prompt, or sampling mode.
 | Prepared NVFP4 (text only) | DFlash V1 | Native matched its own target in both thinking modes. In the released Edge runner, speculative and target-only outputs differed; with thinking enabled both reached the token cap. The Model Connect Edge run returned a factual answer, so the capped result is specific to the direct control. |
 | Prepared NVFP4 (text only) | DFlash V2 | Native matched its own target in both modes. The released Edge runner returned different greedy answers with and without speculation. Model Connect Edge matched the released speculative answers in both modes. |
 
-The existing scientific-answer check still requires a generated public-channel
-header when thinking is disabled; the template supplies it in the prompt. A
-factual answer in that mode is **not** a pass of the unchanged check. Separately,
-both the native and the released FP16 visual encoders exceeded the pointwise
+The scientific-answer test runs both modes on one bundle. With thinking off,
+it checks a direct answer without a generated private turn. With thinking on,
+it checks the answer after the generated public-channel delimiter. Terms found
+only in reasoning do not count. Separately, both the native and the released FP16 visual encoders exceeded the pointwise
 tolerance against the eager reference on identical inputs. Correct media answers
 do not establish encoder tensor parity. These quality limitations do not disable
 the corresponding build or inference commands.
@@ -90,7 +90,7 @@ establish tree accuracy.
 On the original FP16 target, the tree built and ran on both routes. Both
 passed the thinking-enabled science check and distinguished the two images
 and both video orders. With thinking disabled, both gave a factual answer but
-failed the generated-header check. Native matched target-only token IDs on all
+did not generate the header that the earlier test expected. Native matched target-only token IDs on all
 six requests; Edge matched on five. On the red-then-blue video, the Edge tree
 separated the two correct colors with a comma, while target-only used a
 newline. The direct Edge runner also produced different text with speculation
@@ -101,7 +101,8 @@ cause of the difference.
 For the prepared NVFP4 target, both tree routes built and generated answers
 with thinking disabled and enabled. Native returned the same 38 and 171
 token IDs as its own target-only engine, respectively. Both routes missed
-the existing generated-header check with thinking disabled. With thinking
+the earlier test's generated-header check with thinking disabled; the template
+already supplies that header. With thinking
 enabled, native passed; the Edge answer said “solid water” rather than either
 term accepted by the test (“ice” or “crystal”). The released Edge runner also
 produced different text with tree verification enabled versus disabled on the
@@ -161,8 +162,8 @@ The 0.11 Edge offload does not support DDTree.
 
 The existing owning E2E retains its scientific prompt, low-reasoning system
 message, 512-token generation budget, and final-answer semantic checks. Muse's
-ATEM output must reach `assistant to=user`; a response that stops in the
-reasoning channel is not a passing answer.
+thinking-enabled ATEM output must reach `assistant to=user`; a response
+that stops in the reasoning channel is not a passing answer.
 
 The 0.11 validation did not run the original FP16 checkpoint or its paired
 modes: the compatible test device had insufficient memory. This describes

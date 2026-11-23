@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tokenizers import Tokenizer
 
 from tensorrt_model_connect import BuildRequest, build
 from tools.e2e_evidence import evidence_stage, record_evidence
@@ -123,23 +124,48 @@ def _run_native(binary: Path, runtime_root: Path, bundle: Path, case: dict) -> d
     ]
     completed = subprocess.run(command, check=True, capture_output=True, text=True, timeout=900)
     record_evidence("commands", {"argv": command})
-    record_evidence("native", {"stdout": completed.stdout, "stderr": completed.stderr})
+    record_evidence(
+        "native",
+        {
+            "enable_thinking": case["enable_thinking"],
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        },
+    )
     return json.loads(completed.stdout)
 
 
-def _assert_correctness(payload: dict, case: dict) -> None:
-    token_ids = payload["token_ids"]
-    assert isinstance(token_ids, list) and token_ids
-    assert all(isinstance(token_id, int) for token_id in token_ids)
-    assert len(token_ids) <= case["max_new_tokens"]
-    _assert_answer(str(payload["text"]), case)
+def _assert_correctness(payload: dict, case: dict, tokenizer: Tokenizer) -> None:
+    ids = payload["token_ids"]
+    assert isinstance(ids, list) and ids
+    assert all(type(token_id) is int for token_id in ids)
+    assert len(ids) <= case["max_new_tokens"], "generation exceeded the token budget"
+    assert payload["text"] == tokenizer.decode(ids, skip_special_tokens=True), "incorrect display"
 
+    # ATEM inserts the public turn in the prompt when thinking is disabled.
+    # When enabled, only a generated, token-delimited public turn ends reasoning.
+    start, message, eom = (
+        tokenizer.token_to_id(s) for s in ("<|start|>", "<|message|>", "<|eom|>")
+    )
+    assert None not in (start, message, eom), "missing checkpoint ATEM delimiter"
+    public = ids
+    if case["enable_thinking"]:
+        starts = [i for i in range(1, len(ids)) if ids[i - 1 : i + 1] == [eom, start]]
+        assert starts, "no generated public turn"
+        begin = starts[-1] + 1
+        assert message in ids[begin:], "missing message delimiter"
+        end = ids.index(message, begin)
+        role = tokenizer.decode(ids[begin:end], skip_special_tokens=False)
+        assert role == "assistant to=user", "last turn was not addressed to the user"
+        public = ids[end + 1 :]
 
-def _assert_answer(output: str, case: dict) -> None:
-    marker = "assistant to=user"
-    assert marker in output, "Muse ATEM output never reached its public user channel"
-    answer = output.rsplit(marker, 1)[1].casefold()
-    assert answer.strip()
+    assert public and not set(public).intersection((start, message, eom)), (
+        "unexpected turn in public answer"
+    )
+    answer = tokenizer.decode(public, skip_special_tokens=True).strip().casefold()
+    assert answer and not answer.startswith(("to=self", "assistant to=")), (
+        "not a direct public answer"
+    )
     for alternatives in case["expected_terms"]:
         assert any(term.casefold() in answer for term in alternatives), (alternatives, answer)
 
@@ -172,7 +198,12 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     inspection = json.loads(inspected.stdout)
     assert inspection["family"] == _FAMILY
     assert inspection["task"] == manifest["task"]
-    with evidence_stage("native"):
-        payload = _run_native(binary, runtime_root, bundle, case)
-    with evidence_stage("compare"):
-        _assert_correctness(payload, case)
+    tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
+    default = case["enable_thinking"]
+    for thinking in (default, not default):
+        request_case = {**case, "enable_thinking": thinking}
+        mode = "thinking" if thinking else "direct"
+        with evidence_stage(f"native-{mode}"):
+            payload = _run_native(binary, runtime_root, bundle, request_case)
+        with evidence_stage(f"compare-{mode}"):
+            _assert_correctness(payload, request_case, tokenizer)
