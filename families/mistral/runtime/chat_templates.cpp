@@ -5,6 +5,7 @@
 
 #include "families/mistral/runtime/chat_templates.h"
 
+#include <regex>
 #include <string>
 
 namespace trtmc {
@@ -17,8 +18,8 @@ std::string apply_chatml(const std::string& prompt, bool enable_thinking) {
     return r;
 }
 
-std::string apply_mistral(const std::string& prompt, bool /*enable_thinking*/) {
-    return "[INST] " + prompt + " [/INST]";
+std::string apply_mistral(const std::string& prompt, bool compact_close) {
+    return "[INST] " + prompt + (compact_close ? "[/INST]" : " [/INST]");
 }
 
 std::string apply_phi(const std::string& prompt, bool /*enable_thinking*/) {
@@ -56,8 +57,14 @@ std::string mistral_detect_chat_template_format(const std::string& jinja_templat
         return {};
     if (jinja_template.find("<|im_start|>") != std::string::npos)
         return "chatml";
-    if (jinja_template.find("[INST]") != std::string::npos)
+    if (jinja_template.find("[INST]") != std::string::npos) {
+        // A separately concatenated space is significant, just like " [/INST]".
+        static const std::regex compact_close(
+            R"re((\[\s*['"]content['"]\s*\]|\.content)\s*[+~]\s*['"]\[/INST\]['"])re");
+        if (std::regex_search(jinja_template, compact_close))
+            return "mistral_compact_close";
         return "mistral";
+    }
     if (jinja_template.find("<|user|>") != std::string::npos ||
         jinja_template.find("<|assistant|>") != std::string::npos)
         return "phi";
@@ -78,8 +85,8 @@ std::string mistral_apply_chat_template(const std::string& format, const std::st
         return prompt;
     if (format == "chatml")
         return apply_chatml(prompt, enable_thinking);
-    if (format == "mistral")
-        return apply_mistral(prompt, enable_thinking);
+    if (format == "mistral" || format == "mistral_compact_close")
+        return apply_mistral(prompt, format == "mistral_compact_close");
     if (format == "phi")
         return apply_phi(prompt, enable_thinking);
     if (format == "gemma")
