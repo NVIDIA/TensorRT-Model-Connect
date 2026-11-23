@@ -14,4 +14,8 @@ benchmarks:
         kind: family_inputs
         module: families/lerobot_groot/reference/inputs.py
       selection: {method: first, count: 50}
-    gate: {max_abs_error: 0.045}  # the largest E2E bf16 tolerance (max abs against the bfloat16 policy)
+    # Arm: the largest E2E bf16 tolerance (max abs against the bfloat16 policy). Gripper: the binary LIBERO command
+    # by sign, as for the FP8 profile; one observation may change it at one step, as LeRobot's own bfloat16 policy
+    # does against float32 (0.03% of steps) and the bundle does on Jetson Thor (episode 1287, frame 94).
+    gate: {max_abs_error: 0.045, gripper_component: -1,
+           outliers: {max_fraction: 0.02, gate: {max_gripper_sign_changes: 1}}}
