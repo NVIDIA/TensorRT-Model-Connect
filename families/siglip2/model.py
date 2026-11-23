@@ -101,6 +101,30 @@ def _added_tokens(tokenizer: dict) -> list[dict]:
     return entries
 
 
+def _check_bpe_options(model: dict) -> None:
+    # The runtime merges the checkpoint's way: no dropout, no subword prefix or suffix, and
+    # also a word that is a vocabulary entry goes through the merges.
+    options = {key: model[key] for key in ("dropout", "continuing_subword_prefix", "end_of_word_suffix")
+               if model.get(key) is not None}
+    if model.get("ignore_merges", False) is not False:
+        options["ignore_merges"] = model["ignore_merges"]
+    if options:
+        raise NotImplementedError(f"siglip2 does not reproduce the BPE options {options}")
+
+
+def _check_vocabulary(vocab: dict) -> None:
+    # The runtime keeps the vocabulary as ids 0..N-1 and encodes every space as U+2581.
+    size = len(vocab)
+    for token, token_id in vocab.items():
+        if type(token_id) is not int:
+            raise ValueError(f"siglip2 vocabulary id of {token!r} is not an integer: {token_id!r}")
+        if not 0 <= token_id < size:
+            raise NotImplementedError(
+                f"siglip2 vocabulary ids must be integers in [0, {size}); {token!r} has {token_id}")
+    if _SENTENCE_PIECE_SPACE not in vocab:
+        raise NotImplementedError("siglip2 vocabulary has no U+2581 space marker")
+
+
 def _check_byte_fallback(vocab: dict) -> None:
     # The reference falls back to bytes all or nothing (the unknown token otherwise), and
     # the runtime has no unknown-token path: every byte that a character outside the
@@ -140,9 +164,11 @@ def _tokenizer_contract(model_dir: Path) -> int:
     appends one end token. That is what this checkpoint ships and what the reference
     tokenizer runs: it does not lowercase (``do_lower_case`` in
     ``tokenizer_config.json`` is not applied by the reference), so neither does the
-    runtime. The checkpoint's files also never need what the runtime leaves out: the byte
-    fallback never needs the unknown token, no added token sets a matching option or an id
-    other than its vocabulary id, and the end token expands to its own id alone. Anything
+    runtime. The checkpoint's files also never need what the runtime leaves out: no BPE
+    dropout, subword prefix or suffix, or skipped merges; vocabulary ids 0..N-1 with the
+    U+2581 marker; the byte fallback never needs the unknown token, no added token sets a
+    matching option or an id other than its vocabulary id, and the end token expands to its
+    own id alone. Anything
     else is refused here rather than tokenised differently; the runtime checks the same
     on load.
     """
@@ -173,6 +199,8 @@ def _tokenizer_contract(model_dir: Path) -> int:
         # with exactly this template.
         raise NotImplementedError(
             "siglip2 is qualified for a template that appends one end token")
+    _check_bpe_options(model)
+    _check_vocabulary(model["vocab"])
     _check_byte_fallback(model["vocab"])
     added_tokens = _added_tokens(tokenizer)
 

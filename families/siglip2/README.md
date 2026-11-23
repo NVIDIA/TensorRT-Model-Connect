@@ -51,9 +51,11 @@ stated value is checked against them.
   implementation in `families/embeddinggemma2/runtime/bpe_tokenizer.cpp`. It merges in
   the reference tokenizer's order (the lowest-ranked adjacent pair, the leftmost on a
   tie, one at a time). Like the builder, it refuses on load a `tokenizer.json` that it
-  would tokenise differently: a byte fallback that could need the unknown token,
-  added tokens with matching options or with an id other than their vocabulary id,
-  and an end token that expands to other ids than its own. It has no decoder: the
+  would tokenise differently: another normaliser, pre-tokenizer or template shape, BPE
+  dropout, a subword prefix or suffix or `ignore_merges`, vocabulary ids outside
+  0..N-1 or no `▁` marker, a byte fallback that could need the unknown token, added
+  tokens with matching options or with an id other than their vocabulary id, and an
+  end token that expands to other ids than its own. It has no decoder: the
   family never turns ids back into text.
 
 ## Reference behaviours this family takes a position on

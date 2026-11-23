@@ -897,6 +897,46 @@ class BpeTokenizer final : public ITokenizer {
 
     // ─── JSON parsing helpers ───
 
+    // The checkpoint's settings are the only ones the runtime reproduces (the builder refuses
+    // the others first): any other normaliser, pre-tokenizer, template shape or BPE option
+    // makes the reference tokenise differently.
+    static void check_settings(const nlohmann::json& j) {
+        const auto unsupported = [](const std::string& what) {
+            return std::runtime_error("Unsupported tokenizer.json: " + what);
+        };
+        const auto& model = j["model"];
+        if (model.value("type", "") != "BPE")
+            throw unsupported("model.type must be BPE");
+        for (const char* key : {"dropout", "continuing_subword_prefix", "end_of_word_suffix"}) {
+            const auto option = model.find(key);
+            if (option != model.end() && !option->is_null())
+                throw unsupported(std::string("model.") + key + " must be null");
+        }
+        const auto ignore_merges = model.find("ignore_merges");
+        if (ignore_merges != model.end() &&
+            !(ignore_merges->is_boolean() && !ignore_merges->get<bool>()))
+            throw unsupported("model.ignore_merges must be false");
+        const nlohmann::json space_marker = {
+            {"type", "Replace"}, {"pattern", {{"String", " "}}}, {"content", "\xe2\x96\x81"}};
+        const auto normalizer = j.find("normalizer");
+        if (normalizer == j.end() || *normalizer != space_marker)
+            throw unsupported("the normalizer must only replace spaces with U+2581");
+        const auto pre_tokenizer = j.find("pre_tokenizer");
+        if (pre_tokenizer != j.end() && !pre_tokenizer->is_null())
+            throw unsupported("pre_tokenizer must be null");
+        // The window keeps the end token in its last slot, so the template is the sequence
+        // followed by one special token (its id is checked with the added tokens).
+        const auto post = j.find("post_processor");
+        const bool one_end_token = post != j.end() && post->is_object() &&
+                                   post->value("type", "") == "TemplateProcessing" &&
+                                   post->contains("single") && (*post)["single"].is_array() &&
+                                   (*post)["single"].size() == 2 &&
+                                   (*post)["single"][0].contains("Sequence") &&
+                                   (*post)["single"][1].contains("SpecialToken");
+        if (!one_end_token)
+            throw unsupported("the template must be the sequence followed by one special token");
+    }
+
     // The reference falls back to bytes all or nothing: a character outside the vocabulary
     // becomes its byte tokens only when every one of them is in the vocabulary, and the
     // unknown token otherwise. The runtime has no unknown-token path, so it takes only a
@@ -922,15 +962,26 @@ class BpeTokenizer final : public ITokenizer {
     void parse_vocab(const nlohmann::json& j) {
         auto& vocab_obj = j["model"]["vocab"];
         size_t vocab_size = vocab_obj.size();
+        if (vocab_size > static_cast<size_t>(INT32_MAX))
+            throw std::runtime_error(
+                "Unsupported tokenizer.json: more vocabulary entries than int32 ids");
         mVocab.resize(vocab_size);
 
         for (auto& [token, id] : vocab_obj.items()) {
-            int32_t token_id = id.get<int32_t>();
-            if (token_id >= 0 && token_id < static_cast<int32_t>(vocab_size)) {
-                mVocab[token_id] = token;
-                mTokenToId[token] = token_id;
-            }
+            // The vocabulary is kept as ids 0..N-1; the reference takes any id, so a token
+            // with another id would be lost here.
+            if (!id.is_number_unsigned() || id.get<std::uint64_t>() >= vocab_size)
+                throw std::runtime_error("Unsupported tokenizer.json: vocabulary id of " + token +
+                                         " is not in 0.." + std::to_string(vocab_size - 1));
+            const auto token_id = static_cast<int32_t>(id.get<std::uint64_t>());
+            mVocab[token_id] = token;
+            mTokenToId[token] = token_id;
         }
+        // The normaliser turns every space into U+2581; without that marker the runtime would
+        // encode on another path than the reference's.
+        if (mTokenToId.count("\xe2\x96\x81") == 0)
+            throw std::runtime_error(
+                "Unsupported tokenizer.json: no U+2581 space marker in the vocabulary");
     }
 
     void parse_merges(const nlohmann::json& j) {
@@ -1169,6 +1220,7 @@ class BpeTokenizer final : public ITokenizer {
             throw std::runtime_error("Invalid tokenizer.json: model.vocab must be an object");
         if (!model.contains("merges") || !model["merges"].is_array())
             throw std::runtime_error("Invalid tokenizer.json: model.merges must be an array");
+        check_settings(j);
 
         mByteFallback = model.value("byte_fallback", false);
         mEndOfWordSuffix = optional_model_string(model, "end_of_word_suffix");

@@ -116,6 +116,8 @@ int main() {
         expect("\t", {byte_id(0x09), kEos}, "tab");
         // An added token in the text is matched as itself.
         expect("a<eos>", {5, kEos, kEos}, "added token");
+        // A word that is a vocabulary entry still goes through the merges.
+        expect("aba", {7, 5, kEos}, "merge path for a vocabulary word");
         // A prompt that ends inside a multi-byte sequence falls back to one token per byte.
         expect("a\xc3", {5, byte_id(0xC3), kEos}, "truncated two-byte sequence");
         expect("a\xe2\x82", {5, byte_id(0xE2), byte_id(0x82), kEos},
@@ -142,6 +144,17 @@ int main() {
             failures += "merge order: space marker merge\n";
     } catch (const std::exception& error) {
         failures += std::string("merge order: ") + error.what() + "\n";
+    }
+
+    // ignore_merges false is the merge path as well ("aba" as "ab" + "a"); the reference skips
+    // the merges for a vocabulary word only when it is true.
+    try {
+        Json merged = miniature();
+        merged["model"]["ignore_merges"] = false;
+        if (load(merged)->encode("aba") != std::vector<std::int32_t>{7, 5, kEos})
+            failures += "ignore_merges false left the merge path\n";
+    } catch (const std::exception& error) {
+        failures += std::string("ignore_merges false: ") + error.what() + "\n";
     }
 
     // What the runtime would tokenise differently from the reference is refused on load (the
@@ -184,6 +197,47 @@ int main() {
          "exactly its id 1"},
         {"template without special_tokens",
          [](Json& t) { t["post_processor"].erase("special_tokens"); }, "exactly its id 1"},
+        // The vocabulary is kept as ids 0..N-1 (N = 267 here); the reference takes any id.
+        {"vocabulary id out of range", [](Json& t) { t["model"]["vocab"]["aba"] = 267; },
+         "vocabulary id of aba is not in 0..266"},
+        {"vocabulary id beyond int32", [](Json& t) { t["model"]["vocab"]["aba"] = 2147483658ULL; },
+         "vocabulary id of aba is not in 0..266"},
+        // Without U+2581 in the vocabulary a space would take another encode path.
+        {"no space marker",
+         [](Json& t) {
+             rename_token(t, "▁", "zz");
+             rename_token(t, "▁ab", "zab");
+             t["model"]["merges"] = Json::array({Json::array({"a", "b"})});
+         },
+         "no U+2581 space marker"},
+        // Settings the runtime does not apply.
+        {"ignore_merges true", [](Json& t) { t["model"]["ignore_merges"] = true; },
+         "model.ignore_merges must be false"},
+        {"dropout", [](Json& t) { t["model"]["dropout"] = 0.1; }, "model.dropout must be null"},
+        {"subword prefix", [](Json& t) { t["model"]["continuing_subword_prefix"] = "##"; },
+         "model.continuing_subword_prefix must be null"},
+        {"word suffix", [](Json& t) { t["model"]["end_of_word_suffix"] = "</w>"; },
+         "model.end_of_word_suffix must be null"},
+        {"model type", [](Json& t) { t["model"]["type"] = "WordPiece"; }, "model.type must be BPE"},
+        {"lowercasing normalizer",
+         [](Json& t) {
+             t["normalizer"] =
+                 Json{{"type", "Sequence"},
+                      {"normalizers", Json::array({Json{{"type", "Lowercase"}}, t["normalizer"]})}};
+         },
+         "the normalizer must only replace spaces"},
+        {"no normalizer", [](Json& t) { t["normalizer"] = nullptr; },
+         "the normalizer must only replace spaces"},
+        {"pre-tokenizer",
+         [](Json& t) {
+             t["pre_tokenizer"] = Json{{"type", "Metaspace"},
+                                       {"replacement", "▁"},
+                                       {"prepend_scheme", "always"},
+                                       {"split", true}};
+         },
+         "pre_tokenizer must be null"},
+        {"template without the end token", [](Json& t) { t["post_processor"]["single"].erase(1); },
+         "the template must be the sequence followed by one special token"},
         {"record without a flag", [](Json& t) { t["added_tokens"][2].erase("normalized"); },
          "no boolean normalized"},
         {"record without content",

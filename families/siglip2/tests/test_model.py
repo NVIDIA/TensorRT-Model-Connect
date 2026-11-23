@@ -46,10 +46,11 @@ def _added(token_id, content, special=True, **options) -> dict:
             "rstrip": False, "normalized": False, "special": special, **options}
 
 
-# Like the checkpoint's: every byte has its fallback token except the tab, whose character
-# is a vocabulary entry itself.
-_TOKEN_IDS = {"<pad>": 0, "<eos>": 1, "a": 2, "\t": 3,
-              **{f"<0x{byte:02X}>": 4 + byte for byte in range(256) if byte != 0x09}}
+# Like the checkpoint's: ids 0..N-1 with the U+2581 marker, and every byte has its fallback
+# token except the tab, whose character is a vocabulary entry itself.
+_TOKEN_IDS = {"<pad>": 0, "<eos>": 1, "a": 2, "\t": 3, "▁": 4,
+              **{f"<0x{byte:02X}>": 5 + index
+                 for index, byte in enumerate(b for b in range(256) if b != 0x09)}}
 
 _TOKENIZER = {
     "added_tokens": [_added(0, "<pad>"), _added(1, "<eos>")],
@@ -64,9 +65,13 @@ _TOKENIZER = {
 }
 
 
-def _without_tokens(*names: str) -> dict:
-    return {"model": {**_TOKENIZER["model"],
-                      "vocab": {k: v for k, v in _TOKEN_IDS.items() if k not in names}}}
+def _with_model(**changes) -> dict:
+    return {"model": {**_TOKENIZER["model"], **changes}}
+
+
+def _renamed(token: str, new_name: str) -> dict:
+    # Keeps the ids 0..N-1: the token's id moves to a name the tokenizer does not use.
+    return _with_model(vocab={(new_name if k == token else k): v for k, v in _TOKEN_IDS.items()})
 
 
 def _end_token_expanding_to(ids) -> dict:
@@ -212,8 +217,18 @@ def test_the_tokenizer_contract_returns_the_pad_id(tmp_path: Path) -> None:
         ({"added_tokens": [_added(0, "<pad>"), _added(1, "<eos>", special=False)]}, "special token"),
         # The reference turns a character whose byte token is missing into the unknown
         # token; the runtime has no unknown-token path.
-        (_without_tokens("<0xAC>"), "missing <0xAC>"),
-        (_without_tokens("<0x7A>"), "missing <0x7A>"),
+        (_renamed("<0xAC>", "zz"), "missing <0xAC>"),
+        (_renamed("<0x7A>", "zz"), "missing <0x7A>"),
+        # The runtime keeps ids 0..N-1, where the reference takes any id.
+        (_with_model(vocab={**_TOKEN_IDS, "<0xFF>": len(_TOKEN_IDS)}), "ids must be integers in"),
+        (_with_model(vocab={**_TOKEN_IDS, "a": 10_000}), "ids must be integers in"),
+        # Without the marker the runtime would not encode on the reference's path.
+        (_renamed("▁", "zz"), "no U.2581 space marker"),
+        # BPE options the runtime does not apply.
+        (_with_model(ignore_merges=True), "ignore_merges"),
+        (_with_model(dropout=0.1), "dropout"),
+        (_with_model(continuing_subword_prefix="##"), "continuing_subword_prefix"),
+        (_with_model(end_of_word_suffix="</w>"), "end_of_word_suffix"),
         *[({"added_tokens": [_added(0, "<pad>"), _added(1, "<eos>"),
                              _added(2, "a", special=False, **{option: True})]}, f"sets {option}")
           for option in ("single_word", "lstrip", "rstrip", "normalized")],
@@ -232,6 +247,17 @@ def test_tokenizers_the_runtime_would_tokenise_differently_are_refused(
         tmp_path: Path, override: dict, message: str) -> None:
     with pytest.raises(NotImplementedError, match=message):
         model_module._tokenizer_contract(_model_dir(tmp_path, tokenizer={**_TOKENIZER, **override}))
+
+
+def test_a_vocabulary_id_that_is_not_an_integer_is_refused(tmp_path: Path) -> None:
+    tokenizer = {**_TOKENIZER, **_with_model(vocab={**_TOKEN_IDS, "a": "2"})}
+    with pytest.raises(ValueError, match="vocabulary id of 'a' is not an integer"):
+        model_module._tokenizer_contract(_model_dir(tmp_path, tokenizer=tokenizer))
+
+
+def test_merges_stay_on_with_ignore_merges_false(tmp_path: Path) -> None:
+    tokenizer = {**_TOKENIZER, **_with_model(ignore_merges=False)}
+    assert model_module._tokenizer_contract(_model_dir(tmp_path, tokenizer=tokenizer)) == 0
 
 
 @pytest.mark.parametrize(
