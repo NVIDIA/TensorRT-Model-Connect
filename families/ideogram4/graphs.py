@@ -98,6 +98,46 @@ class Denoiser(nn.Module):
         )
 
 
+class Attention(nn.Module):
+    """Keep score and probability arithmetic in FP32 like the fused reference."""
+
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, values, segment_ids, cos, sin):
+        from ideogram4.modeling_ideogram4 import _apply_rotary_pos_emb
+
+        batch, length, _ = values.shape
+        module = self.module
+        q, k, v = (
+            module.qkv(values)
+            .reshape(batch, length, 3, module.num_heads, module.head_dim)
+            .unbind(dim=2)
+        )
+        q = module.norm_q(q).transpose(1, 2)
+        k = module.norm_k(k).transpose(1, 2)
+        v = v.transpose(1, 2)
+        q, k = _apply_rotary_pos_emb(q, k, cos, sin)
+        mask = (segment_ids.unsqueeze(2) == segment_ids.unsqueeze(1)).unsqueeze(1)
+        scores = (q.float() @ k.float().transpose(-1, -2)) * (module.head_dim**-0.5)
+        probabilities = torch.softmax(torch.where(mask, scores, float("-inf")), dim=-1)
+        output = probabilities @ v.float()
+        output = output.to(values.dtype).transpose(1, 2).reshape(batch, length, module.hidden_size)
+        return module.o(output)
+
+
+def preserve_attention(module):
+    from ideogram4.modeling_ideogram4 import Ideogram4Attention
+
+    for name, child in list(module.named_children()):
+        if isinstance(child, Ideogram4Attention):
+            setattr(module, name, Attention(child))
+        else:
+            preserve_attention(child)
+    return module
+
+
 class RMSNorm(nn.Module):
     """Keep the affine multiply inside PyTorch RMSNorm's FP32 accumulation."""
 
@@ -150,7 +190,7 @@ def denoiser(directory: Path, component: str):
         torch.device("cpu"),
         torch.bfloat16,
     )
-    return Denoiser(preserve_normalization(materialize_fp8(model)).eval())
+    return Denoiser(preserve_attention(preserve_normalization(materialize_fp8(model))).eval())
 
 
 class Decoder(nn.Module):
