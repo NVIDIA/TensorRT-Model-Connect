@@ -119,7 +119,7 @@ public Task's 448x448 image size, with image decode before timing and preparatio
   attempt. Low scores from successfully returned answers do not trigger precision fallback.
 - Both sides run separately with one server and concurrency 1. Legacy Acc replica, MPS, and overlap settings
   are ignored by qualification; their contended timings cannot serve as speed evidence.
-- Every AIPerf run has a 12-hour deadline unless the environment explicitly sets `deadlines.<profile>`.
+- Every AIPerf run has a 12-hour deadline unless the environment (or its platform) sets `deadlines.<profile>`.
   Scheduling ledgers only determine assignment: historical rescoring durations can omit fresh inference.
   A GPU phase that fails before producing its result runs once more.
 - `summary` reports one result per model, worst first: White (no verdict: an error or a failed build; or no valid
@@ -267,7 +267,7 @@ that the serving interpreter cannot import (missing, or failing on a missing or 
 ## Commands
 
 ```bash
-E=config/environments/gb300-perf-serving.yaml
+E=config/environments/<machine>.yaml
 trtmc-aiperf-qual plan --environment $E
 trtmc-aiperf-qual matrix --environment $E --output matrix.csv                # exit 1 unless every profile is executable
 trtmc-aiperf-qual run --profile qwen3-0.6b-fp16 --environment $E --out out/qwen3-0.6b-fp16
@@ -336,6 +336,15 @@ models:
 
 Excluded profiles are written to `<out-root>/excluded.json` and appear in `summary` as `excluded`
 with their reason, unless another result root holds a result for them.
+
+### Platform defaults
+
+What a kind of hardware cannot run belongs to the platform, not to each machine. An environment with
+`platform: <name>` takes `config/platforms/<name>.yaml` (`gb300`, `dgx-spark`, `jetson-thor`): its
+`models.exclude` follow the machine's own exclusions, with reasons that name the platform, and its
+`deadlines` apply unless the machine sets the same profile. The lists change with the catalog: a change that
+lets a model run on a platform removes its entry there. A reason tied to one machine rather than to the
+hardware (a bare-metal host without root, for example) stays in that machine's `models.exclude`.
 
 ### Disk retention
 
@@ -454,9 +463,11 @@ A suite with media and neither `media_root` nor `hf_datasets_cache` configured i
   selection, the fit helpers and AIPerf then count with it, loaded as a plain fast tokenizer with the
   checkpoint's special tokens and chat template (InternLM2: its remote-code tokenizer splits text into characters
   on transformers 5.x).
-- New machine: a new file under `config/environments/` (paths, Python interpreters, ports, lock, model list,
-  retention); Docker or bare metal only differ in these paths. A run's own inputs (its ledger and multi-host
-  assignment) stay with that run's results and are passed by path (`run-all --ledger`, `--assignment`).
+- New machine: a copy of `config/environments/example.yaml` (platform, paths, Python interpreters, ports, lock,
+  model list, retention); Docker or bare metal only differ in these paths. New hardware: a file under
+  `config/platforms/` with the models it cannot run and the deadlines it needs. A run's own inputs (its ledger
+  and multi-host assignment) stay with that run's results and are passed by path (`run-all --ledger`,
+  `--assignment`).
 - Several hosts without a frozen assignment: a coordinator hands profiles (a checkpoint's profiles together) to
   hosts as they free up. Each attempt is a fragment, `run-all --campaign ID --fragment ID --host NAME --profile ...`
   in an `--out-root` of its own (it resumes only as the same fragment). The coordinator's manifest
