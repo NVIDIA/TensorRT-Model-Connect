@@ -98,6 +98,34 @@ class Denoiser(nn.Module):
         )
 
 
+class RMSNorm(nn.Module):
+    """Keep the affine multiply inside PyTorch RMSNorm's FP32 accumulation."""
+
+    def __init__(self, module):
+        super().__init__()
+        self.weight = module.weight
+        self.eps = module.eps
+
+    def forward(self, values):
+        wide = values.float()
+        normalized = wide * torch.rsqrt(wide.square().mean(-1, keepdim=True) + self.eps)
+        return (normalized * self.weight.float()).to(values.dtype)
+
+
+def preserve_normalization(module):
+    from ideogram4.modeling_ideogram4 import Ideogram4RMSNorm
+
+    for name, child in list(module.named_children()):
+        if isinstance(child, Ideogram4RMSNorm):
+            # Exporting F.rms_norm directly rounds the normalized BF16 value
+            # before its affine multiply. The publisher's fused PyTorch op
+            # rounds only after that multiply, so spell out its accumulation.
+            setattr(module, name, RMSNorm(child))
+        else:
+            preserve_normalization(child)
+    return module
+
+
 def denoiser(directory: Path, component: str):
     from ideogram4.modeling_ideogram4 import Ideogram4Config
     from ideogram4.pipeline_ideogram4 import _build_transformer
@@ -122,7 +150,7 @@ def denoiser(directory: Path, component: str):
         torch.device("cpu"),
         torch.bfloat16,
     )
-    return Denoiser(materialize_fp8(model).eval())
+    return Denoiser(preserve_normalization(materialize_fp8(model)).eval())
 
 
 class Decoder(nn.Module):
@@ -156,21 +184,25 @@ def decoder(directory: Path, grid_h, grid_w):
 
 
 def compile_engine(module, inputs, input_names, output_name, directory: Path, verbose=False):
+    import onnxscript.optimizer
     import tensorrt as trt
 
     path = directory / "component.onnx"
     with torch.inference_mode():
-        torch.onnx.export(
+        program = torch.onnx.export(
             module.eval(),
             inputs,
-            str(path),
             input_names=input_names,
             output_names=[output_name],
             opset_version=23,
             dynamo=True,
-            external_data=True,
-            optimize=True,
+            optimize=False,
         )
+    # Fold constant axes without the exporter's algebraic pattern rewrites:
+    # its RMSNormalization fusion moves a BF16 cast before the affine multiply.
+    # TensorRT still owns fusion and lowering of the faithfully typed graph.
+    program.model = onnxscript.optimizer.optimize(program.model)
+    program.save(str(path), external_data=True)
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
