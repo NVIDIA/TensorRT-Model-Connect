@@ -3,6 +3,9 @@
 
 # Optional native dependency provisioning. Model builds never acquire dependencies.
 option(TRTMC_ENABLE_EDGELLM "Install the pinned native Edge-LLM SDK and builder" OFF)
+if(TRTMC_EDGELLM_POLICY_SDK AND (NOT TRTMC_ENABLE_EDGELLM OR NOT TRTMC_EDGELLM_RELEASE STREQUAL "0.12.0"))
+  message(FATAL_ERROR "TRTMC_EDGELLM_POLICY_SDK requires TRTMC_ENABLE_EDGELLM=ON and TRTMC_EDGELLM_RELEASE=0.12.0")
+endif()
 if(NOT TRTMC_ENABLE_EDGELLM)
   return()
 endif()

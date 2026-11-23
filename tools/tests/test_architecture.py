@@ -565,6 +565,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "cmake/edge_llm/0.12/Provider.cmake",
         "cmake/edge_llm/0.12/Prepare.cmake.in",
         "cmake/edge_llm/0.12/InstalledSDK.cmake",
+        "cmake/edge_llm/0.12/PolicySDK.cmake",
         "cmake/edge_llm/CheckNative.cmake",
         "cmake/edge_llm/EdgeLLMConfig.cmake.in",
         "cmake/edge_llm/Install.cmake.in",
