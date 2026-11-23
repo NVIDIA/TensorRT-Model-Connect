@@ -15,6 +15,8 @@
 #include <queue>
 #include <stdexcept>
 #include <string>
+#include <unicode/uchar.h>
+#include <unicode/unistr.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -208,10 +210,7 @@ inline bool is_digit(char32_t cp) {
 }
 
 inline bool is_whitespace(char32_t cp) {
-    return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == 0x0B || cp == 0x0C // VT, FF
-           || cp == 0xA0                   // non-breaking space
-           || cp == 0x2000 || cp == 0x200A // en space through hair space
-           || cp == 0x3000;                // ideographic space
+    return u_isUWhiteSpace(static_cast<UChar32>(cp));
 }
 
 // BLOOM punctuation set: .,!?...
@@ -1031,7 +1030,10 @@ class BpeTokenizer final : public ITokenizer {
                 result.append(text, start, pos - start);
             }
         }
-        return result;
+        // Joined token bytes can end inside a character; decode with replacement once.
+        std::string repaired;
+        icu::UnicodeString::fromUTF8(result).toUTF8String(repaired);
+        return repaired;
     }
 
     // Generic pre-tokenizer used when no GPT-2 pattern is declared.

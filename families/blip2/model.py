@@ -47,6 +47,10 @@ def build(request, writer):
         or vision["hidden_act"] != "gelu"
         or qformer["hidden_act"] != "gelu"
         or qformer["use_qformer_text_input"]
+        or not preprocessing.get("do_resize", True)
+        or not preprocessing.get("do_rescale", True)
+        or preprocessing.get("rescale_factor", 1 / 255) != 1 / 255
+        or not preprocessing.get("do_normalize", True)
         or preprocessing["resample"] != 3
         or preprocessing["size"] != dict(height=vision["image_size"], width=vision["image_size"])
         or preprocessing["image_mean"] != [0.48145466, 0.4578275, 0.40821073]
@@ -54,7 +58,7 @@ def build(request, writer):
     ):
         raise ValueError("Unsupported BLIP-2 language model, Q-Former, or image preprocessing")
     length = request.max_sequence_length or 128
-    if not cfg["num_query_tokens"] + 2 <= length <= text["max_position_embeddings"]:
+    if not cfg["num_query_tokens"] + 3 <= length <= text["max_position_embeddings"]:
         raise ValueError("BLIP-2 sequence profile must fit image queries and text")
     index = json.loads((directory / "model.safetensors.index.json").read_text())["weight_map"]
     weights = {}

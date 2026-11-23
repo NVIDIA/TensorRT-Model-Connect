@@ -134,10 +134,30 @@ def _record_comparison(tmp_path, label, native, reference, checks):
     )
 
 
+def _checkpoint_source(manifest: dict, path: Path, *, override: bool) -> Path:
+    """An arbitrary local directory does not establish the manifest's pinned identity."""
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": None if override else manifest["hf_id"],
+            "revision": None if override else manifest["hf_revision"],
+            "source": "local_override" if override else "pinned_snapshot",
+            "path": str(path.resolve()),
+            "revision_verified": not override,
+            "expected_repo_id": manifest["hf_id"],
+            "expected_revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    return path
+
+
 def _model_dir(manifest: dict) -> Path:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
-        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+        return _checkpoint_source(
+            manifest, _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR"), override=True
+        )
     from huggingface_hub import snapshot_download
 
     try:
@@ -148,7 +168,7 @@ def _model_dir(manifest: dict) -> Path:
         raise AssertionError(
             f"selected {FAMILY} E2E requires the exact cached checkpoint {manifest['hf_id']}"
         ) from error
-    return Path(snapshot)
+    return _checkpoint_source(manifest, Path(snapshot), override=False)
 
 
 def _runtime() -> tuple[Path, Path]:
@@ -235,17 +255,23 @@ def _run_json(
         return payloads[0]
 
 
-def test_official_checkpoint_e2e(case_name, tmp_path):
+@pytest.fixture
+def strict_reference_math():
+    import torch
+
+    matmul, cudnn = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = matmul
+        torch.backends.cudnn.allow_tf32 = cudnn
+
+
+def test_official_checkpoint_e2e(case_name, tmp_path, strict_reference_math):
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
-    record_evidence(
-        "checkpoint",
-        {
-            "repo_id": manifest["hf_id"],
-            "revision": manifest["hf_revision"],
-            "precision": manifest["precision"],
-        },
-    )
     record_evidence(
         "thresholds",
         {
@@ -313,8 +339,6 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         )
         with evidence_stage("comparison"):
             assert completed.returncode == 0, completed.stderr
-        with evidence_stage("comparison"):
-            assert json.loads(completed.stdout)["ids"] == inputs.input_ids[0].tolist()
         record_evidence(
             "native_preprocess",
             {
@@ -332,6 +356,8 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             },
         )
         with evidence_stage("comparison"):
+            assert json.loads(completed.stdout)["ids"] == inputs.input_ids[0].tolist()
+        with evidence_stage("comparison"):
             np.testing.assert_allclose(
                 np.fromfile(pixels, dtype="<f4").reshape(1, 3, 224, 224),
                 inputs.pixel_values.numpy(),
@@ -342,8 +368,6 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     with evidence_stage("build"):
         _build(directory, bundle, manifest)
     record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
     with evidence_stage("reference"):
         reference = (
             AutoModelForImageTextToText.from_pretrained(
