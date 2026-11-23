@@ -83,6 +83,8 @@ class GrootConfig:
     clip_action: bool
     libero_gripper: bool  # Turn the last action dimension into LIBERO's -1/+1 gripper command.
 
+    isaac_libero: bool = False
+
 
 def _read_json(path: Path) -> dict[str, Any]:
     if not path.is_file():
@@ -202,9 +204,69 @@ def _image(step: dict[str, Any], height: int, width: int) -> ImageTransform:
     return ImageTransform(shortest_edge=shortest, crop_fraction=fraction, target_height=target_h, target_width=target_w)
 
 
+def _isaac_libero(model_dir: Path, raw: dict[str, Any]) -> GrootConfig:
+    """Read the Isaac checkpoint's named robot groups; the LeRobot unpacker is not used."""
+    def expect(values: dict, expected: dict) -> None:
+        _unsupported({k: (values.get(k), v) for k, v in expected.items() if values.get(k) != v})
+
+    tag = "libero_sim"
+    keys = ["x", "y", "z", "roll", "pitch", "yaw", "gripper"]
+    expect(raw, {"architectures": ["Gr00tN1d7"], "model_name": BACKBONE, "select_layer": 16,
+                 "backbone_embedding_dim": 2048, "hidden_size": 1024, "add_pos_embed": True,
+                 "use_alternate_vl_dit": True, "use_vlln": True, "use_vl_self_attention": True,
+                 "use_future_tokens": False, "action_space_prompt": False, "reproject_vision": False,
+                 "num_timestep_buckets": 1000, "num_inference_timesteps": 4, "action_horizon": 40})
+    expect(raw["diffusion_model_cfg"], {"attention_head_dim": 48, "num_attention_heads": 32,
+                                         "num_layers": 32, "output_dim": 1024, "norm_type": "ada_norm",
+                                         "interleave_self_attention": True, "positional_embeddings": None})
+    expect(raw["vl_self_attention_cfg"], {"attention_head_dim": 64, "num_attention_heads": 32,
+                                           "num_layers": 4, "positional_embeddings": None})
+    processor = _read_json(model_dir / "processor_config.json")["processor_kwargs"]
+    for values in (raw, processor):
+        expect(values, {"image_target_size": [256, 256], "shortest_image_edge": 256, "crop_fraction": 0.95,
+                        "use_albumentations": True, "letter_box_transform": False, "formalize_language": True,
+                        "max_state_dim": MAX_DIM, "max_action_dim": MAX_DIM, "exclude_state": False,
+                        "apply_sincos_state_encoding": False, "use_percentiles": True, "use_mean_std": False})
+    expect(processor, {"max_action_horizon": NATIVE_ACTION_HORIZON})
+    expect(_read_json(model_dir / "embodiment_id.json"), {tag: 2})
+    group = processor["modality_configs"][tag]
+    cameras = ["image", "wrist_image"]
+    expect(group["video"], {"modality_keys": cameras, "delta_indices": [0]})
+    expect(group["language"], {"modality_keys": ["annotation.human.action.task_description"], "delta_indices": [0]})
+    expect(group["state"], {"modality_keys": keys, "delta_indices": [0], "sin_cos_embedding_keys": None,
+                            "mean_std_embedding_keys": None})
+    absolute = {"rep": "ABSOLUTE", "type": "NON_EEF", "format": "DEFAULT", "state_key": None}
+    expect(group["action"], {"modality_keys": keys, "delta_indices": list(range(16)),
+                             "action_configs": [absolute] * len(keys), "mean_std_embedding_keys": None,
+                             "sin_cos_embedding_keys": None})
+    stats = _read_json(model_dir / "statistics.json")[tag]
+
+    def bounds(part: str, quantile: str) -> tuple[float, ...]:
+        values = []
+        for key in keys:
+            column = stats[part][key][quantile]
+            width = 2 if (part, key) == ("state", "gripper") else 1
+            if len(column) != width or not np.isfinite(column).all():
+                raise ValueError(f"Invalid GR00T LIBERO {part}.{key}.{quantile}: expected {width} finite values")
+            values.extend(float(value) for value in column)
+        return tuple(values)
+
+    return GrootConfig(
+        cameras=tuple(cameras), camera_width=256, camera_height=256, state_dim=8, action_dim=7,
+        action_horizon=NATIVE_ACTION_HORIZON, max_state_dim=MAX_DIM, max_action_dim=MAX_DIM,
+        num_inference_steps=4, chunk_size=16, embodiment_id=2, embodiment_tag=tag, formalize_language=True,
+        image=_image({"config": raw}, 256, 256),
+        state_min=bounds("state", "q01"), state_max=bounds("state", "q99"), clip_state=True,
+        action_min=bounds("action", "q01"), action_max=bounds("action", "q99"), clip_action=True,
+        libero_gripper=False, isaac_libero=True,
+    )
+
+
 def load_config(model_dir: str | Path) -> GrootConfig:
     model_dir = Path(model_dir)
     raw = _read_json(model_dir / "config.json")
+    if raw.get("model_type") == "Gr00tN1d7":
+        return _isaac_libero(model_dir, raw)
     _check_boundary(raw)
     cameras, (height, width), state_dim, action_dim = _features(raw)
 

@@ -352,7 +352,7 @@ episode 1262 frame 40 and episode 1267 frame 80 in `physical-intelligence/libero
 revision `a4336d589d589045d1c56423ffdf3b88a0e19b1f`. That dataset is distributed
 under CC-BY-4.0. Each `observation.json` records the source. The `*.processed.png`
 files are those same frames after LeRobot's evaluation crop and resize.
-`noise_seed0.f32` is a `torch.randn` draw, `reference/*.f32` are LeRobot
+`noise_seed0.f32` is a `torch.randn` draw, `reference/ep*.f32` are LeRobot
 `lerobot[groot]==0.6.1` outputs, and `tokenizer_golden.json` holds instructions
 written for this test with the token ids LeRobot's preprocessor produced for them;
 none of these contains third-party content beyond the frames above.
@@ -364,6 +364,14 @@ none of these contains third-party content beyond the frames above.
 - `noise_seed0.f32`: little-endian float32 flow noise, 40 x 132
 - `reference/ep*_f*.{fp32,bf16}.f32`, `reference/ep1272_f000.alternate.{fp32,bf16}.f32`: little-endian float32 actions, 16 x 7
 - `tokenizer_golden.json`: test instructions and expected prompt token ids
+
+The Isaac LIBERO-10 fixture `reference/isaac_libero10_ep1272_f000.fp32.f32`
+contains 16 × 7 generated float32 actions, not weights. It reuses the episode
+1272 frame 0 observation and flow noise above with the independent
+[Isaac GR00T policy](https://github.com/NVIDIA/Isaac-GR00T/tree/23ace64f17aa5015259b8609d371eb61a357c776)
+and the pinned [LIBERO-10 checkpoint](https://huggingface.co/nvidia/GR00T-N1.7-LIBERO/tree/658540327860f93dd2cb9c1ed3e3b10fb792a0eb/libero_10).
+The family records the inputs and reference method in
+`families/lerobot_groot/tests/isaac-fixture-source.json`.
 
 ## FoundationPose external model artifacts
 

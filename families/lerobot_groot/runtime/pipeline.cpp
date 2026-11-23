@@ -6,6 +6,7 @@
 #include "families/lerobot_groot/runtime/pipeline.h"
 
 #include "families/lerobot_groot/runtime/image.h"
+#include "families/lerobot_groot/runtime/request.h"
 
 #include <algorithm>
 #include <chrono>
@@ -21,14 +22,6 @@ namespace {
 
 // Additive mask for keys a query must not see; exp() of it underflows to exactly zero.
 constexpr float kMasked = -1e30F;
-
-const internal::ConfigField kFields[] = {
-    {"seed", internal::ConfigKind::I64, std::nullopt,
-     "Seed for the initial flow noise. Omit for a fresh random draw on every call."},
-    {"noise", internal::ConfigKind::F64List, std::nullopt,
-     "Explicit initial noise of action_horizon x max_action_dim values (40 x 132), row-major. It "
-     "overrides seed; use it to reproduce a reference run."},
-};
 
 Tensor tensor_of(void* data, std::vector<std::int64_t> shape, DType dtype) {
     Tensor tensor;
@@ -151,106 +144,22 @@ void Pipeline::validate_engines() {
 }
 
 std::vector<internal::TaskInstance> Pipeline::task_bindings() {
-    return {internal::bind<internal::IImagesStateTextToActionChunk>(
-        *this, Span<const internal::ConfigField>{kFields, std::size(kFields)})};
-}
-
-Pipeline::Options Pipeline::parse_options(internal::ConfigView config) const {
-    Options options;
-    for (const auto& entry : config) {
-        if (entry.name == "seed") {
-            const auto seed = std::get<std::int64_t>(entry.value);
-            if (seed < 0)
-                throw std::invalid_argument("lerobot_groot seed must not be negative");
-            options.has_seed = true;
-            options.seed = static_cast<std::uint64_t>(seed);
-        } else if (entry.name == "noise") {
-            const auto values = std::get<Span<const double>>(entry.value);
-            const auto expected =
-                static_cast<std::size_t>(config_.action_horizon) * config_.max_action_dim;
-            if (values.size() != expected)
-                throw std::invalid_argument(
-                    "lerobot_groot noise must have action_horizon x max_action_dim values");
-            options.noise.reserve(expected);
-            for (const double value : values) {
-                if (!std::isfinite(value))
-                    throw std::invalid_argument("lerobot_groot noise must be finite");
-                options.noise.push_back(static_cast<float>(value));
-            }
-        }
-    }
-    return options;
-}
-
-std::vector<float> Pipeline::initial_noise(const Options& options) {
-    if (!options.noise.empty())
-        return options.noise;
-    std::vector<float> noise(static_cast<std::size_t>(config_.action_horizon) *
-                             config_.max_action_dim);
-    std::mt19937_64 seeded(options.seed);
-    auto& engine = options.has_seed ? seeded : rng_;
-    std::normal_distribution<float> normal(0.0F, 1.0F);
-    for (float& value : noise)
-        value = normal(engine);
-    return noise;
+    return {internal::bind<internal::IImagesStateTextToActionChunk>(*this, action_fields())};
 }
 
 std::vector<float>
 Pipeline::pack_pixels(const internal::ImagesStateTextObservation& observation) const {
-    const auto size = static_cast<std::uint32_t>(config_.camera_size);
-    const std::size_t values = static_cast<std::size_t>(size) * size * 3;
-    std::vector<const internal::ImageView*> views(config_.cameras.size(), nullptr);
-    for (const auto& named : observation.images) {
-        const auto found =
-            std::find(config_.cameras.begin(), config_.cameras.end(), std::string(named.name));
-        if (found == config_.cameras.end())
-            throw std::invalid_argument("lerobot_groot does not accept a camera named '" +
-                                        std::string(named.name) + "'");
-        const auto& image = named.image;
-        const std::size_t element =
-            image.format == internal::ImageFormat::Float32 ? sizeof(float) : 1;
-        if (image.height != size || image.width != size || image.channels != 3 ||
-            image.data == nullptr || image.byte_size != values * element)
-            throw std::invalid_argument("lerobot_groot camera '" + std::string(named.name) +
-                                        "' must be " + std::to_string(size) + "x" +
-                                        std::to_string(size) + "x3");
-        views[static_cast<std::size_t>(found - config_.cameras.begin())] = &image;
-    }
-
     std::vector<float> pixels;
-    std::vector<std::uint8_t> bytes(values);
-    for (std::size_t slot = 0; slot < views.size(); ++slot) {
-        const internal::ImageView* image = views[slot];
-        if (image == nullptr)
-            throw std::invalid_argument("lerobot_groot requires camera '" + config_.cameras[slot] +
-                                        "'");
-        const std::uint8_t* rgb = static_cast<const std::uint8_t*>(image->data);
-        if (image->format == internal::ImageFormat::Float32) {
-            // LeRobot's float image path: clamp to [0, 1], scale by 255 and truncate to uint8.
-            const auto* source = static_cast<const float*>(image->data);
-            for (std::size_t index = 0; index < values; ++index) {
-                if (!std::isfinite(source[index]))
-                    throw std::invalid_argument("lerobot_groot camera '" + config_.cameras[slot] +
-                                                "' contains a non-finite pixel");
-                bytes[index] =
-                    static_cast<std::uint8_t>(std::clamp(source[index], 0.0F, 1.0F) * 255.0F);
-            }
-            rgb = bytes.data();
-        }
-        append_patches(rgb, config_.camera_size, config_.crop, pixels);
-    }
+    for (const auto& frame : ordered_rgb(observation, config_.cameras, config_.camera_size))
+        append_patches(frame.data(), config_.camera_size, config_.crop, pixels);
     return pixels;
 }
 
 std::vector<float> Pipeline::normalized_state(Span<const float> state) const {
-    if (state.size() != static_cast<std::size_t>(config_.state_dim))
-        throw std::invalid_argument("lerobot_groot state must have " +
-                                    std::to_string(config_.state_dim) + " values");
+    validate_state(state, config_.state_dim);
     // Min/max to [-1, 1] (0 where the range is empty), clipped, zero-padded to max_state_dim.
     std::vector<float> values(static_cast<std::size_t>(config_.max_state_dim), 0.0F);
     for (std::size_t index = 0; index < state.size(); ++index) {
-        if (!std::isfinite(state[index]))
-            throw std::invalid_argument("lerobot_groot state must be finite");
         const float denom = config_.state_max[index] - config_.state_min[index];
         float value = 0.0F;
         if (denom != 0.0F) {
@@ -264,16 +173,8 @@ std::vector<float> Pipeline::normalized_state(Span<const float> state) const {
 }
 
 Prompt Pipeline::prompt(std::string_view text) const {
-    const auto max_bytes =
-        static_cast<std::size_t>(config_.max_instruction_tokens) * kInstructionBytesPerToken;
-    if (text.size() > max_bytes)
-        throw std::invalid_argument("lerobot_groot instruction exceeds " +
-                                    std::to_string(max_bytes) + " bytes");
-    const auto instruction =
-        tokenizer_->encode(formalize_instruction(text, config_.formalize_language));
-    if (instruction.size() > static_cast<std::size_t>(config_.max_instruction_tokens))
-        throw std::invalid_argument("lerobot_groot instruction exceeds " +
-                                    std::to_string(config_.max_instruction_tokens) + " tokens");
+    const auto instruction = instruction_tokens(text, config_.formalize_language, *tokenizer_,
+                                                config_.max_instruction_tokens);
     return build_prompt(instruction, static_cast<std::int32_t>(config_.cameras.size()),
                         config_.grid(), template_);
 }
@@ -325,7 +226,9 @@ internal::ImagesStateTextActionChunkResult
 Pipeline::run(const internal::ImagesStateTextToActionChunkRequest& request,
               internal::ConfigView config) {
     const auto started = std::chrono::steady_clock::now();
-    const auto options = parse_options(config);
+    const auto noise_count =
+        static_cast<std::size_t>(config_.action_horizon) * config_.max_action_dim;
+    const auto options = parse_noise(config, noise_count);
     const auto& observation = request.observation;
     auto pixels = pack_pixels(observation);
     auto state = normalized_state(observation.state);
@@ -362,7 +265,7 @@ Pipeline::run(const internal::ImagesStateTextToActionChunkRequest& request,
     denoise_->bind_external("cross_v", cross_v_.data(), {cross_blocks_, length, cross_width_});
     denoise_->bind_external("state_features", state_features_.data(), {1, cross_width_});
 
-    auto sample = initial_noise(options);
+    auto sample = initial_noise(options, noise_count, rng_);
     const auto steps = config_.num_inference_steps;
     float step_size = static_cast<float>(1.0 / steps);
     for (std::int32_t step = 0; step < steps; ++step) {

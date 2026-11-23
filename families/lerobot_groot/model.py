@@ -23,7 +23,7 @@ from .tokenizer import load_tokenizer_json
 
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
+    from .edge_llm.cli import GrootBuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
@@ -38,7 +38,7 @@ _TYPICAL_INSTRUCTION_TOKENS = 24
 def _dtype(precision: str):
     import tensorrt as trt
 
-    return trt.bfloat16 if precision == "bf16" else trt.float32
+    return getattr(trt, {"bf16": "bfloat16", "fp16": "float16", "fp32": "float32"}[precision])
 
 
 def _builder(verbose: bool, quant=None):
@@ -188,7 +188,7 @@ def runtime_json(cfg: config_module.GrootConfig, precision: str) -> dict:
     }
 
 
-def build(request: "BuildRequest", writer: "BundleWriter") -> None:
+def build(request: "GrootBuildRequest", writer: "BundleWriter") -> None:
     """Build one LeRobot GR00T N1.7 bundle: a condition engine and one flow-matching step."""
     from .checkpoint import load_checkpoint
 
@@ -200,8 +200,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.backend not in {"trt", "trt_rtx"}:
         raise ValueError("lerobot_groot supports only backend=trt")
     precision = str(request.precision).lower()
-    if precision not in _PRECISIONS:
-        raise ValueError(f"Unsupported lerobot_groot precision: {precision} (supported: bf16, fp32)")
+    precisions = ("fp16",) if cfg.isaac_libero else _PRECISIONS
+    if precision not in precisions:
+        raise ValueError(f"Unsupported lerobot_groot precision: {precision} (supported: {precisions})")
     if request.max_batch_size != 1:
         raise NotImplementedError("lerobot_groot supports batch size one")
     if request.tensor_parallel_size != 1 or request.context_parallel_size != 1:
@@ -230,8 +231,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         from .quantization import refuse_quantized_checkpoint
 
         refuse_quantized_checkpoint(model_dir)
+    if cfg.isaac_libero:
+        from .edge_llm.builder import try_build
+
+        if try_build(request, writer, model_dir):
+            return
     # The tokenizer first: a missing or wrong file then fails in seconds, not after the weights load.
-    vocabulary = load_tokenizer_json(model_dir)
+    vocabulary = load_tokenizer_json(model_dir, public_copy=True) if cfg.isaac_libero else load_tokenizer_json(model_dir)
     weights = load_checkpoint(model_dir)
     verbose = bool(request.verbose)
     quant = None if quantization is None else quantization_context(cfg, weights, quantization, precision)

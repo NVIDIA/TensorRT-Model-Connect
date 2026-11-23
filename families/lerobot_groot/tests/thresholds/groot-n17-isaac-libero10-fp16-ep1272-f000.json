@@ -1,0 +1,8 @@
+{
+  "threshold_overrides": {
+    "max_abs_vs_fp32": 0.03,
+    "cosine_vs_fp32_min": 0.999,
+    "mean_abs_vs_fp32": 0.0026,
+    "chunk_inference_p95_ms": 500.0
+  }
+}

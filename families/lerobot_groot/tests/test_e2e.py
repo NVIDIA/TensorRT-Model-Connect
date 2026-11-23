@@ -3,11 +3,12 @@
 
 """LeRobot GR00T N1.7 build -> bundle -> native Task API, against the pinned LeRobot reference.
 
-Every case builds the pinned ``nvidia/gr00t17-lerobot-libero_spatial-640`` checkpoint straight
+The LeRobot cases build the pinned ``nvidia/gr00t17-lerobot-libero_spatial-640`` checkpoint straight
 from its directory, runs a recorded LIBERO-spatial observation through the bundle with the
 reference's flow noise, and compares all 16 x 7 action values with the LeRobot float32 oracle
 (and, for a bfloat16 bundle, with LeRobot's own bfloat16 policy). The FP8 manifest builds the
-same checkpoint with ``quantization="fp8"``.
+same checkpoint with ``quantization="fp8"``. The Isaac LIBERO-10 case uses its own checkpoint, named
+cameras and independent Isaac/HF FP32 reference.
 """
 
 from __future__ import annotations
@@ -108,6 +109,13 @@ def _checkpoint_dir(manifest: dict) -> Path:
     explicit = os.environ.get("TRTMC_LEROBOT_GROOT_CHECKPOINT_DIR")
     if explicit:
         return _required_path(explicit, "TRTMC_LEROBOT_GROOT_CHECKPOINT_DIR")
+    if subdir := manifest.get("checkpoint_subdir"):
+        # The Isaac repository has four different policies under separate directories, no root
+        # config. CI stages only this revision's named files, preserving their relative paths.
+        for root in (os.environ.get(EXTERNAL_FILES_ENV), CI_ASSET_DIR):
+            if root and (Path(root) / subdir / "config.json").is_file():
+                return Path(root) / subdir
+        raise FileNotFoundError(f"{subdir} was not staged under {EXTERNAL_FILES_ENV} or {CI_ASSET_DIR}")
     from huggingface_hub import snapshot_download
 
     return Path(
@@ -137,7 +145,7 @@ def model_dirs(tmp_path_factory):
         name = manifest["name"]
         if name not in resolved:
             directory = _checkpoint_dir(manifest)
-            ci_tokenizer = _ci_tokenizer(manifest)
+            ci_tokenizer = None if "checkpoint_subdir" in manifest else _ci_tokenizer(manifest)
             if ci_tokenizer is not None and not (directory / TOKENIZER_FILE).is_file():
                 overlay = tmp_path_factory.mktemp(f"{name}-with-tokenizer")
                 for path in directory.iterdir():
@@ -169,7 +177,14 @@ def test_pinned_assets_are_staged(case_name: str, model_dirs) -> None:
     try:
         directory = model_dirs(manifest)
     except Exception as error:  # noqa: BLE001 - surface why the staged snapshot is unusable
-        pytest.fail(f"{manifest['hf_id']}@{manifest['hf_revision']} is not staged locally: {error}")
+        origin = manifest.get("hf_id", manifest["name"])
+        revision = manifest.get("hf_revision", manifest.get("source_revision"))
+        pytest.fail(f"{origin}@{revision} is not staged locally: {error}")
+    if subdir := manifest.get("checkpoint_subdir"):
+        for asset in manifest["external_files"]:
+            name = Path(asset["path"]).relative_to(subdir)
+            assert (directory / name).is_file(), f"staged policy missing {name}"
+        return
     missing = [name for name in MODEL_FILES if not (directory / name).is_file()]
     missing += [name for name in _staged_state_files(directory) if not (directory / name).is_file()]
     assert not missing, f"staged checkpoint is missing {missing}"
@@ -250,10 +265,11 @@ def _run_native(binary: Path, root: Path, bundle: Path, case: dict, tmp_path: Pa
     state = tmp_path / "state.f32"
     np.asarray(observation["state"], dtype="<f4").tofile(state)
     output = tmp_path / "actions.f32"
+    cameras = case.get("cameras", CAMERAS)
     command = [
         str(binary), "--bundle", str(bundle), "--runtime-root", str(root),
-        "--camera", f"{CAMERAS[0]}={frame / 'image.png'}",
-        "--camera", f"{CAMERAS[1]}={frame / 'wrist_image.png'}",
+        "--camera", f"{cameras[0]}={frame / 'image.png'}",
+        "--camera", f"{cameras[1]}={frame / 'wrist_image.png'}",
         "--state", str(state), "--noise", str(_asset(case, "noise")),
         "--text", observation["task"], "--repeat", "20", "--check-rejections",
         "--output", str(output),
@@ -263,6 +279,9 @@ def _run_native(binary: Path, root: Path, bundle: Path, case: dict, tmp_path: Pa
         alternate = tmp_path / "alternate.f32"
         command += ["--alternate-text", case["alternate_task"], "--alternate-output", str(alternate)]
     environment = os.environ.copy()
+    # The released Edge logger sends INFO to stdout. This machine-readable consumer emits a
+    # single JSON result; keep SDK warnings and errors on stderr without mutating the parent.
+    environment["EDGELLM_LOG_LEVEL"] = "WARNING"
     environment["LD_LIBRARY_PATH"] = ":".join(part for part in (str(root), environment.get("LD_LIBRARY_PATH", "")) if part)
     completed = subprocess.run(command, check=False, capture_output=True, text=True, env=environment, timeout=1800)
     assert completed.returncode == 0, completed.stderr or completed.stdout
@@ -307,7 +326,17 @@ def test_groot_bundle_matches_the_lerobot_reference_e2e(case_name: str, bundles,
     assert summary["rows"] == CHUNK and summary["columns"] == ACTION_DIM
     assert np.isfinite(actions).all()
     p95 = float(np.percentile(summary["wall_ms"], 95))
-    metrics = {"primary": _check_limits(limits, case, actions, "reference_")}
+    if "checkpoint_subdir" in manifest:
+        # This is a different checkpoint from LeRobot. Its independently generated Isaac FP32
+        # reference does not depend on which backend the builder chose.
+        primary = _metrics(actions, _reference(case, "reference_fp32"))
+        record_evidence("isaac_reference", primary)
+        assert primary["max_abs"] <= limits["max_abs_vs_fp32"], primary
+        assert primary["cosine"] >= limits["cosine_vs_fp32_min"], primary
+        assert primary["mean_abs"] <= limits["mean_abs_vs_fp32"], primary
+        metrics = {"primary": {"vs_fp32": primary}}
+    else:
+        metrics = {"primary": _check_limits(limits, case, actions, "reference_")}
     if alternate is not None:
         # Same images and state, another instruction: the bundle follows the text it is given and
         # keeps nothing between calls, so the first instruction's chunk comes back unchanged.

@@ -543,7 +543,26 @@ def test_manifests_declare_the_public_tokenizer_copy() -> None:
     assert manifests
     for path in manifests:
         manifest = json.loads(path.read_text(encoding="utf-8"))
-        assert manifest["external_files"] == expected, path.name
+        if path.name == "groot-n17-isaac-libero10-fp16.json":
+            assert manifest["name"] == path.stem
+            assert manifest["checkpoint_subdir"] == "isaac-libero10"
+            revision = "658540327860f93dd2cb9c1ed3e3b10fb792a0eb"
+            assert manifest["source_revision"] == revision
+            # This HF repository has no root policy. Stage precisely the identified LIBERO-10
+            # shards and metadata, and use only the pinned public tokenizer/processor copy.
+            names = ("config.json", "embodiment_id.json", "model.safetensors.index.json",
+                     "processor_config.json", "statistics.json", "model-00001-of-00002.safetensors",
+                     "model-00002-of-00002.safetensors")
+            policy = f"https://huggingface.co/nvidia/GR00T-N1.7-LIBERO/resolve/{revision}/libero_10"
+            public = f"https://huggingface.co/{PUBLIC_COPY}/resolve/{PUBLIC_REVISION}"
+            files = {f"isaac-libero10/{n}": f"{policy}/{n}" for n in names}
+            for n in ("tokenizer.json", "tokenizer_config.json", "preprocessor_config.json"):
+                files[f"isaac-libero10/tokenizer/{n}"] = f"{public}/{n}"
+            expected_files = [{"path": key, "url": value} for key, value in sorted(files.items())]
+            assert sorted(manifest["external_files"], key=lambda entry: entry["path"]) == expected_files, path.name
+        else:
+            assert "checkpoint_subdir" not in manifest, path.name
+            assert manifest["external_files"] == expected, path.name
         assert "hf_dependencies" not in manifest, path.name
 
 

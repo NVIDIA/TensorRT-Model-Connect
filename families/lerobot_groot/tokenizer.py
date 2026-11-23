@@ -48,21 +48,24 @@ def _checked(data: bytes, origin: str) -> bytes:
     return data
 
 
-def load_tokenizer_json(model_dir: str | Path) -> bytes:
+def load_tokenizer_json(model_dir: str | Path, *, public_copy: bool = False) -> bytes:
     """Return the checked ``tokenizer.json``: the checkpoint's copy or the pinned Hub file."""
     local = Path(model_dir) / TOKENIZER_FILE
-    if local.is_file():
-        return _checked(local.read_bytes(), str(local))
-    pinned = f"{TOKENIZER_REPO}@{TOKENIZER_REVISION}"
+    for candidate in (local, Path(model_dir) / "tokenizer" / TOKENIZER_FILE):
+        if candidate.is_file():
+            return _checked(candidate.read_bytes(), str(candidate))
+    repo, revision = (PUBLIC_COPY, PUBLIC_REVISION) if public_copy else (TOKENIZER_REPO, TOKENIZER_REVISION)
+    pinned = f"{repo}@{revision}"
     try:
         from huggingface_hub import hf_hub_download
 
-        cached = Path(hf_hub_download(TOKENIZER_REPO, TOKENIZER_FILE, revision=TOKENIZER_REVISION))
+        cached = Path(hf_hub_download(repo, TOKENIZER_FILE, revision=revision))
     except Exception as error:  # noqa: BLE001 - offline, gated and network errors share one remedy
+        remedy = "The public copy is unavailable" if public_copy else "The repository is gated"
         raise FileNotFoundError(
             f"the Qwen3-VL tokenizer is not at {local}, and {TOKENIZER_FILE} of {pinned} is neither in "
-            f"the Hugging Face cache nor downloadable ({type(error).__name__}). The repository is gated: "
-            f"log in with access to it, or copy the identical public {TOKENIZER_FILE} of "
+            f"the Hugging Face cache nor downloadable ({type(error).__name__}). {remedy}: "
+            f"log in with access, or copy the identical public {TOKENIZER_FILE} of "
             f"{PUBLIC_COPY}@{PUBLIC_REVISION} to {local}"
         ) from error
     return _checked(cached.read_bytes(), pinned)

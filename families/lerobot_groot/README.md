@@ -18,7 +18,31 @@ trtmc build nvidia/gr00t17-lerobot-libero_spatial-640 -o groot-fp8.bundle --prec
 The family is recognised from `type: "groot"` in `config.json`, never from a
 checkpoint name. LeRobot 0.6 saves only GR00T N1.7 policies under that type.
 
-## Supported boundary
+## Isaac LIBERO-10 (FP16)
+
+The Isaac checkpoint layout differs from a LeRobot save. Use the family command to fetch only
+the documented `libero_10` policy from `nvidia/GR00T-N1.7-LIBERO`, not its sibling checkpoints.
+A local policy directory can be passed instead. The bundle accepts named cameras `image` and
+`wrist_image` (256 × 256 RGB), an eight-value state and an instruction; it returns sixteen
+seven-coordinate actions in the robot's units. It does not binarize the gripper.
+
+```bash
+trtmc lerobot_groot build nvidia/GR00T-N1.7-LIBERO --precision fp16 -o isaac-libero10.bundle
+```
+
+Native TensorRT builds directly from the checkpoint. Optional complete-network offload uses the
+Edge 0.12.0 builder and its C++ GR00T runtime. It requires an MC installation built with the
+matching GR00T SDK archive and headers; the **base** Edge 0.12.0 SDK does not install them.
+If that capability is unavailable, MC uses the same native FP16 policy. For an isolated Edge
+builder install, pass `--edge-builder-python /absolute/path/to/python`. An Edge builder error
+emits a warning before retrying native.
+
+**Accuracy status:** On the recorded episode 1272 frame 0 with fixed initial noise, native
+passed the Isaac FP32 robot-action comparison. Released Edge inference completed but failed
+that comparison (maximum absolute error 0.272; limit 0.03). Executability does not imply
+accuracy qualification. No other Isaac embodiment or LIBERO checkpoint is claimed here.
+
+## LeRobot supported boundary
 
 Anything outside this list fails at build time with the offending field named.
 
