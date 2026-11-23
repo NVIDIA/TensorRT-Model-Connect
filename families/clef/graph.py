@@ -2,15 +2,22 @@
 # SPDX-License-Identifier: Apache-2.0
 """Strongly typed TensorRT expressions owned by the Clef graph."""
 
+import tempfile
+
 import numpy as np
 import tensorrt as trt
 
+# Constants of at least this size go to file-backed pages when the build gives a spill directory.
+SPILL_MIN_BYTES = 64 * 1024**2
+
 
 class Graph:
-    def __init__(self, network, weights, *, fp32_sigmoid=True):
+    def __init__(self, network, weights, *, fp32_sigmoid=True, spill_dir=None):
         self.n = network
         self.weights = weights
         self.keep = []
+        self.spill_dir = spill_dir
+        self.spilled_bytes = 0
         self.fp32_sigmoid = fp32_sigmoid
         # Projection name -> static FP8 activation scale (FP8 builds only).
         self.fp8_scales = {}
@@ -26,12 +33,26 @@ class Graph:
         if dtype == trt.bfloat16:
             import ml_dtypes
 
-            a = a.astype(ml_dtypes.bfloat16).view(np.uint16)
+            a = self.file_backed(a.astype(ml_dtypes.bfloat16).view(np.uint16))
             w = trt.Weights(trt.bfloat16, a.ctypes.data, a.size)
         else:
+            a = self.file_backed(a)
             w = trt.Weights(a)
         self.keep.extend([a, w])
         return self.n.add_constant(a.shape, w).get_output(0)
+
+    def file_backed(self, a):
+        """TensorRT reads the host constants for the whole build while it also places their device copy. On a
+        GPU that shares its memory with the CPU, a large constant in a mapping of an anonymous temporary file
+        can be written back and evicted when the device copy needs the memory."""
+        if self.spill_dir is None or a.nbytes < SPILL_MIN_BYTES:
+            return a
+        # An anonymous temporary file is never reachable by name; its space is freed with the last mapping.
+        with tempfile.TemporaryFile(dir=self.spill_dir, prefix=".clef-weights-") as backing:
+            mapped = np.memmap(backing, dtype=a.dtype, mode="w+", shape=a.shape)
+        mapped[...] = a
+        self.spilled_bytes += a.nbytes
+        return mapped
 
     def scalar(self, value, x):
         return self.const(np.full((1,) * len(x.shape), value), x.dtype)
