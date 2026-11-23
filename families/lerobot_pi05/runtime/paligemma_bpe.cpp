@@ -761,6 +761,14 @@ TokenizedPrompt PaligemmaBpeTokenizer::pad_or_truncate(std::vector<int32_t> ids,
     return result;
 }
 
+TokenizedPrompt PaligemmaBpeTokenizer::tokenize_task_only(std::string_view text,
+                                                          std::size_t limit) const {
+    auto ids = encode(clean_prompt(text), true);
+    auto suffix = encode("\n", false);
+    ids.insert(ids.end(), suffix.begin(), suffix.end());
+    return pad_or_truncate(std::move(ids), limit);
+}
+
 TokenizedPrompt PaligemmaBpeTokenizer::tokenize_pi05(std::string_view prompt,
                                                      const std::vector<float>& state,
                                                      std::size_t max_length) const {

@@ -80,6 +80,8 @@ class PaligemmaBpeTokenizer {
     std::string normalize(std::string_view text) const;
     std::vector<int32_t> encode(std::string_view text, bool add_bos) const;
 
+    TokenizedPrompt tokenize_task_only(std::string_view text, std::size_t limit) const;
+
     // Mirrors LeRobot's pi05 prompt, including discrete state
     // formatting and hard-coded zero padding (`False` appended to a Python int
     // list becomes token id zero upstream).
