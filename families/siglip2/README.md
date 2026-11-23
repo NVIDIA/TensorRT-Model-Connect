@@ -53,9 +53,10 @@ stated value is checked against them.
   tie, one at a time). Like the builder, it refuses on load a `tokenizer.json` that it
   would tokenise differently: another normaliser, pre-tokenizer or template shape, BPE
   dropout, a subword prefix or suffix or `ignore_merges`, vocabulary ids outside
-  0..N-1 or no `▁` marker, a byte fallback that could need the unknown token, added
-  tokens with matching options or with an id other than their vocabulary id, and an
-  end token that expands to other ids than its own. It has no decoder: the
+  0..N-1 or no `▁` marker, a merge rule that is not one pair of vocabulary entries
+  with a result in the vocabulary, a byte fallback that could need the unknown token,
+  added tokens with matching options or with an id other than their vocabulary id, and
+  an end token that expands to other ids than its own. It has no decoder: the
   family never turns ids back into text.
 
 ## Reference behaviours this family takes a position on

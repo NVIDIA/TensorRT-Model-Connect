@@ -125,6 +125,26 @@ def _check_vocabulary(vocab: dict) -> None:
         raise NotImplementedError("siglip2 vocabulary has no U+2581 space marker")
 
 
+def _check_merges(model: dict) -> None:
+    # Like the reference, a rule is one pair (two strings, or one string with one space) whose
+    # operands and result are vocabulary entries; the reference refuses any other table.
+    merges, vocab = model.get("merges"), model["vocab"]
+    if not isinstance(merges, list):
+        raise ValueError("siglip2 tokenizer model.merges must be a list")
+    for index, merge in enumerate(merges):
+        pair = merge.split(" ") if isinstance(merge, str) else merge
+        if not (isinstance(pair, list) and len(pair) == 2 and all(isinstance(p, str) for p in pair)):
+            raise ValueError(f"siglip2 tokenizer merge {index} is not one pair: {merge!r}")
+        left, right = pair
+        for part in pair:
+            if part not in vocab:
+                raise ValueError(
+                    f"siglip2 tokenizer merge {left} {right}: {part} is not in the vocabulary")
+        if left + right not in vocab:
+            raise ValueError(f"siglip2 tokenizer merge {left} {right} makes {left + right}, "
+                             "which is not in the vocabulary")
+
+
 def _check_byte_fallback(vocab: dict) -> None:
     # The reference falls back to bytes all or nothing (the unknown token otherwise), and
     # the runtime has no unknown-token path: every byte that a character outside the
@@ -192,7 +212,8 @@ def _tokenizer_contract(model_dir: Path) -> int:
     if tokenizer.get("pre_tokenizer") is not None:
         raise NotImplementedError("siglip2 is qualified for a tokenizer without a pre-tokenizer")
     template = (tokenizer.get("post_processor") or {}).get("single") or []
-    if (tokenizer.get("post_processor") or {}).get("type") != "TemplateProcessing" or [
+    if (tokenizer.get("post_processor") or {}).get("type") != "TemplateProcessing" or not all(
+            isinstance(item, dict) and len(item) == 1 for item in template) or [
             next(iter(item)) for item in template] != ["Sequence", "SpecialToken"]:
         # The runtime truncates a long prompt to the window by keeping its head and
         # re-appending the end token, which is what the reference's truncation does
@@ -201,6 +222,7 @@ def _tokenizer_contract(model_dir: Path) -> int:
             "siglip2 is qualified for a template that appends one end token")
     _check_bpe_options(model)
     _check_vocabulary(model["vocab"])
+    _check_merges(model)
     _check_byte_fallback(model["vocab"])
     added_tokens = _added_tokens(tokenizer)
 

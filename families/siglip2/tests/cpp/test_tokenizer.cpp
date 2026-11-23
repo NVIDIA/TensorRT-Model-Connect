@@ -126,6 +126,15 @@ int main() {
         expect("a\xf0\x9f", {5, byte_id(0xF0), byte_id(0x9F), kEos},
                "truncated four-byte sequence");
         expect("a\xf0", {5, byte_id(0xF0), kEos}, "four-byte lead at the end");
+        // A lead byte without its continuation bytes is one byte: the bytes after it are read
+        // again, so a tab or a letter keeps its own token.
+        expect("\xc3\t", {byte_id(0xC3), byte_id(0x09), kEos}, "two-byte lead before a tab");
+        expect("\xe2\x82\tb", {byte_id(0xE2), byte_id(0x82), byte_id(0x09), 6, kEos},
+               "three-byte lead before a tab");
+        expect("\xf0\x9f\x98"
+               "a",
+               {byte_id(0xF0), byte_id(0x9F), byte_id(0x98), 5, kEos},
+               "four-byte lead before a letter");
     } catch (const std::exception& error) {
         failures += std::string("miniature tokenizer: ") + error.what() + "\n";
     }
@@ -144,6 +153,16 @@ int main() {
             failures += "merge order: space marker merge\n";
     } catch (const std::exception& error) {
         failures += std::string("merge order: ") + error.what() + "\n";
+    }
+
+    // The legacy merge format, one "left right" string per rule, reads the same rules.
+    try {
+        Json legacy = miniature();
+        legacy["model"]["merges"] = Json::array({"a b", "▁ ab"});
+        if (load(legacy)->encode("a ab") != std::vector<std::int32_t>{5, 8, kEos})
+            failures += "legacy merge strings\n";
+    } catch (const std::exception& error) {
+        failures += std::string("legacy merge strings: ") + error.what() + "\n";
     }
 
     // ignore_merges false is the merge path as well ("aba" as "ab" + "a"); the reference skips
@@ -238,6 +257,24 @@ int main() {
          "pre_tokenizer must be null"},
         {"template without the end token", [](Json& t) { t["post_processor"]["single"].erase(1); },
          "the template must be the sequence followed by one special token"},
+        // The reference refuses an item with two operations and every merge rule whose
+        // operands or result are not vocabulary entries.
+        {"template item with two operations",
+         [](Json& t) {
+             t["post_processor"]["single"][1]["Sequence"] = Json{{"id", "A"}, {"type_id", 0}};
+         },
+         "the template must be the sequence followed by one special token"},
+        {"merge result outside the vocabulary",
+         [](Json& t) { t["model"]["merges"].push_back(Json::array({"b", "a"})); },
+         "merge b a makes ba, which is not in the vocabulary"},
+        {"merge operand outside the vocabulary",
+         [](Json& t) { t["model"]["merges"].push_back(Json::array({"x", "a"})); },
+         "merge x a: x is not in the vocabulary"},
+        {"merge with three parts", [](Json& t) { t["model"]["merges"].push_back("a b c"); },
+         "merge 2 is not one pair"},
+        {"merge that is not a pair",
+         [](Json& t) { t["model"]["merges"].push_back(Json::array({"a"})); },
+         "merge 2 is not one pair"},
         {"record without a flag", [](Json& t) { t["added_tokens"][2].erase("normalized"); },
          "no boolean normalized"},
         {"record without content",

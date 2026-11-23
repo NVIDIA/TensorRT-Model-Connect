@@ -45,8 +45,14 @@ inline std::string utf32_to_utf8(char32_t cp) {
     return r;
 }
 
+inline bool is_continuation(char byte) {
+    return (static_cast<unsigned char>(byte) & 0xC0) == 0x80;
+}
+
 // Read one UTF-8 codepoint from raw bytes, advance ptr. Returns 0xFFFD on error. The bounds
-// are checked on the remaining length, so no pointer past the end of the text is formed.
+// are checked on the remaining length, so no pointer past the end of the text is formed. A
+// lead byte without all its continuation bytes is one byte of its own, so the bytes after it
+// are read again: a tab or a letter there keeps its own token.
 inline char32_t read_utf8(const char*& p, const char* end) {
     if (p >= end)
         return 0xFFFD;
@@ -55,20 +61,21 @@ inline char32_t read_utf8(const char*& p, const char* end) {
         ++p;
         return c;
     }
-    if ((c & 0xE0) == 0xC0 && end - p > 1) {
+    if ((c & 0xE0) == 0xC0 && end - p > 1 && is_continuation(p[1])) {
         char32_t cp =
             (static_cast<char32_t>(c & 0x1F) << 6) | (static_cast<unsigned char>(p[1]) & 0x3F);
         p += 2;
         return cp;
     }
-    if ((c & 0xF0) == 0xE0 && end - p > 2) {
+    if ((c & 0xF0) == 0xE0 && end - p > 2 && is_continuation(p[1]) && is_continuation(p[2])) {
         char32_t cp = (static_cast<char32_t>(c & 0x0F) << 12) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[1]) & 0x3F) << 6) |
                       (static_cast<unsigned char>(p[2]) & 0x3F);
         p += 3;
         return cp;
     }
-    if ((c & 0xF8) == 0xF0 && end - p > 3) {
+    if ((c & 0xF8) == 0xF0 && end - p > 3 && is_continuation(p[1]) && is_continuation(p[2]) &&
+        is_continuation(p[3])) {
         char32_t cp = (static_cast<char32_t>(c & 0x07) << 18) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[1]) & 0x3F) << 12) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[2]) & 0x3F) << 6) |
@@ -927,12 +934,12 @@ class BpeTokenizer final : public ITokenizer {
         // The window keeps the end token in its last slot, so the template is the sequence
         // followed by one special token (its id is checked with the added tokens).
         const auto post = j.find("post_processor");
-        const bool one_end_token = post != j.end() && post->is_object() &&
-                                   post->value("type", "") == "TemplateProcessing" &&
-                                   post->contains("single") && (*post)["single"].is_array() &&
-                                   (*post)["single"].size() == 2 &&
-                                   (*post)["single"][0].contains("Sequence") &&
-                                   (*post)["single"][1].contains("SpecialToken");
+        const bool one_end_token =
+            post != j.end() && post->is_object() &&
+            post->value("type", "") == "TemplateProcessing" && post->contains("single") &&
+            (*post)["single"].is_array() && (*post)["single"].size() == 2 &&
+            (*post)["single"][0].size() == 1 && (*post)["single"][0].contains("Sequence") &&
+            (*post)["single"][1].size() == 1 && (*post)["single"][1].contains("SpecialToken");
         if (!one_end_token)
             throw unsupported("the template must be the sequence followed by one special token");
     }
@@ -991,28 +998,40 @@ class BpeTokenizer final : public ITokenizer {
         auto& merges_arr = j["model"]["merges"];
         mMergeRank.reserve(merges_arr.size());
 
+        // Like the reference, a rule is one pair (two strings, or one string with one space)
+        // whose operands and result are vocabulary entries; any other rule is a load error,
+        // never skipped.
         for (size_t i = 0; i < merges_arr.size(); ++i) {
+            const auto& merge = merges_arr[i];
             std::string first, second;
-
-            if (merges_arr[i].is_array()) {
-                auto arr = merges_arr[i].get<std::vector<std::string>>();
-                if (arr.size() != 2)
-                    continue;
-                first = std::move(arr[0]);
-                second = std::move(arr[1]);
-            } else if (merges_arr[i].is_string()) {
-                std::string merge_str = merges_arr[i].get<std::string>();
-                auto space_pos = merge_str.find(' ');
-                if (space_pos == std::string::npos)
-                    continue;
-                first = merge_str.substr(0, space_pos);
-                second = merge_str.substr(space_pos + 1);
-            } else {
-                continue;
+            bool pair = false;
+            if (merge.is_array() && merge.size() == 2 && merge[0].is_string() &&
+                merge[1].is_string()) {
+                first = merge[0].get<std::string>();
+                second = merge[1].get<std::string>();
+                pair = true;
+            } else if (merge.is_string()) {
+                const std::string text = merge.get<std::string>();
+                const auto space = text.find(' ');
+                if (space != std::string::npos && text.find(' ', space + 1) == std::string::npos) {
+                    first = text.substr(0, space);
+                    second = text.substr(space + 1);
+                    pair = true;
+                }
             }
-
-            auto pair = std::make_pair(std::move(first), std::move(second));
-            mMergeRank[pair] = static_cast<int>(i);
+            if (!pair)
+                throw std::runtime_error("Invalid tokenizer.json: merge " + std::to_string(i) +
+                                         " is not one pair");
+            for (const std::string* part : {&first, &second}) {
+                if (mTokenToId.count(*part) == 0)
+                    throw std::runtime_error("Invalid tokenizer.json: merge " + first + " " +
+                                             second + ": " + *part + " is not in the vocabulary");
+            }
+            if (mTokenToId.count(first + second) == 0)
+                throw std::runtime_error("Invalid tokenizer.json: merge " + first + " " + second +
+                                         " makes " + first + second +
+                                         ", which is not in the vocabulary");
+            mMergeRank[std::make_pair(first, second)] = static_cast<int>(i);
         }
     }
 

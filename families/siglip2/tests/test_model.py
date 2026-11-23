@@ -241,12 +241,37 @@ def test_the_tokenizer_contract_returns_the_pad_id(tmp_path: Path) -> None:
         (_end_token_expanding_to([0]), "exactly its id 1"),
         ({"post_processor": {k: v for k, v in _TOKENIZER["post_processor"].items()
                              if k != "special_tokens"}}, "exactly its id 1"),
+        # The reference refuses an item with two operations.
+        ({"post_processor": {**_TOKENIZER["post_processor"], "single": [
+            {"Sequence": {"id": "A", "type_id": 0}},
+            {"SpecialToken": {"id": "<eos>", "type_id": 0}, "Sequence": {"id": "A", "type_id": 0}}]}},
+         "one end token"),
     ],
 )
 def test_tokenizers_the_runtime_would_tokenise_differently_are_refused(
         tmp_path: Path, override: dict, message: str) -> None:
     with pytest.raises(NotImplementedError, match=message):
         model_module._tokenizer_contract(_model_dir(tmp_path, tokenizer={**_TOKENIZER, **override}))
+
+
+@pytest.mark.parametrize(
+    ("merges", "message"),
+    [
+        # The runtime loader requires the table; the reference refuses all of these files.
+        (None, "model.merges must be a list"),
+        ({}, "model.merges must be a list"),
+        ([["a", "a"]], "merge a a makes aa, which is not in the vocabulary"),
+        ([["x", "a"]], "merge x a: x is not in the vocabulary"),
+        (["a a a"], "merge 0 is not one pair"),
+        ([["a"]], "merge 0 is not one pair"),
+    ],
+)
+def test_merge_tables_the_reference_cannot_load_are_refused(tmp_path: Path, merges, message) -> None:
+    model = {k: v for k, v in _TOKENIZER["model"].items() if k != "merges"}
+    if merges is not None:
+        model["merges"] = merges
+    with pytest.raises(ValueError, match=message):
+        model_module._tokenizer_contract(_model_dir(tmp_path, tokenizer={**_TOKENIZER, "model": model}))
 
 
 def test_a_vocabulary_id_that_is_not_an_integer_is_refused(tmp_path: Path) -> None:
