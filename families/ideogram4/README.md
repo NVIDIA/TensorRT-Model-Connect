@@ -10,6 +10,7 @@ The build precision is BF16. The publisher's FP8 weights use per-row scales;
 dequantization preserves the reference's BF16 rounding before matrix
 multiplication. Graph export uses the pinned official implementation declared
 in `requirements.txt`; inference runs the native plans without Python.
+Normalization and attention accumulate in FP32 with explicit BF16 boundaries.
 
 The prompt is a structured JSON caption string, as required by the foundation
 model. The native tokenizer applies NFC normalization, byte-level BPE, and the
@@ -19,7 +20,10 @@ application. Overlong framed captions are rejected without truncation.
 Execution supports one image on one GPU. Build dimensions default to 1024 by
 1024 and must be multiples of 16, at least 256. The text profile defaults to
 256 tokens and can be set up to 2048. Image dimensions and the 20-step sampler
-are fixed by the bundle. Sampling seeds select native initial noise;
+are fixed by the bundle. Engines use the actual caption length followed by
+masked image slots, matching the publisher's packed sequence; the text capacity
+bounds the profile without adding padding tokens. Sampling seeds select native
+initial noise;
 `initial_latents` allows exact replay in `[1, H/16 * W/16, 128]` order across
 backends. The native random generator does not reproduce PyTorch's generator.
 

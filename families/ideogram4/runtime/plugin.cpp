@@ -85,9 +85,10 @@ class Pipeline final : public internal::IModel, public internal::ITextToImage {
           guidance_(config.at("guidance").get<std::vector<float>>()) {
         if (height_ < 256 || width_ < 256 || height_ % 16 || width_ % 16 || length_ <= 0 ||
             length_ > 2048 || times_.size() != 21 || guidance_.size() != 20 ||
+            config.value("sequence_layout", "") != "packed_text_image" ||
             config.at("precision") != "bf16" || config.at("sampler") != "V4_DEFAULT_20" ||
             config.at("latent_channels") != kChannels || config.at("features") != kFeatures)
-            throw std::invalid_argument("ideogram4 invalid bundle dimensions or sampler");
+            throw std::invalid_argument("ideogram4 invalid bundle dimensions, layout or sampler");
         for (std::size_t i = 0; i < times_.size(); ++i) {
             if (!std::isfinite(times_[i]) || times_[i] < 0 || times_[i] > 1 ||
                 (i && times_[i] > times_[i - 1]))
@@ -122,21 +123,22 @@ class Pipeline final : public internal::IModel, public internal::ITextToImage {
         const auto encoded = tokenizer_->encode(framed);
         if (encoded.empty() || encoded.size() > static_cast<std::size_t>(length_))
             throw std::invalid_argument("ideogram4 framed prompt exceeds the bundle text profile");
-        const auto offset = static_cast<std::int32_t>(length_ - encoded.size());
-        std::vector<std::int32_t> ids(length_, 0), mask(length_, 0), text_positions(length_, 0);
-        std::copy(encoded.begin(), encoded.end(), ids.begin() + offset);
-        for (std::int32_t i = offset; i < length_; ++i) {
-            mask[i] = 1;
-            text_positions[i] = i - offset;
-        }
-        TensorMap text_inputs{{"token_ids", tensor(ids, {1, length_}, DType::kInt32)},
-                              {"token_mask", tensor(mask, {1, length_}, DType::kInt32)},
-                              {"positions", tensor(text_positions, {1, length_}, DType::kInt32)}};
-        auto features =
-            forward(*text_, text_inputs, "features", static_cast<std::size_t>(length_) * kFeatures);
+        const auto text_length = static_cast<std::int32_t>(encoded.size());
         const std::int32_t gh = height_ / 16, gw = width_ / 16, count = gh * gw;
+        const auto total = text_length + count;
+        std::vector<std::int32_t> ids(total, 0), mask(total, 0), text_positions(total, 0);
+        std::copy(encoded.begin(), encoded.end(), ids.begin());
+        for (std::int32_t i = 0; i < text_length; ++i) {
+            mask[i] = 1;
+            text_positions[i] = i;
+        }
+        TensorMap text_inputs{{"token_ids", tensor(ids, {1, total}, DType::kInt32)},
+                              {"token_mask", tensor(mask, {1, total}, DType::kInt32)},
+                              {"positions", tensor(text_positions, {1, total}, DType::kInt32)}};
+        auto features =
+            forward(*text_, text_inputs, "features", static_cast<std::size_t>(total) * kFeatures);
         Packed pos, neg;
-        pos.length = length_ + count;
+        pos.length = total;
         neg.length = count;
         for (auto* pack : {&pos, &neg}) {
             pack->positions.assign(static_cast<std::size_t>(pack->length) * 3, 0);
@@ -146,15 +148,14 @@ class Pipeline final : public internal::IModel, public internal::ITextToImage {
             pack->latents.assign(static_cast<std::size_t>(pack->length) * kChannels, 0);
         }
         std::copy(features.begin(), features.end(), pos.features.begin());
-        for (std::int32_t i = 0; i < length_; ++i) {
-            pos.segments[i] = i < offset ? -1 : 1;
-            pos.roles[i] = i < offset ? 0 : 3;
+        for (std::int32_t i = 0; i < text_length; ++i) {
+            pos.roles[i] = 3;
             for (int axis = 0; axis < 3; ++axis)
                 pos.positions[3 * i + axis] = text_positions[i];
         }
         for (std::int32_t i = 0; i < count; ++i) {
             const std::int32_t coordinates[] = {65536, 65536 + i / gw, 65536 + i % gw};
-            std::copy(coordinates, coordinates + 3, pos.positions.begin() + 3 * (length_ + i));
+            std::copy(coordinates, coordinates + 3, pos.positions.begin() + 3 * (text_length + i));
             std::copy(coordinates, coordinates + 3, neg.positions.begin() + 3 * i);
         }
         std::vector<float> z(static_cast<std::size_t>(count) * kChannels);
@@ -175,12 +176,12 @@ class Pipeline final : public internal::IModel, public internal::ITextToImage {
         for (int step = 19; step >= 0; --step) {
             float time = times_[step + 1];
             std::copy(z.begin(), z.end(),
-                      pos.latents.begin() + static_cast<std::size_t>(length_) * kChannels);
+                      pos.latents.begin() + static_cast<std::size_t>(text_length) * kChannels);
             neg.latents = z;
             const auto positive =
                 forward(*positive_, pos.inputs(&time), "velocity", pos.latents.size());
             const auto negative = forward(*negative_, neg.inputs(&time), "velocity", z.size());
-            const auto begin = static_cast<std::size_t>(length_) * kChannels;
+            const auto begin = static_cast<std::size_t>(text_length) * kChannels;
             for (std::size_t i = 0; i < z.size(); ++i) {
                 const float velocity =
                     guidance_[step] * positive[begin + i] + (1.0F - guidance_[step]) * negative[i];

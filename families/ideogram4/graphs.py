@@ -223,11 +223,17 @@ def decoder(directory: Path, grid_h, grid_w):
     return Decoder(model.decoder, grid_h, grid_w).eval()
 
 
-def compile_engine(module, inputs, input_names, output_name, directory: Path, verbose=False):
+def compile_engine(
+    module, inputs, input_names, output_name, directory: Path, verbose=False, sequence_bounds=None
+):
     import onnxscript.optimizer
     import tensorrt as trt
 
     path = directory / "component.onnx"
+    dynamic_shapes = None
+    if sequence_bounds is not None and sequence_bounds[0] < sequence_bounds[1]:
+        sequence = torch.export.Dim("sequence", min=sequence_bounds[0], max=sequence_bounds[1])
+        dynamic_shapes = tuple({1: sequence} if value.ndim > 1 else None for value in inputs)
     with torch.inference_mode():
         program = torch.onnx.export(
             module.eval(),
@@ -237,6 +243,7 @@ def compile_engine(module, inputs, input_names, output_name, directory: Path, ve
             opset_version=23,
             dynamo=True,
             optimize=False,
+            dynamic_shapes=dynamic_shapes,
         )
     # Fold constant axes without the exporter's algebraic pattern rewrites:
     # its RMSNormalization fusion moves a BF16 cast before the affine multiply.
@@ -261,6 +268,18 @@ def compile_engine(module, inputs, input_names, output_name, directory: Path, ve
     settings = builder.create_builder_config()
     settings.builder_optimization_level = 3
     settings.clear_flag(trt.BuilderFlag.TF32)
+    if dynamic_shapes is not None:
+        profile = builder.create_optimization_profile()
+        lower, upper = sequence_bounds
+        for index in range(network.num_inputs):
+            value = network.get_input(index)
+            shape = tuple(value.shape)
+            if -1 not in shape:
+                continue
+            minimum = tuple(lower if axis == 1 else size for axis, size in enumerate(shape))
+            maximum = tuple(upper if axis == 1 else size for axis, size in enumerate(shape))
+            profile.set_shape(value.name, minimum, maximum, maximum)
+        settings.add_optimization_profile(profile)
     plan = builder.build_serialized_network(network, settings)
     if plan is None:
         raise RuntimeError("Ideogram4 TensorRT engine build failed")

@@ -63,6 +63,7 @@ def build(request, writer):
         "height": height,
         "width": width,
         "text_length": length,
+        "sequence_layout": "packed_text_image",
         "latent_channels": 128,
         "features": 53248,
         "precision": "bf16",
@@ -74,11 +75,13 @@ def build(request, writer):
     count = (height // 16) * (width // 16)
     with tempfile.TemporaryDirectory(prefix="trtmc-ideogram4-") as temporary:
         work = Path(temporary)
-        # Text encoder padding is on the left; image positions never enter its causal keys.
+        # Match the publisher's packed sequence, including masked image slots.
+        # The text capacity bounds the engine profile; it does not add tokens.
+        size = length + count
         inputs = (
-            torch.zeros((1, length), dtype=torch.int32),
-            torch.ones((1, length), dtype=torch.int32),
-            torch.arange(length, dtype=torch.int32).reshape(1, -1),
+            torch.zeros((1, size), dtype=torch.int32),
+            torch.ones((1, size), dtype=torch.int32),
+            torch.arange(size, dtype=torch.int32).reshape(1, -1),
         )
         module = graphs.text_encoder(root)
         plan = graphs.compile_engine(
@@ -88,6 +91,7 @@ def build(request, writer):
             "features",
             work,
             bool(request.verbose),
+            sequence_bounds=(count + 1, count + length),
         )
         writer.add_bytes("text.plan", plan)
         del module, plan, inputs
@@ -113,6 +117,7 @@ def build(request, writer):
                 "velocity",
                 Path(temporary),
                 bool(request.verbose),
+                sequence_bounds=(count + 1, count + length) if prefix == "positive" else None,
             )
             writer.add_bytes(f"{prefix}.plan", plan)
             del module, plan, inputs
