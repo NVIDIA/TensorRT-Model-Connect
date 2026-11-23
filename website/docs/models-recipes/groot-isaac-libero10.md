@@ -28,9 +28,10 @@ The C++ task is `ImagesStateTextToActionChunk`: pass two named 256 × 256 RGB
 cameras (`image` and `wrist_image`), an eight-value robot state, and an
 instruction. The result is 16 actions with seven values each.
 
-**Validation boundary:** On one recorded observation with fixed initial noise,
-native passed the independent FP32 comparison (max absolute action error
-0.0159; limit 0.03). Edge completed inference but missed the same gate (0.2722).
-The released Edge runner returned the same actions on the same engines. Edge
-remains executable, not accuracy-qualified. This is not a closed-loop task
-success result or a claim about other embodiments.
+**Validation boundary:** One native FP16 run passed the independent FP32 action
+comparison (mean absolute error 0.001853; limit 0.0026). A separate GB300 run on the
+same observation missed that mean limit (0.002731), though its maximum error and
+cosine passed. Edge completed inference but missed the maximum error limit (0.2722
+vs 0.03); the released runner returned the same actions on the same engines. Both
+routes are runnable. These results do not qualify accuracy across runs, closed-loop
+task success, or other embodiments.

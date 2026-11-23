@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 
-from ..tokenizer import PUBLIC_COPY, PUBLIC_REVISION
+from ..tokenizer import PUBLIC_COPY, PUBLIC_REVISION, TOKENIZER_FILE, load_tokenizer_json
 from tensorrt_model_connect.build import cmake_prefixes, detect_local_platform
 
 
@@ -119,7 +119,9 @@ def _checkpoint(source: Path, staging: Path) -> Path:
                 (tokenizer / child.name).symlink_to(child.resolve())
     for name in names:
         if not (tokenizer / name).is_file():
-            supplied = Path(hf_hub_download(PUBLIC_COPY, name, revision=PUBLIC_REVISION))
+            supplied = source / name
+            if name != TOKENIZER_FILE or not supplied.is_file():
+                supplied = Path(hf_hub_download(PUBLIC_COPY, name, revision=PUBLIC_REVISION))
             (tokenizer / name).symlink_to(supplied.resolve())
     return overlay
 
@@ -150,6 +152,7 @@ def try_build(request, writer, source: Path) -> bool:
             target = detect_local_platform()
             python, plugin = _tools(prefix, receipt, target, edge_python)
             checkpoint = _checkpoint(source, staging)
+            load_tokenizer_json(checkpoint / "tokenizer")
             cmd = [str(python), "-I", "-c", "from tensorrt_edgellm.builder.cli import main; main()",
                    "--model-dir", str(checkpoint), "--engine-dir", str(engine), "--components", "all",
                    "--plugin-path", str(plugin), "--max-input-len", "1024", "--max-batch-size", "1",

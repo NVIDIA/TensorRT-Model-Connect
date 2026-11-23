@@ -51,7 +51,9 @@ def _checked(data: bytes, origin: str) -> bytes:
 def load_tokenizer_json(model_dir: str | Path, *, public_copy: bool = False) -> bytes:
     """Return the checked ``tokenizer.json``: the checkpoint's copy or the pinned Hub file."""
     local = Path(model_dir) / TOKENIZER_FILE
-    for candidate in (local, Path(model_dir) / "tokenizer" / TOKENIZER_FILE):
+    nested = local.parent / "tokenizer" / TOKENIZER_FILE
+    # Isaac consumes tokenizer/ even when a flat compatibility copy also exists.
+    for candidate in ((nested, local) if public_copy else (local, nested)):
         if candidate.is_file():
             return _checked(candidate.read_bytes(), str(candidate))
     repo, revision = (PUBLIC_COPY, PUBLIC_REVISION) if public_copy else (TOKENIZER_REPO, TOKENIZER_REVISION)

@@ -37,10 +37,12 @@ the Edge 0.12.0 builder, and Model Connect must have its matching GR00T C++
 archive and headers. The base Edge 0.12.0 SDK does not install these policy
 components. If Edge preparation fails, MC warns and retries the same native policy.
 
-**Accuracy status:** On the recorded episode 1272 frame 0 with fixed initial noise, native
-passed the Isaac FP32 robot-action comparison. Released Edge inference completed but failed
-that comparison (maximum absolute error 0.272; limit 0.03). Executability does not imply
-accuracy qualification. No other Isaac embodiment or LIBERO checkpoint is claimed here.
+**Accuracy status:** Native FP16 built and ran the recorded episode 1272 frame 0 with fixed
+noise. One run passed the independent Isaac FP32 comparison (mean absolute action error
+0.001853); another GB300 run missed the same 0.0026 mean limit (0.002731). Its maximum
+error and cosine still passed. The released Edge runner missed the maximum error limit
+(0.2722 vs 0.03). Both routes run, but neither result establishes consistent accuracy.
+No other Isaac embodiment or LIBERO checkpoint is claimed here.
 
 ## LeRobot supported boundary
 
