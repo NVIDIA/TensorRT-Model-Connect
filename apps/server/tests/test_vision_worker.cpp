@@ -4,6 +4,7 @@
  */
 #include "cli/io.h"
 #include "server/native_worker.h"
+#include "trtmc/internal/config.h"
 #include "trtmc/task.h"
 
 #include <filesystem>
@@ -33,8 +34,10 @@ class Vision final : public trtmc::IVisionLanguageGeneration, public trtmc::ITex
                                const trtmc::TextGenerationConfig& config) override {
         if (prompt == "Too long?") {
             ++rejected;
-            throw std::invalid_argument("prompt has 9 tokens but the KV cache holds 4");
+            throw trtmc::internal::ConfigError("prompt has 9 tokens but the KV cache holds 4");
         }
+        if (prompt == "Broken?")
+            throw std::invalid_argument("Bind TensorRT alias input 'cache', not output 'present'");
         require(prompt == "Color?" && height == 4 && width == 8 && pixels[0] == 1.0F &&
                     pixels[1] == 0.0F,
                 "original RGB geometry and question reach the Task");
@@ -88,8 +91,8 @@ void verify(const std::string& path) {
     for (std::size_t i = 1; i < 5; ++i)
         require(replies[i].at("error").at("type") == "invalid_request_error",
                 "invalid requests remain recoverable and never invoke the Task");
-    // A request the Task rejects with std::invalid_argument, such as a prompt
-    // longer than its KV cache, is a request error; the worker keeps serving.
+    // A request the Task rejects with ConfigError, such as a prompt longer than
+    // its KV cache, is a request error; the worker keeps serving.
     require(replies[5].at("id") == "too-long" &&
                 replies[5].at("error").at("type") == "invalid_request_error",
             "a Task-rejected request remains recoverable");
@@ -99,6 +102,31 @@ void verify(const std::string& path) {
                 result.at("model_call_ms").get<double>() >= 0 &&
                 result.at("timing_scope") == "public_task_call_wall",
             "complete result and timing survive");
+}
+// Any other exception, std::invalid_argument included, can come from a broken
+// runtime, so it still retires the worker before the next request runs.
+void verify_internal_failure(const std::string& path) {
+    Vision task;
+    const Json broken{{"id", "broken"},
+                      {"op", "generate_vision"},
+                      {"prompt", "Broken?"},
+                      {"image_path", path},
+                      {"config", {{"max_new_tokens", 10}, {"top_k", 1}, {"seed", 42}}}};
+    auto valid = broken;
+    valid["id"] = "after-broken";
+    valid["prompt"] = "Color?";
+    std::stringstream input;
+    input << broken.dump() << '\n' << valid.dump() << '\n';
+    std::ostringstream output;
+    require(trtmc::server::run_task_worker(task, input, output) != 0,
+            "an internal invalid_argument retires the worker");
+    std::vector<Json> replies;
+    std::istringstream stream(output.str());
+    for (std::string line; std::getline(stream, line);)
+        replies.push_back(Json::parse(line));
+    require(replies.size() == 2 && replies[1].at("error").at("type") == "runtime_error" &&
+                task.calls == 0,
+            "an internal failure is reported as a runtime error and stops the worker");
 }
 } // namespace
 int main() {
@@ -110,6 +138,7 @@ int main() {
             pixels[i] = 1.0F;
         trtmc::cli::io::save_png(path.string(), pixels, 8, 4);
         verify(path.string());
+        verify_internal_failure(path.string());
         std::filesystem::remove(path);
     } catch (const std::exception& error) {
         std::filesystem::remove(path);

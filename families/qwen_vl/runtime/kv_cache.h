@@ -48,9 +48,10 @@ class QwenVlKvCache : public QwenVlInferenceState {
     void bind_to(ITrtModule& module) override;
     void prepare_step(TensorMap& inputs, int32_t seq_len = 1) override;
     void advance(int32_t n_tokens = 1) override;
-    // Rejects a prompt longer than the cache with std::invalid_argument, so
-    // callers report a request error. The cache never drops rows: advance()
-    // throws once it is full, and the pipeline stops generating before that.
+    // Rejects a prompt longer than the cache with internal::ConfigError, the
+    // request-rejection type callers answer as a request error. The cache never
+    // drops rows: advance() throws once it is full, and the pipeline stops
+    // generating before that.
     void set_prompt_length(int32_t prompt_length) override;
     int32_t position() const override { return position_; }
     int32_t max_length() const override { return max_length_; }

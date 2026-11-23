@@ -14,6 +14,7 @@
 #include "families/qwen_vl/runtime/kv_cache.h"
 #include "families/qwen_vl/runtime/pipeline.h"
 #include "families/qwen_vl/runtime/tokenizer.h"
+#include "trtmc/internal/config.h"
 #include "trtmc/runtime/trt_module.h"
 
 #include <cstdint>
@@ -194,7 +195,7 @@ void test_text_path(cudaStream_t stream) {
     bool rejected = false;
     try {
         (void)overflow->pipeline->generate_ids(std::vector<std::int32_t>(kRows + 1, 1), budget(4));
-    } catch (const std::invalid_argument&) {
+    } catch (const trtmc::internal::ConfigError&) {
         rejected = true;
     }
     check(rejected, "a text prompt longer than the cache is rejected as invalid");
@@ -221,7 +222,7 @@ void test_image_path(cudaStream_t stream) {
     bool rejected = false;
     try {
         (void)overflow->pipeline->generate("q", pixels.data(), 28, 28, budget(4));
-    } catch (const std::invalid_argument&) {
+    } catch (const trtmc::internal::ConfigError&) {
         rejected = true;
     }
     check(rejected, "an image prompt longer than the cache is rejected as invalid");

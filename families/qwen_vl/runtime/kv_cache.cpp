@@ -5,6 +5,7 @@
 
 #include "families/qwen_vl/runtime/kv_cache.h"
 
+#include "trtmc/internal/config.h"
 #include "trtmc/runtime/trt_module.h"
 
 #include <algorithm>
@@ -282,7 +283,7 @@ void QwenVlKvCache::advance(int32_t n_tokens) {
 
 void QwenVlKvCache::set_prompt_length(int32_t prompt_length) {
     if (prompt_length > max_length_) {
-        throw std::invalid_argument("qwen_vl prompt has " + std::to_string(prompt_length) +
+        throw internal::ConfigError("qwen_vl prompt has " + std::to_string(prompt_length) +
                                     " tokens but the KV cache holds " +
                                     std::to_string(max_length_) +
                                     "; rebuild the bundle with a larger --max-sequence-length or "
@@ -310,11 +311,15 @@ std::size_t QwenVlKvCache::device_memory_bytes() const {
 }
 
 bool QwenVlKvCache::ok() const {
-    if (cache_k_.size() != static_cast<std::size_t>(num_layers_))
-        return false;
-    for (const auto& t : cache_k_) {
-        if (!t.ok())
+    // Every buffer is checked: a failed V or present allocation would otherwise
+    // surface later as a null binding inside the decoder.
+    for (const auto* group : {&cache_k_, &cache_v_, &present_k_, &present_v_}) {
+        if (group->size() != static_cast<std::size_t>(num_layers_))
             return false;
+        for (const auto& t : *group) {
+            if (!t.ok())
+                return false;
+        }
     }
     return true;
 }

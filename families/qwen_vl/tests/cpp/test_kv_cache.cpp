@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "families/qwen_vl/runtime/kv_cache.h"
+#include "trtmc/internal/config.h"
 
 #include <cstdint>
 #include <cstdlib>
@@ -17,6 +18,8 @@
 // shim records it and refuses to copy.
 namespace {
 std::vector<void*> allocations;
+int allocation_count = 0;
+int fail_allocation = -1;
 int copies = 0;
 bool overlapping_copy = false;
 
@@ -98,9 +101,9 @@ void test_prompt_capacity() {
     cache.set_prompt_length(4);
     try {
         cache.set_prompt_length(5);
-    } catch (const std::invalid_argument& error) {
-        // std::invalid_argument maps to TRTMC_INVALID_ARGUMENT, a request error
-        // that does not retire a serving worker.
+    } catch (const trtmc::internal::ConfigError& error) {
+        // ConfigError is the request-rejection type: the C API reports it as
+        // TRTMC_INVALID_CONFIG and a serving worker answers a request error.
         const std::string message = error.what();
         check(message.find("5 tokens") != std::string::npos &&
                   message.find("holds 4") != std::string::npos &&
@@ -110,9 +113,24 @@ void test_prompt_capacity() {
     }
     throw std::runtime_error("A prompt longer than the KV cache must be rejected as invalid");
 }
+
+void test_allocation_failures() {
+    // Allocations per layer: cache_k, cache_v, present_k, present_v.
+    for (int failure = 0; failure < 4; ++failure) {
+        allocation_count = 0;
+        fail_allocation = failure;
+        trtmc::QwenVlKvCache cache(1, 4, 2, nullptr);
+        check(!cache.ok(), "A failed cache allocation was accepted: " + std::to_string(failure));
+    }
+    fail_allocation = -1;
+}
 } // namespace
 
 extern "C" cudaError_t CUDARTAPI cudaMalloc(void** pointer, std::size_t size) {
+    if (allocation_count++ == fail_allocation) {
+        *pointer = nullptr;
+        return cudaErrorMemoryAllocation;
+    }
     *pointer = std::malloc(size);
     if (!*pointer)
         return cudaErrorMemoryAllocation;
@@ -144,6 +162,7 @@ int main() {
     try {
         test_advance_appends_until_full();
         test_prompt_capacity();
+        test_allocation_failures();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
