@@ -355,6 +355,14 @@ def _prepare_paired_onnx(request, raw: dict, target: dict, staging: Path, log_pa
     source, draft_dir = Path(request.model_dir).resolve(), draft_dir.resolve()
     version = package.get("version", "0.11.0")
     current = version == "0.12.0"
+    if current and variant == "dspark":
+        # The 0.12 draft profile counts query rows, not just proposed tokens.
+        draft = json.loads((draft_dir / "config.json").read_text(encoding="utf-8"))
+        sample_from_anchor = (draft.get("dspark_config") or {}).get(
+            "sample_from_anchor", draft.get("sample_from_anchor", True))
+        if not isinstance(sample_from_anchor, bool):
+            raise ValueError("DSpark sample_from_anchor must be boolean")
+        draft_slots = block + (not sample_from_anchor)
     quantization = paired_checkpoint_quantization(source, raw, variant, include_current=current)
     if quantization is None:
         raise ValueError("Unsupported Qwen3.8 target checkpoint for this paired Edge release")

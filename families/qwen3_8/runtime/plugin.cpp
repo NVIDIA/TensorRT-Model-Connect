@@ -435,14 +435,13 @@ ITask* create(const FamilyContext& context) {
     // A bundle with an unknown external draft must not silently run target-only.
     for (const auto& section : context.reader.info().sections) {
         const auto& name = section.name;
-        if (name.compare(0, 7, "native_") != 0 || name.size() <= 12 ||
+        if (name.compare(0, 7, "native_") != 0 || name.size() < 12 ||
             name.compare(name.size() - 5, 5, ".json") != 0)
             continue;
-        const auto prefix = name.substr(0, name.size() - 5);
-        if (context.reader.find_section(prefix + "_embeddings.bin") &&
-            name != "native_dspark.json" && name != "native_dflash2.json" &&
-            name != "native_domino.json")
-            throw std::runtime_error("Unsupported Qwen native draft: " + prefix);
+        if (name != "native_visual.json" && name != "native_dspark.json" &&
+            name != "native_dflash2.json" && name != "native_domino.json")
+            throw std::runtime_error("Unsupported Qwen native draft: " +
+                                     name.substr(0, name.size() - 5));
     }
     const auto config = parse_runtime_config(context.reader);
     if (config.tensor_parallel_size == 2) {

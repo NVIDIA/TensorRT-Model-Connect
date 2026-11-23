@@ -721,6 +721,45 @@ def test_paired_draft_contract_rejected_before_export(tmp_path, monkeypatch, var
         dispatch.build_paired(request, None, execution)
 
 
+@pytest.mark.parametrize("root_anchor,nested_anchor,expected", [
+    (None, None, 7), (False, None, 8), (True, False, 8), (False, True, 7),
+])
+def test_dspark_012_draft_compiler_reserves_anchor_input(tmp_path, monkeypatch, root_anchor, nested_anchor, expected):
+    """Open the real family build path, stopping before executing the draft compiler."""
+    import json
+    from families.qwen3_8.edge_llm import builder
+
+    request, execution = _dspark_pair_request(tmp_path)
+    draft = execution.checkpoints[0].model_dir
+    for directory in (request.model_dir, draft):
+        (directory / "model.safetensors").touch()
+    draft_config = json.loads((draft / "config.json").read_text())
+    if root_anchor is not None:
+        draft_config["sample_from_anchor"] = root_anchor
+    if nested_anchor is not None:
+        draft_config["dspark_config"]["sample_from_anchor"] = nested_anchor
+    (draft / "config.json").write_text(json.dumps(draft_config))
+    monkeypatch.setattr(builder, "installed_package", lambda _: {
+        "onnx": True, "version": "0.12.0", "onnx_builder": "compiler", "plugin": "/sdk/plugin",
+    })
+    monkeypatch.setattr(builder, "builder_python", lambda *args, **kwargs: "exporter")
+
+    class ReachedCompiler(Exception):
+        pass
+
+    def record(argv, **kwargs):
+        if argv[0] == "compiler":
+            assert "--spec-draft" in argv
+            assert argv[argv.index("--max-spec-draft-tokens") + 1] == str(expected)
+            raise ReachedCompiler
+        assert "--dspark-draft" in argv
+
+    monkeypatch.setattr(builder.subprocess, "run", record)
+    raw = json.loads((request.model_dir / "config.json").read_text())
+    with pytest.raises(ReachedCompiler):
+        builder.prepare_dspark(request, raw, {}, tmp_path / "stage", tmp_path / "build.log", draft)
+
+
 @pytest.mark.parametrize("onnx", [False, True])
 @pytest.mark.parametrize("available", [False, True])
 @pytest.mark.parametrize("version", ["0.11.0", "0.12.0"])
