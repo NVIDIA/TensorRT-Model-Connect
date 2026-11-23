@@ -279,12 +279,26 @@ void QwenVlKvCache::advance(int32_t n_tokens) {
         // Cache full: shift [1..max) → [0..max-1), then write at tail
         auto shift_bytes = static_cast<std::size_t>(max_length_ - 1) * row_bytes;
         auto tail_offset = shift_bytes;
+        // src and dst overlap inside the same allocation, and cudaMemcpyAsync
+        // is undefined for overlapping ranges, so stage through scratch. One
+        // buffer serves every layer because all copies are ordered on stream_.
+        DeviceTensor& scratch_tensor = shift_scratch();
+        if (shift_bytes > 0 && !scratch_tensor.ok())
+            throw std::runtime_error(
+                "QwenVlKvCache: failed to allocate scratch for the cache shift");
+        auto* scratch = static_cast<uint8_t*>(scratch_tensor.data());
         for (int32_t i = 0; i < num_layers_; ++i) {
             auto li = static_cast<std::size_t>(i);
             auto* ck = static_cast<uint8_t*>(cache_k_[li].data());
             auto* cv = static_cast<uint8_t*>(cache_v_[li].data());
-            cudaMemcpyAsync(ck, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
+            if (shift_bytes > 0) {
+                cudaMemcpyAsync(scratch, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice,
+                                stream_);
+                cudaMemcpyAsync(ck, scratch, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
+                cudaMemcpyAsync(scratch, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice,
+                                stream_);
+                cudaMemcpyAsync(cv, scratch, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
+            }
             cudaMemcpyAsync(ck + tail_offset, present_k_[li].data(), row_bytes,
                             cudaMemcpyDeviceToDevice, stream_);
             cudaMemcpyAsync(cv + tail_offset, present_v_[li].data(), row_bytes,
@@ -294,10 +308,25 @@ void QwenVlKvCache::advance(int32_t n_tokens) {
     }
 }
 
+void QwenVlKvCache::set_prompt_length(int32_t prompt_length) {
+    if (prompt_length > max_length_) {
+        throw std::runtime_error("qwen_vl prompt has " + std::to_string(prompt_length) +
+                                 " tokens but the KV cache holds " + std::to_string(max_length_) +
+                                 "; rebuild the bundle with a larger --max-sequence-length or "
+                                 "shorten the prompt");
+    }
+}
+
 void QwenVlKvCache::reset() {
     // Reset only the logical sequence length. Attention masks hide every
     // stale cache row, and each present row is overwritten before use.
     position_ = 0;
+}
+
+DeviceTensor& QwenVlKvCache::shift_scratch() {
+    if (!shift_scratch_.ok() && max_length_ > 1)
+        shift_scratch_ = DeviceTensor({max_length_ - 1, kv_dim_}, cache_dtype_, stream_);
+    return shift_scratch_;
 }
 
 std::size_t QwenVlKvCache::device_memory_bytes() const {

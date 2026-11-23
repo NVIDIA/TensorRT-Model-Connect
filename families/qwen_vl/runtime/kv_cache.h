@@ -48,6 +48,9 @@ class QwenVlKvCache : public QwenVlInferenceState {
     void bind_to(ITrtModule& module) override;
     void prepare_step(TensorMap& inputs, int32_t seq_len = 1) override;
     void advance(int32_t n_tokens = 1) override;
+    // Rejects a prompt longer than the cache. Sliding the cache during the
+    // prompt would silently drop its first tokens, image tokens included.
+    void set_prompt_length(int32_t prompt_length) override;
     int32_t position() const override { return position_; }
     int32_t max_length() const override { return max_length_; }
     int32_t num_layers() const override { return num_layers_; }
@@ -94,10 +97,16 @@ class QwenVlKvCache : public QwenVlInferenceState {
     void write_bidirectional_mask(TensorMap& inputs, int32_t seq_len);
     void write_decode_mask(TensorMap& inputs);
 
+    // Scratch for the cache-full row shift. cudaMemcpyAsync has undefined
+    // behavior on overlapping ranges, so the shift stages through this buffer.
+    // Allocated on first overflow, so a cache that never fills never pays for it.
+    DeviceTensor& shift_scratch();
+
     std::vector<DeviceTensor> cache_k_;   // [num_layers], shape [max_length, kv_dim]
     std::vector<DeviceTensor> cache_v_;   // [num_layers]
     std::vector<DeviceTensor> present_k_; // [num_layers], shape [1, kv_dim] (single step output)
     std::vector<DeviceTensor> present_v_; // [num_layers]
+    DeviceTensor shift_scratch_;          // lazily sized [max_length - 1, kv_dim]
     int32_t num_layers_{0};
     int32_t max_length_{0};
     int32_t kv_dim_{0};
