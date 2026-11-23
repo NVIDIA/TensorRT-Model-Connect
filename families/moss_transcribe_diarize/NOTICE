@@ -1,0 +1,33 @@
+This family reproduces behavior of two upstream sources, both licensed under the
+Apache License, Version 2.0 (http://www.apache.org/licenses/LICENSE-2.0, also in
+this repository's LICENSE file). Neither source carries a copyright header; the
+model card names MOSI.AI / OpenMOSS as the authors.
+
+1. The OpenMOSS-Team/MOSS-Transcribe-Diarize checkpoint repository, revision
+   10304d926740cf5a5cee05a268086e3265197910:
+   https://huggingface.co/OpenMOSS-Team/MOSS-Transcribe-Diarize
+
+   - runtime/prompt_plan.cpp re-implements the audio chunking, the per-chunk
+     audio token count and the time-marker expansion of the audio span
+     (_chunk_audio, _compute_audio_token_length, _audio_span_ids in
+     processing_moss_transcribe_diarize.py).
+   - audio_encoder.py and decoder.py express the network of
+     modeling_moss_transcribe_diarize.py (Whisper encoder, frame merge,
+     VQAdaptor, Qwen3 decoder with audio placeholder injection) as TensorRT
+     graphs; the bundle embeds the repository's weights and tokenizer data.
+
+2. The OpenMOSS MOSS-Transcribe-Diarize package, commit
+   79c675f0670cc2f824bcbcdd98263704f40f1f7e:
+   https://github.com/OpenMOSS/MOSS-Transcribe-Diarize
+
+   - runtime/text_output.cpp ports TranscriptStreamParser of
+     moss_transcribe_diarize/transcript_parser.py (parse_transcript for the
+     "[start][Sxx]text[end]" spans).
+   - tokens.py and tests/test_e2e.py carry the default transcription
+     instruction (DEFAULT_PROMPT) of moss_transcribe_diarize/inference_utils.py,
+     and tests/test_e2e.py follows its prepare_inputs and
+     generate_transcription steps for the reference run.
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied.
