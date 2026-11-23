@@ -72,6 +72,10 @@ int main(int argc, char** argv) {
     metaspace_only["normalizer"] = nullptr;
     check(*create(metaspace_only), u8"A\u1680B", {3, 4, 0, 5});
     check(*create(metaspace_only), u8"A\u0085B", {3, 4, 0, 5});
+    for (const auto* control : {"A\tB", "A\nB", "A\rB"}) {
+        check(*create(metaspace_only), control, {3, 4, 0, 5});
+        check(*create(whitespace), control, {3, 4, 3, 5});
+    }
     auto suffix = fixture;
     suffix["normalizer"]["precompiled_charsmap"] = data.at("valid_charsmaps").at("ascii_suffix");
     check(*create(suffix), u8"ﬁ", {3, 0});

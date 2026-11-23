@@ -208,9 +208,7 @@ bool whitespace_at(const std::string& text, size_t pos) {
 std::vector<std::string> whitespace_split(const std::string& text, bool unicode_whitespace) {
     std::vector<std::string> words;
     const auto is_space = [&](size_t pos) {
-        return unicode_whitespace ? whitespace_at(text, pos)
-                                  : text[pos] == ' ' || text[pos] == '\t' || text[pos] == '\n' ||
-                                        text[pos] == '\r';
+        return unicode_whitespace ? whitespace_at(text, pos) : text[pos] == ' ';
     };
     size_t i = 0;
     while (i < text.size()) {
