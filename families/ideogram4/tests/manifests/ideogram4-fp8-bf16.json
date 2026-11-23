@@ -1,0 +1,27 @@
+{
+  "name": "ideogram4-fp8-bf16",
+  "bundle": "ideogram4-fp8-bf16.bundle",
+  "hf_id": "ideogram-ai/ideogram-4-fp8",
+  "hf_revision": "ee79a7237b519f1402ceacf952f30c8a31ec5073",
+  "family": "ideogram4",
+  "task": "text_to_image",
+  "precision": "bf16",
+  "image_height": 512,
+  "image_width": 512,
+  "max_sequence_length": 128,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "ideogram4-red-cup",
+      "color": "red",
+      "seed": 7,
+      "premerge": true
+    },
+    {
+      "name": "ideogram4-blue-cup",
+      "color": "blue",
+      "seed": 19,
+      "premerge": true
+    }
+  ]
+}
