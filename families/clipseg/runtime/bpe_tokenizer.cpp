@@ -656,8 +656,19 @@ class BpeTokenizer final : public ITokenizer {
                 throw std::runtime_error("clipseg tokenizer NFC normalization failed");
             unicode = std::move(composed);
         }
-        if (mNormalizeLowercase)
-            unicode.toLower(icu::Locale::getRoot());
+        if (mNormalizeLowercase) {
+            // Hugging Face Lowercase maps code points independently, including expansions.
+            icu::UnicodeString lowered;
+            for (int32_t offset = 0; offset < unicode.length();) {
+                const auto codepoint = unicode.char32At(offset);
+                icu::UnicodeString character;
+                character.append(codepoint);
+                character.toLower(icu::Locale::getRoot());
+                lowered.append(character);
+                offset += U16_LENGTH(codepoint);
+            }
+            unicode = std::move(lowered);
+        }
         std::string utf8;
         unicode.toUTF8String(utf8);
         std::string normalized;
