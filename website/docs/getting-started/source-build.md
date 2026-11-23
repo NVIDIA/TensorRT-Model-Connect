@@ -117,6 +117,11 @@ from Model Connect's shared pin. This option provisions the native SDK; it
 does not port any family adapter. See the [native SDK setup](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/cmake/edge_llm/README.md)
 for provisioning options. Follow each family's instructions for model builds.
 
+To include the optional GR00T and Pi0.5 C++ libraries and headers in the 0.12
+SDK, add `-DTRTMC_EDGELLM_POLICY_SDK=ON` when provisioning from source, or
+select a matching external SDK that already contains both. The base SDK does
+not contain them; installing the Edge Python wheel does not add them.
+
 Build on the GPU where the SDK will run. Pass its numeric architecture:
 for example, `-DCMAKE_CUDA_ARCHITECTURES=100` on GB200 or
 `-DCMAKE_CUDA_ARCHITECTURES=103` on GB300. The 0.12 provider selects the

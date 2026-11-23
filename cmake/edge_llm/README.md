@@ -39,6 +39,14 @@ The SDK must include its installed license. To request all kernel groups
 `TRTMC_EDGELLM_ONNX=ON` installs the upstream ONNX builder commands only when
 requested; it does not change the native MC graph path or qualify any family.
 
+For the optional GR00T and Pi0.5 C++ APIs, also set
+`-DTRTMC_EDGELLM_POLICY_SDK=ON`. The stock 0.12 SDK does not install them.
+When provisioning from pinned source, this builds the two upstream static
+libraries and installs their headers under `include/tensorrt_edgellm/` in
+the same prefix as the core. An explicitly selected external SDK must already
+contain both components. The option is off by default and does not select a
+model backend or install Python, models, or policy examples.
+
 Keep the **0.12 Python builder separate from the MC environment**. For
 example, when the native SDK uses TensorRT 11.4.0.106:
 
