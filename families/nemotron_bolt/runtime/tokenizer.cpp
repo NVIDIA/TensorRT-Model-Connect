@@ -6,9 +6,11 @@
 
 #include <algorithm>
 #include <array>
-#include <limits>
+#include <functional>
 #include <nlohmann/json.hpp>
+#include <queue>
 #include <stdexcept>
+#include <tuple>
 #include <unicode/regex.h>
 #include <unicode/unistr.h>
 #include <unordered_map>
@@ -21,14 +23,18 @@ std::string utf8(const icu::UnicodeString& text) {
     text.toUTF8String(result);
     return result;
 }
-std::string pair_key(const std::string& a, const std::string& b) {
-    return a + '\0' + b;
+uint64_t pair_key(int32_t a, int32_t b) {
+    return (uint64_t(static_cast<uint32_t>(a)) << 32) | static_cast<uint32_t>(b);
 }
 } // namespace
 
 struct Tokenizer::Impl {
     std::unique_ptr<icu::RegexPattern> pattern;
-    std::unordered_map<std::string, int32_t> vocab, ranks;
+    std::unordered_map<std::string, int32_t> vocab;
+    struct Merge {
+        int32_t rank, token;
+    };
+    std::unordered_map<uint64_t, Merge> merges;
     std::unordered_map<int32_t, std::string> inverse;
     std::unordered_set<int32_t> special_ids;
     std::vector<std::pair<std::string, int32_t>> added;
@@ -73,7 +79,7 @@ struct Tokenizer::Impl {
                 a = text.substr(0, space);
                 b = text.substr(space + 1);
             }
-            ranks.emplace(pair_key(a, b), rank++);
+            merges.emplace(pair_key(vocab.at(a), vocab.at(b)), Merge{rank++, vocab.at(a + b)});
         }
         ignore_merges = model.value("ignore_merges", false);
         for (const auto& item : j.at("added_tokens")) {
@@ -100,41 +106,58 @@ struct Tokenizer::Impl {
     }
 
     void piece(const std::string& bytes, std::vector<int32_t>& result) const {
-        std::vector<std::string> units;
-        std::string encoded;
-        for (unsigned char b : bytes) {
-            units.push_back(byte_encoder[b]);
-            encoded += byte_encoder[b];
-        }
         if (ignore_merges) {
+            std::string encoded;
+            for (unsigned char b : bytes)
+                encoded += byte_encoder[b];
             const auto found = vocab.find(encoded);
             if (found != vocab.end()) {
                 result.push_back(found->second);
                 return;
             }
         }
-        // A split piece is short; deterministic leftmost rank ordering mirrors BPE.
-        while (units.size() > 1) {
-            size_t best = units.size();
-            int rank = std::numeric_limits<int>::max();
-            for (size_t i = 0; i + 1 < units.size(); ++i) {
-                auto found = ranks.find(pair_key(units[i], units[i + 1]));
-                if (found != ranks.end() && found->second < rank) {
-                    rank = found->second;
-                    best = i;
-                }
-            }
-            if (best == units.size())
-                break;
-            units[best] += units[best + 1];
-            units.erase(units.begin() + best + 1);
+        // Stable positions break equal-rank ties from left to right. Only the
+        // two neighbors of a merge need new candidates, even for long words.
+        const size_t end = bytes.size();
+        struct Symbol {
+            int32_t id;
+            size_t previous, next;
+        };
+        std::vector<Symbol> units;
+        units.reserve(end);
+        for (size_t i = 0; i < end; ++i)
+            units.push_back({vocab.at(byte_encoder[static_cast<unsigned char>(bytes[i])]),
+                             i == 0 ? end : i - 1, i + 1});
+        using Candidate = std::tuple<int32_t, size_t>;
+        std::priority_queue<Candidate, std::vector<Candidate>, std::greater<Candidate>> queue;
+        auto offer = [&](size_t left) {
+            if (left == end || units[left].next == end)
+                return;
+            const auto it = merges.find(pair_key(units[left].id, units[units[left].next].id));
+            if (it != merges.end())
+                queue.emplace(it->second.rank, left);
+        };
+        for (size_t i = 0; i < end; ++i)
+            offer(i);
+        while (!queue.empty()) {
+            const auto [rank, left] = queue.top();
+            queue.pop();
+            const size_t right = units[left].next;
+            if (right == end)
+                continue;
+            const auto it = merges.find(pair_key(units[left].id, units[right].id));
+            if (it == merges.end() || it->second.rank != rank)
+                continue; // One of the original neighbors already merged.
+            units[left].id = it->second.token;
+            units[left].next = units[right].next;
+            units[right].next = end;
+            if (units[left].next != end)
+                units[units[left].next].previous = left;
+            offer(units[left].previous);
+            offer(left);
         }
-        for (const auto& token : units) {
-            auto found = vocab.find(token);
-            if (found == vocab.end())
-                throw std::invalid_argument("Missing byte in Nemotron Bolt vocabulary");
-            result.push_back(found->second);
-        }
+        for (size_t i = 0; i != end; i = units[i].next)
+            result.push_back(units[i].id);
     }
 
     void ordinary(std::string_view bytes, std::vector<int32_t>& result) const {

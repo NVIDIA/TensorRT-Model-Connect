@@ -46,7 +46,7 @@ def build(request, writer, draft, input_limit, capacity, native):
             else:
                 # The released paired Edge engine is only supported on SM120.
                 prepared = None
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+        except (OSError, KeyError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             logging.getLogger(__name__).warning(
                 "Bolt Edge preparation failed: %s. See %s. Falling back to native TensorRT.",
                 exc,

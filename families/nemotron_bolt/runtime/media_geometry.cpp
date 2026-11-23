@@ -29,7 +29,7 @@ Grid image_grid(Grid input, int patch, int minimum, int available) {
         throw std::invalid_argument("Bolt image is too small for a complete patch");
     const double scale = std::min(1., std::sqrt(double(available) / (double(h) * w)));
     Grid result{std::max(1, int(std::floor(scale * h))), std::max(1, int(std::floor(scale * w)))};
-    if (available > minimum && int64_t(result.rows) * result.columns < minimum) {
+    if (int64_t(result.rows) * result.columns < minimum) {
         const double up = std::sqrt(double(minimum) / (double(result.rows) * result.columns));
         result.rows = int(std::ceil(up * result.rows));
         result.columns = int(std::ceil(up * result.columns));
@@ -68,8 +68,9 @@ std::vector<Grid> image_grids(const std::vector<Grid>& shapes, int patch, int mi
         }
         if (total <= budget) {
             for (const auto& grid : result)
-                if (grid.count() > maximum)
-                    throw std::invalid_argument("Bolt image grid exceeds built visual capacity");
+                if (grid.count() < minimum || grid.count() > maximum)
+                    throw std::invalid_argument(
+                        "Bolt image grid is outside the built patch limits");
             return result;
         }
         const double scale = double(budget) / total;

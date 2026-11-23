@@ -34,6 +34,8 @@ def validate_inputs(target: Path, draft: Path | None) -> dict:
             and lattice.get("projector_type") == "lilicorr"
             and lattice.get("lilicorr_enabled") is True
             and lattice.get("lilicorr_candidate_topk") == 8
+            and type(lattice.get("lilicorr_num_layers")) is int
+            and lattice["lilicorr_num_layers"] == 2
             and companion.get("num_hidden_layers") == 5
             and companion.get("num_attention_heads") == 32
             and companion.get("num_key_value_heads") == 2

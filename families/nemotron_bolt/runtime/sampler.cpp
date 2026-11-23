@@ -86,11 +86,12 @@ static void topk_indices_and_softmax(FilteredDistribution& dist, const float* lo
     dist.probs.resize(static_cast<std::size_t>(k));
     float sum = 0.0F;
     for (int32_t i = 0; i < k; ++i) {
-        const float scaled =
-            (logits[static_cast<std::size_t>(dist.indices[static_cast<std::size_t>(i)])] -
-             max_logit) /
-            temperature;
-        dist.probs[static_cast<std::size_t>(i)] = std::isfinite(scaled) ? std::exp(scaled) : 0.0F;
+        const float value = logits[dist.indices[i]];
+        // Equal maxima get equal mass even when a repetition penalty overflowed.
+        // In particular, +inf - +inf must not turn the entire vocabulary uniform.
+        dist.probs[i] = value == max_logit ? 1.0F : std::exp((value - max_logit) / temperature);
+        if (!std::isfinite(dist.probs[i]))
+            dist.probs[i] = 0.0F;
         sum += dist.probs[static_cast<std::size_t>(i)];
     }
     if (sum > 0.0F) {
@@ -212,12 +213,16 @@ class TopKSampler final : public NemotronBoltISampler {
         rng_state_ ^= rng_state_ << 13;
         rng_state_ ^= rng_state_ >> 7;
         rng_state_ ^= rng_state_ << 17;
-        float u = static_cast<float>(rng_state_ & 0xFFFFFFFF) / 4294967296.0F;
+        const double u = static_cast<double>(rng_state_ & 0xFFFFFFFF) * 0x1.0p-32;
 
         // Sample from cumulative distribution
-        float cumulative = 0.0F;
+        double cumulative = 0.0;
+        int32_t last_positive = 0;
         for (int32_t i = 0; i < dist.keep; ++i) {
-            cumulative += dist.probs[static_cast<std::size_t>(i)];
+            if (dist.probs[i] == 0.0F)
+                continue;
+            last_positive = i;
+            cumulative += dist.probs[i];
             if (u < cumulative) {
                 result.token_id = dist.indices[static_cast<std::size_t>(i)];
                 result.is_eos = (result.token_id == params.eos_token_id);
@@ -225,7 +230,7 @@ class TopKSampler final : public NemotronBoltISampler {
             }
         }
 
-        result.token_id = dist.indices[static_cast<std::size_t>(dist.keep - 1)];
+        result.token_id = dist.indices[last_positive];
         result.is_eos = (result.token_id == params.eos_token_id);
         return result;
     }
@@ -258,7 +263,7 @@ create_nemotron_bolt_sampler(const NemotronBoltSamplingParams& params) {
     // Greedy when sampling is fully disabled and no explicit random seed is set.
     const float top_p = sanitized_top_p(params.top_p);
     const float min_p = sanitized_min_p(params.min_p);
-    if (params.top_k <= 1 && top_p >= 1.0F - kSamplingEpsilon && min_p <= 0.0F && params.seed < 0) {
+    if (params.top_k == 1 && top_p >= 1.0F - kSamplingEpsilon && min_p <= 0.0F && params.seed < 0) {
         return std::make_unique<GreedySampler>();
     }
 
@@ -270,12 +275,9 @@ create_nemotron_bolt_sampler(const NemotronBoltSamplingParams& params) {
 }
 
 BoltVerificationSampler::BoltVerificationSampler(NemotronBoltSamplingParams params)
-    : params_(params), rng_(params.seed < 0 ? 42 : std::max<uint64_t>(params.seed, 1)) {}
+    : params_(params), rng_(params.seed < 0 ? 42 : params.seed) {}
 double BoltVerificationSampler::uniform() {
-    rng_ ^= rng_ << 13;
-    rng_ ^= rng_ >> 7;
-    rng_ ^= rng_ << 17;
-    return double(rng_ >> 11) * 0x1.0p-53;
+    return double(rng_() >> 11) * 0x1.0p-53;
 }
 int32_t BoltVerificationSampler::draw(const std::vector<double>& weights) {
     const double total = std::accumulate(weights.begin(), weights.end(), 0.0);
@@ -297,7 +299,7 @@ std::vector<double> BoltVerificationSampler::distribution(const std::vector<floa
     if (logits.empty())
         throw std::invalid_argument("No Bolt target logits");
     std::vector<double> p(logits.size());
-    const bool deterministic = params_.top_k <= 1 &&
+    const bool deterministic = params_.top_k == 1 &&
                                sanitized_top_p(params_.top_p) >= 1 - kSamplingEpsilon &&
                                sanitized_min_p(params_.min_p) <= 0 && params_.seed < 0;
     if (greedy_equivalent(params_) || deterministic) {
@@ -322,9 +324,7 @@ BoltDraftChoice BoltVerificationSampler::propose(const int32_t* ids, const float
         throw std::runtime_error("Nonfinite Bolt transition scores");
     const auto max = std::max_element(scores, scores + 8);
     const bool greedy = params_.temperature < 1e-3f || params_.top_p <= 0 ||
-                        (params_.top_k == 1 && !top_p_enabled(params_.top_p)) ||
-                        (params_.top_k <= 1 && params_.top_p >= 1 - kSamplingEpsilon &&
-                         params_.min_p <= 0 && params_.seed < 0);
+                        (params_.top_k == 1 && !top_p_enabled(params_.top_p));
     if (greedy) {
         c.column = int(max - scores);
         c.probability[c.column] = 1;

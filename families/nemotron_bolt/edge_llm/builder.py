@@ -41,7 +41,10 @@ def sdk(target, explicit_python):
             and ".".join(info.get("cuda_version", "").split(".")[:2]) == target["cuda_version"]
         ):
             raise ValueError("Bolt needs a matching Edge 0.12 SDK with the W2A16 kernels")
-        relative = Path(info["plugin"])
+        plugin_name = info.get("plugin")
+        if not isinstance(plugin_name, str) or not plugin_name:
+            raise ValueError("Bolt Edge SDK receipt lacks a plugin path")
+        relative = Path(plugin_name)
         plugin = (prefix / relative).resolve()
         if (
             relative.is_absolute()

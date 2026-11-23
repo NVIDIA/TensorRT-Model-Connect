@@ -48,6 +48,7 @@ def build_native(request, writer):
     generation = json.loads((root / "generation_config.json").read_text())
     if set(generation["eos_token_id"]) != {2, 11}:
         raise ValueError("Unexpected Bolt EOS tokens")
+    generation["eos_token_id"] = [2, 11]
     writer.add_json("generation.json", generation)
     for name in ("tokenizer.json", "chat_template.jinja"):
         writer.add_bytes(name, (root / name).read_bytes())
