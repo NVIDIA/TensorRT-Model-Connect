@@ -150,6 +150,7 @@ const TASKS = {
   image_points_to_masks: ['Image and points to masks', 'Computer Vision', 'mask-generation', 'segment'],
   image_box_to_masks: ['Image and box to masks', 'Computer Vision', 'mask-generation', null],
   image_mask_to_masks: ['Image and prior mask to masks', 'Computer Vision', 'mask-generation', null],
+  image_trimap_to_alpha: ['Image and trimap alpha matting', 'Computer Vision', null, null],
   image_to_mask_proposals: ['Image mask proposals', 'Computer Vision', 'mask-generation', 'segment'],
   image_text_to_instance_masks: ['Image and text to instance masks', 'Computer Vision', 'mask-generation', 'segment-prompted'],
   image_box_exemplars_to_instance_masks: ['Image and box exemplars to instance masks', 'Computer Vision', 'mask-generation', null],
