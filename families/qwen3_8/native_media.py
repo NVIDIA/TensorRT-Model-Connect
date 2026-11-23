@@ -160,6 +160,6 @@ def native_media_metadata(model_dir: Path, raw: dict, hidden: int, capacity: int
         "schema_version": 1, "patch": vision.patch, "temporal": vision.temporal, "merge": vision.merge,
         "positions": vision.positions, "head_dim": vision.head_dim, "hidden": vision.output, "theta": vision.theta,
         "mean": image["image_mean"], "stddev": image["image_std"], "min_tokens": 128, "max_tokens": 1280,
-        "input_limit": min(capacity, 2048), "capacity": capacity, "precision": precision,
+        "input_limit": capacity, "capacity": capacity, "precision": precision,
         "token_ids": ids, "prompts": provider_recipes(tokenizer),
     }

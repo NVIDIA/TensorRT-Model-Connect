@@ -125,7 +125,7 @@ def load_vision_weights(model_dir: Path, config: VisionConfig, *, readers=None):
             if prepared is None or (prepared.out_features, prepared.in_features) != (out_width, in_width):
                 raise ValueError(f"Invalid prepared Qwen visual projection: {source}")
             input_scale = quant._read_input_scale(readers, source)
-            if not isinstance(prepared, quant._AWQWeight) and input_scale is None:
+            if not isinstance(prepared, quant._GroupInt4Weight) and input_scale is None:
                 raise ValueError(f"Missing prepared visual activation scale: {source}")
             scales[name] = quant._LayerScales(input_scale, prepared)
         else:

@@ -116,9 +116,9 @@ def test_edge_cli_help_is_family_owned(tmp_path, capsys):
         build_cli.main(["qwen3_8", "build", str(source), "--help"])
     assert caught.value.code == 0
     help_text = capsys.readouterr().out
-    assert "--execution-variant {dspark,dflash,mtp}" in help_text
+    assert "--execution-variant {dspark,dflash,dflash_tree,domino,domino_tree,mtp}" in help_text
     assert "--companion" in help_text
-    assert "--quantization {none,nvfp4,fp8,int4_awq}" in help_text
+    assert "--quantization {none,nvfp4,fp8,int4_awq,int4_gptq}" in help_text
 
 
 @pytest.mark.parametrize("vision", [False, True])
@@ -340,7 +340,7 @@ def _dspark_pair_request(tmp_path, variant="dspark"):
         "architectures": ["DSparkDraftModel" if variant == "dspark" else "DFlash2DraftModel"],
         "hidden_size": 16, "vocab_size": 32,
         "num_target_layers": 8, "max_position_embeddings": 4096,
-        f"{variant}_config": {"block_size": 7 if variant == "dspark" else 8,
+        ("dspark_config" if variant == "dspark" else "dflash_config"): {"block_size": 7 if variant == "dspark" else 8,
                               "target_layer_ids": [1], "mask_token_id": 3},
     }))
     return (
@@ -374,7 +374,8 @@ def test_dspark_request_errors_precede_adapter_work(tmp_path, monkeypatch, overr
 
 @pytest.mark.parametrize("variant, limit, quantization", [
     ("dspark", 9, "nvfp4"), ("dspark", 1024, "nvfp4"), ("dflash", 9, "nvfp4"),
-    ("dflash", 4096, "nvfp4"), ("dflash", 9, "int4_awq"), ("dflash", 4096, "int4_awq")])
+    ("dflash", 4096, "nvfp4"), ("dflash", 9, "int4_awq"), ("dflash", 4096, "int4_awq"),
+    ("dflash", 9, None), ("dflash", 4096, None), ("dflash_tree", 256, "nvfp4"), ("dflash_tree", 4096, None)])
 def test_dspark_capacity_boundaries_keep_the_requested_pair(tmp_path, monkeypatch, variant, limit, quantization):
     from dataclasses import replace
     from families.qwen3_8.edge_llm import dispatch
@@ -391,6 +392,35 @@ def test_dspark_capacity_boundaries_keep_the_requested_pair(tmp_path, monkeypatc
             "quantization": {"quant_algo": "W4A16_AWQ", "group_size": 128,
                              "kv_cache_quant_algo": None},
         }))
+    if quantization == "nvfp4" and variant == "dflash":
+        import json
+        raw = json.loads((request.model_dir / "config.json").read_text())
+        assert not dispatch.candidate(replace(request, quantization="none"), raw, variant,
+                                      include_current=True)
+    if quantization is None:
+        import json
+        from families.qwen3_8.edge_llm import builder
+
+        path = request.model_dir / "config.json"
+        raw = json.loads(path.read_text())
+        del raw["quantization_config"]
+        (request.model_dir / "hf_quant_config.json").unlink()
+        assert not dispatch.candidate(request, raw, variant, include_current=True)
+        raw.update(output_gate_type="swish", hidden_size=5120, vocab_size=248320,
+                   num_hidden_layers=64, intermediate_size=17408, num_attention_heads=24,
+                   num_key_value_heads=4)
+        path.write_text(json.dumps(raw))
+        companion = execution.checkpoints[0].model_dir / "config.json"
+        draft = json.loads(companion.read_text())
+        draft.update(hidden_size=5120, vocab_size=248320, num_target_layers=64)
+        companion.write_text(json.dumps(draft))
+        assert builder.paired_checkpoint_quantization(request.model_dir, raw, variant) is None
+        assert dispatch.candidate(request, raw, variant, include_current=True)
+        assert dispatch.candidate(replace(request, quantization="none"), raw, variant,
+                                  include_current=True)
+        assert not dispatch.candidate(request, raw, "dspark", include_current=True)
+        assert not dispatch.candidate(replace(request, quantization="nvfp4"), raw, variant,
+                                      include_current=True)
     seen = []
     native_seen = []
     from families.qwen3_8 import model
@@ -404,7 +434,7 @@ def test_dspark_capacity_boundaries_keep_the_requested_pair(tmp_path, monkeypatc
         assert native_seen[-1][0].max_sequence_length == limit
         assert native_seen[-1][0].quantization == quantization
         expected = {"draft_dir": execution.checkpoints[0].model_dir}
-        if variant == "dflash":
+        if variant in {"dflash", "dflash_tree"}:
             expected["draft_variant"] = variant
         assert native_seen[-1][1] == expected
         seen.append(original)
@@ -693,7 +723,8 @@ def test_paired_draft_contract_rejected_before_export(tmp_path, monkeypatch, var
 
 @pytest.mark.parametrize("onnx", [False, True])
 @pytest.mark.parametrize("available", [False, True])
-def test_builder_interpreter_checks_requested_api(monkeypatch, onnx, available):
+@pytest.mark.parametrize("version", ["0.11.0", "0.12.0"])
+def test_builder_interpreter_checks_requested_api(monkeypatch, onnx, available, version):
     import json
     import subprocess
     from types import SimpleNamespace
@@ -701,16 +732,26 @@ def test_builder_interpreter_checks_requested_api(monkeypatch, onnx, available):
 
     def probe(command, **options):
         assert command[1:3] == ["-I", "-c"]
-        assert ("tensorrt_edgellm.scripts.export" in command[3]) is onnx
-        assert ("experimental.builder.cli" in command[3]) is not onnx
+        modules = {
+            "0.11.0": ("experimental.builder.cli", "tensorrt_edgellm.scripts.export"),
+            "0.12.0": ("tensorrt_edgellm.builder.cli", "tensorrt_edgellm.onnx.cli"),
+        }
+        assert modules[version][int(onnx)] in command[3]
+        assert modules[version][int(not onnx)] not in command[3]
+        assert ("5.17.0" in command[3]) == (version == "0.12.0")
         assert options["timeout"] == 30
         if not available:
             raise subprocess.CalledProcessError(1, command)
-        return SimpleNamespace(stdout=json.dumps(["0.11.0", "test-trt"]))
+        return SimpleNamespace(stdout=json.dumps([version, "test-trt"]))
 
     monkeypatch.setattr(builder.subprocess, "run", probe)
-    result = builder.builder_python({"python": "/sdk/python"}, {"tensorrt_version": "test-trt"}, onnx=onnx)
-    assert result == (builder.sys.executable if available else "/sdk/python")
+    package = {"version": version, "python": "/sdk/python"}
+    if not available and version == "0.12.0":
+        with pytest.raises(ValueError, match="--edge-builder-python"):
+            builder.builder_python(package, {"tensorrt_version": "test-trt"}, onnx=onnx)
+    else:
+        result = builder.builder_python(package, {"tensorrt_version": "test-trt"}, onnx=onnx)
+        assert result == (builder.sys.executable if available else "/sdk/python")
 
 
 @pytest.mark.parametrize("edge", [False, True])

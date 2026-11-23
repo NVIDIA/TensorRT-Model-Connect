@@ -26,9 +26,9 @@ class Qwen38DSpark final : public Qwen38ExternalDraft {
                  std::unique_ptr<ITrtModule> heads, std::vector<char> embeddings);
     void reset(ITrtModule& target, std::size_t prompt_length, int32_t max_new_tokens) override;
     void observe(ITrtModule& target) override;
-    std::vector<Qwen38DSparkProposal> propose(int32_t anchor, const Qwen38SamplingParams& sampling,
-                                              const std::vector<int32_t>& history, int32_t budget,
-                                              uint64_t& rng) override;
+    Qwen38DraftRound propose(int32_t anchor, const Qwen38SamplingParams& sampling,
+                             const std::vector<int32_t>& history, int32_t budget,
+                             uint64_t& rng) override;
     const char* name() const override { return "DSpark"; }
 
   private:

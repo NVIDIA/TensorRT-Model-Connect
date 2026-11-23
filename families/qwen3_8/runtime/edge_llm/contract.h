@@ -17,7 +17,11 @@
 
 namespace trtmc::qwen3_8::edge_llm {
 
+#ifdef TRTMC_QWEN38_EDGE_012
+inline constexpr const char* kRevision = "513dcd18291e587c80928911a480761352f3c2d8";
+#else
 inline constexpr const char* kRevision = "95515c2f87fba8982db5a519f9022277667b3cc9";
+#endif
 
 /// DSpark proposal length excludes the one additional verification token.
 inline bool valid_execution_variant(const std::string& variant, int block_size) {

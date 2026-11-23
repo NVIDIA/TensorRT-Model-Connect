@@ -11,14 +11,15 @@ import pytest
 from families.qwen3_8 import checkpoint_mapper as mapper
 
 
-@pytest.mark.parametrize("format_name", ["nvfp4", "fp8", "int4_awq"])
+@pytest.mark.parametrize("format_name", ["nvfp4", "fp8", "int4_awq", "int4_gptq"])
 def test_prepared_q_gate_split_retains_exact_source_bytes(monkeypatch, format_name) -> None:
     import torch
     from families.qwen3_8 import quantization as quant
 
     name = "model.language_model.layers.0.self_attn.q_proj"
-    width = 128 if format_name == "int4_awq" else 16
-    if format_name == "int4_awq":
+    group_int4 = format_name in ("int4_awq", "int4_gptq")
+    width = 128 if group_int4 else 16
+    if group_int4:
         codes = np.arange(8 * width, dtype=np.uint16).reshape(8, width).astype(np.uint8) & 15
         # Vary output rows too, so mixing adjacent rows cannot accidentally pass.
         codes = (codes + np.arange(8, dtype=np.uint8)[:, None]) & 15
@@ -36,11 +37,22 @@ def test_prepared_q_gate_split_retains_exact_source_bytes(monkeypatch, format_na
         tensors[name + ".weight_scale_2"] = torch.tensor([0.125])
     if format_name == "int4_awq":
         tensors[name + ".pre_quant_scale"] = torch.linspace(0.5, 1.5, width)
-    else:
+    elif not group_int4:
         expected_packed = values.view(torch.uint8).numpy()
+    if format_name == "int4_gptq":
+        # Independent representation: offset-binary codes packed LSB-first in
+        # INT32 words along input channels, not ModelOpt's output-row layout.
+        signed = codes.astype(np.int32)
+        signed[signed >= 8] -= 16
+        words = np.sum((signed.reshape(8, -1, 8) + 8).astype(np.uint32)
+                       << (4 * np.arange(8, dtype=np.uint32)), axis=2, dtype=np.uint32)
+        tensors = {name + ".weight_packed": torch.from_numpy(words.view(np.int32)),
+                   name + ".weight_scale": scales, name + ".weight_shape": torch.tensor([8, width])}
     monkeypatch.setattr(quant, "_has_tensor", lambda _, key: key in tensors)
     monkeypatch.setattr(quant, "_get_raw_tensor", lambda _, key: tensors[key])
-    query, gate = quant._read_prepared_weight_split_q([], name, 2, 2, awq=format_name == "int4_awq")
+    read = {"int4_awq": quant._read_awq_weight, "int4_gptq": quant._read_compressed_int4}.get(
+        format_name, quant._read_prepared_weight)
+    query, gate = quant._read_prepared_weight_split_q([], name, 2, 2, read_weight=read)
     for result, rows in ((query, [0, 1, 4, 5]), (gate, [2, 3, 6, 7])):
         assert result.out_features == 4 and result.in_features == width
         np.testing.assert_array_equal(result.packed, expected_packed[rows])
@@ -48,10 +60,13 @@ def test_prepared_q_gate_split_retains_exact_source_bytes(monkeypatch, format_na
             assert isinstance(result, quant._NVFP4Weight)
             assert result.global_scale == 0.125
             np.testing.assert_array_equal(result.block_scale_f8, scales.view(torch.uint8).numpy()[rows])
-        elif format_name == "int4_awq":
-            assert isinstance(result, quant._AWQWeight)
+        elif group_int4:
+            assert isinstance(result, quant._GroupInt4Weight)
             np.testing.assert_array_equal(result.block_scale, scales.numpy()[rows])
-            np.testing.assert_array_equal(result.pre_quant_scale, tensors[name + ".pre_quant_scale"].numpy())
+            if format_name == "int4_awq":
+                np.testing.assert_array_equal(result.pre_quant_scale, tensors[name + ".pre_quant_scale"].numpy())
+            else:
+                assert result.pre_quant_scale is None
         else:
             assert isinstance(result, quant._FP8Weight)
             assert result.weight_scale == 0.25
@@ -60,6 +75,11 @@ def test_prepared_q_gate_split_retains_exact_source_bytes(monkeypatch, format_na
         del tensors[name + ".weight_scale_2"]
         with pytest.raises(ValueError, match="expected FP8"):
             quant._read_prepared_weight([], name)
+
+    if format_name == "int4_gptq":
+        tensors[name + ".weight_g_idx"] = torch.arange(width)
+        with pytest.raises(ValueError, match="without a permutation"):
+            read([], name)
 
     if format_name == "int4_awq":
         tensors[name + ".weight_scale"] = torch.ones(8, 2)
@@ -108,14 +128,14 @@ def test_embedded_draft_keeps_its_own_quantization(monkeypatch, tmp_path, format
     monkeypatch.setattr(quant, "_get_raw_tensor", lambda _, key: tensors[key])
     config = SimpleNamespace(num_hidden_layers=0, hidden_size=hidden, intermediate_size=hidden,
                              vocab_size=hidden, num_attention_heads=2, head_dim=head_dim)
-    loader = quant.load_qwen3_8_awq if format_name == "int4_awq" else quant.calibrate_qwen3_8_nvfp4
+    loader = quant.load_qwen3_8_group_int4 if format_name == "int4_awq" else quant.calibrate_qwen3_8_nvfp4
     context = loader(tmp_path, config, None, readers=[])
     expected = {"fc", "w_q", "w_gate_attn", "w_k", "w_v", "w_o", "w_gate", "w_up", "w_down"}
     assert set(context.profile.scales) == {"mtp_layer." + name for name in expected}
     for item in context.profile.scales.values():
         if format_name == "int4_awq":
             assert item.input_scale is None  # W4A16 does not quantize activations.
-            assert isinstance(item.weight, quant._AWQWeight)
+            assert isinstance(item.weight, quant._GroupInt4Weight)
             np.testing.assert_array_equal(item.weight.pre_quant_scale, 0.75)
         else:
             assert item.input_scale == 0.25

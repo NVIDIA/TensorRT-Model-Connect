@@ -69,21 +69,29 @@ class Qwen38BuildRequest(BuildRequest):
     """Ordinary build inputs plus an explicitly requested Qwen38 execution recipe."""
 
     execution: BuildExecutionInputs | None = None
+    edge_builder_python: Path | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.family != "qwen3_8":
             raise ValueError("Qwen38BuildRequest requires the qwen3_8 family")
+        if self.edge_builder_python is not None and (
+            not isinstance(self.edge_builder_python, Path) or not self.edge_builder_python.is_absolute()
+        ):
+            raise ValueError("edge_builder_python must be an absolute interpreter path")
         if self.execution is not None:
             if not isinstance(self.execution, BuildExecutionInputs):
                 raise TypeError("execution must be BuildExecutionInputs")
             self.execution.validate_local()
 
 
-def with_execution(request: BuildRequest, execution: BuildExecutionInputs) -> Qwen38BuildRequest:
+def with_execution(
+    request: BuildRequest, execution: BuildExecutionInputs | None, *, edge_builder_python: Path | None = None,
+) -> Qwen38BuildRequest:
     """Preserve supported ordinary request fields and callback identity."""
     request = coerce_request(request)
     return Qwen38BuildRequest(
         **{field.name: getattr(request, field.name) for field in fields(BuildRequest)},
         execution=execution,
+        edge_builder_python=edge_builder_python or getattr(request, "edge_builder_python", None),
     )

@@ -114,7 +114,8 @@
             "none",
             "nvfp4",
             "fp8",
-            "int4_awq"
+            "int4_awq",
+            "int4_gptq"
           ]
         },
         {
@@ -142,9 +143,20 @@
           "choices": [
             "dspark",
             "dflash",
+            "dflash_tree",
+            "domino",
+            "domino_tree",
             "mtp"
           ],
           "help": "Explicit execution mode; MTP uses an embedded draft, external companions are explicit"
+        },
+        {
+          "name": "edge_builder_python",
+          "flags": [
+            "--edge-builder-python"
+          ],
+          "type": "path",
+          "help": "Absolute Python interpreter for the optional Edge builder"
         },
         {
           "name": "companion",
