@@ -45,6 +45,7 @@ def build(
     verbose: bool = False,
     execution_variant: str | None = None,
     companion: list[str] | tuple[str, ...] = (),
+    edge_builder_python: Path | None = None,
 ) -> int:
     """Resolve one exact checkpoint and invoke its family-owned Edge route."""
     model_dir = resolve_model(model, revision)
@@ -64,7 +65,7 @@ def build(
     from .edge_llm.config import with_execution
 
     execution = execution_inputs(execution_variant, companion)
-    if execution is not None:
-        request = with_execution(request, execution)
+    if execution is not None or edge_builder_python is not None:
+        request = with_execution(request, execution, edge_builder_python=edge_builder_python)
     build_bundle(request, output)
     return 0

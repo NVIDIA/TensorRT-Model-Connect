@@ -45,8 +45,7 @@ std::int32_t require_tensor_parallel_size(const nlohmann::json& config) {
 }
 
 std::string require_task(const BundleInfo& info) {
-    if (info.task == IEncoding::kTask || info.task == IEmbedding::kTask ||
-        info.task == IReranking::kTask) {
+    if (info.task == IEncoding::kTask || info.task == IEmbedding::kTask) {
         return info.task;
     }
     throw std::runtime_error("RoBERTa does not implement task: " + info.task);
@@ -58,6 +57,7 @@ std::string require_task(const BundleInfo& info) {
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("roberta does not support --kv-cache-size");
+    const auto task = trtmc::roberta_factory::require_task(context.reader.info());
     const auto config = trtmc::roberta_factory::require_config(context.reader);
     const auto tp_size = trtmc::roberta_factory::require_tensor_parallel_size(config);
     const auto group = trtmc::roberta::initialize_tensor_parallel_group(tp_size);
@@ -75,6 +75,5 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     auto tokenizer = trtmc::create_tokenizer_from_bundle(context.reader);
     if (!tokenizer)
         throw std::runtime_error("RoBERTa bundle does not contain its required tokenizer");
-    const auto task = trtmc::roberta_factory::require_task(context.reader.info());
     return new trtmc::EncoderPipeline(std::move(loaded.module), task, std::move(tokenizer));
 }

@@ -1,0 +1,21 @@
+{
+  "name": "flint-bf16",
+  "hf_id": "RecursiveSI/flint",
+  "hf_revision": "2a247be0c0aec895ccb0ac7ca92229ec6df37288",
+  "family": "flint",
+  "task": "text_generation",
+  "precision": "bf16",
+  "bundle": "flint-bf16.bundle",
+  "max_sequence_length": 1024,
+  "tensor_parallel_size": 1,
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "flint-bf16-logits",
+      "premerge": true,
+      "prompt": "The capital of France is",
+      "max_new_tokens": 4,
+      "reference_precision": "bf16"
+    }
+  ]
+}

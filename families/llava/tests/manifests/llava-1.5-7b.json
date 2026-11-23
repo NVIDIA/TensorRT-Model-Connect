@@ -1,0 +1,17 @@
+{
+  "name": "llava-1.5-7b",
+  "hf_id": "llava-hf/llava-1.5-7b-hf",
+  "hf_revision": "b234b804b114d9e37bb655e11cbbb5f5e971b7a9",
+  "bundle": "llava-1.5-7b-fp16.bundle",
+  "family": "llava",
+  "task": "vision_language_generation",
+  "precision": "fp16",
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1024,
+  "testcases": [
+    {"name": "llava-1.5-7b-car", "premerge": true, "test_image": "data/test_img.jpeg", "prompt": "What color is the car? Answer with one word.", "expected_word": "white", "max_new_tokens": 4, "reference_backend": "hf_transformers", "reference_precision": "fp16"},
+    {"name": "llava-1.5-7b-outdoors", "premerge": true, "test_image": "data/test_img.jpeg", "prompt": "Is this car indoors or outdoors? Answer with one word.", "expected_word": "outdoors", "max_new_tokens": 6, "reference_backend": "hf_transformers", "reference_precision": "fp16"},
+    {"name": "llava-1.5-7b-red", "premerge": true, "solid_color": "red", "image_size": [480, 270], "prompt": "What color is this image? Answer with one word.", "expected_word": "red", "max_new_tokens": 4, "reference_backend": "hf_transformers", "reference_precision": "fp16"},
+    {"name": "llava-1.5-7b-blue", "premerge": true, "solid_color": "blue", "image_size": [270, 480], "prompt": "What color is this image? Answer with one word.", "expected_word": "blue", "max_new_tokens": 4, "reference_backend": "hf_transformers", "reference_precision": "fp16"}
+  ]
+}

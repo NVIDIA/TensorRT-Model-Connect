@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ast
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -93,6 +94,10 @@ class _Network:
         return layer
 
     def add_activation(self, tensor, operation):
+        if operation == "gelu_erf":
+            erf = np.vectorize(math.erf)
+            values = 0.5 * tensor.values * (1 + erf(tensor.values / math.sqrt(2)))
+            return _layer(_Tensor(values, tensor.dtype))
         assert operation == "tanh"
         return _layer(_Tensor(np.tanh(tensor.values), tensor.dtype))
 
@@ -132,7 +137,7 @@ def graph():
         BuilderFlag=SimpleNamespace(TF32=1),
         ElementWiseOperation=SimpleNamespace(PROD="prod", SUM="sum", SUB="sub"),
         MatrixOperation=SimpleNamespace(NONE="none"),
-        ActivationType=SimpleNamespace(TANH="tanh"),
+        ActivationType=SimpleNamespace(TANH="tanh", GELU_ERF="gelu_erf"),
     )
     owner = Path(__file__).resolve().parents[1]
     graph_namespace = {"np": np, "trt": trt}

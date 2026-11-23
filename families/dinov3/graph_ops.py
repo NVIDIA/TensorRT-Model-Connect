@@ -237,10 +237,12 @@ def attention(network, q, k, v, head_dim: int, dtype: np.dtype):
     scores = network.add_matrix_multiply(
         q, trt.MatrixOperation.NONE, k, trt.MatrixOperation.TRANSPOSE
     ).get_output(0)
-    probs_layer = network.add_softmax(scores)
+    # The softmax runs in FP32: on GB10 (sm_121) the FP16 softmax of these
+    # scores moves the features by several percent.
+    probs_layer = network.add_softmax(cast(network, scores, trt.float32))
     probs_layer.axes = 1 << 3
     return network.add_matrix_multiply(
-        probs_layer.get_output(0),
+        cast(network, probs_layer.get_output(0), v.dtype),
         trt.MatrixOperation.NONE,
         v,
         trt.MatrixOperation.NONE,

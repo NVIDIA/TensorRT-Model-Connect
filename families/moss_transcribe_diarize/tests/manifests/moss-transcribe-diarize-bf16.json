@@ -1,0 +1,28 @@
+{
+  "name": "moss-transcribe-diarize-bf16",
+  "hf_id": "OpenMOSS-Team/MOSS-Transcribe-Diarize",
+  "hf_revision": "10304d926740cf5a5cee05a268086e3265197910",
+  "bundle": "moss-transcribe-diarize-bf16.bundle",
+  "family": "moss_transcribe_diarize",
+  "task": "speech_transcription",
+  "precision": "bf16",
+  "max_sequence_length": 2048,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "moss-transcribe-diarize-bf16-two-speakers",
+      "premerge": true,
+      "test_input_audio": "data/two_speakers_22s.wav",
+      "max_new_tokens": 512,
+      "oracle": "teacher_forced",
+      "input_contract": true
+    },
+    {
+      "name": "moss-transcribe-diarize-bf16-four-speakers",
+      "premerge": false,
+      "input_audio_parts": ["data/two_speakers_22s.wav", "data/continuation_20s.wav"],
+      "max_new_tokens": 1024,
+      "oracle": "teacher_forced"
+    }
+  ]
+}

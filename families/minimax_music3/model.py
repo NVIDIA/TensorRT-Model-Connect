@@ -251,8 +251,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("MiniMax-Music3 requires single-GPU parallelism")
     if request.max_batch_size != 1:
         raise NotImplementedError("MiniMax-Music3 requires max_batch_size=1")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("MiniMax-Music3 does not support quantization")
+    quantization = None if request.quantization in {None, "none"} else str(request.quantization)
+    if quantization is not None and quantization != "fp8":
+        raise NotImplementedError(
+            f"MiniMax-Music3 supports quantization=fp8 only, got {request.quantization!r}")
     if request.fp32_layers:
         raise NotImplementedError("MiniMax-Music3 does not support fp32_layers")
     if request.mtp_seq_len is not None:
@@ -267,6 +269,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     model = _MiniMaxMusic3Model()
     weights = model.load_weights(str(request.model_dir), None)
+    if quantization is not None:
+        # Fail before the first engine is built when a component has no calibrated scales.
+        for engine in _QUANTIZED_COMPONENTS:
+            _quant_context(engine, weights[engine], quantization)
     cache_length = int(request.max_sequence_length or 9216)
     writer.set_header(family="minimax_music3", task=request.task, backend=request.backend)
     writer.add_bytes(
@@ -277,6 +283,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             cache_length,
             precision=request.precision,
             verbose=request.verbose,
+            quantization=quantization,
         ),
     )
     extras = model.build_extra_engines(
@@ -285,6 +292,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         cache_length,
         precision=request.precision,
         verbose=request.verbose,
+        quantization=quantization,
     )
     for old_name, data in extras.items():
         writer.add_bytes(old_name.removesuffix("_plan") + ".plan", data)
@@ -363,8 +371,14 @@ def _read_component(directory: Path, *, widen: bool = True) -> dict:
 
 def _build_one(engine: str, weights: dict, *, latent_length: int = 689,
                steps: int = 8, max_cache_length: int | None = None,
-               precision: str = "fp32", verbose: bool = False, **_kwargs) -> bytes:
-    """Build one engine's serialized plan."""
+               precision: str = "fp32", verbose: bool = False,
+               quantization: str | None = None, **_kwargs) -> bytes:
+    """Build one engine's serialized plan.
+
+    ``quantization="fp8"`` quantizes the projections of the language model, the
+    depth decoder and the diffusion transformer (see :mod:`.quantization`); the
+    condition encoder and the vocoder are the same in every build.
+    """
 
     if max_cache_length is None:
         from .language_model_engine import DEFAULT_MAX_CACHE_LENGTH
@@ -381,6 +395,7 @@ def _build_one(engine: str, weights: dict, *, latent_length: int = 689,
     # and heads stay float32 (TF32 off). The condition encoder and the vocoder
     # stay float32 in every precision.
     block_dtype = trt.bfloat16 if precision == "bf16" else None
+    quant = _quant_context(engine, tensors, quantization)
 
     if engine == engines.LANGUAGE_MODEL_ENGINE:
         # The decoder builder assembles and serialises its own network: it owns
@@ -393,7 +408,7 @@ def _build_one(engine: str, weights: dict, *, latent_length: int = 689,
         # 6.6 GB in those two tensors alone before the thirty-six layers.
         return language_model_engine.build_engine(
             tensors, max_cache_length=max_cache_length, precision=precision,
-            verbose=verbose)
+            verbose=verbose, quant_ctx=quant)
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -440,7 +455,7 @@ def _build_one(engine: str, weights: dict, *, latent_length: int = 689,
             embed_tokens=language_model_tensors["model.embed_tokens.weight"])
         hidden = builder_module.add_depth_decoder(
             network, trt, sequence, steps=depth_engine.MAX_STEPS, weights=tensors,
-            dtype=block_dtype)
+            dtype=block_dtype, quant=quant)
         output = depth_engine.add_output_heads(
             network, trt, hidden, weights=tensors)
         output.name = depth_engine.LOGITS_OUTPUT
@@ -481,14 +496,52 @@ def _build_one(engine: str, weights: dict, *, latent_length: int = 689,
             network, trt, timestep, weights=tensors)
         output = builder_module.add_dit(
             network, trt, latents, condition, embedded,
-            latent_length=latent_length, weights=tensors, dtype=block_dtype)
+            latent_length=latent_length, weights=tensors, dtype=block_dtype,
+            quant=quant)
         output.name = builder_module.OUTPUT_NAME
     else:
         raise ValueError(f"unknown MiniMax-Music3 engine {engine!r}")
 
     network.mark_output(output)
     builder_module.configure(config, trt)
+    if quant is not None:
+        from .quantization import configure_fp8_build
+
+        configure_fp8_build(config)
     plan = builder.build_serialized_network(network, config)
     if plan is None:
         raise RuntimeError(f"MiniMax-Music3 {engine} engine build returned None")
     return bytes(plan)
+
+
+#: Engine -> the checkpoint component its FP8 scales are calibrated for.
+_QUANTIZED_COMPONENTS = {
+    "language_model": "language_model",
+    "depth_decoder": "rvq_depth_decoder",
+    "dit": "transformer",
+}
+
+
+def _quant_context(engine: str, tensors: dict, quantization: str | None):
+    """Return the FP8 context of one engine, or None (unquantized build or engine)."""
+
+    if quantization is None:
+        return None
+    if quantization != "fp8":
+        raise NotImplementedError(f"MiniMax-Music3 supports quantization=fp8 only, got {quantization!r}")
+    component = _QUANTIZED_COMPONENTS.get(engine)
+    if component is None:
+        return None  # the condition encoder and the vocoder stay float32
+    from . import graph_ops
+    from .quantization import (
+        BlockQuant,
+        LanguageModelQuantContext,
+        load_activation_scales,
+        reject_quantized_checkpoint,
+    )
+
+    reject_quantized_checkpoint(tensors)
+    scales = load_activation_scales(component, tensors)
+    if component == "language_model":
+        return LanguageModelQuantContext(scales=scales, graph_ops=graph_ops)
+    return BlockQuant(scales=scales)

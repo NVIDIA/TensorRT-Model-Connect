@@ -9,8 +9,21 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
 
 namespace trtmc {
+
+inline constexpr const char* kMagpieCrossKvSection = "cross_kv.plan";
+
+// Bundle section of the decoder plan. A single-GPU decoder whose cross_k /
+// cross_v inputs are the rows that cross_kv.plan projects lives in its own
+// section, so a runtime that only knows decoder.plan stops at load instead of
+// binding the raw encoder output to those inputs.
+inline std::string magpie_decoder_section(int32_t tp_size, int32_t rank, bool has_cross_kv_plan) {
+    if (tp_size > 1)
+        return "decoder.rank" + std::to_string(rank) + ".plan";
+    return has_cross_kv_plan ? "decoder.cross_kv.plan" : "decoder.plan";
+}
 
 struct MagpieDecoderPlan {
     int32_t hidden{0};

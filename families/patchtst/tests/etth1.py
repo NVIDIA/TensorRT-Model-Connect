@@ -23,6 +23,12 @@ CASES = {
         "prediction": 96,
         "gates": {"relative_l2": 1.5e-3, "max_pointwise_error": 3.5e-2},
     },
+    "patchtst-granite-official-fp8": {
+        "columns": ("HUFL", "HULL", "MUFL", "MULL", "LUFL", "LULL", "OT"),
+        "context": 512,
+        "prediction": 96,
+        "gates": {"relative_l2": 5.0e-2, "max_pointwise_error": 1.0},
+    },
 }
 
 

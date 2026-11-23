@@ -1,4 +1,4 @@
-# Qwen3.5/3.6 MoE: Edge-LLM 0.11 execution
+# Qwen3.5/3.6 MoE: Edge-LLM execution
 
 This family owns checkpoint admission, builder selection, bundles, runtime
 orchestration and validation. It does not add model-specific behavior to shared
@@ -7,16 +7,19 @@ speculative algorithm. Native fallback graphs and orchestration stay in this fam
 
 ## Installation
 
-Native CMake provisioning uses `TRTMC_ENABLE_EDGELLM=ON` and the official public
-Edge-LLM **0.11.0** revision `95515c2f87fba8982db5a519f9022277667b3cc9`.
-Expose the installation through `CMAKE_PREFIX_PATH`. Build on the executing
-target; there is no cross-compilation.
+The default CMake release remains **0.11.0**. To opt into **0.12.0**, build on
+the executing target with `-DTRTMC_ENABLE_EDGELLM=ON -DTRTMC_EDGELLM_RELEASE=0.12.0`.
+For all native kernel groups, add `-DTRTMC_EDGELLM_ALL_KERNELS=ON` to a pinned
+source build. The official 0.12 revision is `513dcd18291e587c80928911a480761352f3c2d8`.
+Expose the installed SDK through `CMAKE_PREFIX_PATH`; do not mix the C++ ABIs
+or cross-compile. See the [CMake provisioning guide](../../../cmake/edge_llm/README.md).
 
-Compatible installed Python tools, including `tensorrt-edgellm==0.11.0` from
-PyPI, are discovered automatically. Otherwise the adapter uses the native SDK's
-source-installed Python. The wheel does not replace the native C++ headers,
-archives and plugins. Model builds never install packages or select another
-Edge release automatically.
+The Python builder may come from the matching PyPI package or a matching source
+installation. To use an isolated exporter, pass
+`--edge-builder-python /path/to/edge-env/bin/python` to the family build.
+The adapter checks the builder version and local TensorRT version before use.
+Installing the Python wheel alone does not supply Model Connect's compiled C++
+family runtime. Model builds do not install packages or upgrade dependencies.
 
 `edge_llm/builder.py` maps the owning request into the upstream Python builder.
 `runtime/edge_llm/` loads the complete result through the upstream C++ runtime.
@@ -29,7 +32,23 @@ The adapter verifies native GPU, architecture, CUDA and TensorRT compatibility.
 | `Qwen/Qwen3.5-35B-A3B-GPTQ-Int4` | Group128 GPTQ routed experts; original shared experts and attention; FP16 KV and vision |
 | `nvidia/Qwen3.6-35B-A3B-NVFP4` | Group16 NVFP4 W4A16 routed/shared experts and LM head; FP8 attention/GDN projections; FP16 KV and vision |
 
-Both use FP16 compute, one batch and one device. The NVFP4 Edge route requires a
+In 0.12, the adapter also maps original BF16-weight Qwen3.5 35B/122B and
+Qwen3.6 35B checkpoints to explicit FP16 compute. The prepared Qwen3.5 122B
+NVFP4 source has a different layout from the 35B mixed source: its routed
+experts use calibrated W4A4; its shared expert, LM head and attention retain
+original weights. It is not the 35B W4A16 recipe scaled up.
+
+The published original-weight checkpoints store fused expert tensors.
+The 0.12 direct builder expects per-expert tensors. Enable
+`-DTRTMC_EDGELLM_ONNX=ON` to use the released ONNX exporter and the installed
+SDK's native compilers on the executing GPU. The bundle contains the compiled
+engines and their exported weight files, not a second copy of the source
+checkpoint. Packed sources retain the direct builder. For a documented original
+Qwen3.6 35B DFlash or JetSpec pair, the adapter supplies the matching draft to
+the base and draft exporters and compiles both roles into the same engine
+directory. A successful draft export alone does not qualify a speculative pair.
+
+These routes use FP16 compute, one batch and one device. The NVFP4 Edge route requires a
 compatible Blackwell target. Native TensorRT owns hardware lowering; unavailable
 quantized operations are errors, never an automatic precision substitution.
 `--quantization`, when supplied, asserts the source format; it does not calibrate,
@@ -42,9 +61,10 @@ uses FP16 KV, as does native fallback. A sidecar label alone is not evidence of
 FP8 language-model cache storage. Prepared sources with actual exported scales
 retain FP8 KV rather than silently widening storage.
 
-The full original-weight 35B and 122B checkpoints and the 122B NVFP4 checkpoint
-are outside the current validated single-device admission. Aggregate memory
-across multiple GPUs does not establish a supported MoE parallel route.
+Accepting source metadata or executing a single routed layer does not qualify a
+full checkpoint. Build, inference and independent quality must be assessed per
+checkpoint, modality and draft; memory on multiple GPUs is not available to a
+single-device engine.
 Standalone Qwen3 and older checkpoints do not belong to this family.
 
 ## Build and run
@@ -79,7 +99,7 @@ Raw text mode preserves prompt bytes, including trailing newlines. Image Task
 API requests require the provider chat template. Unsupported generation
 controls are rejected, not silently ignored.
 
-## DFlash companions
+## Paired drafts
 
 The family CLI owns `--execution-variant` and `--companion`. Supply a local,
 explicitly matched draft; no companion is inferred or downloaded automatically.
@@ -87,7 +107,7 @@ explicitly matched draft; no companion is inferred or downloaded automatically.
 | Target | Companion |
 | --- | --- |
 | Qwen3.5 GPTQ 35B | `z-lab/Qwen3.5-35B-A3B-DFlash` |
-| Qwen3.6 NVFP4 35B | `z-lab/Qwen3.6-35B-A3B-DFlash` |
+| Qwen3.6 NVFP4 35B (or, in 0.12, the original 35B) | `z-lab/Qwen3.6-35B-A3B-DFlash` |
 
 These listed pairs use original BF16 drafts, including the NVFP4 target. The
 adapter checks target width, vocabulary, layer selection and the block16
@@ -103,6 +123,18 @@ trtmc qwen3_5_moe build /models/Qwen3.5-35B-A3B-GPTQ-Int4 \
 `dflash_ddtree` selects greedy top-4 tree drafting with 16 verification positions.
 The pinned hybrid DFlash base contains the recurrent replay metadata required
 by both linear and tree verification. Non-greedy DDTree requests are rejected.
+
+### JetSpec (0.12)
+
+The documented `JetSpec/jetspec-Qwen3.6-35B-A3B` companion pairs with the
+original Qwen3.6 35B or its mixed NVFP4 checkpoint. Use
+`--execution-variant jetspec --companion draft=/models/jetspec-Qwen3.6-35B-A3B`.
+This is a different trained draft, not a DFlash option: each proposal row may
+attend to confirmed target features and earlier or current proposal rows, but
+not future rows. Both backends use greedy top-7 branching and 16 verification
+nodes including the root. A 0.11 SDK cannot offload JetSpec. These mappings
+describe the execution contract, not independent accuracy results.
+
 ### Embedded MTP
 
 The documented Qwen3.6 NVFP4 35B MTP recipe uses the prediction layer embedded
@@ -158,6 +190,80 @@ inference result was produced. This is a native build-time limitation, not an
 Edge builder failure or a proven TensorRT defect. The requested three draft
 steps and four verification positions remain unchanged; they are not replaced
 with ordinary decoding.
+
+**Measured 0.12 results (single device, FP16 compute, 1,024-token context).**
+With `Qwen/Qwen3.5-35B-A3B-GPTQ-Int4`, both Edge and native TensorRT
+matched the independent packed Hugging Face reference on the tested ordinary
+raw-text and image prompts. With its explicit DFlash draft, both runtimes
+matched the raw-text reference and the released Edge runtime's chat response;
+this is not a paired-image result.
+
+For the original `Qwen/Qwen3.5-35B-A3B`, the MC Edge ONNX and native
+vision bundles both matched the independent BF16 Hugging Face token IDs on
+raw text, chat and image. The released Edge runner returned the same text
+on all three requests with the MC-built engines.
+
+For the original `Qwen/Qwen3.6-35B-A3B`, use the ONNX flow. The ordinary
+vision bundle matched the independent BF16 Hugging Face token IDs on all three
+32-token requests: raw text, chat and image. On native TensorRT, the DFlash
+and JetSpec pairs each matched the ordinary native token IDs on raw text and
+chat. That verifies the greedy target comparison, not reference accuracy: both
+native pairs scored 0.644 on raw text and 0 on chat (limit 0.15).
+The original DFlash pair also built and ran through the Edge ONNX route.
+Its chat matched the reference exactly; its raw completion scored 0.644 and
+differed from ordinary Edge decoding. Stock Edge reproduced the paired output
+on the same engines, and native DFlash returned the same raw token IDs. The
+pair is executable, but the raw result is not accuracy-qualified.
+On the original checkpoint, Edge ONNX with the published JetSpec draft
+matched the independent and ordinary greedy token IDs on both raw and chat
+requests. Stock Edge matched both outputs and its profile recorded actual
+draft proposals. This JetSpec result is for text only; it does not qualify
+native raw decoding or the mixed NVFP4 target.
+
+With `nvidia/Qwen3.6-35B-A3B-NVFP4` and the documented JetSpec draft, both
+runtimes built and ran. Both matched the independent mixed-precision reference
+on a chat request. On an untemplated completion, normalized edit distance was
+0.725 for Edge and 0.644 for native TensorRT (limit 0.15). The released Edge CLI
+reproduced the adapter's response on the same engines. This rules out the MC
+request mapping as the sole explanation for that difference; it does not
+establish which runtime is at fault. These routes remain executable.
+
+The same NVFP4 target with its documented DFlash draft also built and ran on
+both routes. Both matched the chat reference exactly, but the untemplated
+completion exceeded the same gate: 0.521 on Edge and 0.644 on native TensorRT.
+These are text-only comparisons, not evidence of paired media accuracy.
+
+Without a draft, the installed Model Connect wheel built both text and visual
+Edge bundles. Edge and native TensorRT both ran raw text, chat, and an image.
+Both matched the independent chat reference; neither met the same 0.15 gate on
+the raw completion (0.725 Edge, 0.644 native) or image description (0.704 Edge,
+0.531 native). The standalone Edge CLI returned three distinct completions for
+three identical raw requests on the same engine with batch size 1, temperature
+0, top-k 1, and top-p 1. Their edit distances were 0.685, 0.058, and 0.725.
+A single passing standalone run is therefore not a reproducible accuracy pass.
+This control does not identify a TensorRT defect or explain the native result.
+
+On the installed mixed NVFP4 vision bundle, the public CLI also accepted
+requests without an image. In that run the raw, chat and image scores were
+0.064, 0 and 0.719, respectively. The released CLI on the identical engines
+also missed the image gate (0.682). Neither this run nor the earlier text-only
+run establishes repeatability.
+
+When comparing a vision bundle with the released `llm_inference` CLI, pass
+`--multimodal-engine-dir` for **all** requests, even those without images.
+Model Connect loads the visual runtime when it opens the bundle. On the
+prepared Qwen3.5 122B NVFP4 model, the stock raw completion differed when
+the visual engine was omitted; loading it reproduced the MC completion.
+For independent validation, vLLM used the same prepared weights with CUTLASS
+experts, FP16 compute and FP16 KV. The MC Edge bundle matched its raw and
+chat token IDs exactly. The image result missed the 0.15 gate (NED 0.475);
+the released Edge runner produced the same image response on the same engines.
+Native TensorRT also matched the raw and chat reference IDs, but its image
+result missed the gate (NED 0.539). Both image routes remain executable.
+The original, unquantized Qwen3.5 122B checkpoint was not built or run:
+no validation destination had room for the estimated staged build outputs.
+That is a storage limitation of the experiment, not an inference OOM. Results
+for the prepared NVFP4 checkpoint do not qualify the original weights.
 
 **Command success is not accuracy qualification.** The recorded DFlash outputs
 can differ from same-checkpoint ordinary Edge decoding beyond the existing

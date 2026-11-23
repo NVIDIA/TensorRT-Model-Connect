@@ -13,9 +13,15 @@
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <dlfcn.h>
+#ifdef TRTMC_PHI4_EDGE_012
+#include <tensorrt_edgellm/common/trtInterop.h>
+#include <tensorrt_edgellm/runtime/llmInferenceRuntime.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#else
 #include <edgellm/cpp/common/logger.h>
 #include <edgellm/cpp/runtime/llmInferenceRuntime.h>
 #include <edgellm/cpp/runtime/streaming.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -27,6 +33,8 @@
 
 namespace trtmc::phi4_multimodal::edge_llm {
 namespace {
+using EdgeDataType = decltype(trt_edgellm::rt::Tensor{}.getDataType());
+
 namespace fs = std::filesystem;
 
 /// Turn CUDA failures into caller-visible load or inference errors.
@@ -146,7 +154,12 @@ std::unique_ptr<void, CloseLibrary> load_plugin() {
                                  std::string(dlerror()));
     using Initialize = bool (*)(void*, const char*);
     auto initialize = reinterpret_cast<Initialize>(dlsym(plugin.get(), "initEdgellmPlugins"));
-    if (!initialize || !initialize(static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger), ""))
+#ifdef TRTMC_PHI4_EDGE_012
+    auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::TrtLogger::instance());
+#else
+    auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger);
+#endif
+    if (!initialize || !initialize(logger, ""))
         throw std::runtime_error("Cannot initialize Phi4 Edge plugin");
     return plugin;
 }
@@ -205,7 +218,7 @@ class EdgeTask final : public ITextGeneration, public IVisionLanguageGeneration 
         auto request = make_request(prompt, config, !bytes.empty());
         if (!bytes.empty()) {
             trt_edgellm::rt::Tensor tensor({1, height, width, 3}, trt_edgellm::rt::DeviceType::kCPU,
-                                           nvinfer1::DataType::kUINT8);
+                                           EdgeDataType::kUINT8);
             std::memcpy(tensor.rawPointer(), bytes.data(), bytes.size());
             request.requests.front().imageBuffers.emplace_back(std::move(tensor));
         }
@@ -241,6 +254,13 @@ class EdgeTask final : public ITextGeneration, public IVisionLanguageGeneration 
 ITask* create(const BundleReader& bundle) {
     const auto bytes = bundle.read_section("edge_llm.json");
     const auto marker = nlohmann::json::parse(bytes.begin(), bytes.end());
+    const auto& revision = marker.at("edge_revision");
+#ifdef TRTMC_PHI4_EDGE_012
+    const bool compatible =
+        marker.at("edge_release") == "0.12.0" && (revision.is_null() || revision == kRevision);
+#else
+    const bool compatible = revision == kRevision;
+#endif
     const auto format = marker.at("weight_format").get<std::string>();
     const bool packed = format == "fp8" || format == "nvfp4" || format == "int4_awq";
     const bool packed_profile =
@@ -248,7 +268,7 @@ ITask* create(const BundleReader& bundle) {
         marker.at("max_sequence_length") == 8192 && marker.at("max_input_length") == 7168 &&
         marker.at("visual_max_image_tokens") == 6400;
     if ((!packed_profile && !(format == "fp16" && marker.at("max_batch_size") == 1)) ||
-        marker.at("version") != 1 || marker.at("edge_revision") != kRevision ||
+        marker.at("version") != 1 || !compatible ||
         marker.at("max_sequence_length").get<int>() <= 1 ||
         marker.at("max_input_length").get<int>() <= 0 ||
         marker.at("max_input_length").get<int>() > marker.at("max_sequence_length").get<int>() ||

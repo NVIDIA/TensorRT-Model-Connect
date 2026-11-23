@@ -42,6 +42,7 @@ struct RuntimeConfig {
     std::string precision;
     std::string decoder_engine_layout;
     bool dynamic_kv_cache;
+    bool fp8_kv_cache;
     // Empty unless the bundle names more than one stop token.
     std::vector<std::int32_t> eos_token_ids;
 };
@@ -68,9 +69,11 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     if (!json.is_object())
         throw std::runtime_error("llama runtime.json must be an object");
     const bool dynamic_kv_cache = json.contains("dynamic_kv_cache");
+    const bool packed_cache = json.contains("fp8_kv_cache");
     const bool multi_eos = json.contains("eos_token_ids");
     const std::size_t expected_fields = 12 + (json.contains("native_kv_cache") ? 2 : 0) +
-                                        (dynamic_kv_cache ? 1 : 0) + (multi_eos ? 1 : 0);
+                                        (dynamic_kv_cache ? 1 : 0) + (multi_eos ? 1 : 0) +
+                                        (packed_cache ? 1 : 0);
     if (json.size() != expected_fields)
         throw std::runtime_error("llama runtime.json has an unexpected field set");
     if (json.contains("native_kv_cache") &&
@@ -82,6 +85,12 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         throw std::runtime_error("llama runtime.json has an invalid dynamic KV contract");
     if (dynamic_kv_cache && json.contains("native_kv_cache"))
         throw std::runtime_error("llama runtime.json declares incompatible KV contracts");
+
+    if (packed_cache &&
+        (!require_value<bool>(json, "fp8_kv_cache") || dynamic_kv_cache ||
+         json.contains("native_kv_cache") ||
+         require_value<std::string>(json, "decoder_engine_layout") != "dual_profile"))
+        throw std::runtime_error("llama runtime.json has an invalid packed FP8 cache contract");
 
     RuntimeConfig config{
         require_value<std::int32_t>(json, "hidden_size"),
@@ -97,6 +106,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_value<std::string>(json, "precision"),
         require_value<std::string>(json, "decoder_engine_layout"),
         dynamic_kv_cache,
+        packed_cache,
     };
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_heads <= 0 ||
         config.num_key_value_heads <= 0 || config.head_dim <= 0 || config.vocab_size <= 0 ||
@@ -125,7 +135,10 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     return config;
 }
 
-DType cache_dtype(const std::string& precision) {
+DType cache_dtype(const RuntimeConfig& config) {
+    if (config.fp8_kv_cache)
+        return DType::kFloat8E4M3;
+    const auto& precision = config.precision;
     if (precision == "fp16")
         return DType::kFloat16;
     if (precision == "bf16")
@@ -187,7 +200,7 @@ std::int32_t runtime_cache_rows(const FamilyContext& context, const RuntimeConfi
                          static_cast<std::uint64_t>(config.head_dim));
     const std::uint64_t row_bytes = checked_multiply(
         checked_multiply(checked_multiply(static_cast<std::uint64_t>(config.num_layers), kv_dim),
-                         static_cast<std::uint64_t>(dtype_size(cache_dtype(config.precision)))),
+                         static_cast<std::uint64_t>(dtype_size(cache_dtype(config)))),
         2);
     const std::uint64_t requested_rows = context.kv_cache_size_bytes / row_bytes;
     if (requested_rows == 0) {
@@ -243,9 +256,9 @@ ITask* create(const FamilyContext& context) {
     const std::int32_t cache_rows = runtime_cache_rows(context, config, modules);
     const cudaStream_t stream = modules.decode->stream();
     const std::int32_t kv_dim = config.num_key_value_heads * config.head_dim;
-    auto state = std::make_unique<LlamaKvCache>(config.num_layers, cache_rows, kv_dim, stream,
-                                                cache_dtype(config.precision),
-                                                make_kv_names(config.num_layers));
+    auto state =
+        std::make_unique<LlamaKvCache>(config.num_layers, cache_rows, kv_dim, stream,
+                                       cache_dtype(config), make_kv_names(config.num_layers));
     if (!state->ok())
         throw std::runtime_error("llama failed to create KV cache");
     std::cerr << "[trtmc] KV cache rows=" << cache_rows

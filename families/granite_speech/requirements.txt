@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Validation only; the builder needs just the base environment (TensorRT, NumPy, safetensors,
+# Transformers for the tokenizer and chat template).
+# The official reference model runs on torch, which the base runtime dependencies do not include;
+# 2.10 is the oldest torch these tests were run with.
+torch>=2.10.0
+# The official GraniteSpeechFeatureExtractor requires torchaudio. Keep the build that matches the
+# environment's torch: some torchaudio releases require one exact torch version. The repository's
+# CI image ships torchaudio 2.11.0+cu130 with torch 2.12.0+cu130.
+torchaudio
+# Float32 WAV input for the E2E cases and the official processor (the wheel bundles libsndfile,
+# LGPL-2.1, loaded dynamically and not redistributed).
+soundfile==0.14.0

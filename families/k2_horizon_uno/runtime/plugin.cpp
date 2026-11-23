@@ -30,6 +30,8 @@ namespace trtmc::k2_horizon_uno {
 namespace {
 
 constexpr std::int32_t kMaximumBlockLength = 8;
+// Prompt chunks on the base profile; bundles built before them stop at 8.
+constexpr std::int32_t kMaximumPromptRows = 64;
 constexpr std::int32_t kVocabSize = 250624;
 constexpr std::int32_t kNumLayers = 36;
 constexpr std::int32_t kMaxPositionEmbeddings = 524288;
@@ -118,15 +120,20 @@ K2HorizonUnoKvCacheNames make_cache_names() {
 
 void require_dynamic_vector_input(const ITrtModule& module, const std::string& name, DType dtype,
                                   std::int32_t profile) {
+    const auto mismatch = [&name] {
+        return std::runtime_error("K2-Horizon-Uno dynamic input contract mismatch for '" + name +
+                                  "'");
+    };
     if (!module.has_input(name) || module.tensor_dtype(name) != dtype ||
         !module.input_is_dynamic(name) ||
         module.input_profile_shape(name, profile, ProfileShapeSelector::kMin) !=
-            std::vector<std::int64_t>{1} ||
-        module.input_profile_shape(name, profile, ProfileShapeSelector::kMax) !=
-            std::vector<std::int64_t>{kMaximumBlockLength}) {
-        throw std::runtime_error("K2-Horizon-Uno dynamic input contract mismatch for '" + name +
-                                 "'");
-    }
+            std::vector<std::int64_t>{1})
+        throw mismatch();
+    // Decode blocks need 8 rows; the base profile may take longer prompt chunks.
+    const auto maximum = module.input_profile_shape(name, profile, ProfileShapeSelector::kMax);
+    const std::int64_t limit = profile == kBaseProfile ? kMaximumPromptRows : kMaximumBlockLength;
+    if (maximum.size() != 1 || maximum.front() < kMaximumBlockLength || maximum.front() > limit)
+        throw mismatch();
     const auto optimum = module.input_profile_shape(name, profile, ProfileShapeSelector::kOpt);
     if (optimum.size() != 1 || optimum.front() < 1 || optimum.front() > kMaximumBlockLength) {
         throw std::runtime_error("K2-Horizon-Uno input profile optimum is invalid for '" + name +

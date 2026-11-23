@@ -1,0 +1,4 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+exclude: AIPerf qualification defines no Task defaults for text_to_head_scores and no generic reference for token-classification logits; the family E2E compares every token's logits with the Transformers float32 model instead

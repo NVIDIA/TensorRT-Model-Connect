@@ -69,6 +69,7 @@ class Qwen35MoeBuildRequest(BuildRequest):
     """Ordinary build inputs plus an explicitly requested Qwen35Moe execution recipe."""
 
     execution: BuildExecutionInputs | None = None
+    edge_builder_python: Path | None = None
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -80,10 +81,12 @@ class Qwen35MoeBuildRequest(BuildRequest):
             self.execution.validate_local()
 
 
-def with_execution(request: BuildRequest, execution: BuildExecutionInputs) -> Qwen35MoeBuildRequest:
+def with_execution(request: BuildRequest, execution: BuildExecutionInputs | None, *,
+                   edge_builder_python: Path | None = None) -> Qwen35MoeBuildRequest:
     """Preserve supported ordinary request fields and callback identity."""
     request = coerce_request(request)
     return Qwen35MoeBuildRequest(
         **{field.name: getattr(request, field.name) for field in fields(BuildRequest)},
         execution=execution,
+        edge_builder_python=edge_builder_python,
     )

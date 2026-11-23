@@ -1,0 +1,27 @@
+{
+  "name": "lfm2-1.2b-int4-awq",
+  "hf_id": "LiquidAI/LFM2-1.2B",
+  "hf_revision": "40f3da0d0164913923aee9462c23077868b816a3",
+  "bundle": "lfm2-1.2b-int4-awq.bundle",
+  "family": "lfm2",
+  "task": "text_generation",
+  "precision": "fp16",
+  "quantization": "int4_awq",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "lfm2-1.2b-int4-awq",
+      "premerge": true,
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 8,
+      "use_chat_template": true,
+      "do_sample": false,
+      "reference": "none",
+      "expected_answers": [
+        "Paris"
+      ]
+    }
+  ],
+  "max_sequence_length": 512,
+  "tensor_parallel_size": 1
+}

@@ -431,12 +431,32 @@ preprocess_dynamic_tiles(const runtime::adapters::io::DecodedImage& image,
     if (config.use_thumbnail && tiles.size() != 1)
         tiles.push_back(internvl::torch_aa_bicubic_resize_rgb(image.pixels, image.height,
                                                               image.width, tile, tile));
-    for (const auto& pixels : tiles) {
-        std::vector<float> chw;
-        if (!normalize_to_chw(pixels, tile, config, chw))
-            return InternVlPreprocessedImage{};
-        result.pixel_values.insert(result.pixel_values.end(), chw.begin(), chw.end());
-    }
+    // Normalize the tiles in parallel, each into its own slice of the output.
+    const auto tile_values = static_cast<std::size_t>(config.in_channels) * tile * tile;
+    result.pixel_values.resize(tiles.size() * tile_values);
+    std::vector<char> failed(tiles.size(), 0);
+    internvl::parallel_chunks(
+        static_cast<int32_t>(tiles.size()), 1, [&](int32_t begin, int32_t end) {
+            for (int32_t index = begin; index < end; ++index) {
+                const auto slot = static_cast<std::size_t>(index);
+                // No exception may leave a worker thread (std::terminate).
+                try {
+                    std::vector<float> chw;
+                    if (!normalize_to_chw(tiles[slot], tile, config, chw) ||
+                        chw.size() != tile_values) {
+                        failed[slot] = 1;
+                        continue;
+                    }
+                    std::copy(chw.begin(), chw.end(),
+                              result.pixel_values.begin() +
+                                  static_cast<std::ptrdiff_t>(slot * tile_values));
+                } catch (...) {
+                    failed[slot] = 1;
+                }
+            }
+        });
+    if (std::any_of(failed.begin(), failed.end(), [](char value) { return value != 0; }))
+        return InternVlPreprocessedImage{};
     result.num_tiles = static_cast<int32_t>(tiles.size());
     result.channels = config.in_channels;
     result.height = tile;

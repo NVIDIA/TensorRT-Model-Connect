@@ -26,6 +26,13 @@ import pytest
 _ACTIVE: contextvars.ContextVar[Evidence | None] = contextvars.ContextVar(
     "e2e_evidence", default=None
 )
+# A toolchain sweep sets TRTMC_E2E_STOP_AFTER=loaded. A testcase that calls
+# mark_loaded() once every engine is built and has an execution context is
+# skipped there with STOPPED_AFTER_MARKER; a testcase that does not declare that
+# point runs to completion.
+STOP_AFTER_ENV = "TRTMC_E2E_STOP_AFTER"
+LOADED_STAGE = "loaded"
+STOPPED_AFTER_MARKER = "trtmc-e2e-stopped-after:"
 _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _FILE_LIMIT = 32 * 1024 * 1024
@@ -459,6 +466,22 @@ def evidence_stage(name: str):
             {"stage": name, "seconds": time.monotonic() - started, "status": status}
         )
         recorder.stage = previous
+
+
+def mark_loaded() -> None:
+    """Declare that every engine of this testcase is built and has an execution context.
+
+    Call it once, after the last engine of the testcase has been loaded by the
+    native runtime and before any reference or comparison work. It records a
+    ``loaded`` stage. With ``TRTMC_E2E_STOP_AFTER=loaded`` (a toolchain sweep that
+    only needs every bundle to build and load), the testcase stops here; a
+    testcase that never calls it runs to completion.
+    """
+    with evidence_stage(LOADED_STAGE):
+        pass
+    if os.environ.get(STOP_AFTER_ENV) == LOADED_STAGE:
+        record_evidence("stopped_after", LOADED_STAGE)
+        pytest.skip(f"{STOPPED_AFTER_MARKER}{LOADED_STAGE}")
 
 
 @pytest.fixture(autouse=True)

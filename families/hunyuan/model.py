@@ -15,7 +15,7 @@ from .default_decoder import build_standard_decoder_engine
 
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
+    from .edge_llm.cli import HunyuanBuildRequest as BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 

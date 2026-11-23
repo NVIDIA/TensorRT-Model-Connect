@@ -259,7 +259,7 @@ def _request(tmp_path: Path, **overrides):
     )
     fields = dict(
         model_dir=str(tmp_path),
-        task="text_generation",
+        task="text_continuation",
         precision="fp16",
         quantization="fp8",
         tensor_parallel_size=1,
