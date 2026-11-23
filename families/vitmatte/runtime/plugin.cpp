@@ -12,6 +12,8 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 
+extern "C" const char* trtmc_vitmatte_register_kernels() noexcept;
+
 namespace trtmc::vitmatte {
 namespace {
 class Pipeline final : public internal::IModel, public internal::IImageTrimapToAlpha {
@@ -92,6 +94,8 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     if (height < 32 || width < 32 || height > 1024 || width > 1024 || height % 32 || width % 32)
         throw std::runtime_error("Invalid ViTMatte image profile");
     const auto plan = vitmatte::section(context.reader, "model.plan");
+    if (const auto* error = trtmc_vitmatte_register_kernels())
+        throw std::runtime_error(error);
     auto engine = context.backend.create_module(plan.data(), plan.size(), {});
     if (!engine || !engine->ok())
         throw std::runtime_error("ViTMatte engine failed to load");

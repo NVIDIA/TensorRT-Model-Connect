@@ -96,6 +96,10 @@ def build(request, writer):
         return net.add_elementwise(a, b, trt.ElementWiseOperation.PROD).get_output(0)
 
     def linear(x, name):
+        if name.endswith(".mlp.fc2"):
+            from .kernels import mlp_output
+
+            return mlp_output(net, x, weights[name + ".weight"], weights[name + ".bias"])
         return g.add_linear(net, x, weights[name + ".weight"], weights.get(name + ".bias"))
 
     def norm(x, name, *, spatial=False):
@@ -120,7 +124,9 @@ def build(request, writer):
         return layer.get_output(0)
 
     def gelu(x):
-        return net.add_activation(x, trt.ActivationType.GELU_ERF).get_output(0)
+        from .kernels import gelu as fp32_gelu
+
+        return fp32_gelu(net, x)
 
     def batch_norm(x, name, epsilon):
         shape = (1, -1, 1, 1)
