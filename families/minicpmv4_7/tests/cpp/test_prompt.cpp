@@ -177,6 +177,12 @@ void canvas() {
         expect(digest(flat) == cases[i].digest && result.decode_position == cases[i].decode,
                "canvas M-RoPE case " + std::to_string(i));
     }
+    // Rows and columns of the square thumbnail sum alike, so its digest would not see H and W
+    // swapped: tokens (row 0, column 1) and (row 1, column 0) after the text and <image>.
+    const auto square = canvas_positions(cases[1].ids, t, cases[1].grids, 4);
+    expect(square.positions[4] == std::array<int32_t, 3>{2, 2, 3} &&
+               square.positions[11] == std::array<int32_t, 3>{2, 3, 2},
+           "canvas H and W of the square thumbnail");
 }
 
 // Recipe extracted from the checkpoint template at build time (enable_thinking=false).
