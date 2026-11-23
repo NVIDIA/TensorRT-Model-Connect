@@ -621,3 +621,33 @@ def test_time_embedding_frequencies_match_the_reference_formulas() -> None:
     half = action_head.TIME_CHANNELS // 2
     np.testing.assert_allclose(action_head.dit_time_frequencies(),
                                np.exp(-math.log(10000.0) * np.arange(half) / (half - 1)), rtol=1e-6)
+
+
+def test_family_build_preserves_native_and_isaac_inputs(tmp_path, monkeypatch):
+    from families.lerobot_groot.edge_llm import cli
+
+    requests = []
+    monkeypatch.setattr(cli, "publish", requests.append)
+    native = tmp_path / "lerobot"
+    native.mkdir()
+    (native / "config.json").write_text(json.dumps({"type": "groot"}))
+    output = tmp_path / "action.bundle"
+    for precision, quantization in ((None, None), ("fp32", None), ("bf16", "fp8")):
+        assert cli.build(model=str(native), output=output, precision=precision, quantization=quantization) == 0
+        request = requests[-1]
+        assert (request.model_dir, request.precision, request.quantization) == (
+            native, precision or "bf16", quantization)
+
+    stage = tmp_path / "isaac-libero10"
+    stage.mkdir()
+    (stage / "config.json").write_text(json.dumps({
+        "model_type": "Gr00tN1d7", "architectures": ["Gr00tN1d7"], "model_name": "nvidia/Cosmos-Reason2-2B",
+    }))
+    for name in ("processor_config.json", "embodiment_id.json", "statistics.json"):
+        (stage / name).write_text("{}")
+    assert cli.build(model=str(tmp_path), output=output, checkpoint_subdir=stage.name) == 0
+    assert (requests[-1].model_dir, requests[-1].precision) == (stage, "fp16")
+    with pytest.raises(ValueError, match="unquantized"):
+        cli.build(model=str(stage), output=output, quantization="fp8")
+    with pytest.raises(ValueError, match="only to LIBERO-10"):
+        cli.build(model=str(native), output=output, checkpoint_subdir=stage.name)

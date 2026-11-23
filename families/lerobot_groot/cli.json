@@ -3,7 +3,7 @@
   "commands": [
     {
       "name": "build",
-      "help": "Build a GR00T N1.7 LIBERO action policy",
+      "help": "Build a GR00T N1.7 action policy",
       "executor": "python",
       "handler": "edge_llm.cli:build",
       "arguments": [
@@ -22,7 +22,7 @@
           "required": true
         },
         {
-          "name": "revision",
+          "name": "source_revision",
           "flags": [
             "--revision"
           ],
@@ -35,10 +35,11 @@
           ],
           "type": "string",
           "choices": [
-            "fp16"
+            "fp16",
+            "bf16",
+            "fp32"
           ],
-          "help": "TensorRT compute precision",
-          "default": "fp16"
+          "help": "Compute precision: FP16 for Isaac, BF16 or FP32 for LeRobot"
         },
         {
           "name": "verbose",
@@ -56,6 +57,29 @@
           ],
           "type": "path",
           "help": "Absolute Python interpreter for the optional Edge builder"
+        },
+        {
+          "name": "checkpoint_subdir",
+          "flags": [
+            "--checkpoint-subdir"
+          ],
+          "type": "string",
+          "choices": [
+            "isaac-libero10"
+          ],
+          "help": "Select the staged Isaac LIBERO-10 directory under a local asset root"
+        },
+        {
+          "name": "quantization",
+          "flags": [
+            "--quantization"
+          ],
+          "type": "string",
+          "choices": [
+            "none",
+            "fp8"
+          ],
+          "help": "Optional native LeRobot weight quantization"
         }
       ]
     }
