@@ -48,10 +48,9 @@ std::vector<PillowSpan> make_pillow_plan(std::int32_t input_size, std::int32_t o
     std::vector<PillowSpan> plan(static_cast<std::size_t>(output_size));
     for (std::int32_t output_index = 0; output_index < output_size; ++output_index) {
         const double center = (static_cast<double>(output_index) + 0.5) * scale;
-        const auto first =
-            std::max<std::int32_t>(0, static_cast<std::int32_t>(center - support + 0.5));
-        const auto end =
-            std::min<std::int32_t>(input_size, static_cast<std::int32_t>(center + support + 0.5));
+        const auto first = static_cast<std::int32_t>(std::max(0.0, center - support + 0.5));
+        const auto end = static_cast<std::int32_t>(
+            std::min(static_cast<double>(input_size), center + support + 0.5));
         if (end <= first)
             throw std::runtime_error("chinese_clip Pillow resize produced empty support");
 
@@ -82,12 +81,12 @@ std::vector<PillowSpan> make_pillow_plan(std::int32_t input_size, std::int32_t o
     return plan;
 }
 
-std::uint8_t apply_pillow_span(const std::uint8_t* source, std::int32_t stride,
+std::uint8_t apply_pillow_span(const std::uint8_t* source, std::size_t stride,
                                const PillowSpan& span) {
     std::int64_t sum = kPillowRounding;
     for (std::size_t index = 0; index < span.weights.size(); ++index) {
         sum += static_cast<std::int64_t>(
-                   source[(span.first + static_cast<std::int32_t>(index)) * stride]) *
+                   source[(static_cast<std::size_t>(span.first) + index) * stride]) *
                span.weights[index];
     }
     if (sum <= 0)
@@ -125,7 +124,8 @@ std::vector<float> resize_pillow_bicubic(const float* source, std::int32_t input
                 const auto source_offset = static_cast<std::size_t>(x) * 3U + channel;
                 const auto target = (static_cast<std::size_t>(y) * output_w + x) * 3U + channel;
                 output[target] = static_cast<float>(apply_pillow_span(
-                                     horizontal.data() + source_offset, output_w * 3, span)) /
+                                     horizontal.data() + source_offset,
+                                     static_cast<std::size_t>(output_w) * 3U, span)) /
                                  255.0F;
             }
         }
@@ -176,7 +176,7 @@ std::vector<float> preprocess_chinese_clip_image(const float* image_pixels,
     std::vector<float> pixel_values(3U * plane);
     for (std::int32_t y = 0; y < config.input_image_h; ++y) {
         for (std::int32_t x = 0; x < config.input_image_w; ++x) {
-            const auto source = static_cast<std::size_t>((y * shape.width + x) * 3);
+            const auto source = (static_cast<std::size_t>(y) * shape.width + x) * 3U;
             for (std::int32_t c = 0; c < 3; ++c) {
                 const auto channel = static_cast<std::size_t>(c);
                 pixel_values[channel * plane + static_cast<std::size_t>(y) * config.input_image_w +
