@@ -12,6 +12,7 @@ from pathlib import Path
 import tempfile
 import traceback
 
+from ..config import dflash_policy
 from . import builder as edge_llm
 
 _LOG = logging.getLogger(__name__)
@@ -290,9 +291,7 @@ def build_paired(request, writer, execution) -> None:
             raise ValueError(f"Qwen3.5 DFlash base and draft disagree on {name}")
     if draft.get("num_target_layers") != base.get("num_hidden_layers"):
         raise ValueError("Qwen3.5 DFlash target layer count differs from base")
-    config = draft.get("dflash_config")
-    if not isinstance(config, dict) or config.get("block_size") != 16:
-        raise ValueError("Qwen3.5 DFlash currently maps the upstream block16 draft profile")
+    config = dflash_policy(draft)
     layers = config.get("target_layer_ids")
     if (
         not isinstance(layers, list)

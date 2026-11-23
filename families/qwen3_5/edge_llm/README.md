@@ -51,6 +51,26 @@ the released long greedy fixture on MC Edge, native and standalone Edge
 verification steps respectively on the long request. The original **27B
 linear DFlash** pair also passed these checks at a 256-token capacity.
 
+The prepared **Qwen3.5-4B-NVFP4 + Qwen3.5-4B-DFlash-NVFP4** pair uses
+the 0.12 ONNX exporter and native Edge compilers. The direct builder recurses
+while resolving the tied quantized output head. Install the `onnx` extra for
+the matching Edge Python package and configure the SDK with
+`-DTRTMC_EDGELLM_ONNX=ON`. For example:
+
+```sh
+trtmc qwen3_5 build "$TARGET" -o model.bundle --task text_generation \
+  --execution-variant dflash --companion "draft=$DRAFT" --max-sequence-length 2048
+```
+
+If those tools are unavailable, the family retains both checkpoints and builds native TensorRT
+target and draft plans; native does not export ONNX. On SM120, both MC routes
+matched the HF FP32 reference text for the two short thinking-mode checks at
+batch one and capacity 2,048, and passed the released long greedy check.
+Separate vision bundles on both routes also passed the existing car-color
+fixture against the original 4B HF FP32 reference (normalized edit distance
+0). These results do not establish exact token parity, tree decoding, larger
+batches, or speedup.
+
 The **4B, 9B and 27B DFlash DDTree** profiles use their respective original targets
 and drafts with a top-k-four tree. Both MC routes matched their ordinary
 targets on both short prompts, and all three routes passed the long greedy
