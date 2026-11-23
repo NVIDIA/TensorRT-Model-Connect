@@ -1,0 +1,49 @@
+{
+  "name": "qwen38-flash-next-nvfp4",
+  "family": "qwen3_8_flash_next",
+  "hf_id": "nvidia/Qwen3.8-Flash-Next-NVFP4",
+  "hf_revision": "fc694b54fb0174e0913e6adf86691ef85a4ead47",
+  "bundle": "qwen38-flash-next-nvfp4.bundle",
+  "task": "vision_language_generation",
+  "precision": "fp16",
+  "max_sequence_length": 8192,
+  "external_files": [
+    {
+      "path": "giant_panda.jpeg",
+      "url": "https://raw.githubusercontent.com/NVIDIA/TensorRT-Edge-LLM/513dcd18291e587c80928911a480761352f3c2d8/examples/multimodal/pics/giant_panda.jpeg"
+    },
+    {
+      "path": "red_panda.jpeg",
+      "url": "https://raw.githubusercontent.com/NVIDIA/TensorRT-Edge-LLM/513dcd18291e587c80928911a480761352f3c2d8/examples/multimodal/pics/red_panda.jpeg"
+    }
+  ],
+  "testcases": [
+    {
+      "name": "qwen38-flash-next-nvfp4-multimodal",
+      "premerge": false,
+      "requests": [
+        {
+          "id": "text",
+          "prompt": "List the first ten prime numbers, separated by commas. Return only the list.",
+          "expected": "2, 3, 5, 7, 11, 13, 17, 19, 23, 29"
+        },
+        {
+          "id": "image",
+          "prompt": "What species of bear is shown? Answer with only its common name.",
+          "expected": "giant panda"
+        },
+        {
+          "id": "video",
+          "prompt": "Name the animals in the first and last frames, in that order. Answer with only the two common names separated by a comma.",
+          "expected": "red panda, giant panda"
+        }
+      ]
+    },
+    {
+      "name": "qwen38-flash-next-native-packed-lexical-stage",
+      "premerge": true,
+      "component": "packed_lexical_rows"
+    }
+  ],
+  "tensor_parallel_size": 1
+}

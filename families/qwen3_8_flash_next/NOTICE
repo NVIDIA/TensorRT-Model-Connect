@@ -1,0 +1,5 @@
+TensorRT Model Connect does not distribute Flash-Next weights. Generated bundles
+contain checkpoint-derived material. Review the model terms before redistribution:
+NVIDIA Qwen3.8-Flash-Next-NVFP4 — https://huggingface.co/nvidia/Qwen3.8-Flash-Next-NVFP4
+NVIDIA Open Model License — https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/
+Qwen3.8-Flash-Next upstream terms — https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE
