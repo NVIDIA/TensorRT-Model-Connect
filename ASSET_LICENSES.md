@@ -220,6 +220,9 @@ the same license. `families/moss_transcribe_diarize/tests/data/README.md` lists
 the utterance IDs and their positions.
 
 A byte-identical copy is stored at
+`families/hubert/tests/data/librispeech-test-clean-6930-75918-0003.wav`.
+
+A byte-identical copy is stored at
 `families/qwen3_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`.
 
 A byte-identical copy is stored at
