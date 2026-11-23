@@ -11,6 +11,7 @@ add_library(trtmc_model_qwen SHARED
   pipeline.cpp
   plugin.cpp
   plugin_helpers.cpp
+  refit_weights.cpp
   sampler.cpp
 )
 
@@ -53,6 +54,7 @@ if(TRTMC_BUILD_TESTS)
       test_qwen_native_kv_cache
       test_qwen_pipeline
       test_qwen_sampler
+      test_qwen_refit_weights
       test_qwen_tensor_names
       test_qwen_text_stream
       test_qwen_task_pipeline

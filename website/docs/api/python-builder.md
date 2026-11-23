@@ -65,3 +65,7 @@ not an options bag. Every family must either implement the requested value or
 reject it. Cosmos3 accepts context parallel size 1 or 2. FLUX and Wan accept
 1, 2, 4, or 8; their family-owned builders and runtimes reject simultaneous
 tensor and context parallelism. Other families require the default value 1.
+
+Qwen's [weightless build entry](../features/weightless-builds.md) uses the
+family-owned `families.qwen.build_request.BuildRequest` and
+`families.qwen.cli.build_bundle`. The shared `BuildRequest` has no stripping flag.

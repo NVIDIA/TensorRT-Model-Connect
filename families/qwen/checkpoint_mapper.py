@@ -10,8 +10,12 @@ standard_decoder_builder.py. All projections are transposed from HF
 
 from __future__ import annotations
 
+import json
+import math
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from contextvars import ContextVar
 from pathlib import Path
 
 import numpy as np
@@ -21,11 +25,126 @@ import ml_dtypes  # noqa: F401
 
 from safetensors import safe_open
 
+from . import weight_stripping
 from .config import ModelConfig
 
 
+_NATIVE_LAYOUT: ContextVar[bool] = ContextVar("qwen_native_weight_layout", default=False)
+
+# safetensors header dtype <-> numpy. Only the dtypes a weight can be stored
+# in; anything else falls back to materializing through safetensors itself.
+_ST_DTYPES = {
+    "F32": np.dtype(np.float32),
+    "F16": np.dtype(np.float16),
+    "BF16": np.dtype(ml_dtypes.bfloat16),
+}
+ST_DTYPE_NAMES = {value: key for key, value in _ST_DTYPES.items()}
+
+
+@dataclass(frozen=True)
+class TensorRef:
+    """Where a weight lives on disk, instead of its bytes.
+
+    Under native layout a large projection needs no transform at all, and a
+    stripped build never hands its data to TensorRT -- only a shape and a
+    dtype. So the loader can return this instead of reading 60+ GiB into host
+    memory, and the refit manifest is written straight from it: the offset
+    travels with the weight rather than being reconstructed later.
+
+    Duck-types as an array for ``shape``/``dtype``/``ndim``/``size``/
+    ``nbytes``, and materializes through ``np.asarray()`` for the rare
+    consumer that really does want the values.
+    """
+
+    path: Path
+    offset: int
+    nbytes: int
+    dtype: np.dtype
+    shape: tuple[int, ...]
+
+    @property
+    def ndim(self) -> int:
+        return len(self.shape)
+
+    @property
+    def size(self) -> int:
+        return int(np.prod(self.shape)) if self.shape else 1
+
+    def materialize(self) -> np.ndarray:
+        with self.path.open("rb") as handle:
+            handle.seek(self.offset)
+            buffer = handle.read(self.nbytes)
+        if len(buffer) != self.nbytes:
+            raise ValueError(f"{self.path} is shorter than {self} expects")
+        return np.frombuffer(buffer, dtype=self.dtype).reshape(self.shape)
+
+    def __array__(self, dtype=None, copy=None):
+        array = self.materialize()
+        return array if dtype is None else array.astype(dtype)
+
+
+def is_tensor_like(value: object) -> bool:
+    """True for anything carrying array geometry: ndarray or TensorRef.
+
+    Prefer this to ``isinstance(x, np.ndarray)`` when only shape or dtype is
+    wanted -- a bare isinstance check silently takes the fallback branch for a
+    lazy weight, which means wrong dimensions rather than an error.
+    """
+    return hasattr(value, "shape") and hasattr(value, "dtype")
+
+
+def _safetensors_layout(model_dir: Path) -> dict[str, TensorRef]:
+    """Map tensor name -> TensorRef by reading only the files' JSON headers."""
+    import struct
+
+    layout: dict[str, TensorRef] = {}
+    single = model_dir / "model.safetensors"
+    if single.is_file():
+        paths = [single]
+        selected = None
+    else:
+        index = json.loads((model_dir / "model.safetensors.index.json").read_text())
+        selected = index["weight_map"]
+        paths = [model_dir / name for name in sorted(set(selected.values()))]
+    for path in paths:
+        with path.open("rb") as handle:
+            header_len = struct.unpack("<Q", handle.read(8))[0]
+            if header_len > min(100 << 20, path.stat().st_size - 8):
+                raise ValueError(f"invalid safetensors header length: {path}")
+            header = json.loads(handle.read(header_len))
+        data_start = 8 + header_len
+        for name, meta in header.items():
+            if name == "__metadata__" or (selected is not None and selected.get(name) != path.name):
+                continue
+            dtype = _ST_DTYPES.get(meta["dtype"])
+            if dtype is None:
+                continue
+            begin, end = meta["data_offsets"]
+            shape = tuple(int(dim) for dim in meta["shape"])
+            if (any(dim <= 0 for dim in shape) or begin < 0 or end < begin
+                    or end > path.stat().st_size - data_start
+                    or end - begin != math.prod(shape) * dtype.itemsize):
+                raise ValueError(f"invalid safetensors tensor: {name}")
+            layout[name] = TensorRef(
+                path=path,
+                offset=data_start + begin,
+                nbytes=end - begin,
+                dtype=dtype,
+                shape=tuple(int(dim) for dim in meta["shape"]),
+            )
+    return layout
+
+
 def _target_np_dtype(precision: str) -> np.dtype:
-    """Map precision string to numpy dtype for weight storage."""
+    """Map precision string to numpy dtype for weight storage.
+
+    Note bf16 normally stores as fp16 and is cast to bfloat16 inside the
+    graph. Under native layout a bf16 build keeps genuine bfloat16, so the
+    checkpoint's own bytes are already what the engine wants and refit can
+    be fed from the checkpoint with no conversion at all.
+    """
+    if precision == "bf16" and native_layout():
+        return np.dtype(ml_dtypes.bfloat16)
     if precision in ("fp16", "bf16"):
         return np.float16
     return np.float32
@@ -94,6 +213,10 @@ def load_standard_weights(
     """Load HF safetensors and map to standard weight dict."""
     model_dir = Path(model_dir)
     readers = _open_safetensors(model_dir)
+    # Under native layout large weights need no transform, so they can be
+    # referenced in place instead of copied into host memory.
+    native = native_layout()
+    layout = _safetensors_layout(model_dir) if native else None
 
     hidden = config.hidden_size
     vocab = config.vocab_size
@@ -107,7 +230,9 @@ def load_standard_weights(
     # Embedding
     if embedding_key is None:
         embedding_key = f"{model_prefix}.embed_tokens.weight"
-    embedding = _load_tensor_as_dtype(readers, embedding_key, target_dtype)
+    embedding = (_lazy_or_copy(readers, embedding_key, target_dtype, layout)
+                 if native
+                 else _load_tensor_as_dtype(readers, embedding_key, target_dtype))
     if embedding.shape != (vocab, hidden):
         raise ValueError(f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
     weights["embedding"] = embedding
@@ -135,27 +260,31 @@ def load_standard_weights(
             _layer_key(layer_idx, "self_attn.q_proj.weight", model_prefix),
             "q_proj",
             target_dtype,
+            layout,
         )
         k_t = _load_transposed_tensor(
             readers,
             _layer_key(layer_idx, "self_attn.k_proj.weight", model_prefix),
             "k_proj",
             target_dtype,
+            layout,
         )
         v_t = _load_transposed_tensor(
             readers,
             _layer_key(layer_idx, "self_attn.v_proj.weight", model_prefix),
             "v_proj",
             target_dtype,
+            layout,
         )
         o_t = _load_transposed_tensor(
             readers,
             _layer_key(layer_idx, "self_attn.o_proj.weight", model_prefix),
             "o_proj",
             target_dtype,
+            layout,
         )
 
-        q_hidden = q_t.shape[1]
+        q_hidden = q_t.shape[0 if native else 1]
 
         layer[f"{prefix}.w_q"] = q_t
         layer[f"{prefix}.w_k"] = k_t
@@ -191,20 +320,23 @@ def load_standard_weights(
             _layer_key(layer_idx, "mlp.gate_proj.weight", model_prefix),
             "gate_proj",
             target_dtype,
+            layout,
         )
         layer[f"{prefix}.w_up"] = _load_transposed_tensor(
             readers,
             _layer_key(layer_idx, "mlp.up_proj.weight", model_prefix),
             "up_proj",
             target_dtype,
+            layout,
         )
         layer[f"{prefix}.w_down"] = _load_transposed_tensor(
             readers,
             _layer_key(layer_idx, "mlp.down_proj.weight", model_prefix),
             "down_proj",
             target_dtype,
+            layout,
         )
-        layer_mlp_size = layer[f"{prefix}.w_gate"].shape[1]
+        layer_mlp_size = layer[f"{prefix}.w_gate"].shape[0 if native else 1]
 
         return layer_idx, layer, q_hidden, layer_mlp_size
 
@@ -227,7 +359,7 @@ def load_standard_weights(
         if attention_size == 0:
             attention_size = layer_attention_size
             first_k = layer[f"layer.{_layer_idx}.w_k"]
-            kv_attention_size = int(first_k.shape[1])
+            kv_attention_size = int(first_k.shape[0 if native else 1])
         if mlp_size == 0:
             mlp_size = layer_mlp_size
 
@@ -241,7 +373,14 @@ def load_standard_weights(
 
     # LM head
     if _has_tensor(readers, lm_head_key):
-        weights["w_out"] = _load_transposed_tensor(readers, lm_head_key, "lm_head", target_dtype)
+        weights["w_out"] = _load_transposed_tensor(
+            readers, lm_head_key, "lm_head", target_dtype, layout)
+    elif native:
+        # Tied embeddings, checkpoint layout: the head wants [vocab, hidden],
+        # which is exactly the embedding. Transposing here would hand the
+        # builder [hidden, vocab] and it would read out_vocab off the wrong
+        # axis.
+        weights["w_out"] = embedding
     else:
         # Tied embeddings
         weights["w_out"] = _transpose_2d(embedding, "embedding_tied", precision=precision)
@@ -268,8 +407,6 @@ class _ReaderCollection(list):
 
 def _open_safetensors(model_dir: Path) -> _ReaderCollection:
     """Open the checkpoint's required NumPy safetensors readers."""
-    import json
-
     single = model_dir / "model.safetensors"
     if single.is_file():
         return _ReaderCollection([safe_open(str(single), framework="numpy")])
@@ -335,13 +472,60 @@ def _load_tensor_as_dtype(readers: list, name: str, dtype: np.dtype) -> np.ndarr
     return _copy_to_numpy(_get_tensor(readers, name), dtype)
 
 
+# Native layout: projection weights keep the checkpoint's [out, in] layout and
+# the graph asks TensorRT to transpose them in the matmul instead (see
+# graph_ops.add_matmul_rhs_constant(hf_layout=True)). Removes the host-side
+# transpose and the array copy it forces, which leaves every large weight
+# byte-identical to the checkpoint. Enabled by stripped builds only; see
+# the derivation in model.build().
+
+
+def set_native_layout(enabled: bool):
+    return _NATIVE_LAYOUT.set(bool(enabled))
+
+
+def reset_native_layout(token) -> None:
+    _NATIVE_LAYOUT.reset(token)
+
+
+def native_layout() -> bool:
+    return _NATIVE_LAYOUT.get()
+
+
 def _load_transposed_tensor(
     readers: list,
     name: str,
     transpose_name: str,
     dtype: np.dtype,
-) -> np.ndarray:
+    layout: dict[str, TensorRef] | None = None,
+) -> np.ndarray | TensorRef:
+    if layout is not None:
+        return _lazy_or_copy(readers, name, dtype, layout)
     return _copy_to_numpy(_get_tensor(readers, name), dtype, transpose_name=transpose_name)
+
+
+def _lazy_or_copy(
+    readers: list,
+    name: str,
+    dtype: np.dtype,
+    layout: dict[str, TensorRef] | None,
+) -> np.ndarray | TensorRef:
+    """Reference the checkpoint when no transform is needed; else copy.
+
+    Native layout preserves the source orientation and dtype. The graph owns
+    any cast to the requested compute precision.
+
+    Deliberately limited to weights large enough that the build will strip
+    them. A weight that stays baked must be a real array -- TensorRT does not
+    copy the buffer behind a bf16 constant, so it has to be one the WeightDict
+    owns rather than one materialized for the call and dropped.
+    """
+    if layout is not None:
+        ref = layout.get(name)
+        if (ref is not None
+                and ref.nbytes >= weight_stripping.DEFAULT_MIN_STRIP_BYTES):
+            return ref
+    return _copy_to_numpy(_get_tensor(readers, name), dtype)
 
 
 def _load_tensor(readers: _ReaderCollection, name: str) -> np.ndarray:

@@ -141,3 +141,9 @@ Reasons:
   adds 0.22 KL.
 - No non-finite logits or cache values (quality runs and 3 x 1056 stress tokens
   per engine).
+
+## Weightless builds
+
+Dense Qwen3 text continuation can build stripped TensorRT plans with
+`trtmc qwen build ... --strip-weights`. The bundle keeps one shared weight copy and
+refits both engines at load time. See [design, limits, and the Qwen3 example](../../website/docs/features/weightless-builds.md).

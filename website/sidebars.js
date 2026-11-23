@@ -87,6 +87,7 @@ module.exports = {
         },
         'user-guides/configure-runtime',
         'features/quantization',
+        'features/weightless-builds',
         'features/multi-device',
         'user-guides/validate-benchmark',
       ],

@@ -8,6 +8,7 @@
 #include "families/qwen/runtime/kv_cache.h"
 #include "families/qwen/runtime/pipeline.h"
 #include "families/qwen/runtime/plugin_helpers.h"
+#include "families/qwen/runtime/refit_weights.h"
 #include "families/qwen/runtime/tensor_names.h"
 #include "trtmc/runtime/family_factory.h"
 
@@ -40,6 +41,7 @@ struct RuntimeConfig {
     std::string tensor_parallel_mode;
     std::string precision;
     std::string decoder_engine_layout;
+    bool strip_weights{false};
 };
 
 template <typename T>
@@ -74,11 +76,11 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     }
     if (!json.is_object())
         throw std::runtime_error("qwen runtime.json must be an object");
-    if (json.size() != 14 && json.size() != 16)
+    const auto fields = json.size() - json.count("strip_weights");
+    if (fields != 14 && fields != 16)
         throw std::runtime_error("qwen runtime.json has an unexpected field set");
-    if (json.size() == 16 &&
-        (!require_value<bool>(json, "native_kv_cache") ||
-         require_value<std::int32_t>(json, "native_kv_contract_version") != 1)) {
+    if (fields == 16 && (!require_value<bool>(json, "native_kv_cache") ||
+                         require_value<std::int32_t>(json, "native_kv_contract_version") != 1)) {
         throw std::runtime_error("qwen runtime.json has an invalid native KV contract");
     }
 
@@ -98,6 +100,8 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_value<std::string>(json, "precision"),
         require_value<std::string>(json, "decoder_engine_layout"),
     };
+    if (json.contains("strip_weights"))
+        config.strip_weights = require_value<bool>(json, "strip_weights");
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_heads <= 0 ||
         config.num_key_value_heads <= 0 || config.head_dim <= 0 || config.vocab_size <= 0 ||
         config.max_cache_length <= 0 || config.tensor_parallel_size <= 0 ||
@@ -175,15 +179,26 @@ DecoderModules load_modules(const FamilyContext& context, const RuntimeConfig& c
     DistributedRuntimeGroup group = initialize_tensor_parallel_group(config.tensor_parallel_size);
     DecoderModules modules;
     modules.distributed_owner = group.owner;
+
+    const QwenRefitSource refit_source(context.reader);
+    ModuleCreateOptions refit_options;
+    refit_options.requires_refit = config.strip_weights;
+    refit_options.refit_weights = refit_source.weights_for("engine.plan");
+    if (!config.strip_weights && refit_options.refit_weights)
+        throw std::runtime_error("qwen refit sections require the stripped-plan runtime marker");
+
     if (config.decoder_engine_layout == "split") {
-        modules.decode = load_engine(
-            context.backend, require_section(context.reader, "engine.plan"), "qwen decoder");
-        modules.prefill = load_engine(
-            context.backend, require_section(context.reader, "prefill.plan"), "qwen prefill");
+        modules.decode =
+            load_engine(context.backend, require_section(context.reader, "engine.plan"),
+                        "qwen decoder", refit_options);
+        refit_options.refit_weights = refit_source.weights_for("prefill.plan");
+        modules.prefill =
+            load_engine(context.backend, require_section(context.reader, "prefill.plan"),
+                        "qwen prefill", refit_options);
         return modules;
     }
 
-    ModuleCreateOptions options;
+    ModuleCreateOptions options = refit_options;
     if (config.tensor_parallel_size > 1) {
         options.distributed_communicator = group.communicator;
         options.distributed_owner = group.owner;
