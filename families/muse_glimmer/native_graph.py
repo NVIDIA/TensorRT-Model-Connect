@@ -168,12 +168,12 @@ class Graph:
         embedding = self.checkpoint.projection("embed_tokens", c.vocab_size, c.hidden_size)
         embedding = weight_tensor(self.network, embedding, self.keep_alive, trt.float16)
         x = self.network.add_gather(embedding, token, 0).get_output(0)
+        x = self.norm(x, c.rms_norm_eps)
         if visual_inputs:
-            # Both text and projected image/video rows enter the decoder's embedding RMSNorm.
+            # The visual projector already normalized its rows independently of text.
             visual = self.network.add_input("visual_embeddings", trt.float16, (-1, c.hidden_size))
             is_visual = self.network.add_input("is_visual", trt.int32, (-1, 1))
             x = self.network.add_select(self.cast(is_visual, trt.bool), visual, x).get_output(0)
-        x = self.norm(x, c.rms_norm_eps)
         hidden = {}
         for i in range(c.num_hidden_layers):
             prefix = f"layers.{i}"

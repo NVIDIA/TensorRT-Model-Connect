@@ -37,6 +37,15 @@ std::pair<int, int> visual_patch_grid(int height, int width, int patch_size,
             }
         }
     }
+    if (!std::isfinite(error)) {
+        // Match the processor's rounded fallback. Do not collapse an elongated
+        // image to one cell or silently clamp a provider grid outside this plan.
+        const double y = std::max(1.0, std::nearbyint(h)), x = std::max(1.0, std::nearbyint(w));
+        if (y * x > max_merged_tokens || std::max(y, x) > std::numeric_limits<int>::max() / 2)
+            throw std::invalid_argument(
+                "Muse provider resize exceeds the native visual token profile");
+        best = {static_cast<int>(y) * 2, static_cast<int>(x) * 2};
+    }
     return best;
 }
 
@@ -54,7 +63,8 @@ VisionGrid make_vision_grid(int rows, int cols, int table_side, int head_dim, fl
     grid.rotary_cos.reserve(n * head_dim);
     grid.rotary_sin.reserve(n * head_dim);
     grid.merge_order.reserve(n);
-    grid.window_mask.resize(n * n);
+    grid.window_ids.reserve(n);
+    const int window_cols = 1 + (cols - 1) / table_side;
     std::vector<float> inv_freq(head_dim / 4);
     for (int i = 0; i < head_dim / 4; ++i)
         inv_freq[i] = 1.0F / std::pow(rope_theta, static_cast<float>(i) / (head_dim / 4));
@@ -80,12 +90,7 @@ VisionGrid make_vision_grid(int rows, int cols, int table_side, int head_dim, fl
                 grid.rotary_cos.push_back(std::cos(angle));
                 grid.rotary_sin.push_back(std::sin(angle));
             }
-            const auto offset = static_cast<std::size_t>(row * cols + col) * n;
-            for (int t = 0; t < count; ++t)
-                grid.window_mask[offset + t] = row / table_side == (t / cols) / table_side &&
-                                                       col / table_side == (t % cols) / table_side
-                                                   ? 0.0F
-                                                   : -std::numeric_limits<float>::infinity();
+            grid.window_ids.push_back((row / table_side) * window_cols + col / table_side);
         }
     }
     for (int y = 0; y < rows; y += 2)

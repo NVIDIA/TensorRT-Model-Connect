@@ -37,10 +37,11 @@ def media_contract(request, raw, weight_format, capacity):
     # Save half of the sequence budget for the rest of the prompt and answer.
     per_image = min(int(image["max_image_tokens"]), capacity // 2)
     frame_limit = min(int(video["max_video_frame_tokens"]), per_image)
-    if min(per_image, frame_limit) < 4 or not 0 < float(video["fps"]) < float("inf"):
+    fps = float(video["fps"])
+    if min(per_image, frame_limit) < 4 or not 0 < fps < float("inf"):
         raise ValueError("Invalid Muse-Glimmer visual profile or frame rate")
     return {"patch_size": 14, "table_side": v["pos_emb_height"], "head_dim": v["hidden_size"] // v["num_attention_heads"],
             "text_width": raw["text_config"]["hidden_size"], "max_patches": 4 * per_image,
             "max_image_tokens": per_image, "max_video_frame_tokens": frame_limit,
             "image_token_id": raw["image_token_id"], "video_token_id": raw["video_token_id"],
-            "rope_theta": v["rope_parameters"]["rope_theta"], "fps": video["fps"]}
+            "rope_theta": v["rope_parameters"]["rope_theta"], "fps": fps}

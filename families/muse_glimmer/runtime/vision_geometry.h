@@ -14,7 +14,7 @@ struct VisionGrid {
     std::vector<float> position_weights;
     std::vector<float> rotary_cos;
     std::vector<float> rotary_sin;
-    std::vector<float> window_mask;
+    std::vector<std::int32_t> window_ids;
     std::vector<std::int32_t> merge_order;
 };
 

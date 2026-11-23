@@ -46,6 +46,11 @@ DFlash V1 and DFlash V2 chain modes. **They are not all accuracy-qualified.**
   enabled.
   A result on this checkpoint does not qualify media execution.
 
+For native image and video requests, the processor's resized patch grid must
+fit the bundle's visual profile. If the processor's rounded fallback exceeds
+that profile, native execution reports the limit instead of silently reducing
+the image to a single token.
+
 See the [family-owned recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/muse_glimmer/edge_llm/README.md)
 for commands, dependency requirements, precision/profile boundaries and
 qualification limitations.

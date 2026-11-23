@@ -44,6 +44,22 @@ inline trt_edgellm::rt::imageUtils::ImageData pixels(Span<const internal::ImageV
 inline trt_edgellm::rt::LLMGenerationRequest media_request(const MediaTurns& turns,
                                                            const TextGenerationConfig& cfg,
                                                            int budget, int capacity, double fps) {
+    if (capacity <= 0)
+        throw std::invalid_argument("Invalid Muse Edge visual capacity");
+    // Reject the whole request before converting even its first borrowed image.
+    auto remaining_frames = 2 * static_cast<size_t>(capacity);
+    for (const auto& turn : turns) {
+        for (const auto& part : turn.parts) {
+            const auto* video = std::get_if<internal::VideoView>(&part);
+            const auto frames =
+                video ? video->frames.size()
+                      : static_cast<size_t>(std::holds_alternative<internal::ImageView>(part));
+            if (frames > remaining_frames)
+                throw std::invalid_argument(
+                    "Muse Edge total visual frame count exceeds request capacity");
+            remaining_frames -= frames;
+        }
+    }
     auto request = make_request("", cfg, budget);
     auto& row = request.requests.front();
     row.messages.clear();
@@ -55,14 +71,14 @@ inline trt_edgellm::rt::LLMGenerationRequest media_request(const MediaTurns& tur
             if (const auto* text = std::get_if<std::string>(&part)) {
                 msg.contents.push_back({"text", *text});
             } else if (const auto* image = std::get_if<internal::ImageView>(&part)) {
-                msg.contents.push_back({"image", ""});
+                msg.contents.push_back({"image", cfg.use_chat_template ? "" : "<|patch|>"});
                 row.imageBuffers.push_back(pixels({image, 1}, false, fps, capacity));
             } else {
                 const auto& video = std::get<internal::VideoView>(part);
                 auto data = pixels(video.frames, true, fps, capacity);
                 for (size_t i = 0; i < video.timestamps_seconds.size(); ++i)
                     data.timestamps.push_back(video.timestamps_seconds.data()[i]);
-                msg.contents.push_back({"video", ""});
+                msg.contents.push_back({"video", cfg.use_chat_template ? "" : "<|video|>"});
                 row.imageBuffers.push_back(std::move(data));
             }
         }

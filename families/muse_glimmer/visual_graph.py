@@ -84,10 +84,18 @@ class VisionGraph(Graph):
         inputs = {
             "patches": (trt.float16, (-1, features)), "position_indices": (trt.int32, (-1, 4)),
             "position_weights": (trt.float16, (-1, 4)), "rotary_cos": (trt.float32, (-1, 1, dim)),
-            "rotary_sin": (trt.float32, (-1, 1, dim)), "window_mask": (trt.float32, (1, -1, -1)),
+            "rotary_sin": (trt.float32, (-1, 1, dim)), "window_ids": (trt.int32, (-1,)),
             "merge_order": (trt.int32, (-1,)),
         }
         rows = {k: self.network.add_input(k, *v) for k, v in inputs.items()}
+        # Send one window ID per patch. Construct the additive mask on-device;
+        # global-attention layers still receive no mask.
+        ids = rows["window_ids"]
+        same_window = self.ew(self.reshape(ids, (1, -1, 1)), self.reshape(ids, (1, 1, -1)),
+                              trt.ElementWiseOperation.EQUAL)
+        window_mask = self.network.add_select(
+            same_window, self.const([[[0.0]]]), self.const([[[-np.inf]]])
+        ).get_output(0)
         tower = "vision_tower"
         patch = tower + ".patch_embedder"
         x = self.fc(rows["patches"], patch + ".patch_embedding", width, bias=False)
@@ -105,7 +113,7 @@ class VisionGraph(Graph):
             prefix = f"{tower}.layers.{i}"
             y = self.affine_norm(x, prefix + ".norm1", v["layer_norm_eps"])
             y = self.attend(y, prefix + ".attn", heads, rows["rotary_cos"], rows["rotary_sin"],
-                            rows["window_mask"] if kind == "window_attention" else None, dim**-0.5)
+                            window_mask if kind == "window_attention" else None, dim**-0.5)
             x = self.ew(x, y, trt.ElementWiseOperation.SUM)
             y = self.affine_norm(x, prefix + ".norm2", v["layer_norm_eps"])
             y = self.gelu(self.fc(y, prefix + ".mlp.fc1", v["intermediate_size"]))

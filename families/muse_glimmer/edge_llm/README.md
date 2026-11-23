@@ -202,3 +202,9 @@ are still required even though the native family has no GPU allowlist.
 Insufficient device memory is a runtime failure, not permission to silently
 change precision or remove a companion. Inference failures are returned to the
 caller and are never silently retried.
+
+For raw media requests, pass typed image or video parts rather than inserting
+special tokens into prompt text. The Edge adapter formats those parts with the
+checkpoint's placeholders. If the processor's resize fallback exceeds the
+compiled native visual profile, the runtime reports the limit instead of
+silently shrinking the image to a single token.

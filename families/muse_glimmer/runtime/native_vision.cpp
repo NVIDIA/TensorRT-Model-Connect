@@ -149,7 +149,7 @@ MediaPrefix NativeVision::prepare(const MediaTurns& turns, const Tokenizer& toke
                        {"position_weights", {weights.data(), {n, 4}, DType::kFloat16}},
                        {"rotary_cos", {g.rotary_cos.data(), {n, 1, head_dim_}, DType::kFloat32}},
                        {"rotary_sin", {g.rotary_sin.data(), {n, 1, head_dim_}, DType::kFloat32}},
-                       {"window_mask", {g.window_mask.data(), {1, n, n}, DType::kFloat32}},
+                       {"window_ids", {g.window_ids.data(), {n}, DType::kInt32}},
                        {"merge_order", {g.merge_order.data(), {n}, DType::kInt32}}};
         auto result = module_->forward(args);
         const auto& features = result.at("visual_embeddings");

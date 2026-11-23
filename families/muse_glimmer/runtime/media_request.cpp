@@ -74,8 +74,12 @@ MediaTurns parse(const Request& r, const TextGenerationConfig& cfg) {
     if (r.tools.size() || !r.messages.data() || !r.messages.size())
         throw std::invalid_argument("Muse media requires messages without tool definitions");
     MediaTurns turns;
-    if (!cfg.system_prompt.empty())
+    if (!cfg.system_prompt.empty()) {
+        if (cfg.system_prompt.find("<|") != std::string::npos)
+            throw std::invalid_argument(
+                "Reserved Muse control sequence in configured system prompt");
         turns.push_back({"system", {cfg.system_prompt}});
+    }
     for (std::size_t i = 0; i < r.messages.size(); ++i) {
         const auto& msg = r.messages.data()[i];
         const char* role = nullptr;
