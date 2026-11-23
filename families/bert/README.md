@@ -48,3 +48,4 @@ weight reads (numbers from #2075, B200 and B300, TensorRT 11.4):
 4-bit weights could save at most the weight-read time. The GEMMs at 128 to 512
 rows are compute bound, and NVFP4 adds one dynamic quantize kernel per
 projection.
+<!-- Temporary CI acceptance probe: BERT family routing without model changes; do not merge this PR. -->
