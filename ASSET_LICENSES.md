@@ -196,6 +196,8 @@ golden data.
 ## LibriSpeech accuracy fixture
 
 `families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav` and
+`families/higgs_audio_v2_tokenizer/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+are PCM WAV versions of utterance `6930-75918-0003` from the LibriSpeech
 `families/mimi/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 are unmodified copies of utterance `6930-75918-0003` from the LibriSpeech `test-clean` split,
 distributed by OpenSLR as SLR12 under the Creative Commons Attribution 4.0
