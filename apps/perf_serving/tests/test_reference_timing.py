@@ -67,3 +67,40 @@ def test_json_array_encoding_stays_outside_the_task_call_time(tmp_path, monkeypa
     result = backend(ValuesAdapter()).invoke({}, tmp_path / "values")
     assert result.model_call_ms < 50
     assert result.observation == {"shape": [2], "values": [1.0, 2.0]}
+
+
+class FakeCuda:
+    def __init__(self, *, integrated, reserved_gib, allocated_gib=10, total_gib=120):
+        self.integrated, self.total = integrated, total_gib << 30
+        self.reserved, self.allocated, self.emptied = reserved_gib << 30, allocated_gib << 30, 0
+
+    def is_available(self):
+        return True
+
+    def current_device(self):
+        return 0
+
+    def get_device_properties(self, device):
+        return type("Properties", (), {"is_integrated": self.integrated, "total_memory": self.total})()
+
+    def memory_reserved(self):
+        return self.reserved
+
+    def memory_allocated(self):
+        return self.allocated
+
+    def empty_cache(self):
+        self.emptied += 1
+
+
+@pytest.mark.parametrize(("integrated", "reserved_gib", "emptied"), [
+    (True, 80, 1),   # 70 GiB unused > a quarter of 120 GiB: given back
+    (True, 30, 0),   # 20 GiB unused: kept for the next requests
+    (False, 80, 0),  # a discrete GPU keeps its cache
+])
+def test_a_shared_memory_gpu_gives_back_a_cache_larger_than_a_quarter_of_its_memory(
+        monkeypatch, integrated, reserved_gib, emptied):
+    fake = FakeCuda(integrated=integrated, reserved_gib=reserved_gib)
+    monkeypatch.setattr(common.torch, "cuda", fake)
+    common.release_inputs()
+    assert fake.emptied == emptied
