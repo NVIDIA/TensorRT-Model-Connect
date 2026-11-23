@@ -17,7 +17,6 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -25,38 +24,6 @@ namespace trtmc {
 namespace {
 
 // ─── UTF-8 helpers ───
-
-// Decode one UTF-8 codepoint from s starting at pos, advance pos.
-inline char32_t utf8_to_char32(const std::string& s, size_t& pos) {
-    unsigned char c = static_cast<unsigned char>(s[pos]);
-    if (c < 0x80) {
-        ++pos;
-        return static_cast<char32_t>(c);
-    }
-    if ((c & 0xE0) == 0xC0 && pos + 1 < s.size()) {
-        char32_t cp = (static_cast<char32_t>(c & 0x1F) << 6) |
-                      static_cast<char32_t>(static_cast<unsigned char>(s[pos + 1]) & 0x3F);
-        pos += 2;
-        return cp;
-    }
-    if ((c & 0xF0) == 0xE0 && pos + 2 < s.size()) {
-        char32_t cp = (static_cast<char32_t>(c & 0x0F) << 12) |
-                      (static_cast<char32_t>(static_cast<unsigned char>(s[pos + 1]) & 0x3F) << 6) |
-                      static_cast<char32_t>(static_cast<unsigned char>(s[pos + 2]) & 0x3F);
-        pos += 3;
-        return cp;
-    }
-    if ((c & 0xF8) == 0xF0 && pos + 3 < s.size()) {
-        char32_t cp = (static_cast<char32_t>(c & 0x07) << 18) |
-                      (static_cast<char32_t>(static_cast<unsigned char>(s[pos + 1]) & 0x3F) << 12) |
-                      (static_cast<char32_t>(static_cast<unsigned char>(s[pos + 2]) & 0x3F) << 6) |
-                      static_cast<char32_t>(static_cast<unsigned char>(s[pos + 3]) & 0x3F);
-        pos += 4;
-        return cp;
-    }
-    ++pos;
-    return 0xFFFD;
-}
 
 inline std::string utf32_to_utf8(char32_t cp) {
     std::string r;
@@ -113,13 +80,11 @@ inline char32_t read_utf8(const char*& p, const char* end) {
     return 0xFFFD;
 }
 
-// ─── GPT-2 byte encoder: byte value <-> Unicode codepoint ───
+// ─── GPT-2 byte encoder: byte value -> Unicode codepoint ───
 
 struct ByteEncoderTables {
     // byte -> UTF-8 encoded string (precomputed for speed)
     std::string byte_to_utf8[256];
-    // Unicode codepoint -> byte value
-    std::unordered_map<char32_t, uint8_t> cp_to_byte;
 
     ByteEncoderTables() {
         // GPT-2 byte encoder: printable bytes map to themselves,
@@ -136,7 +101,6 @@ struct ByteEncoderTables {
         for (int b = 0; b < 256; ++b) {
             char32_t cp = direct[b] ? static_cast<char32_t>(b) : static_cast<char32_t>(256 + n++);
             byte_to_utf8[b] = utf32_to_utf8(cp);
-            cp_to_byte[cp] = static_cast<uint8_t>(b);
         }
     }
 };
@@ -643,19 +607,6 @@ class BpeTokenizer final : public ITokenizer {
         return result;
     }
 
-    std::string decode(const std::vector<int32_t>& ids) const override {
-        std::string joined = join_vocab_tokens(ids);
-        switch (mDecoderType) {
-        case DecoderType::kByteLevel:
-            return byte_decode(joined);
-        case DecoderType::kMetaspace:
-            return decode_metaspace(joined);
-        case DecoderType::kSequence:
-            return decode_sequence(joined);
-        }
-        return byte_decode(joined);
-    }
-
     int32_t id_for_token(std::string_view token) const override {
         auto it = mTokenToId.find(std::string(token));
         return it != mTokenToId.end() ? it->second : -1;
@@ -670,8 +621,6 @@ class BpeTokenizer final : public ITokenizer {
 
   private:
     BpeTokenizer() = default;
-
-    enum class DecoderType { kByteLevel, kMetaspace, kSequence };
 
     std::string normalize_text(const std::string& text) const {
         if (!mNormalizeLowercase && !mNormalizeWhitespace) {
@@ -772,7 +721,7 @@ class BpeTokenizer final : public ITokenizer {
     }
 
     // SentencePiece-style encode: replace spaces with ▁, split to chars, BPE merge.
-    // Used for Metaspace pre-tokenizer and Sequence decoder models (LLaMA, Mistral, Phi-3).
+    // Used when the vocabulary marks spaces with ▁ (SentencePiece BPE vocabularies).
     // Normalize text for SentencePiece: replace spaces with ▁, handle prepend
     std::string normalize_sentencepiece(const std::string& text) const {
         static const std::string sp = "\xe2\x96\x81"; // U+2581
@@ -862,125 +811,6 @@ class BpeTokenizer final : public ITokenizer {
         }
     }
 
-    // ─── Decoding helpers ───
-
-    std::string join_vocab_tokens(const std::vector<int32_t>& ids) const {
-        std::string joined;
-        for (int32_t id : ids) {
-            if (mSpecialIds.count(id))
-                continue;
-            if (id >= 0 && static_cast<size_t>(id) < mVocab.size()) {
-                joined += mVocab[id];
-            }
-        }
-        return joined;
-    }
-
-    std::string decode_metaspace(const std::string& joined) const {
-        std::string result;
-        const std::string g_char = utf32_to_utf8(0x0120);
-        const std::string spiece_char = "\xe2\x96\x81"; // U+2581
-        size_t pos = 0;
-        while (pos < joined.size()) {
-            if (pos + g_char.size() <= joined.size() &&
-                joined.compare(pos, g_char.size(), g_char) == 0) {
-                result.push_back(' ');
-                pos += g_char.size();
-            } else if (pos + spiece_char.size() <= joined.size() &&
-                       joined.compare(pos, spiece_char.size(), spiece_char) == 0) {
-                result.push_back(' ');
-                pos += spiece_char.size();
-            } else {
-                result.push_back(joined[pos]);
-                ++pos;
-            }
-        }
-        if (!result.empty() && result[0] == ' ') {
-            result.erase(0, 1);
-        }
-        return result;
-    }
-
-    // ─── Sequence decoder (SentencePiece BPE models: LLaMA, Mistral, Phi-3) ───
-
-    std::string decode_sequence(const std::string& joined) const {
-        std::string text = joined;
-        // Step 1: Apply Replace operations (e.g. ▁ → space)
-        for (const auto& rep : mSeqDecoderReplaces) {
-            text = string_replace_all(text, rep.pattern, rep.content);
-        }
-        // Step 2: ByteFallback — convert <0xXX> tokens to raw bytes
-        if (mSeqDecoderByteFallback) {
-            text = apply_byte_fallback(text);
-        }
-        // Step 3: Fuse is implicit (tokens already joined)
-        // Step 4: Strip leading space
-        if (mSeqDecoderStripLeft && !text.empty() && text[0] == ' ') {
-            text.erase(0, 1);
-        }
-        return text;
-    }
-
-    static std::string string_replace_all(const std::string& input, const std::string& from,
-                                          const std::string& to) {
-        if (from.empty())
-            return input;
-        std::string result;
-        result.reserve(input.size());
-        size_t pos = 0;
-        while (pos < input.size()) {
-            if (pos + from.size() <= input.size() && input.compare(pos, from.size(), from) == 0) {
-                result += to;
-                pos += from.size();
-            } else {
-                result.push_back(input[pos]);
-                ++pos;
-            }
-        }
-        return result;
-    }
-
-    static int hex_char_value(char c) {
-        if (c >= '0' && c <= '9')
-            return c - '0';
-        if (c >= 'a' && c <= 'f')
-            return c - 'a' + 10;
-        if (c >= 'A' && c <= 'F')
-            return c - 'A' + 10;
-        return -1;
-    }
-
-    // Try to parse <0xXX> at position pos. Returns parsed byte or -1.
-    static int try_parse_byte_token(const std::string& text, size_t pos) {
-        if (pos + 6 > text.size())
-            return -1;
-        if (text[pos] != '<' || text[pos + 1] != '0' || text[pos + 2] != 'x' ||
-            text[pos + 5] != '>')
-            return -1;
-        int h = hex_char_value(text[pos + 3]);
-        int l = hex_char_value(text[pos + 4]);
-        if (h < 0 || l < 0)
-            return -1;
-        return (h << 4) | l;
-    }
-
-    static std::string apply_byte_fallback(const std::string& text) {
-        std::string result;
-        result.reserve(text.size());
-        size_t pos = 0;
-        while (pos < text.size()) {
-            int byte_val = try_parse_byte_token(text, pos);
-            if (byte_val >= 0) {
-                result.push_back(static_cast<char>(byte_val));
-                pos += 6;
-            } else {
-                result.push_back(text[pos]);
-                ++pos;
-            }
-        }
-        return result;
-    }
-
     // ─── Byte-level encoding ───
 
     static std::vector<std::string> byte_encode(const std::string& text) {
@@ -989,25 +819,6 @@ class BpeTokenizer final : public ITokenizer {
         result.reserve(text.size());
         for (unsigned char byte : text) {
             result.push_back(tables.byte_to_utf8[byte]);
-        }
-        return result;
-    }
-
-    static std::string byte_decode(const std::string& text) {
-        const auto& tables = byte_tables();
-        std::string result;
-        result.reserve(text.size());
-        size_t pos = 0;
-        while (pos < text.size()) {
-            size_t start = pos;
-            char32_t cp = utf8_to_char32(text, pos);
-            auto it = tables.cp_to_byte.find(cp);
-            if (it != tables.cp_to_byte.end()) {
-                result.push_back(static_cast<char>(it->second));
-            } else {
-                // Not a GPT-2 byte-encoded codepoint — pass through raw UTF-8
-                result.append(text, start, pos - start);
-            }
         }
         return result;
     }
@@ -1203,12 +1014,10 @@ class BpeTokenizer final : public ITokenizer {
                                          std::to_string(id));
             if (tok.at("special").get<bool>()) {
                 mSpecialTokens[content] = id;
-                mSpecialIds.insert(id);
             }
             // All added tokens (special and non-special) participate in pre-split
             // matching during encode, matching HuggingFace's AddedToken behavior.
-            // The special flag only controls decode filtering (mSpecialIds) and
-            // post_processor BOS/EOS insertion.
+            // The special flag only controls post_processor BOS/EOS insertion.
             mAddedTokenPatterns.push_back({content, id});
         }
         // Sort by length descending for longest-match-first
@@ -1331,58 +1140,11 @@ class BpeTokenizer final : public ITokenizer {
         }
     }
 
-    DecoderType classify_decoder_type(const nlohmann::json& j) const {
-        if (!j.contains("decoder") || j["decoder"].is_null()) {
-            return mIsMetaspace ? DecoderType::kMetaspace : DecoderType::kByteLevel;
-        }
-        std::string dt = j["decoder"].value("type", "");
-        if (dt == "ByteLevel")
-            return DecoderType::kByteLevel;
-        if (dt == "Metaspace")
-            return DecoderType::kMetaspace;
-        if (dt == "Sequence")
-            return DecoderType::kSequence;
-        return mIsMetaspace ? DecoderType::kMetaspace : DecoderType::kByteLevel;
-    }
-
-    void detect_decoder(const nlohmann::json& j) {
-        mDecoderType = classify_decoder_type(j);
-        if (mDecoderType == DecoderType::kSequence) {
-            parse_sequence_decoder(j["decoder"]);
-        }
-        // SentencePiece encode: vocab uses ▁ (U+2581) for spaces.
-        // Detect by: (1) ▁ in vocabulary, or (2) normalizer prepends ▁.
+    // SentencePiece encode: vocab uses ▁ (U+2581) for spaces.
+    // Detect by: (1) ▁ in vocabulary, or (2) normalizer prepends ▁.
+    void detect_sentencepiece() {
         static const std::string spiece_marker = "\xe2\x96\x81"; // U+2581
         mIsSentencePiece = mTokenToId.count(spiece_marker) > 0 || mSentencePiecePrependAlways;
-    }
-
-    void parse_seq_decoder_replace(const nlohmann::json& sub) {
-        SeqDecoderReplace rep;
-        if (sub.contains("pattern") && sub["pattern"].contains("String")) {
-            rep.pattern = sub["pattern"]["String"].get<std::string>();
-        }
-        rep.content = sub.value("content", "");
-        if (!rep.pattern.empty()) {
-            mSeqDecoderReplaces.push_back(std::move(rep));
-        }
-    }
-
-    void parse_sequence_decoder(const nlohmann::json& dec) {
-        if (!dec.contains("decoders"))
-            return;
-        for (auto& sub : dec["decoders"]) {
-            std::string sub_type = sub.value("type", "");
-            if (sub_type == "Replace") {
-                parse_seq_decoder_replace(sub);
-            } else if (sub_type == "ByteFallback") {
-                mSeqDecoderByteFallback = true;
-            } else if (sub_type == "Strip") {
-                if (sub.value("content", " ") == " " && sub.value("start", 0) > 0) {
-                    mSeqDecoderStripLeft = true;
-                }
-            }
-            // Fuse is implicit (tokens already joined)
-        }
     }
 
     static std::string optional_model_string(const nlohmann::json& model, const char* key) {
@@ -1417,7 +1179,7 @@ class BpeTokenizer final : public ITokenizer {
         parse_post_processor(j);
         detect_normalizer(j);
         detect_pre_tokenizer(j);
-        detect_decoder(j);
+        detect_sentencepiece();
     }
 
     // Detect normalizer: check for Prepend (always prepend ▁) vs none
@@ -1594,7 +1356,6 @@ class BpeTokenizer final : public ITokenizer {
     std::unordered_map<std::pair<std::string, std::string>, int, PairHash> mMergeRank;
 
     std::unordered_map<std::string, int32_t> mSpecialTokens;
-    std::unordered_set<int32_t> mSpecialIds; // O(1) lookup in decode()
 
     // Non-special added tokens: matched before pre-tokenization (longest first)
     std::vector<std::pair<std::string, int32_t>> mAddedTokenPatterns;
@@ -1617,17 +1378,6 @@ class BpeTokenizer final : public ITokenizer {
     std::vector<int32_t> mPostEosIds;
     pretok::Variant mPreTokenizerVariant = pretok::Variant::kGemma;
     int mPreTokenizerDigitGroup = 0; // 0=unlimited, 3=\p{N}{1,3} (LLaMA 3.1/GLM-4)
-
-    DecoderType mDecoderType = DecoderType::kByteLevel;
-
-    // Sequence decoder config (parsed from tokenizer.json decoder field)
-    struct SeqDecoderReplace {
-        std::string pattern;
-        std::string content;
-    };
-    std::vector<SeqDecoderReplace> mSeqDecoderReplaces;
-    bool mSeqDecoderByteFallback = false;
-    bool mSeqDecoderStripLeft = false;
 };
 
 } // namespace
