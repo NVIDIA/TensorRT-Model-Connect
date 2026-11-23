@@ -43,7 +43,7 @@ def caption(color):
     return json.dumps(
         {
             "high_level_description": f"A {color} cup on a white table.",
-            "style_description": {"medium": "photograph"},
+            "style_description": {"photo": "Studio product photography", "medium": "photograph"},
             "compositional_deconstruction": {
                 "background": "White studio.",
                 "elements": [
@@ -180,6 +180,9 @@ def test_e2e(case_name, request, tmp_path, tmp_path_factory):
         tokenize=False,
     )
     with evidence_stage("preprocess"):
+        from ideogram4.caption_verifier import CaptionVerifier
+
+        assert CaptionVerifier().verify_raw(prompt) == []
         samples = [framed, "Cafe\u0301 and 中文 1234567", "<|im_start|>user\nhello"]
         helper = Path(os.environ["TRTMC_NATIVE_BUILD_DIR"]) / "test_ideogram4_tokenizer"
         actual = json.loads(
@@ -203,7 +206,7 @@ def test_e2e(case_name, request, tmp_path, tmp_path_factory):
                     output_path=_BUNDLE,
                     family="ideogram4",
                     task="text_to_image",
-                    precision="bf16",
+                    precision=MANIFEST["precision"],
                     image_height=MANIFEST["image_height"],
                     image_width=MANIFEST["image_width"],
                     max_sequence_length=MANIFEST["max_sequence_length"],

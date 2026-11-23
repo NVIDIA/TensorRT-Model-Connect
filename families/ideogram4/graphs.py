@@ -180,6 +180,12 @@ def compile_engine(module, inputs, input_names, output_name, directory: Path, ve
             "Ideogram4 ONNX import failed: "
             + "\n".join(str(parser.get_error(i)) for i in range(parser.num_errors))
         )
+    # The VAE has a 512-wide attention head. Permit TensorRT to lower attention
+    # to its primitive operations when that shape has no dedicated fused kernel.
+    for layer in network:
+        if layer.type == trt.LayerType.ATTENTION_INPUT:
+            layer.__class__ = trt.IAttentionInputLayer
+            layer.attention.decomposable = True
     settings = builder.create_builder_config()
     settings.builder_optimization_level = 3
     settings.clear_flag(trt.BuilderFlag.TF32)
