@@ -77,6 +77,10 @@ A compatible pip installation may provide Python tools; Edge-backed C++ inferenc
 still requires the matching provisioned SDK. Preparation failures warn and attempt
 the unchanged native request once; runtime failures propagate.
 
+The measured native compiler failures are matched by layer order, attention
+and state dimensions, and routed and shared expert widths. Other graph shapes
+remain eligible for native compilation; eligibility is not a validation result.
+
 ## Native fallback
 
 Without compatible Edge offload, the family uses TensorRT Python graph construction

@@ -17,7 +17,7 @@ import traceback
 from ..config import normalize_target_layers
 from . import builder as edge_llm
 from .edge_quantization import source_quantization
-from .edge_config import topology_matches
+from .edge_config import layers, topology_matches
 
 _LOG = logging.getLogger(__name__)
 # Native platforms with recorded passing family profiles; admission is not qualification.
@@ -83,18 +83,47 @@ def _adapter_for(raw: dict, target: dict, precision: str):
     return None
 
 
+# The serializer failures were observed on two ordered target topologies. A
+# nearby graph is eligible for native execution, even on the same device.
+_NANO_LAYER_ORDER = "MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME"
+_SUPER_LAYER_ORDER = (
+    "MEMEMEM*EMEMEMEM*EMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*"
+    "EMEMEMEMEM*EMEMEMEMEM*EMEMEMEM*EMEMEMEME"
+)
+
+
+def _measured_target_graph(raw: dict, *, large: bool) -> bool:
+    pattern = _SUPER_LAYER_ORDER if large else _NANO_LAYER_ORDER
+    names = {"M": "mamba", "E": "moe", "*": "attention"}
+    if layers(raw) != [names[code] for code in pattern]:
+        return False
+    expected = {
+        "vocab_size": 131072, "hidden_size": 4096 if large else 2688,
+        "num_attention_heads": 32, "num_key_value_heads": 2, "head_dim": 128,
+        "mamba_num_heads": 128 if large else 64, "mamba_head_dim": 64,
+        "n_groups": 8, "ssm_state_size": 128, "conv_kernel": 4,
+        "n_routed_experts": 512 if large else 128, "n_shared_experts": 1,
+        "num_experts_per_tok": 22 if large else 6, "n_group": 1, "topk_group": 1,
+        "moe_intermediate_size": 2688 if large else 1856,
+        "moe_shared_expert_intermediate_size": 5376 if large else 3712,
+        "moe_latent_size": 1024 if large else None,
+        "norm_topk_prob": True, "routed_scaling_factor": 5.0 if large else 2.5,
+    }
+    return all(raw.get(key) == value for key, value in expected.items())
+
+
 def _compiler_profile(raw: dict, precision: str | None, variant: str) -> tuple[str, int] | None:
     """Identify a measured target graph, not a general restriction on quantized MoE."""
     raw = normalize_target_layers(raw)
-    shape = (raw.get("num_hidden_layers"), raw.get("hidden_size"), raw.get("n_routed_experts"))
     policy = raw.get("quantization_config") or {}
-    if (raw.get("model_type") != "nemotron_h" or not isinstance(policy, dict)
-            or (raw.get("num_attention_heads"), raw.get("num_key_value_heads")) != (32, 2)):
+    if raw.get("model_type") != "nemotron_h" or not isinstance(policy, dict):
         return None
-    if shape == (88, 4096, 512) and variant == "ordinary" and precision == "nvfp4":
-        if raw.get("moe_latent_size") == 1024 and policy.get("quant_algo") == "MIXED_PRECISION":
+    if raw.get("num_hidden_layers") == 88:
+        if (variant == "ordinary" and precision == "nvfp4" and policy.get("quant_algo") == "MIXED_PRECISION"
+                and _measured_target_graph(raw, large=True)):
             return "Super 120B NVFP4", 103
-    if shape != (52, 2688, 128):
+        return None
+    if raw.get("num_hidden_layers") != 52 or not _measured_target_graph(raw, large=False):
         return None
     if (variant == "ordinary" and precision == "nvfp4" and not policy
             and raw.get("num_nextn_predict_layers") is None):

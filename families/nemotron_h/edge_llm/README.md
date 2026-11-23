@@ -161,6 +161,12 @@ MC rejects this ordinary capacity-256 profile before retrying a known crash
 on ARM64 SM103, CUDA 13.4 and TensorRT 11.4.0.106. This is not a restriction
 on all GPUs or a change to the generic native graph.
 
+The native compiler guard matches layer order as well as attention, recurrent
+state, expert and routing dimensions. For example, the measured Nano routed
+expert width is 1856; a different width is not blocked by that result, even on
+the same compiler stack. Passing this admission check does not mean the
+different graph has been built or qualified.
+
 The family also checks before invoking native serialization, even if no Edge
 SDK is present. On Linux ARM64 with CUDA 13.4 and TensorRT 11.4.0.106, it
 does not retry the measured batch-one, TP1, FP16-compute, capacity-256
