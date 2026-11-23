@@ -139,6 +139,15 @@ def test_runtime_config_carries_the_pipeline_defaults(tmp_path):
                          "down_block_types": ["DownEncoderBlock2D"] * 3}, "four levels"),
     ("feature_extractor/preprocessor_config.json", {"image_std": [0.27, 0.0, 0.28]},
      "positive standard deviations"),
+    # Values runtime.json must carry for the bundle to load are refused before the build.
+    ("unet/config.json", {"addition_time_embed_dim": 384}, "three added time ids"),
+    ("unet/config.json", {"addition_time_embed_dim": 0}, "three added time ids"),
+    ("unet/config.json", {"num_frames": 0}, "num_frames"),
+    ("vae/config.json", {"scaling_factor": 0.0}, "scaling factor"),
+    ("vae/config.json", {"scaling_factor": float("inf")}, "scaling factor"),
+    ("scheduler/scheduler_config.json", {"sigma_min": 0.0}, "Karras range"),
+    ("scheduler/scheduler_config.json", {"sigma_min": 800.0}, "Karras range"),
+    ("scheduler/scheduler_config.json", {"sigma_max": float("inf")}, "Karras range"),
 ])
 def test_unbuilt_variants_are_refused(tmp_path, name, change, message):
     with pytest.raises(NotImplementedError, match=message):

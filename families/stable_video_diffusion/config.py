@@ -61,7 +61,10 @@ def _unet(raw: dict) -> dict:
              "attention heads must divide the level widths")
     width = int(raw["addition_time_embed_dim"])
     projection = int(raw["projection_class_embeddings_input_dim"])
-    _require(projection % width == 0, "the added time ids must fill the projection input")
+    # The runtime sends fps - 1, motion_bucket_id and noise_aug_strength.
+    _require(width > 0 and projection == 3 * width,
+             "the UNet must take three added time ids of one embedding width each")
+    _require(int(raw["num_frames"]) > 0, "num_frames must be positive")
     return {
         "in_channels": int(raw["in_channels"]),
         "out_channels": int(raw["out_channels"]),
@@ -86,12 +89,15 @@ def _vae(raw: dict) -> dict:
     _require(len(raw["block_out_channels"]) == 4,
              "the VAE must have four levels: the bundle uses an eightfold latent scale")
     _require(int(raw["in_channels"]) == 3 and int(raw["out_channels"]) == 3, "the VAE must be RGB")
+    scaling_factor = float(raw["scaling_factor"])
+    _require(math.isfinite(scaling_factor) and scaling_factor > 0.0,
+             "the VAE scaling factor must be finite and positive")
     return {
         "in_channels": 3,
         "block_out_channels": [int(value) for value in raw["block_out_channels"]],
         "layers_per_block": int(raw["layers_per_block"]),
         "latent_channels": int(raw["latent_channels"]),
-        "scaling_factor": float(raw["scaling_factor"]),
+        "scaling_factor": scaling_factor,
         "force_upcast": bool(raw.get("force_upcast", True)),
     }
 
@@ -122,11 +128,14 @@ def _scheduler(raw: dict) -> dict:
     _require(not raw.get("rescale_betas_zero_snr"), "zero-SNR rescaling is not built")
     _require(raw.get("sigma_min") is not None and raw.get("sigma_max") is not None,
              "the Karras range must be explicit")
+    sigma_min, sigma_max = float(raw["sigma_min"]), float(raw["sigma_max"])
+    _require(math.isfinite(sigma_max) and 0.0 < sigma_min < sigma_max,
+             "the Karras range must be finite with 0 < sigma_min < sigma_max")
     spacing = raw.get("timestep_spacing", "linspace")
     _require(spacing in {"linspace", "leading", "trailing"}, "unknown timestep_spacing")
     return {
-        "sigma_min": float(raw["sigma_min"]),
-        "sigma_max": float(raw["sigma_max"]),
+        "sigma_min": sigma_min,
+        "sigma_max": sigma_max,
         # EulerDiscreteScheduler.init_noise_sigma: the largest sigma for linspace
         # and trailing spacing, sqrt(sigma_max^2 + 1) otherwise.
         "init_noise_sigma_includes_unit": spacing not in {"linspace", "trailing"},
