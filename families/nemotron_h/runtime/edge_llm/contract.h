@@ -16,7 +16,11 @@ namespace trtmc::nemotron_h::edge_llm {
 /// Match the native Nemotron-H task default; insufficient capacity is an explicit error.
 inline constexpr int kDefaultMaxNewTokens = 128;
 
+#ifdef TRTMC_NEMOTRON_H_EDGE_012
+inline constexpr const char* kRevision = "513dcd18291e587c80928911a480761352f3c2d8";
+#else
 inline constexpr const char* kRevision = "95515c2f87fba8982db5a519f9022277667b3cc9";
+#endif
 
 /// Return whether an artifact is a normalized file below one of the three Edge roots.
 inline bool safe_artifact_path(const std::string& name) {
@@ -38,7 +42,12 @@ inline void validate_generation(const TextGenerationConfig& c) {
     if (!std::isfinite(c.temperature) || c.temperature < 0 || !std::isfinite(c.top_p) ||
         c.top_p < 0 || c.top_p > 1 || c.top_k < 0)
         throw std::invalid_argument("Invalid Nemotron-H Edge sampling parameters");
-    if (c.min_p != 0 || c.seed != -1 || c.eos_token_id != -1 || c.repetition_penalty != 1 ||
+#ifdef TRTMC_NEMOTRON_H_EDGE_012
+    const bool invalid_seed = c.seed < -1;
+#else
+    const bool invalid_seed = c.seed != -1;
+#endif
+    if (c.min_p != 0 || invalid_seed || c.eos_token_id != -1 || c.repetition_penalty != 1 ||
         !c.lora_adapter_id.empty() || c.stop_on_boxed_answer ||
         (c.text_generation_mode != "auto" && c.text_generation_mode != "autoregressive") ||
         c.source_language_token_id != -1 || c.forced_bos_token_id != -1 || c.guidance_scale != -1 ||

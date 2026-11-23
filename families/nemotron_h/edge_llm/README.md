@@ -3,21 +3,31 @@
 The family owns source-policy admission, command mapping, tokenizer/EOS semantics,
 engine composition and runtime orchestration. TensorRT Edge-LLM owns model graphs,
 lowering and execution. Provision the [optional native SDK](../../../cmake/edge_llm/README.md)
-from official GitHub Edge-LLM 0.11.0, revision
-`95515c2f87fba8982db5a519f9022277667b3cc9`. No internal source changes or
-cross-compilation are used.
+from the official release selected at configure time. The default is 0.11.0.
+To select 0.12.0 (revision `513dcd18291e587c80928911a480761352f3c2d8`),
+configure with `-DTRTMC_EDGELLM_RELEASE=0.12.0`. Build on the machine
+that will run the model. Do not mix an SDK from one release with another
+release's builder or runtime.
 
-A compatible installed 0.11.0 wheel can provide the Python builder tools;
-otherwise the family uses the provisioned SDK interpreter. The native C++ SDK
-is still required. Interpreter discovery does not install packages or introduce
-multi-version dispatch.
+For 0.12.0, pass `--edge-builder-python /absolute/path/to/python` when the
+builder is installed in a separate environment. A PyPI installation and a
+source installation are discovered the same way: the interpreter must import
+the selected Edge modules, Transformers 5.17.0 and the matching TensorRT
+version. If omitted, the adapter probes the current interpreter. It does not
+install Python packages or replace the native C++ SDK. With 0.11.0, the
+provisioned SDK interpreter remains the fallback for an incompatible ambient
+interpreter.
 
 ## Ordinary and paired builds
 
-Ordinary compatible text builds use the installed experimental Python builder
-with components=llm and original checkpoints. Plain source weights use FP16
-compute; packed FP8/NVFP4 or mixed policies remain in their declared formats.
-The adapter preserves source scales, exclusions and KV policy. For packed
+Ordinary compatible text builds use the release’s checkpoint-direct Python builder
+with `--components llm` and the original checkpoint. Plain source weights use
+FP16 compute. For the RedHatAI Lightning 30B FP8 checkpoint, the
+[Edge 0.12.0 catalog](https://github.com/NVIDIA/TensorRT-Edge-LLM/blob/513dcd18291e587c80928911a480761352f3c2d8/docs/source/user_guide/getting_started/supported-models.md)
+specifies checkpoint-direct execution with **FP16 routed experts**. The
+builder applies the stored FP8 weight scales when materializing those experts;
+the FP8 checkpoint label does not mean they execute in FP8. This checkpoint
+has no K/V calibration scales, so the Edge plan uses FP16 KV storage. For packed
 sources, only supported external-weight kinds are requested; FP16 bias tensors
 are baked into the engine rather than externalized through a missing recipe.
 
@@ -30,9 +40,11 @@ or wrap the request with this family's `with_execution(request, inputs)`
 before calling `build`, as the Python example below shows.
 
 Both paired engines are mandatory. The ONNX graph supplies the intermediate
-Mamba/replay states required to commit accepted draft tokens; the experimental
-builder's final-only state outputs do not implement this pair. No base-only
-engine is substituted. ONNX projection weights are baked into plans and are not
+Mamba/replay states required by this adapter to commit accepted draft tokens.
+For 0.12.0 DSpark, the exporter declares the Markov W2 format in
+`dspark_heads_info.json`. A packed W2 must travel in
+`dspark_w2_nvfp4.safetensors` alongside the regular head sidecar.
+No base-only engine is substituted. ONNX projection weights are baked into plans and are not
 duplicated in the bundle. Successfully consumed ONNX intermediates are removed.
 
 Ordinary preparation failure warns, retains a diagnostic log and attempts the
@@ -71,8 +83,8 @@ chain logits, matching the pinned source, with a sixteen-node verification
 budget. Proposal siblings do not silently recompute a different Markov policy.
 The target's actual untied LM head and companion-owned embeddings are retained.
 
-The exact native DFlash and greedy DDTree profiles below pass full-checkpoint
-checks, including token-identical output to the same native target. DSpark chain
+In the historical 0.11.0 results below, the native DFlash and greedy DDTree
+profiles passed full-checkpoint checks, including token-identical output to the same native target. DSpark chain
 runs but retains a long-response accuracy failure. A stricter synthetic draft-logit
 comparison remains under investigation; it is not silently waived by those
 end-to-end results. Prepared/MoE tensor parallelism is not implemented; Edge
@@ -83,9 +95,12 @@ without retry.
 
 Admission requires compatible Nemotron-H text topology and source quantization,
 FP16 compute, TP 1/batch 1/context-parallel 1, and no unmapped build controls.
-The published platform routes are native x86_64 SM80 for plain sources and
-SM120 for plain/FP8/NVFP4 sources. These routes are admission rules, not proof for
-every compatible checkpoint or capacity.
+For 0.11.0, the Edge map admits x86_64 SM80 for plain sources and SM120 for
+plain/FP8/NVFP4 sources. For 0.12.0, Linux aarch64 and x86_64 workers on SM80
+or newer can try offload when the SDK receipt matches the local GPU, CUDA and
+TensorRT versions. Quantized or paired requests also require the full native
+kernel set. Admission is not qualification: the preparation step may still
+fail, and the unchanged native request may itself fail to build.
 
 Do not gate head80 on optimized CuTe SSD availability. The pinned Mamba plugin
 has a scalar-prefill fallback, which the recorded SM80/SM120 profiles exercise.
@@ -105,7 +120,106 @@ greedy-only, as does DSpark DDTree. DSpark chain forwards filtered sampling.
 Exact native paired outcomes are listed below. Runtime errors are not converted
 to native inference.
 
-## Exact native fallback results
+## Validated ordinary profiles (0.12.0)
+
+These results use TP1, batch 1 and a 256-token context. A pass requires
+the independent short-answer gate (normalized edit distance ≤ 0.15) and
+both released 128-token fixtures, greedy and sampled (ROUGE-1 ≥ 0.25 and
+ROUGE-L ≥ 0.20 on each). The standalone Edge runner passed both long fixtures for the MC Edge
+passes below except unquantized 9B v2: standalone passed sampled generation
+but missed the greedy ROUGE-L gate. A compiler failure produces no engine on
+that route; it is not an inference or accuracy failure.
+
+| Checkpoint | Tested GPU | MC Edge | MC native TensorRT |
+| --- | --- | --- | --- |
+| Nemotron-3 Nano 4B BF16 | A30 | Pass | Pass |
+| Nemotron-3 Nano 4B FP8 | GB300 | Pass | Pass |
+| Nemotron Nano 9B v2 (unquantized) | GB300 | MC passes; standalone greedy misses ROUGE-L (0.1954) | Pass |
+| Nemotron Nano 9B v2 FP8 | GB300 | Pass | Pass |
+| Nemotron Nano 9B v2 NVFP4 | GB300 | Pass | Pass |
+| Nemotron-3 Nano 30B A3B NVFP4 | GB300 | Runs; fails long accuracy gates | TensorRT 11.4 compiler crash |
+| Nemotron-3.5 Lightning 30B A3B NVFP4 | GB300 | Pass | TensorRT 11.4 compiler crash |
+| RedHatAI Lightning 30B A3B FP8 | GB200 | Pass, with FP16 routed experts | TensorRT 11.4 compiler crash |
+
+For Nano 4B BF16 on A30, an installed MC wheel also built a fresh bundle
+with an isolated PyPI Edge 0.12.0 builder. The MC Python environment did not
+contain PyTorch. The installed C++ runtime consumed the bundle without the
+source checkout, checkpoint or separate Edge SDK; it matched all ten reference
+token IDs and passed both released long-answer gates.
+
+On x86-64 SM120, the Nano 30B NVFP4 native build also crashed in TensorRT
+11.4 before producing an engine. This additional result is native-only; it
+does not establish a common cause with GB300. On GB300, the Super 120B
+NVFP4 checkpoint-direct Edge build failed during TensorRT tactic selection.
+The full 88-layer ONNX graph exported, but the released ONNX builder also
+failed the shader-workspace query and found no implementation for its fused
+node. The native fallback segfaulted during serialization; no route produced
+an engine and there was no GPU OOM. With the optional 0.12.0 SDK selected,
+MC rejects this ordinary capacity-256 profile before retrying a known crash
+on ARM64 SM103, CUDA 13.4 and TensorRT 11.4.0.106. This is not a restriction
+on all GPUs or a change to the generic native graph.
+
+The family also checks before invoking native serialization, even if no Edge
+SDK is present. On Linux ARM64 with CUDA 13.4 and TensorRT 11.4.0.106, it
+does not retry the measured batch-one, TP1, FP16-compute, capacity-256
+compiler crashes: Super 120B NVFP4, Nano 30B NVFP4 and Lightning 30B NVFP4
+on SM103, or the compressed Lightning 30B FP8 checkpoint on SM100. For
+Lightning NVFP4 this includes the DFlash, DSpark and DSpark tree target builds.
+Working Edge builds for the 30B profiles are still tried first, including
+those that missed an accuracy gate. The x86 crash above is a separate result,
+not evidence for disabling native build on every SM120 GPU. On an RTX PRO
+4500 Blackwell, the same Nano 30B native build also segfaulted before
+producing an engine. MC rejects that native retry on x86-64 for this model,
+capacity and compiler stack; other named SM120 GPUs are not excluded by it.
+If MC cannot identify the toolkit on a matching device, it reports the
+platform discovery error. Set `CUDACXX` to the actual toolkit compiler to
+distinguish the tested stack from a different one. An unidentified toolkit
+is not a demonstrated compiler failure.
+
+Nano 30B's short Edge result matches the independent reference. Its long
+greedy and sampled results miss the gates through both MC and the standalone
+Edge runner. The original BF16 checkpoint also misses a gate in each mode;
+these failures do not establish an MC-only regression. The Edge route remains
+runnable. None of the ordinary results qualify a companion or embedded MTP mode.
+
+For 9B v2 unquantized and FP8, the two runners did not receive identical greedy prompts.
+MC's explicit no-thinking setting closes the thinking block, as the original
+checkpoint template does with its `/no_think` instruction. The unmodified
+standalone fixture instead opens that block. The two runners received
+different rendered prompts. On the unquantized checkpoint, MC Edge passed greedy
+and sampled generation (ROUGE-L 0.317 and 0.309), while standalone Edge
+missed the original greedy gate and passed sampled generation (0.300).
+Using the checkpoint’s `/no_think` instruction, standalone Edge got the same
+rendered prompt as MC and passed greedy quality (ROUGE-L 0.296). Its output
+text still differed from MC’s. The original standalone failure is unchanged.
+
+## Speculative results (0.12.0)
+
+On GB300, Lightning 30B NVFP4 plus its DFlash companion passed the MC Edge
+short-answer and 128-token greedy gates at TP1, batch 1, context 256. The
+standalone runner produced the same greedy text with 68 verification rounds
+and a mean acceptance length of 1.88. The native build crashed in target
+serialization before loading the companion. This result does not qualify
+DSpark, tree decoding, or stochastic DFlash.
+
+With the DSpark companion in chain mode on the same GB300 profile, the MC
+Edge bundle contained both engines and the packed Markov W2 weights. Its
+short answer matched the independent reference token for token. The greedy
+128-token response passed (ROUGE-L 0.298); the sampled response ran but
+missed the 0.20 threshold (ROUGE-L 0.149). Standalone Edge on the same
+engines matched the greedy text and also missed the sampled gate (ROUGE-L
+0.059). With the same prompt and MC’s sampling seed (42), standalone Edge
+reproduced the MC sampled text exactly. This diagnostic does not replace
+either original score. The chain remains
+runnable but is not accuracy-qualified. The native chain build exited on a segmentation
+fault before inference; its traceback did not identify the faulting frame.
+DSpark tree was tested separately with draft top-k 4 and a 16-token
+verification profile. Its MC Edge short answer matched the reference. MC and
+standalone Edge produced the same greedy long answer (ROUGE-L 0.294), with
+36 verification rounds and mean acceptance length 3.56. This profile is
+greedy-only. Its independent native build crashed before inference.
+
+## Historical native fallback results (0.11.0 rollout)
 
 These results use family-owned TensorRT graphs and the MC C++ runtime, with
 FP16 compute, declared source quantization, TP1/batch1 and capacity 256. They do
@@ -257,7 +371,7 @@ build(with_execution(request, BuildExecutionInputs(
 A failed explicit pair is never replaced by a base-only bundle. The full-model results above were collected during the rollout; publication-head checks must be reported separately.
 
 Ordinary builds without an installed optional Edge SDK select native without a
-warning. Malformed or incomplete installed packages still retain diagnostics and
+warning unless the exact native compiler profile is known to crash. Malformed or incomplete installed packages still retain diagnostics and
 warn before native fallback. Temporary checkpoint/engine staging uses the bundle
 output directory filesystem (choose a scratch-backed output), not system /tmp.
 

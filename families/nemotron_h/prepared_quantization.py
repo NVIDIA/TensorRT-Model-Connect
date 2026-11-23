@@ -41,6 +41,10 @@ def checkpoint_policy(model_dir: Path, *, allow_legacy_producer: bool = False) -
     path = model_dir / "config.json"
     raw = json.loads(path.read_text()) if path.is_file() else {}
     embedded = raw.get("quantization_config") or {}
+    if embedded.get("quant_method") == "compressed-tensors":
+        from .compressed_fp8 import compressed_fp8_exclusions
+
+        return PreparedPolicy("FP8", {}, compressed_fp8_exclusions(model_dir, raw))
     sidecar = model_dir / "hf_quant_config.json"
     prepared = json.loads(sidecar.read_text()) if sidecar.is_file() else {}
     if not embedded and not prepared:

@@ -297,6 +297,36 @@ def test_edge_pair_requires_draft_and_rechecks_local_inputs(tmp_path, monkeypatc
     assert not native_calls
 
 
+def test_active_runner_owns_edge_sdk(tmp_path, monkeypatch) -> None:
+    from importlib.machinery import ModuleSpec
+
+    from families.nemotron_h.edge_llm import builder
+
+    module = tmp_path / "pkg/tensorrt_model_connect"
+    runner = module / "bin/trtmc"
+    runner.parent.mkdir(parents=True)
+    runner.touch()
+    spec = ModuleSpec("tensorrt_model_connect", None, origin=str(module / "__init__.py"))
+    monkeypatch.setattr(builder, "find_spec", lambda name: spec if name == spec.name else None)
+    relative = Path("share/trtmc/edge-llm.json")
+    standalone = tmp_path / "standalone"
+    (standalone / relative).parent.mkdir(parents=True)
+    (standalone / relative).write_text('{"version":"0.11.0"}')
+    monkeypatch.setattr(builder, "cmake_prefixes", lambda: [standalone])
+
+    # A native-only wheel must not prepare a bundle for another runner.
+    assert not builder.package_present()
+    assert builder.selected_release() is None
+    (module / relative).parent.mkdir(parents=True)
+    (module / relative).write_text('{"version":"0.12.0"}')
+    assert builder.package_present()
+    assert builder.selected_release() == "0.12.0"
+
+    # A source checkout without a packaged binary uses the standalone SDK.
+    runner.unlink()
+    assert builder.selected_release() == "0.11.0"
+
+
 @pytest.mark.parametrize("mode", ["absent", "success", "corrupt", "failure", "cancel", "device_failure"])
 def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, caplog, mode):
     import json
