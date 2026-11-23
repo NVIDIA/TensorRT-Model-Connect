@@ -152,17 +152,25 @@ def _dynamic_vision_profile(
 
 
 def _default_sequence_length(model_dir: str, config: ModelConfig) -> int:
-    """Reserve the largest image the dynamic vision profile admits plus text."""
+    """Reserve the largest image the vision profile admits plus text.
+
+    The runtime rejects a prompt longer than the KV cache, so the default must
+    hold the image tokens of both the dynamic and the fixed profile.
+    """
     from .qwen_vl_vision_builder import _smart_resize_max_profile_patches
 
     length = 256
     enabled, minimum, _, maximum = _dynamic_vision_profile(model_dir, config)
+    vision = config.raw.get("vision_config", {})
+    patch_size = int(vision.get("patch_size", 16 if _is_qwen3_vl(config) else 14))
+    merge_size = int(vision.get("spatial_merge_size", 2))
     if enabled:
-        vision = config.raw.get("vision_config", {})
-        patch_size = int(vision.get("patch_size", 16 if _is_qwen3_vl(config) else 14))
-        merge_size = int(vision.get("spatial_merge_size", 2))
         patches = _smart_resize_max_profile_patches(minimum, maximum, patch_size, merge_size)
         length += patches // (merge_size * merge_size)
+    else:
+        height, width = _fixed_image_dimensions(config)
+        merged = patch_size * merge_size
+        length += (height // merged) * (width // merged)
     return min(config.max_position_embeddings, length)
 
 

@@ -3,8 +3,8 @@
 
 """The family's OCRBench benchmark bundles hold the prompt and the whole answer.
 
-A full Qwen-VL KV cache slides and drops the oldest rows, the image among them, so each profile reserves
-its largest image, its chat template and the answer on top of the counted question tokens.
+Qwen-VL generation stops when its KV cache is full, so each profile reserves its largest image, its
+chat template and the answer on top of the counted question tokens.
 """
 
 from __future__ import annotations
