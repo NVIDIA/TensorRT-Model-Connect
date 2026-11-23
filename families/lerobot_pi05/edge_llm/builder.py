@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError, distribution
+from importlib.util import find_spec
 import json
 import logging
 from pathlib import Path
@@ -42,15 +42,12 @@ _ASSETS = (
 
 
 def _sdk_prefix() -> Path | None:
-    try:
-        package = distribution("tensorrt-model-connect")
-    except PackageNotFoundError:
-        pass
-    else:
-        installed = Path(package.locate_file("tensorrt_model_connect"))
+    package = find_spec("tensorrt_model_connect")
+    if package is not None and package.origin:
+        installed = Path(package.origin).parent
         receipt = installed / "share/trtmc/edge-llm.json"
-        if (installed / "bin/trtmc").is_file() and (receipt.exists() or receipt.is_symlink()):
-            # A broken wheel receipt does not authorize mixing this runtime with another SDK.
+        if (installed / "bin/trtmc").is_file():
+            # A packaged runner owns its DSO even when its Edge SDK is absent.
             for prefix in cmake_prefixes():
                 other = prefix / "share/trtmc/edge-llm.json"
                 if other.is_file() and other.resolve() != receipt.resolve():

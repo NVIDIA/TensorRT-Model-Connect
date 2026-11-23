@@ -561,3 +561,27 @@ def test_manifests_declare_the_public_tokenizer_copy() -> None:
             expected.extend({"path": name, "url": url} for name, url in assets)
         assert manifest["external_files"] == expected, path.name
         assert "hf_dependencies" not in manifest, path.name
+
+
+def test_active_pi_runner_owns_sdk(tmp_path, monkeypatch):
+    import tensorrt_model_connect
+    from families.lerobot_pi05.edge_llm import builder
+
+    installed = tmp_path / "site-packages/tensorrt_model_connect"
+    runner = installed / "bin/trtmc"
+    runner.parent.mkdir(parents=True)
+    runner.touch()
+    standalone = tmp_path / "standalone"
+    receipt = Path("share/trtmc/edge-llm.json")
+    (standalone / receipt).parent.mkdir(parents=True)
+    (standalone / receipt).write_text('{"version":"0.12.0"}')
+    monkeypatch.setattr(tensorrt_model_connect.__spec__, "origin", str(installed / "__init__.py"))
+    monkeypatch.setattr(builder, "cmake_prefixes", lambda: [standalone])
+
+    # A native-only packaged runner cannot load an Edge bundle for the standalone DSO.
+    assert builder._sdk_prefix() == installed
+    (installed / receipt).parent.mkdir(parents=True)
+    (installed / receipt).write_text('{"version":"0.12.0"}')
+    assert builder._sdk_prefix() == installed
+    runner.unlink()
+    assert builder._sdk_prefix() == standalone
