@@ -195,19 +195,17 @@ golden data.
 
 ## LibriSpeech accuracy fixture
 
-`families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav` and
-`families/higgs_audio_v2_tokenizer/tests/data/librispeech-test-clean-6930-75918-0003.wav`
-are PCM WAV versions of utterance `6930-75918-0003` from the LibriSpeech
-`families/mimi/tests/data/librispeech-test-clean-6930-75918-0003.wav`
-are unmodified copies of utterance `6930-75918-0003` from the LibriSpeech `test-clean` split,
-distributed by OpenSLR as SLR12 under the Creative Commons Attribution 4.0
-`families/wav2vec2_bert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
-are PCM WAV conversions of utterance `6930-75918-0003` from the LibriSpeech
-`test-clean` split, which OpenSLR distributes as FLAC in SLR12 under the
-Creative Commons Attribution 4.0
-International license. LibriSpeech was prepared by Vassil Panayotov with the
-assistance of Daniel Povey and is derived from LibriVox public-domain
-audiobooks.
+The following paths contain PCM WAV conversions of utterance `6930-75918-0003`
+from the LibriSpeech `test-clean` split, which OpenSLR distributes as FLAC in
+SLR12 under the Creative Commons Attribution 4.0 International license:
+
+- `families/higgs_audio_v2_tokenizer/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/mimi/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/wav2vec2_bert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+
+LibriSpeech was prepared by Vassil Panayotov with the assistance of Daniel Povey
+and is derived from LibriVox public-domain audiobooks.
 
 - Source and attribution: https://www.openslr.org/12/
 - License: https://creativecommons.org/licenses/by/4.0/
