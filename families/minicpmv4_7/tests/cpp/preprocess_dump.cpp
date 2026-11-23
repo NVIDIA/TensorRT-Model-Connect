@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// E2E helper: run the runtime's host-side request preparation for one conversation and dump it
-// for comparison with the provider processor.
+// E2E helper: build one conversation's prompt ids, crops and canvas positions with the runtime's
+// preprocessing, prompt and tokenizer units, and dump them for comparison with the provider
+// processor. It maps the request itself and does not call prepare_request.
 //
 //   minicpmv4_7_preprocess_dump BUNDLE REQUEST_JSON OUTPUT_DIR
 //
