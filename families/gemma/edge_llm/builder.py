@@ -271,8 +271,12 @@ def validate_pair(request, execution) -> tuple[dict, Path, int]:
     verify_size = block_size if execution.variant == "dflash" else {"mtp": 4, "dspark": 8, "eagle3": 60, "jetspec": 128}[execution.variant]
     if bolt:
         verify_size = 16  # Both runtime modes use the same 16/16 direct engine build.
-    if any(type(v) is not int or v < limit for v in capacities) or not verify_size < limit <= 1024:
-        raise ValueError("Gemma4 pair requires context above its verify size and at most 1024")
+    # The runtime reserves its verification tree in addition to the prompt and output.
+    greedy_bolt = bolt and (getattr(execution, "draft_top_k", None) or 1) == 1
+    runtime_verify = 8 if greedy_bolt else verify_size
+    minimum = max(verify_size + 1, runtime_verify + 2)
+    if any(type(v) is not int or v < limit for v in capacities) or not minimum <= limit <= 1024:
+        raise ValueError(f"Gemma4 pair requires context from {minimum} to 1024 for verification and generation")
     return raw, draft, limit
 
 

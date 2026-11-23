@@ -658,6 +658,10 @@ def test_original_and_unified_gemma_pair_geometry(tmp_path, monkeypatch, model_t
             builder.prepare(request, raw, draft, limit, sdk_target, tmp_path / "stage",
                             tmp_path / "unused.log", variant)
     if variant == "jetspec":
+        # The verification tree reserves 128 tokens before prompt and generation.
+        with pytest.raises(ValueError, match="context from 130"):
+            validate_pair(replace(request, max_sequence_length=129), execution)
+        assert validate_pair(replace(request, max_sequence_length=130), execution) == (raw, draft, 130)
         noncausal = {**companion, "dflash_config": {**companion["dflash_config"], "causal_head": False}}
         (draft / "config.json").write_text(json.dumps(noncausal))
         with pytest.raises(ValueError, match="causal block16"):
@@ -687,6 +691,10 @@ def test_original_and_unified_gemma_pair_geometry(tmp_path, monkeypatch, model_t
             explicit = execution_inputs("dflash", options, width)
             assert explicit.draft_top_k == width
             assert validate_pair(request, explicit) == (raw, draft, limit)
+            minimum = 17 if width == 1 else 18
+            with pytest.raises(ValueError, match=f"context from {minimum}"):
+                validate_pair(replace(request, max_sequence_length=minimum - 1), explicit)
+            assert validate_pair(replace(request, max_sequence_length=minimum), explicit) == (raw, draft, minimum)
         with pytest.raises(ValueError):
             execution_inputs("dflash", options, 2)
         with pytest.raises(ValueError):
