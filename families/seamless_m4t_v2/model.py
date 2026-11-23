@@ -28,7 +28,7 @@ def build_engine(weights, cfg, length, *, decoder=False, verbose=False):
         hidden, graph.const(np.full((1, 1), width**0.5 if cfg["scale_embedding"] else 1))
     )
     table = SeamlessM4Tv2SinusoidalPositionalEmbedding.get_embedding(
-        length + 2, width, cfg["pad_token_id"]
+        length + cfg["pad_token_id"] + 1, width, cfg["pad_token_id"]
     ).numpy()
     hidden = graph.add(hidden, net.add_gather(graph.const(table), positions, 0).get_output(0))
 

@@ -4,6 +4,7 @@
  */
 #include "families/seamless_m4t_v2/runtime/tokenizer.h"
 
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
@@ -13,6 +14,9 @@ int main(int argc, char** argv) {
         return 2;
     std::ifstream file(argv[1]);
     const std::string data((std::istreambuf_iterator<char>(file)), {});
-    const auto tokenizer = trtmc::CreateBpeTokenizer(data.data(), data.size(), false);
+    std::ifstream config(std::filesystem::path(argv[1]).parent_path() / "config.json");
+    const auto cfg = nlohmann::json::parse(config);
+    const auto tokenizer = trtmc::CreateBpeTokenizer(data.data(), data.size(), false,
+                                                     cfg.at("vocab_size").get<std::size_t>());
     std::cout << nlohmann::json(tokenizer->encode(argv[2])).dump() << '\n';
 }

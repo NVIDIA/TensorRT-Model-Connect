@@ -42,7 +42,9 @@ class Pipeline final : public internal::IModel, public internal::ITextTranslatio
              std::unique_ptr<ITokenizer> tokenizer, nlohmann::json cfg)
         : encoder_(std::move(encoder)), decoder_(std::move(decoder)),
           tokenizer_(std::move(tokenizer)), cfg_(std::move(cfg)),
-          fields_{{"max_new_tokens", internal::ConfigKind::I64, internal::ConfigValue{int64_t{64}},
+          fields_{{"max_new_tokens", internal::ConfigKind::I64,
+                   internal::ConfigValue{
+                       std::min<int64_t>(64, cfg_.at("sequence_length").get<int64_t>() - 2)},
                    "Maximum generated tokens; greedy decoding"}} {}
     const char* task() const noexcept override { return "text_translation"; }
     std::vector<internal::TaskInstance> task_bindings() override {
@@ -169,7 +171,7 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         return engine;
     };
     const auto raw_tokenizer = seamless_m4t_v2::section(context.reader, "tokenizer.json");
-    auto tokenizer = CreateBpeTokenizer(raw_tokenizer.data(), raw_tokenizer.size(), false);
+    auto tokenizer = CreateBpeTokenizer(raw_tokenizer.data(), raw_tokenizer.size(), false, vocab);
     return new seamless_m4t_v2::Pipeline(load("encoder.plan"), load("decoder.plan"),
                                          std::move(tokenizer), cfg);
 }
