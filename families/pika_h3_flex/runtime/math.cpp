@@ -4,10 +4,13 @@
  */
 // Mathematical primitives for the checkpoint's mixed-precision transformers.
 // TensorRT supplies buffers and the stream through the public TVM-FFI bridge.
+#include "families/pika_h3_flex/runtime/math.h"
+
 #include <ATen/ATen.h>
 #include <ATen/Context.h>
 #include <c10/core/InferenceMode.h>
 #include <c10/core/impl/LocalDispatchKeySet.h>
+#include <c10/cuda/CUDAFunctions.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cmath>
@@ -18,7 +21,22 @@
 #include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/extra/c_env_api.h>
 #include <tvm/ffi/function.h>
+#include <unordered_map>
 #include <vector>
+
+namespace trtmc::pika_h3_flex {
+cudaStream_t execution_stream() {
+    // ATen caches temporary allocations by stream. Keep a persistent stream
+    // across the family's short-lived engines instead of retaining one cache
+    // for every block and sampling step. PyTorch owns these pooled streams.
+    thread_local std::unordered_map<int, c10::cuda::CUDAStream> streams;
+    const int device = c10::cuda::current_device();
+    auto found = streams.find(device);
+    if (found == streams.end())
+        found = streams.emplace(device, c10::cuda::getStreamFromPool(false, device)).first;
+    return found->second.stream();
+}
+} // namespace trtmc::pika_h3_flex
 
 namespace {
 using View = tvm::ffi::TensorView;

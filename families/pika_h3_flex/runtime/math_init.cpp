@@ -16,6 +16,12 @@
 #endif
 
 namespace trtmc::pika_h3_flex {
+#if !TRTMC_PIKA_HAS_MATH
+cudaStream_t execution_stream() {
+    throw std::runtime_error("Pika H3 Flex transformer math requires the TVM-FFI bridge");
+}
+#endif
+
 void initialize_math() {
 #if TRTMC_PIKA_HAS_MATH
     static std::once_flag once;

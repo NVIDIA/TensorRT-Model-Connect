@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #pragma once
+#include "families/pika_h3_flex/runtime/math.h"
 #include "trtmc/internal/video.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
@@ -60,7 +61,9 @@ struct Loader {
     }
     std::unique_ptr<ITrtModule> load(const std::string& name) const {
         const auto plan = section(name + ".plan");
-        auto result = backend.create_module(plan.data(), plan.size(), {});
+        ModuleCreateOptions options;
+        options.stream = execution_stream();
+        auto result = backend.create_module(plan.data(), plan.size(), options);
         if (!result || !result->ok())
             throw std::runtime_error("Cannot load Pika engine " + name);
         return result;
