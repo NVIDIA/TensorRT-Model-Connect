@@ -41,17 +41,38 @@ _PREPROCESSOR = {
     "max_num_patches": 16,
 }
 
+def _added(token_id, content, special=True, **options) -> dict:
+    return {"id": token_id, "content": content, "single_word": False, "lstrip": False,
+            "rstrip": False, "normalized": False, "special": special, **options}
+
+
+# Like the checkpoint's: every byte has its fallback token except the tab, whose character
+# is a vocabulary entry itself.
+_TOKEN_IDS = {"<pad>": 0, "<eos>": 1, "a": 2, "\t": 3,
+              **{f"<0x{byte:02X}>": 4 + byte for byte in range(256) if byte != 0x09}}
+
 _TOKENIZER = {
-    "added_tokens": [{"id": 0, "content": "<pad>", "special": True},
-                     {"id": 1, "content": "<eos>", "special": True}],
+    "added_tokens": [_added(0, "<pad>"), _added(1, "<eos>")],
     "normalizer": {"type": "Replace", "pattern": {"String": " "}, "content": "▁"},
     "pre_tokenizer": None,
     "post_processor": {"type": "TemplateProcessing",
                        "single": [{"Sequence": {"id": "A", "type_id": 0}},
-                                  {"SpecialToken": {"id": "<eos>", "type_id": 0}}]},
-    "model": {"type": "BPE", "byte_fallback": True, "vocab": {"<pad>": 0, "<eos>": 1, "a": 2},
-              "merges": []},
+                                  {"SpecialToken": {"id": "<eos>", "type_id": 0}}],
+                       "special_tokens": {"<eos>": {"id": "<eos>", "ids": [1],
+                                                    "tokens": ["<eos>"]}}},
+    "model": {"type": "BPE", "byte_fallback": True, "vocab": _TOKEN_IDS, "merges": []},
 }
+
+
+def _without_tokens(*names: str) -> dict:
+    return {"model": {**_TOKENIZER["model"],
+                      "vocab": {k: v for k, v in _TOKEN_IDS.items() if k not in names}}}
+
+
+def _end_token_expanding_to(ids) -> dict:
+    processor = dict(_TOKENIZER["post_processor"])
+    processor["special_tokens"] = {"<eos>": {"id": "<eos>", "ids": ids, "tokens": ["<eos>"]}}
+    return {"post_processor": processor}
 
 
 def _weights(**overrides) -> dict:
@@ -188,14 +209,46 @@ def test_the_tokenizer_contract_returns_the_pad_id(tmp_path: Path) -> None:
                              "single": [{"SpecialToken": {"id": "<bos>"}},
                                         {"Sequence": {"id": "A"}}]}}, "one end token"),
         ({"model": {"type": "Unigram", "vocab": []}}, "byte-fallback BPE"),
-        ({"added_tokens": [{"id": 0, "content": "<pad>", "special": True},
-                          {"id": 1, "content": "<eos>"}]}, "special token"),
+        ({"added_tokens": [_added(0, "<pad>"), _added(1, "<eos>", special=False)]}, "special token"),
+        # The reference turns a character whose byte token is missing into the unknown
+        # token; the runtime has no unknown-token path.
+        (_without_tokens("<0xAC>"), "missing <0xAC>"),
+        (_without_tokens("<0x7A>"), "missing <0x7A>"),
+        *[({"added_tokens": [_added(0, "<pad>"), _added(1, "<eos>"),
+                             _added(2, "a", special=False, **{option: True})]}, f"sets {option}")
+          for option in ("single_word", "lstrip", "rstrip", "normalized")],
+        # The reference gives an added token in the vocabulary the vocabulary's id.
+        ({"added_tokens": [_added(0, "<pad>"), _added(1, "<eos>"), _added(5, "a", special=False)]},
+         "vocabulary entry with id 5"),
+        ({"added_tokens": [_added(0, "<pad>"), _added(1, "<eos>"), _added(300, "<extra>")]},
+         "vocabulary entry with id 300"),
+        (_end_token_expanding_to([0, 1]), "exactly its id 1"),
+        (_end_token_expanding_to([0]), "exactly its id 1"),
+        ({"post_processor": {k: v for k, v in _TOKENIZER["post_processor"].items()
+                             if k != "special_tokens"}}, "exactly its id 1"),
     ],
 )
 def test_tokenizers_the_runtime_would_tokenise_differently_are_refused(
         tmp_path: Path, override: dict, message: str) -> None:
     with pytest.raises(NotImplementedError, match=message):
         model_module._tokenizer_contract(_model_dir(tmp_path, tokenizer={**_TOKENIZER, **override}))
+
+
+@pytest.mark.parametrize(
+    ("record", "message"),
+    [
+        ({k: v for k, v in _added(2, "a").items() if k != "content"}, "no string content"),
+        ({k: v for k, v in _added(2, "a").items() if k != "id"}, "no valid id"),
+        (_added("2", "a"), "no valid id"),
+        (_added(-1, "a"), "no valid id"),
+        ({k: v for k, v in _added(2, "a").items() if k != "normalized"}, "no boolean normalized"),
+        (_added(2, "a", lstrip=0), "no boolean lstrip"),
+    ],
+)
+def test_malformed_added_tokens_are_refused(tmp_path: Path, record: dict, message: str) -> None:
+    tokenizer = {**_TOKENIZER, "added_tokens": [*_TOKENIZER["added_tokens"], record]}
+    with pytest.raises(ValueError, match=message):
+        model_module._tokenizer_contract(_model_dir(tmp_path, tokenizer=tokenizer))
 
 
 class _Writer:

@@ -68,13 +68,58 @@ def _require_weights(weights: dict) -> None:
                 f"siglip2 is qualified for the float32 checkpoint; {key} is {value.dtype}")
 
 
+_ADDED_TOKEN_OPTIONS = ("single_word", "lstrip", "rstrip", "normalized")
+
+
+def _added_tokens(tokenizer: dict) -> list[dict]:
+    """Return the added tokens, each checked the way the runtime checks it on load.
+
+    The runtime matches an added token as it is, anywhere in the raw text, and gives it
+    the record's id. The reference does the same only for a token without matching
+    options, and gives a token that is in the vocabulary the vocabulary's id.
+    """
+    entries = tokenizer.get("added_tokens", [])
+    if not isinstance(entries, list):
+        raise ValueError("siglip2 tokenizer added_tokens must be a list")
+    vocab = tokenizer["model"]["vocab"]
+    for entry in entries:
+        if not isinstance(entry, dict) or not isinstance(entry.get("content"), str):
+            raise ValueError(f"siglip2 added token has no string content: {entry!r}")
+        content, token_id = entry["content"], entry.get("id")
+        if type(token_id) is not int or not 0 <= token_id <= 2**31 - 1:
+            raise ValueError(f"siglip2 added token {content!r} has no valid id")
+        for flag in (*_ADDED_TOKEN_OPTIONS, "special"):
+            if type(entry.get(flag)) is not bool:
+                raise ValueError(f"siglip2 added token {content!r} has no boolean {flag}")
+        options = [flag for flag in _ADDED_TOKEN_OPTIONS if entry[flag]]
+        if options:
+            raise NotImplementedError(
+                f"siglip2 matches added tokens as they are; {content!r} sets {', '.join(options)}")
+        if content not in vocab or type(vocab[content]) is not int or vocab[content] != token_id:
+            raise NotImplementedError(
+                f"siglip2 added token {content!r} is not the vocabulary entry with id {token_id}")
+    return entries
+
+
+def _check_byte_fallback(vocab: dict) -> None:
+    # The reference falls back to bytes all or nothing (the unknown token otherwise), and
+    # the runtime has no unknown-token path: every byte that a character outside the
+    # vocabulary can need must have its token. An ASCII byte needs none when its character
+    # is a vocabulary entry itself (this checkpoint's tab).
+    missing = [f"<0x{byte:02X}>" for byte in range(256)
+               if f"<0x{byte:02X}>" not in vocab and not (byte < 0x80 and chr(byte) in vocab)]
+    if missing:
+        raise NotImplementedError(
+            "siglip2 byte fallback needs a token for every byte; missing " + ", ".join(missing[:4]))
+
+
 def _token_id(tokenizer: dict, token: str) -> int:
     for entry in tokenizer.get("added_tokens", []):
         if entry.get("content") == token:
-            return int(entry["id"])
+            return entry["id"]
     vocab = tokenizer["model"]["vocab"]
-    if token in vocab:
-        return int(vocab[token])
+    if token in vocab and type(vocab[token]) is int:
+        return vocab[token]
     raise ValueError(f"siglip2 token {token!r} is not in the vocabulary")
 
 
@@ -95,17 +140,23 @@ def _tokenizer_contract(model_dir: Path) -> int:
     appends one end token. That is what this checkpoint ships and what the reference
     tokenizer runs: it does not lowercase (``do_lower_case`` in
     ``tokenizer_config.json`` is not applied by the reference), so neither does the
-    runtime. Anything else is refused here rather than tokenised differently.
+    runtime. The checkpoint's files also never need what the runtime leaves out: the byte
+    fallback never needs the unknown token, no added token sets a matching option or an id
+    other than its vocabulary id, and the end token expands to its own id alone. Anything
+    else is refused here rather than tokenised differently; the runtime checks the same
+    on load.
     """
     path = model_dir / "tokenizer.json"
     if not path.is_file():
         raise FileNotFoundError(f"missing siglip2 tokenizer: {path}")
     tokenizer = json.loads(path.read_text(encoding="utf-8"))
     model = tokenizer.get("model", {})
-    if model.get("type") != "BPE" or not model.get("byte_fallback"):
+    if model.get("type") != "BPE" or model.get("byte_fallback") is not True:
         raise NotImplementedError(
             "siglip2 is qualified for a byte-fallback BPE tokenizer, not "
             f"{model.get('type')!r}")
+    if not isinstance(model.get("vocab"), dict):
+        raise ValueError("siglip2 tokenizer model.vocab must be an object")
     expected_normalizer = {"type": "Replace", "pattern": {"String": " "},
                            "content": _SENTENCE_PIECE_SPACE}
     if tokenizer.get("normalizer") != expected_normalizer:
@@ -122,6 +173,8 @@ def _tokenizer_contract(model_dir: Path) -> int:
         # with exactly this template.
         raise NotImplementedError(
             "siglip2 is qualified for a template that appends one end token")
+    _check_byte_fallback(model["vocab"])
+    added_tokens = _added_tokens(tokenizer)
 
     config_path = model_dir / "tokenizer_config.json"
     if not config_path.is_file():
@@ -130,13 +183,21 @@ def _tokenizer_contract(model_dir: Path) -> int:
     eos_token = _named_token(tokenizer_config, "eos_token")
     if template[1]["SpecialToken"].get("id") != eos_token:
         raise NotImplementedError("siglip2 tokenizer template must append the end token")
-    _token_id(tokenizer, eos_token)
+    eos_id = _token_id(tokenizer, eos_token)
     # The runtime resolves template tokens only among the added tokens marked special; an
     # end token that is not marked would be dropped from every prompt.
-    if not any(entry.get("content") == eos_token and entry.get("special") is True
-               for entry in tokenizer.get("added_tokens", [])):
+    if not any(entry["content"] == eos_token and entry["special"] for entry in added_tokens):
         raise NotImplementedError(
             "siglip2 tokenizer must register its end token as a special token")
+    # The template appends the ids its special_tokens entry lists; the runtime appends the
+    # end token's one id, and keeps a window's last slot for it.
+    special_tokens = tokenizer["post_processor"].get("special_tokens")
+    entry = special_tokens.get(eos_token) if isinstance(special_tokens, dict) else None
+    expansion = entry.get("ids") if isinstance(entry, dict) else None
+    if not (isinstance(expansion, list) and len(expansion) == 1
+            and type(expansion[0]) is int and expansion[0] == eos_id):
+        raise NotImplementedError(
+            f"siglip2 tokenizer template must expand {eos_token!r} to exactly its id {eos_id}")
     return _token_id(tokenizer, _named_token(tokenizer_config, "pad_token"))
 
 

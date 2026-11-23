@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cassert>
 #include <climits>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <list>
@@ -1077,8 +1078,26 @@ class BpeTokenizer final : public ITokenizer {
 
     // ─── JSON parsing helpers ───
 
-    static bool is_eos_content(const std::string& s) {
-        return s == "<|endoftext|>" || s == "</s>" || s == "<|end_of_text|>";
+    // The reference falls back to bytes all or nothing: a character outside the vocabulary
+    // becomes its byte tokens only when every one of them is in the vocabulary, and the
+    // unknown token otherwise. The runtime has no unknown-token path, so it takes only a
+    // vocabulary in which every byte that such a character can need has its token: all of
+    // them, except an ASCII byte whose character is a vocabulary entry itself (the only
+    // character that holds that byte).
+    void check_byte_fallback_coverage() const {
+        if (!mByteFallback)
+            throw std::runtime_error(
+                "Unsupported tokenizer.json: the model must fall back to bytes");
+        for (int byte = 0; byte < 256; ++byte) {
+            char name[8];
+            std::snprintf(name, sizeof(name), "<0x%02X>", byte);
+            if (mTokenToId.count(name) != 0)
+                continue;
+            if (byte < 0x80 && mTokenToId.count(std::string(1, static_cast<char>(byte))) != 0)
+                continue;
+            throw std::runtime_error(std::string("Unsupported tokenizer.json: no byte token ") +
+                                     name + " for the byte fallback");
+        }
     }
 
     void parse_vocab(const nlohmann::json& j) {
@@ -1127,26 +1146,56 @@ class BpeTokenizer final : public ITokenizer {
         }
     }
 
+    // One added_tokens record, read with checked access: a record without its fields is a
+    // load error, never a lookup of a missing key.
+    static std::pair<std::string, int32_t> read_added_token(const nlohmann::json& tok) {
+        if (!tok.is_object())
+            throw std::runtime_error(
+                "Invalid tokenizer.json: an added_tokens entry is not an object");
+        const auto content = tok.find("content");
+        if (content == tok.end() || !content->is_string())
+            throw std::runtime_error(
+                "Invalid tokenizer.json: an added_tokens entry has no string content");
+        const std::string text = content->get<std::string>();
+        const auto id = tok.find("id");
+        if (id == tok.end() || !id->is_number_unsigned() ||
+            id->get<std::uint64_t>() > static_cast<std::uint64_t>(INT32_MAX))
+            throw std::runtime_error("Invalid tokenizer.json: added token " + text +
+                                     " has no valid id");
+        for (const char* flag : {"single_word", "lstrip", "rstrip", "normalized", "special"}) {
+            const auto value = tok.find(flag);
+            if (value == tok.end() || !value->is_boolean())
+                throw std::runtime_error("Invalid tokenizer.json: added token " + text +
+                                         " has no boolean " + flag);
+        }
+        // The runtime matches an added token as it is, anywhere in the raw text, which is
+        // the reference's behaviour only when none of these options is set.
+        for (const char* flag : {"single_word", "lstrip", "rstrip", "normalized"}) {
+            if (tok.at(flag).get<bool>())
+                throw std::runtime_error("Unsupported tokenizer.json: added token " + text +
+                                         " sets " + flag);
+        }
+        return {text, static_cast<int32_t>(id->get<std::uint64_t>())};
+    }
+
     void parse_added_tokens(const nlohmann::json& j) {
-        if (!j.contains("added_tokens"))
+        const auto list = j.find("added_tokens");
+        if (list == j.end())
             return;
-        for (auto& tok : j["added_tokens"]) {
-            std::string content = tok["content"].get<std::string>();
-            int32_t id = tok["id"].get<int32_t>();
-
-            if (id >= 0 && static_cast<size_t>(id) >= mVocab.size()) {
-                mVocab.resize(static_cast<size_t>(id) + 1);
-            }
-            if (id >= 0) {
-                mVocab[id] = content;
-                mTokenToId[content] = id;
-            }
-
-            if (tok.value("special", false)) {
+        if (!list->is_array())
+            throw std::runtime_error("Invalid tokenizer.json: added_tokens must be an array");
+        for (const auto& tok : *list) {
+            const auto [content, id] = read_added_token(tok);
+            // The reference gives an added token that is in the vocabulary the vocabulary's
+            // id; the runtime uses the record's, so the two must agree.
+            const auto in_vocab = mTokenToId.find(content);
+            if (in_vocab == mTokenToId.end() || in_vocab->second != id)
+                throw std::runtime_error("Unsupported tokenizer.json: added token " + content +
+                                         " is not the vocabulary entry with id " +
+                                         std::to_string(id));
+            if (tok.at("special").get<bool>()) {
                 mSpecialTokens[content] = id;
                 mSpecialIds.insert(id);
-                if (is_eos_content(content))
-                    mEosId = id;
             }
             // All added tokens (special and non-special) participate in pre-split
             // matching during encode, matching HuggingFace's AddedToken behavior.
@@ -1354,6 +1403,7 @@ class BpeTokenizer final : public ITokenizer {
         mByteFallback = model.value("byte_fallback", false);
         mEndOfWordSuffix = optional_model_string(model, "end_of_word_suffix");
         parse_vocab(j);
+        check_byte_fallback_coverage();
         parse_merges(j);
         parse_added_tokens(j);
         parse_post_processor(j);
@@ -1470,28 +1520,48 @@ class BpeTokenizer final : public ITokenizer {
         }
     }
 
-    int32_t resolve_special_token_id(const nlohmann::json& entry) const {
-        if (!entry.contains("SpecialToken"))
-            return -1;
-        std::string token_id = entry["SpecialToken"].value("id", "");
-        if (token_id.empty())
-            return -1;
-        auto it = mSpecialTokens.find(token_id);
-        return it != mSpecialTokens.end() ? it->second : -1;
+    // A template token expands to the ids that its special_tokens entry lists. The runtime
+    // appends one id for it, that of the special added token of the same name, so the
+    // entry must list exactly that id.
+    int32_t template_token_id(const nlohmann::json& pp, const nlohmann::json& piece) const {
+        const std::string name = piece.value("id", "");
+        const auto registered = mSpecialTokens.find(name);
+        if (registered == mSpecialTokens.end())
+            throw std::runtime_error("Unsupported tokenizer.json: template token " + name +
+                                     " is not a special added token");
+        bool exact = false;
+        const auto table = pp.find("special_tokens");
+        if (table != pp.end() && table->is_object()) {
+            const auto entry = table->find(name);
+            if (entry != table->end() && entry->is_object()) {
+                const auto ids = entry->find("ids");
+                exact = ids != entry->end() && ids->is_array() && ids->size() == 1 &&
+                        ids->front().is_number_unsigned() &&
+                        ids->front().get<std::uint64_t>() ==
+                            static_cast<std::uint64_t>(registered->second);
+            }
+        }
+        if (!exact)
+            throw std::runtime_error("Unsupported tokenizer.json: template token " + name +
+                                     " must expand to exactly its id " +
+                                     std::to_string(registered->second));
+        return registered->second;
     }
 
     void parse_template_post_processor(const nlohmann::json& pp) {
-        if (!pp.contains("single"))
+        const auto single = pp.find("single");
+        if (single == pp.end())
             return;
         bool seen_sequence = false;
-        for (auto& entry : pp["single"]) {
+        for (const auto& entry : *single) {
             if (entry.contains("Sequence")) {
                 seen_sequence = true;
                 continue;
             }
-            int32_t id = resolve_special_token_id(entry);
-            if (id < 0)
+            const auto piece = entry.find("SpecialToken");
+            if (piece == entry.end())
                 continue;
+            const int32_t id = template_token_id(pp, *piece);
             if (seen_sequence) {
                 mPostEosIds.push_back(id);
             } else {
@@ -1517,7 +1587,6 @@ class BpeTokenizer final : public ITokenizer {
 
     std::unordered_map<std::string, int32_t> mSpecialTokens;
     std::unordered_set<int32_t> mSpecialIds; // O(1) lookup in decode()
-    int32_t mEosId = -1;
 
     // Non-special added tokens: matched before pre-tokenization (longest first)
     std::vector<std::pair<std::string, int32_t>> mAddedTokenPatterns;

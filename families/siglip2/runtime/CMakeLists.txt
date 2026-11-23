@@ -53,6 +53,8 @@ if(TRTMC_BUILD_TESTS)
     target_compile_options(test_siglip2_${_test} PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME test_siglip2_${_test} COMMAND test_siglip2_${_test})
   endforeach()
+  # Its miniature tokenizer.json variants are built as JSON values.
+  target_link_libraries(test_siglip2_tokenizer PRIVATE nlohmann_json::nlohmann_json)
 
   # Host preprocessing of one raw RGB image, written out for the exact parity check
   # against the reference processor in tests/test_e2e.py, which builds it by name.
