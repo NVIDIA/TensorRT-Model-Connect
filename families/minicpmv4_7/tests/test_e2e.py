@@ -30,6 +30,7 @@ host contract also covers the tokenizer's NFC normalization and Unicode pre-toke
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -47,28 +48,34 @@ CASES = {case["name"]: case for case in MANIFEST["testcases"]}
 _FAMILY = "minicpmv4_7"
 
 
+def _names(config, flag: str) -> set[str]:
+    return {item.strip() for value in (config.getoption(flag, default=[]) or [])
+            for item in value.split(",") if item.strip()}
+
+
 def _selected(config, case_name: str) -> bool:
-    selected = {
-        item.strip()
-        for flag in ("--e2e-model", "--e2e-testcase")
-        for value in (config.getoption(flag, default=[]) or [])
-        for item in value.split(",")
-        if item.strip()
-    }
+    """``--e2e-testcase`` names exact cases; ``--e2e-model`` and ``--e2e-models-file`` name the family, the
+    manifest or a case. Without either, ``TRTMC_E2E=1`` selects every case."""
+    models = _names(config, "--e2e-model")
     filename = config.getoption("--e2e-models-file", default=None)
     if filename:
-        selected.update(line.strip() for line in Path(filename).read_text().splitlines()
-                        if line.strip() and not line.lstrip().startswith("#"))
-    if not selected:
+        models.update(line.strip() for line in Path(filename).read_text().splitlines()
+                      if line.strip() and not line.lstrip().startswith("#"))
+    cases = _names(config, "--e2e-testcase")
+    if not models and not cases:
         return os.environ.get("TRTMC_E2E") == "1"
-    return bool({case_name, MANIFEST["name"], _FAMILY} & selected)
+    if models and not {case_name, MANIFEST["name"], _FAMILY} & models:
+        return False
+    return not cases or case_name in cases
 
 
 def _environment() -> tuple[Path, Path, Path, Path]:
     binary = Path(os.environ["TRTMC_BINARY"])
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
     native = Path(os.environ.get("TRTMC_NATIVE_BUILD_DIR") or runtime)
-    reference = Path(os.environ.get("TRTMC_MINICPMV47_REFERENCE_PYTHON", sys.executable))
+    # Absolute before the reference runs from the repository root; not resolved, because the
+    # interpreter of a virtual environment is a symlink to its base interpreter.
+    reference = Path(os.path.abspath(os.environ.get("TRTMC_MINICPMV47_REFERENCE_PYTHON", sys.executable)))
     assert binary.is_file() and os.access(binary, os.X_OK), binary
     assert (runtime / f"libtrtmc_model_{_FAMILY}.so").is_file(), runtime
     assert (native / "minicpmv4_7_preprocess_dump").is_file(), native
@@ -90,7 +97,8 @@ def _thresholds(case_name: str) -> dict:
 def _run(command: list[str], log: Path, **kwargs) -> subprocess.CompletedProcess:
     result = subprocess.run(command, capture_output=True, text=True, **kwargs)
     log.write_text(f"$ {' '.join(command)}\n--- stdout\n{result.stdout}\n--- stderr\n{result.stderr}\n")
-    assert result.returncode == 0, f"{command[0]} failed, see {log}"
+    # CalledProcessError carries both streams, which evidence_stage records for the failed stage.
+    result.check_returncode()
     return result
 
 
@@ -122,30 +130,52 @@ def _check(name: str, label: str, actual, operator: str, expected) -> dict:
             "operator": operator, "expected": expected, "passed": passed}
 
 
-def _record_comparison(case: dict, work: Path, native_dump: dict, reference: dict, tolerance: float) -> None:
+def _gap_failures(gaps: list[float], tolerance: float) -> list[int]:
+    """Native tokens whose FP32 gap below the reference maximum is not a finite value within ``tolerance``.
+
+    The assertion and the recorded evidence use this one rule."""
+    return [index for index, gap in enumerate(gaps) if not (math.isfinite(gap) and gap <= tolerance)]
+
+
+def _stops_correctly(tokens: list[int], eos: set[int], budget: int) -> bool:
+    """Generation ends at its first end-of-sequence id (kept in the ids) or fills the budget without one."""
+    if not tokens or any(token in eos for token in tokens[:-1]):
+        return False
+    return tokens[-1] in eos or len(tokens) == budget
+
+
+def _comparison_checks(native_dump: dict, reference: dict, pixels: int, tolerance: float) -> list[dict]:
     """The checks the assertions below enforce, against the provider and the FP32 official model."""
-    ours = np.fromfile(work / "native" / "patches.f32", dtype="<f4")
-    theirs = np.fromfile((work / "reference.json").with_suffix(".patches.f32"), dtype="<f4")
-    pixels = int(np.count_nonzero(ours != theirs)) if ours.shape == theirs.shape else max(ours.size, theirs.size)
     layout = _differing(
         [[crop["grid"] for crop in native_dump["crops"]],
          [crop["position_ids"] for crop in native_dump["crops"]],
          native_dump["positions"], native_dump["decode_position"]],
         [reference["crop_grids"], reference["crop_position_ids"], reference["positions"],
          reference["decode_position"]])
-    gap = float(max(reference["teacher_forced"]["candidate_gap"], default=0.0))
+    gaps = reference["teacher_forced"]["candidate_gap"]
+    finite = [float(gap) for gap in gaps if math.isfinite(gap)]
+    return [
+        _check("prompt_token_ids", "Prompt token ids unlike the provider's",
+               _differing(native_dump["input_ids"], reference["input_ids"]), "==", 0),
+        _check("image_layout", "Crop grids, vision position ids and M-RoPE positions unlike the provider's",
+               layout, "==", 0),
+        _check("normalized_pixels", "Normalized pixel values unlike the provider's", pixels, "==", 0),
+        _check("max_teacher_forced_gap", "Largest finite FP32 logit gap below the argmax, native tokens forced",
+               max(finite, default=0.0), "<=", tolerance),
+        _check("teacher_forced_gap_failures",
+               "Native tokens whose FP32 gap is not finite or exceeds near_tie_logit",
+               len(_gap_failures(gaps, tolerance)), "==", 0),
+    ]
+
+
+def _record_comparison(case: dict, work: Path, native_dump: dict, reference: dict, tolerance: float) -> None:
+    ours = np.fromfile(work / "native" / "patches.f32", dtype="<f4")
+    theirs = np.fromfile((work / "reference.json").with_suffix(".patches.f32"), dtype="<f4")
+    pixels = int(np.count_nonzero(ours != theirs)) if ours.shape == theirs.shape else max(ours.size, theirs.size)
     record_evidence("reference_comparison", {
         "label": case["prompt"], "scope": "independent_reference", "enforced": True,
         "native": work / "native.json", "reference": work / "reference.json",
-        "checks": [
-            _check("prompt_token_ids", "Prompt token ids unlike the provider's",
-                   _differing(native_dump["input_ids"], reference["input_ids"]), "==", 0),
-            _check("image_layout", "Crop grids, vision position ids and M-RoPE positions unlike the provider's",
-                   layout, "==", 0),
-            _check("normalized_pixels", "Normalized pixel values unlike the provider's", pixels, "==", 0),
-            _check("max_teacher_forced_gap", "Largest FP32 logit gap below the argmax, native tokens forced",
-                   gap, "<=", tolerance),
-        ],
+        "checks": _comparison_checks(native_dump, reference, pixels, tolerance),
     })
 
 
@@ -231,11 +261,11 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, request) -> Non
                              (work / "reference.json").with_suffix(".patches.f32"))
         teacher = reference["teacher_forced"]
         assert teacher["candidate"] == tokens and len(tokens) <= case["max_new_tokens"]
-        # Generation stops at an end-of-sequence id (kept in the ids) or at the budget, never early without one.
-        assert tokens and (tokens[-1] in _eos_ids(checkpoint) or len(tokens) == case["max_new_tokens"]), tokens
-        for index, (token, gap) in enumerate(zip(teacher["candidate"], teacher["candidate_gap"])):
-            assert gap <= tolerance, (
-                f"token {index} ({token}) is {gap:.4f} below the FP32 reference maximum; "
-                f"reference argmax {teacher['argmax'][index]}")
+        assert len(teacher["candidate_gap"]) == len(tokens), "the reference scores every native token"
+        assert _stops_correctly(tokens, _eos_ids(checkpoint), case["max_new_tokens"]), tokens
+        failures = _gap_failures(teacher["candidate_gap"], tolerance)
+        assert not failures, (
+            f"token {failures[0]} ({tokens[failures[0]]}) is {teacher['candidate_gap'][failures[0]]:.4f} below "
+            f"the FP32 reference maximum; reference argmax {teacher['argmax'][failures[0]]}")
         for answer in case.get("expected_answers", []):
             assert answer.lower() in result["text"].lower(), result["text"]
