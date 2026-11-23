@@ -393,7 +393,10 @@ class UnigramTokenizer final : public ITokenizer {
                     continue;
                 }
                 for (const auto& word : whitespace_split(segment.text, mWhitespaceSplit)) {
-                    auto word_ids = viterbi_encode(kMetaspaceChar + word, mTrie, mUnkId, mUnkScore);
+                    const auto piece = word.compare(0, kMetaspaceChar.size(), kMetaspaceChar) == 0
+                                           ? word
+                                           : kMetaspaceChar + word;
+                    auto word_ids = viterbi_encode(piece, mTrie, mUnkId, mUnkScore);
                     ids.insert(ids.end(), word_ids.begin(), word_ids.end());
                 }
             }
@@ -655,17 +658,24 @@ class UnigramTokenizer final : public ITokenizer {
         if (ptype == "Metaspace") {
             mAddPrefixSpace = pt.value("add_prefix_space", true);
         } else if (ptype == "Sequence") {
-            // Look for Metaspace inside the sequence
-            if (pt.contains("pretokenizers")) {
-                for (auto& sub : pt["pretokenizers"]) {
-                    if (sub.value("type", "") == "WhitespaceSplit")
-                        mWhitespaceSplit = true;
-                    if (sub.value("type", "") == "Metaspace") {
-                        mAddPrefixSpace = sub.value("add_prefix_space", true);
-                        break;
-                    }
+            bool metaspace = false;
+            if (!pt.contains("pretokenizers") || !pt["pretokenizers"].is_array())
+                throw std::runtime_error("Unigram pre-tokenizer sequence requires pretokenizers");
+            for (const auto& sub : pt["pretokenizers"]) {
+                if (metaspace)
+                    throw std::runtime_error("Unigram Metaspace must be the final pre-tokenizer");
+                const auto type = sub.value("type", "");
+                if (type == "WhitespaceSplit") {
+                    mWhitespaceSplit = true;
+                } else if (type == "Metaspace") {
+                    metaspace = true;
+                    mAddPrefixSpace = sub.value("add_prefix_space", true);
+                } else {
+                    throw std::runtime_error("Unsupported Unigram pre-tokenizer in sequence");
                 }
             }
+            if (!metaspace)
+                throw std::runtime_error("Unigram pre-tokenizer sequence requires Metaspace");
         }
     }
 

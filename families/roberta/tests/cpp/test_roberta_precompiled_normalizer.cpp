@@ -138,6 +138,8 @@ int main(int argc, char** argv) {
     auto added_identity = added;
     added_identity["normalizer"] = nullptr;
     auto stripped = create(added_identity);
+    check(*stripped, u8"A<mask>▁B", {3, 4, 12, 3, 5});
+    check(*stripped, u8"▁AB", {3, 4, 5});
     check(*stripped, u8"A\u0085<mask>\u00a0B", {3, 4, 12, 3, 5});
     check(*stripped, u8"<mask>\u3000<mask>", {12, 12});
     check(*stripped, "A <mask> B", {3, 4, 12, 3, 5});
@@ -154,6 +156,33 @@ int main(int argc, char** argv) {
     const auto added_data = added.dump();
     auto added_frame = trtmc::CreateUnigramTokenizer(added_data.data(), added_data.size(), true);
     check(*added_frame, "<s><unk><unk></s>", {1, 1, 0, 0, 2, 2});
+    const auto identity_data = added_identity.dump();
+    auto identity_frame =
+        trtmc::CreateUnigramTokenizer(identity_data.data(), identity_data.size(), true);
+    check(*identity_frame, u8"A<mask>▁B", {1, 3, 4, 12, 3, 5, 2});
+    auto reversed = added_identity;
+    reversed["pre_tokenizer"] = {
+        {"type", "Sequence"},
+        {"pretokenizers", {fixture["pre_tokenizer"], {{"type", "WhitespaceSplit"}}}}};
+    try {
+        create(reversed);
+        std::cerr << "Accepted unsupported Metaspace then WhitespaceSplit\n";
+        ++failures;
+    } catch (const std::runtime_error&) {
+    }
+    for (const auto& stages :
+         nlohmann::json::array({{{{"type", "Metaspace"}}, {{"type", "Metaspace"}}},
+                                {{{"type", "WhitespaceSplit"}}},
+                                {{{"type", "Digits"}}, fixture["pre_tokenizer"]}})) {
+        auto unsupported = added_identity;
+        unsupported["pre_tokenizer"] = {{"type", "Sequence"}, {"pretokenizers", stages}};
+        try {
+            create(unsupported);
+            std::cerr << "Accepted unsupported pre-tokenizer composition\n";
+            ++failures;
+        } catch (const std::runtime_error&) {
+        }
+    }
     auto single_word = added;
     single_word["added_tokens"][3]["single_word"] = true;
     try {
