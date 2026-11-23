@@ -327,6 +327,56 @@ def _record_text_diagnostics(native_ids: list[int], reference_ids: list[int]) ->
     })
 
 
+def _gptq_fp32_reference(model_dir, torch, device):
+    """Load the stored GPTQ-v1 numbers into HF, without using either backend's unpacker."""
+    from contextlib import ExitStack
+
+    from safetensors import safe_open
+    from transformers import AutoConfig, AutoModelForCausalLM, GenerationConfig
+
+    config = AutoConfig.from_pretrained(model_dir, local_files_only=True)
+    quant = config.quantization_config
+    assert quant["quant_method"] == "gptq" and quant["bits"] == 8
+    assert quant["group_size"] == -1 and quant["sym"] and not quant["desc_act"]
+    del config.quantization_config  # HF must execute floating-point math, not a GPTQ kernel.
+    with torch.device(device):
+        model = AutoModelForCausalLM.from_config(config, dtype=torch.float32).eval()
+    model.generation_config = GenerationConfig.from_pretrained(model_dir, local_files_only=True)
+    mapping = json.loads((model_dir / "model.safetensors.index.json").read_text())["weight_map"]
+    used = set()
+    with ExitStack() as stack, torch.no_grad():
+        shards = {
+            name: stack.enter_context(safe_open(model_dir / name, framework="pt", device="cpu"))
+            for name in set(mapping.values())
+        }
+
+        def tensor(key):
+            used.add(key)
+            return shards[mapping[key]].get_tensor(key)
+
+        shifts = torch.tensor([0, 8, 16, 24], dtype=torch.int32)
+        for name, param in model.named_parameters():
+            if name in mapping:
+                param.copy_(tensor(name))
+                continue
+            assert name.endswith(".weight"), name
+            prefix = name.removesuffix("weight")
+            words = tensor(prefix + "qweight")
+            zeros = tensor(prefix + "qzeros")
+            groups = tensor(prefix + "g_idx")
+            scale = tensor(prefix + "scales").float()
+            assert zeros.shape[0] == scale.shape[0] == 1 and not groups.any()
+            # GPTQ packs input bytes in qweight and output bytes in qzeros.
+            # In v1 qzeros stores the mathematical zero point minus one.
+            codes = ((words[:, None, :] >> shifts[None, :, None]) & 255).reshape(-1, words.shape[1])
+            zero = ((zeros[:, :, None] >> shifts) & 255).reshape(1, -1) + 1
+            weight = (codes - zero).float().mul_(scale).T
+            assert weight.shape == param.shape
+            param.copy_(weight)
+        assert used == set(mapping), "FP32 reference did not consume every checkpoint tensor"
+    return model
+
+
 def _hf_reference(
     model_dir: Path,
     manifest: dict,
@@ -353,16 +403,20 @@ def _hf_reference(
         "bf16": torch.bfloat16,
     }
     assert reference_precision in dtypes, reference_precision
-    model = (
-        AutoModelForCausalLM.from_pretrained(
-            model_dir,
-            local_files_only=True,
-            trust_remote_code=trust_remote_code,
-            dtype=dtypes[reference_precision],
+    if manifest.get("quantization") == "w8a16":
+        assert reference_precision == "fp32"
+        model = _gptq_fp32_reference(model_dir, torch, "cuda")
+    else:
+        model = (
+            AutoModelForCausalLM.from_pretrained(
+                model_dir,
+                local_files_only=True,
+                trust_remote_code=trust_remote_code,
+                dtype=dtypes[reference_precision],
+            )
+            .eval()
+            .to("cuda")
         )
-        .eval()
-        .to("cuda")
-    )
     inputs = _render_prompt(tokenizer, prompt, case).to(model.device)
     prompt_ids = inputs["input_ids"][0].tolist()
     if "expected_prompt_token_ids" in case:

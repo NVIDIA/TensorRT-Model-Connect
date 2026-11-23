@@ -22,6 +22,7 @@ import ml_dtypes  # noqa: F401
 from safetensors import safe_open
 
 from .config import ModelConfig
+from .gptq import is_prepared_w8a16, unpack_projection
 
 
 def _target_np_dtype(precision: str) -> np.dtype:
@@ -93,6 +94,7 @@ def load_standard_weights(
     target_dtype = _target_np_dtype(precision)
 
     weights = WeightDict()
+    prepared = is_prepared_w8a16(config.raw)
 
     # Embedding
     if embedding_key is None:
@@ -117,36 +119,23 @@ def load_standard_weights(
         layer[f"{prefix}.input_norm"] = input_norm.astype(np.float32)
         layer[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
-        # Q/K/V/O projections
-        q_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.q_proj.weight", model_prefix)
-        )
-        k_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.k_proj.weight", model_prefix)
-        )
-        v_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.v_proj.weight", model_prefix)
-        )
-        o_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "self_attn.o_proj.weight", model_prefix)
-        )
+        def projection(module: str, input_width: int, output_width: int):
+            stem = _layer_key(layer_idx, module, model_prefix)
+            if prepared:
+                tensors = [
+                    _load_raw_tensor(readers, f"{stem}.{suffix}")
+                    for suffix in ("qweight", "qzeros", "scales", "g_idx")
+                ]
+                return unpack_projection(*tensors, input_width, output_width)
+            return _transpose_2d(_load_tensor(readers, stem + ".weight"), stem, precision)
 
-        q_hidden = q_raw.shape[0]
-        gate_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "mlp.gate_proj.weight", model_prefix)
-        )
-        layer_mlp_size = gate_raw.shape[0]
-
-        # Transpose all projections [out, in] -> [in, out]
-        q_t = _transpose_2d(q_raw, "q_proj", precision=precision)
-        k_t = _transpose_2d(k_raw, "k_proj", precision=precision)
-        v_t = _transpose_2d(v_raw, "v_proj", precision=precision)
-        o_t = _transpose_2d(o_raw, "o_proj", precision=precision)
-
-        layer[f"{prefix}.w_q"] = q_t
-        layer[f"{prefix}.w_k"] = k_t
-        layer[f"{prefix}.w_v"] = v_t
-        layer[f"{prefix}.w_o"] = o_t
+        attention = config.attention_size
+        kv_width = config.head_dim * config.num_key_value_heads
+        mlp_size = config.intermediate_size
+        layer[f"{prefix}.w_q"] = projection("self_attn.q_proj", hidden, attention)
+        layer[f"{prefix}.w_k"] = projection("self_attn.k_proj", hidden, kv_width)
+        layer[f"{prefix}.w_v"] = projection("self_attn.v_proj", hidden, kv_width)
+        layer[f"{prefix}.w_o"] = projection("self_attn.o_proj", attention, hidden)
 
         # Optional QKV biases (Qwen2 style)
         q_bias_key = _layer_key(layer_idx, "self_attn.q_proj.bias", model_prefix)
@@ -171,17 +160,10 @@ def load_standard_weights(
                 _load_tensor(readers, k_norm_key).astype(np.float32), num_kv_heads
             )
 
-        # MLP projections
-        up_raw = _load_tensor(readers, _layer_key(layer_idx, "mlp.up_proj.weight", model_prefix))
-        down_raw = _load_tensor(
-            readers, _layer_key(layer_idx, "mlp.down_proj.weight", model_prefix)
-        )
-
-        layer[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate_proj", precision=precision)
-        layer[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj", precision=precision)
-        layer[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj", precision=precision)
-
-        return layer_idx, layer, q_hidden, layer_mlp_size
+        layer[f"{prefix}.w_gate"] = projection("mlp.gate_proj", hidden, mlp_size)
+        layer[f"{prefix}.w_up"] = projection("mlp.up_proj", hidden, mlp_size)
+        layer[f"{prefix}.w_down"] = projection("mlp.down_proj", mlp_size, hidden)
+        return layer_idx, layer, layer[f"{prefix}.w_q"].shape[1], layer[f"{prefix}.w_gate"].shape[1]
 
     layer_results: list[tuple[int, WeightDict, int, int] | None] = [None] * num_layers
     max_workers = min(8, max(1, os.cpu_count() or 1))
@@ -301,8 +283,12 @@ def _to_numpy_fp32(tensor) -> np.ndarray:
     return np.asarray(tensor, dtype=np.float32)
 
 
-def _load_tensor(readers: _ReaderCollection, name: str) -> np.ndarray:
+def _load_raw_tensor(readers: _ReaderCollection, name: str) -> np.ndarray:
     reader = readers.tensor_map.get(name)
     if reader is None:
         raise KeyError(f"Tensor not found: {name}")
-    return _to_numpy_fp32(reader.get_tensor(name))
+    return reader.get_tensor(name)
+
+
+def _load_tensor(readers: _ReaderCollection, name: str) -> np.ndarray:
+    return _to_numpy_fp32(_load_raw_tensor(readers, name))
