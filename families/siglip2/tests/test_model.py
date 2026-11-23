@@ -199,6 +199,32 @@ def test_processor_settings_the_runtime_does_not_reproduce_are_refused(
         _resolve_with_heads(tmp_path, preprocessor={**_PREPROCESSOR, **override})
 
 
+@pytest.mark.parametrize(
+    ("config", "preprocessor", "message"),
+    [
+        # A fraction, a bool or a string is refused where an integer or a number belongs,
+        # not rounded, counted or parsed into one.
+        (None, {"max_num_patches": 16.5}, "max_num_patches must be an integer"),
+        (None, {"patch_size": 4.0}, "patch_size must be an integer"),
+        (None, {"resample": True}, "resample must be an integer"),
+        (None, {"rescale_factor": "0.00392156862745098"}, "rescale_factor must be a finite number"),
+        (None, {"image_mean": ["0.5", 0.5, 0.5]}, "image_mean must be a finite number"),
+        ({"text_config": {"num_attention_heads": 4.5}}, None, "num_attention_heads must be an integer"),
+        ({"vision_config": {"hidden_size": 128.5}}, None, "hidden_size must be an integer"),
+        ({"vision_config": {"num_channels": 3.0}}, None, "num_channels must be an integer"),
+        ({"text_config": {"layer_norm_eps": "1e-6"}}, None, "layer_norm_eps must be a finite number"),
+        # The json module reads NaN and Infinity, which would reach the engine or the runtime.
+        (None, {"rescale_factor": float("nan")}, "rescale_factor must be a finite number"),
+        (None, {"image_std": [0.5, float("inf"), 0.5]}, "image_std must be a finite number"),
+        ({"text_config": {"layer_norm_eps": float("nan")}}, None, "layer_norm_eps must be a finite number"),
+    ],
+)
+def test_config_numbers_are_checked_before_use(tmp_path: Path, config, preprocessor, message) -> None:
+    kwargs = {} if preprocessor is None else {"preprocessor": {**_PREPROCESSOR, **preprocessor}}
+    with pytest.raises(ValueError, match=message):
+        _resolve_with_heads(tmp_path, config, **kwargs)
+
+
 def test_the_tokenizer_contract_returns_the_pad_id(tmp_path: Path) -> None:
     assert model_module._tokenizer_contract(_model_dir(tmp_path)) == 0
 

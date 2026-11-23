@@ -77,6 +77,9 @@ Siglip2Pipeline::Siglip2Pipeline(std::unique_ptr<ITrtModule> vision,
         throw std::runtime_error("Siglip2Pipeline: invalid model");
     if (!tokenizer_)
         throw std::runtime_error("Siglip2Pipeline: missing tokenizer");
+    // The window is padded with this id, which the text engine looks up like any token.
+    if (tokenizer_->token_for_id(config_.pad_token_id).empty())
+        throw std::runtime_error("siglip2 pad_token_id is not an id of the bundle's tokenizer");
     if (config_.max_text_len <= 0 || config_.embedding_dim <= 0 || config_.pad_token_id < 0 ||
         !std::isfinite(config_.logit_scale) || config_.logit_scale <= 0.0F ||
         !std::isfinite(config_.logit_bias)) {

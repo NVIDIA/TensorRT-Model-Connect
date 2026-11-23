@@ -7,6 +7,9 @@
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
+#include <cmath>
+#include <cstdint>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -23,36 +26,71 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
     return bundle.read_section(name);
 }
 
-std::vector<float> triple(const nlohmann::json& json, const char* name) {
-    auto values = json.at(name).get<std::vector<float>>();
-    if (values.size() != 3)
-        throw std::runtime_error(std::string("siglip2 runtime.json has invalid ") + name);
-    return values;
+// The fields of runtime.json are taken only with their own JSON type and range: a fraction, a
+// bool, a string or a wider value is refused, never converted into the field.
+std::int32_t int32_field(const nlohmann::json& json, const char* name) {
+    const auto& value = json.at(name);
+    const bool fits = value.is_number_unsigned()
+                          ? value.get<std::uint64_t>() <= static_cast<std::uint64_t>(INT32_MAX)
+                          : value.is_number_integer() && value.get<std::int64_t>() >= INT32_MIN &&
+                                value.get<std::int64_t>() <= INT32_MAX;
+    if (!fits)
+        throw std::runtime_error(std::string("siglip2 runtime.json ") + name +
+                                 " is not an int32 integer");
+    return static_cast<std::int32_t>(value.get<std::int64_t>());
 }
 
-Siglip2RuntimeConfig parse_config(const std::vector<char>& data) {
+template <typename T>
+T number_field(const nlohmann::json& value, const char* name) {
+    if (!value.is_number() ||
+        !(std::fabs(value.get<double>()) <= static_cast<double>(std::numeric_limits<T>::max())))
+        throw std::runtime_error(std::string("siglip2 runtime.json ") + name +
+                                 " is not a finite number in range");
+    return static_cast<T>(value.get<double>());
+}
+
+std::vector<float> triple(const nlohmann::json& json, const char* name) {
+    const auto& values = json.at(name);
+    if (!values.is_array() || values.size() != 3)
+        throw std::runtime_error(std::string("siglip2 runtime.json has invalid ") + name);
+    std::vector<float> result;
+    for (const auto& value : values)
+        result.push_back(number_field<float>(value, name));
+    return result;
+}
+
+} // namespace
+
+Siglip2RuntimeConfig parse_runtime_config(const std::vector<char>& data) {
     const auto json = nlohmann::json::parse(data.begin(), data.end());
     Siglip2RuntimeConfig config;
-    config.preprocess.patch_size = json.at("patch_size").get<std::int32_t>();
-    config.preprocess.max_num_patches = json.at("max_num_patches").get<std::int32_t>();
-    config.preprocess.position_grid = json.at("position_grid").get<std::int32_t>();
-    config.preprocess.rescale_factor = json.at("rescale_factor").get<double>();
+    config.preprocess.patch_size = int32_field(json, "patch_size");
+    config.preprocess.max_num_patches = int32_field(json, "max_num_patches");
+    config.preprocess.position_grid = int32_field(json, "position_grid");
+    config.preprocess.rescale_factor =
+        number_field<double>(json.at("rescale_factor"), "rescale_factor");
     config.preprocess.image_mean = triple(json, "image_mean");
     config.preprocess.image_std = triple(json, "image_std");
-    config.resample = json.at("resample").get<std::int32_t>();
-    config.max_text_len = json.at("max_text_len").get<std::int32_t>();
-    config.embedding_dim = json.at("embedding_dim").get<std::int32_t>();
-    config.pad_token_id = json.at("pad_token_id").get<std::int32_t>();
-    config.logit_scale = json.at("logit_scale").get<float>();
-    config.logit_bias = json.at("logit_bias").get<float>();
+    config.resample = int32_field(json, "resample");
+    config.max_text_len = int32_field(json, "max_text_len");
+    config.embedding_dim = int32_field(json, "embedding_dim");
+    config.pad_token_id = int32_field(json, "pad_token_id");
+    config.logit_scale = number_field<float>(json.at("logit_scale"), "logit_scale");
+    config.logit_bias = number_field<float>(json.at("logit_bias"), "logit_bias");
     if (config.preprocess.patch_size <= 0 || config.preprocess.max_num_patches <= 0 ||
         config.preprocess.position_grid <= 0 || !(config.preprocess.rescale_factor > 0.0) ||
         config.max_text_len <= 0 || config.embedding_dim <= 0 || config.pad_token_id < 0 ||
         !(config.logit_scale > 0.0F)) {
         throw std::runtime_error("siglip2 runtime.json does not match its runtime contract");
     }
+    for (const float deviation : config.preprocess.image_std) {
+        if (deviation == 0.0F)
+            throw std::runtime_error("siglip2 runtime.json image_std must be nonzero");
+    }
     return config;
 }
+
+namespace {
 
 std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<char>& plan,
                                         const char* what) {
@@ -83,7 +121,7 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const auto text_plan = trtmc::siglip2::require_section(context.reader, "text.plan");
     const auto tokenizer_data = trtmc::siglip2::require_section(context.reader, "tokenizer.json");
 
-    auto config = trtmc::siglip2::parse_config(config_data);
+    auto config = trtmc::siglip2::parse_runtime_config(config_data);
     auto primary_task = trtmc::siglip2::require_task(context.reader);
     auto tokenizer =
         trtmc::siglip2::CreateSiglip2Tokenizer(tokenizer_data.data(), tokenizer_data.size(),

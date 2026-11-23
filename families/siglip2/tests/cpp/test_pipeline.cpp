@@ -13,6 +13,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -85,7 +86,10 @@ class FixtureTokenizer final : public trtmc::siglip2::ITokenizer {
     std::vector<std::int32_t> ids{7, 8, 1};
     std::vector<std::int32_t> encode(const std::string&) const override { return ids; }
     std::int32_t id_for_token(std::string_view) const override { return -1; }
-    std::string token_for_id(std::int32_t) const override { return {}; }
+    // A vocabulary of ids 0..15.
+    std::string token_for_id(std::int32_t id) const override {
+        return id >= 0 && id < 16 ? "t" : std::string{};
+    }
 };
 
 struct Fixture {
@@ -98,7 +102,6 @@ struct Fixture {
 Fixture make(trtmc::Siglip2RuntimeConfig config = {}) {
     config.max_text_len = 4;
     config.embedding_dim = 4;
-    config.pad_token_id = 0;
     config.logit_scale = 10.0F;
     config.logit_bias = -2.0F;
     auto vision = std::make_unique<FixtureModule>("image_embeds");
@@ -205,15 +208,63 @@ void test_refusals() {
         thrown = true;
     }
     require(thrown, "a bicubic bundle was accepted");
+
+    thrown = false;
+    try {
+        trtmc::Siglip2RuntimeConfig config;
+        config.pad_token_id = 16;
+        make(config);
+    } catch (const std::runtime_error&) {
+        thrown = true;
+    }
+    require(thrown, "a pad id outside the tokenizer's vocabulary was accepted");
 }
 
 } // namespace
+
+void test_runtime_config() {
+    const std::string valid =
+        R"({"patch_size":16,"max_num_patches":256,"position_grid":16,"image_mean":[0.5,0.5,0.5],)"
+        R"("image_std":[0.5,0.5,0.5],"resample":2,"rescale_factor":0.00392156862745098,)"
+        R"("max_text_len":64,"pad_token_id":0,"embedding_dim":768,"logit_scale":117.3,)"
+        R"("logit_bias":-12.9})";
+    const auto parse = [](const std::string& text) {
+        return trtmc::siglip2::parse_runtime_config(std::vector<char>(text.begin(), text.end()));
+    };
+    require(parse(valid).max_text_len == 64, "a valid runtime.json was refused");
+    // A field of another JSON type or beyond its range is refused, not converted: 5.5 would
+    // pad with token 5, 4294967552 would wrap to 256, true would count as 1 and 1e39 would
+    // become an infinity. A zero deviation, refused by the builder, is refused here too.
+    const std::vector<std::pair<std::string, std::string>> bad = {
+        {"\"pad_token_id\":0", "\"pad_token_id\":5.5"},
+        {"\"max_text_len\":64", "\"max_text_len\":64.0"},
+        {"\"max_num_patches\":256", "\"max_num_patches\":4294967552"},
+        {"\"patch_size\":16", "\"patch_size\":true"},
+        {"\"logit_scale\":117.3", "\"logit_scale\":true"},
+        {"\"image_mean\":[0.5,0.5,0.5]", "\"image_mean\":[true,0.5,0.5]"},
+        {"\"image_mean\":[0.5,0.5,0.5]", "\"image_mean\":[1e39,0.5,0.5]"},
+        {"\"logit_bias\":-12.9", "\"logit_bias\":1e39"},
+        {"\"image_std\":[0.5,0.5,0.5]", "\"image_std\":[0.5,0,0.5]"},
+    };
+    for (const auto& [field, value] : bad) {
+        std::string text = valid;
+        text.replace(text.find(field), field.size(), value);
+        bool thrown = false;
+        try {
+            parse(text);
+        } catch (const std::runtime_error&) {
+            thrown = true;
+        }
+        require(thrown, "runtime.json accepted " + value);
+    }
+}
 
 int main() {
     try {
         test_text_window();
         test_embeddings_and_relevance();
         test_refusals();
+        test_runtime_config();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

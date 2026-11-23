@@ -27,6 +27,11 @@ struct Siglip2RuntimeConfig {
     float logit_bias{0.0F};
 };
 
+namespace siglip2 {
+// Reads the bundle's runtime.json; a field of another JSON type or out of range is refused.
+Siglip2RuntimeConfig parse_runtime_config(const std::vector<char>& data);
+} // namespace siglip2
+
 // One model, three tasks: either tower can be asked for its own embedding, or the two
 // can be scored against each other. Each task runs only the towers it needs, which is
 // why the bundle keeps the engines apart.

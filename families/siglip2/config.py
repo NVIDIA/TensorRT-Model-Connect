@@ -21,6 +21,7 @@ from the tensor.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 # Reference defaults (Siglip2TextConfig / Siglip2VisionConfig) for numbers that no
@@ -43,6 +44,22 @@ _RESCALE = 1.0 / 255.0
 _PROCESSORS = {"Siglip2ImageProcessor", "Siglip2ImageProcessorFast"}
 
 
+def _integer(value, what: str) -> int:
+    # A JSON value is taken with its own type: a fraction, a bool or a string is refused where
+    # an integer or a number belongs, not rounded, counted or parsed into one.
+    if type(value) is not int:
+        raise ValueError(f"siglip2 {what} must be an integer, not {value!r}")
+    return value
+
+
+def _number(value, what: str) -> float:
+    # The json module also reads NaN and Infinity; they, and an integer past the float range,
+    # fail the comparison.
+    if type(value) not in (int, float) or not abs(value) <= sys.float_info.max:
+        raise ValueError(f"siglip2 {what} must be a finite number, not {value!r}")
+    return float(value)
+
+
 def _shape(weights, key: str) -> tuple:
     if key not in weights:
         raise KeyError(f"siglip2 checkpoint is missing '{key}'")
@@ -51,7 +68,7 @@ def _shape(weights, key: str) -> tuple:
 
 def _agree(stated, derived, what: str) -> None:
     """Refuse a config.json claim that the tensors contradict."""
-    if stated is not None and int(stated) != int(derived):
+    if stated is not None and _integer(stated, what) != int(derived):
         raise ValueError(
             f"siglip2 config.json says {what}={stated} but the tensors say {derived}")
 
@@ -80,7 +97,8 @@ def _tower(weights, config, prefix: str, name: str) -> dict:
     layers = _count_layers(weights, prefix)
     _agree(stated.get("num_hidden_layers"), layers, f"{name}.num_hidden_layers")
 
-    heads = int(stated.get("num_attention_heads", _REFERENCE_HEADS))
+    heads = _integer(stated.get("num_attention_heads", _REFERENCE_HEADS),
+                     f"{name}.num_attention_heads")
     if heads <= 0 or hidden % heads:
         raise ValueError(f"siglip2 {name} width {hidden} is not divisible by {heads} heads")
 
@@ -97,7 +115,7 @@ def _tower(weights, config, prefix: str, name: str) -> dict:
         "num_layers": layers,
         "num_heads": heads,
         "head_dim": hidden // heads,
-        "eps": float(stated.get("layer_norm_eps", _DEFAULT_EPS)),
+        "eps": _number(stated.get("layer_norm_eps", _DEFAULT_EPS), f"{name}.layer_norm_eps"),
     }
 
 
@@ -139,27 +157,27 @@ def _preprocessor(model_dir: Path) -> dict:
     if not loaded.get("do_resize", True):
         # NaFlex needs every side to be a whole number of patches.
         raise NotImplementedError("siglip2 requires the processor's aspect-preserving resize")
-    resample = int(loaded.get("resample", _BILINEAR))
+    resample = _integer(loaded.get("resample", _BILINEAR), "resample")
     if resample != _BILINEAR:
         raise NotImplementedError(
             f"siglip2 is qualified for Pillow bilinear resize ({_BILINEAR}), not {resample}")
     if not loaded.get("do_rescale", True):
         raise NotImplementedError("siglip2 requires the processor's 1/255 rescale")
-    rescale = float(loaded.get("rescale_factor", _RESCALE))
+    rescale = _number(loaded.get("rescale_factor", _RESCALE), "rescale_factor")
     if abs(rescale - _RESCALE) > 1e-12:
         raise NotImplementedError(f"siglip2 is qualified for a 1/255 rescale, not {rescale}")
     if not loaded.get("do_normalize", True):
         raise NotImplementedError("siglip2 requires the processor's mean/std normalization")
 
-    mean = [float(v) for v in loaded.get("image_mean", _DEFAULT_MEAN)]
-    std = [float(v) for v in loaded.get("image_std", _DEFAULT_STD)]
+    mean = [_number(v, "image_mean") for v in loaded.get("image_mean", _DEFAULT_MEAN)]
+    std = [_number(v, "image_std") for v in loaded.get("image_std", _DEFAULT_STD)]
     if len(mean) != _CHANNELS or len(std) != _CHANNELS:
         raise ValueError("siglip2 image statistics must have three channels")
     if any(v == 0 for v in std):
         raise ValueError("siglip2 image deviation must be nonzero")
 
-    patch = int(loaded.get("patch_size", _DEFAULT_PATCH))
-    max_patches = int(loaded.get("max_num_patches", _DEFAULT_MAX_PATCHES))
+    patch = _integer(loaded.get("patch_size", _DEFAULT_PATCH), "patch_size")
+    max_patches = _integer(loaded.get("max_num_patches", _DEFAULT_MAX_PATCHES), "max_num_patches")
     if patch <= 0 or max_patches <= 0:
         raise ValueError("siglip2 patch size and patch budget must be positive")
     return {
@@ -177,7 +195,7 @@ def _vision(weights, config, processor: dict) -> dict:
     stated = config.get("vision_config") or {}
     width = vision["hidden_size"]
 
-    channels = int(stated.get("num_channels", _CHANNELS))
+    channels = _integer(stated.get("num_channels", _CHANNELS), "vision_config.num_channels")
     if channels != _CHANNELS:
         raise NotImplementedError(f"siglip2 takes 3-channel images, not {channels}")
 
