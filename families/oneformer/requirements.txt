@@ -7,7 +7,7 @@ transformers==5.2.0
 # torchvision 0.27 pairs with the pinned torch 2.12; numpy stays in the base
 # image's range.
 torchvision==0.27.0
-numpy>=1.24,<2.5
+numpy==2.4.6
 Pillow
 # The reference OneFormerForUniversalSegmentation constructor builds the training
 # loss, which requires scipy.

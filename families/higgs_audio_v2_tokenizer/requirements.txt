@@ -2,5 +2,5 @@ numpy
 safetensors
 torch
 transformers==5.20.0
-scipy
+scipy==1.18.1
 torchaudio
