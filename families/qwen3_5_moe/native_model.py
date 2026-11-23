@@ -2544,10 +2544,14 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
     writer.add_bytes("engine.plan", plan)
     del plan  # The section is staged; do not retain a full plan during the next build.
     if split:
-        split = _stage_prefill_engine(writer, lambda: model.build_engine(
-            config, weights, max_sequence_length, precision=precision,
-            verbose=bool(request.verbose), media_inputs=visual, prefill_rows=PREFILL_MAX_TOKENS,
-        ))
+        try:
+            split = _stage_prefill_engine(writer, lambda: model.build_engine(
+                config, weights, max_sequence_length, precision=precision,
+                verbose=bool(request.verbose), media_inputs=visual, prefill_rows=PREFILL_MAX_TOKENS,
+            ))
+        finally:
+            # Also after a failed graph construction: the stacked expert copies must not outlive this build.
+            weights.pop("_prefill_keep", None)
     if require_mtp:
         # Preserve the admitted three draft steps plus one target anchor.
         writer.add_bytes("mtp_engine.plan", model.build_mtp_engine(
