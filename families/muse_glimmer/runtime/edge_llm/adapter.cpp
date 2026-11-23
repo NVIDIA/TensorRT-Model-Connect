@@ -5,15 +5,26 @@
 #include "families/muse_glimmer/runtime/edge_llm/adapter.h"
 
 #include "families/muse_glimmer/runtime/edge_llm/request.h"
+#include "families/muse_glimmer/runtime/sampler.h"
 
 #include <NvInferRuntime.h>
 #include <algorithm>
 #include <cstdlib>
 #include <cuda_runtime_api.h>
 #include <dlfcn.h>
+#ifdef TRTMC_MUSE_GLIMMER_EDGE_012
+#include "families/muse_glimmer/runtime/edge_llm/media.h"
+#include "trtmc/internal/model.h"
+#include "trtmc/internal/text.h"
+
+#include <tensorrt_edgellm/common/trtInterop.h>
+#include <tensorrt_edgellm/runtime/llmInferenceRuntime.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#else
 #include <edgellm/cpp/common/logger.h>
 #include <edgellm/cpp/runtime/llmInferenceRuntime.h>
 #include <edgellm/cpp/runtime/streaming.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -83,7 +94,8 @@ class Artifacts {
             "edge_llm/engine/tokenizer.json", "edge_llm/engine/tokenizer_config.json",
             "edge_llm/engine/chat_template.jinja", "edge_llm/engine/embedding.safetensors",
             "edge_llm/checkpoint/config.json"};
-        if (marker.at("execution_variant") == "dflash") {
+        if (marker.at("execution_variant") == "dflash" ||
+            marker.at("execution_variant") == "dflash_tree") {
             for (const auto* name :
                  {"spec_base.engine", "spec_draft.engine", "base_config.json", "draft_config.json"})
                 required_files.push_back(std::string("edge_llm/engine/") + name);
@@ -105,6 +117,10 @@ class Artifacts {
             required_files.push_back("edge_llm/engine/llm.engine");
             required_files.push_back("edge_llm/engine/config.json");
         }
+        if (marker.contains("vision"))
+            for (const auto* name : {"visual.engine", "config.json", "preprocessor_config.json",
+                                     "processor_config.json"})
+                required_files.push_back(std::string("edge_llm/engine/visual/") + name);
         for (const auto& required : required_files)
             if (!names.count(required) || bundle.find_section(required)->length == 0)
                 throw std::runtime_error(
@@ -165,7 +181,12 @@ std::unique_ptr<void, CloseLibrary> load_plugin() {
                                  std::string(dlerror()));
     using Initialize = bool (*)(void*, const char*);
     auto initialize = reinterpret_cast<Initialize>(dlsym(plugin.get(), "initEdgellmPlugins"));
+#ifdef TRTMC_MUSE_GLIMMER_EDGE_012
+    if (!initialize ||
+        !initialize(static_cast<nvinfer1::ILogger*>(&trt_edgellm::TrtLogger::instance()), ""))
+#else
     if (!initialize || !initialize(static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger), ""))
+#endif
         throw std::runtime_error("Cannot initialize Muse-Glimmer Edge plugin");
     return plugin;
 }
@@ -187,30 +208,42 @@ class Stream {
 std::unique_ptr<trt_edgellm::rt::LLMInferenceRuntime>
 make_runtime(const Artifacts& artifacts, const nlohmann::json& marker, cudaStream_t stream) {
     using Runtime = trt_edgellm::rt::LLMInferenceRuntime;
-    if (marker.at("execution_variant") == "dflash") {
+    const auto media_dir = marker.contains("vision") ? artifacts.engine() : std::string{};
+    if (marker.at("execution_variant") == "dflash" ||
+        marker.at("execution_variant") == "dflash_tree") {
         trt_edgellm::rt::SpecDecodeDraftingConfig config{};
+#ifdef TRTMC_MUSE_GLIMMER_EDGE_012
+        // The release counts the anchor in the verification window but not in proposals.
+        const bool tree = marker.at("execution_variant") == "dflash_tree";
+        config.draftTopK = tree ? marker.at("dflash_top_k").get<int>() : 1;
+        if (!tree)
+            config.proposalTokens = 15;
+        config.verifyTokens = tree ? marker.at("dflash_verify").get<int>() : 16;
+#else
         config.draftingTopK = 1;
         config.draftingStep = 1;
         config.verifySize = 16;
         config.dflashBlockSize = 16;
+#endif
         return std::make_unique<Runtime>(
-            artifacts.engine(), "", std::unordered_map<std::string, std::string>{}, config, stream,
-            trt_edgellm::rt::ContextCacheConfig{}, artifacts.checkpoint());
+            artifacts.engine(), media_dir, std::unordered_map<std::string, std::string>{}, config,
+            stream, trt_edgellm::rt::ContextCacheConfig{}, artifacts.checkpoint());
     }
-    return std::make_unique<Runtime>(artifacts.engine(), "",
+    return std::make_unique<Runtime>(artifacts.engine(), media_dir,
                                      std::unordered_map<std::string, std::string>{}, stream,
                                      trt_edgellm::rt::ContextCacheConfig{}, artifacts.checkpoint());
 }
 
 /// Thin persistent Edge API adapter; serialization prevents concurrent use of Edge request state.
-class EdgeTask final : public ITextGeneration {
+class EdgeTask : public ITextGeneration {
   public:
     EdgeTask(const BundleReader& bundle, const nlohmann::json& marker)
         : artifacts_(bundle, marker), plugin_(load_plugin()),
           runtime_(make_runtime(artifacts_, marker, stream_.get())),
           capacity_(marker.at("max_sequence_length").get<int>()),
           input_limit_(marker.at("max_input_length").get<int>()),
-          greedy_only_(marker.value("dflash_version", 0) == 1) {}
+          v1_(marker.value("dflash_version", 0) == 1),
+          tree_(marker.at("execution_variant") == "dflash_tree") {}
 
     std::int32_t default_max_new_tokens() const override { return std::min(512, capacity_ - 1); }
 
@@ -220,13 +253,35 @@ class EdgeTask final : public ITextGeneration {
     /// Invoke Edge once; failures propagate without attempting native inference.
     TextResult generate(const std::string& prompt, const TextGenerationConfig& config) override {
         auto request = make_request(prompt, config, default_max_new_tokens());
-        if (greedy_only_ && request.temperature != 0.0F)
+        return execute(request, config);
+    }
+
+  protected:
+    int capacity() const { return capacity_; }
+
+    TextResult execute(trt_edgellm::rt::LLMGenerationRequest& request,
+                       const TextGenerationConfig& config) {
+        if (tree_) {
+            if (!muse_is_greedy(muse_sampling_params_from_config(config, -1)))
+                throw std::invalid_argument(
+                    "Muse-Glimmer DFlash2 DDTree requires greedy generation");
+            // Preserve MC's deterministic result even where the SDK classifies
+            // the equivalent parameter spelling as a reason to switch to vanilla.
+            request.temperature = 0.0F;
+            request.topK = 1;
+            request.topP = 1.0F;
+        } else if (v1_ && request.temperature != 0.0F) {
             throw std::invalid_argument("Muse-Glimmer DFlash V1 requires greedy generation");
+        }
         std::lock_guard<std::mutex> lock(mutex_);
-        const auto counts = runtime_->countPromptTokens(request);
-        if (counts.size() != 1)
-            throw std::runtime_error("Muse-Glimmer Edge returned invalid prompt counts");
-        validate_capacity(counts.front(), input_limit_, capacity_, request.maxGenerateLength);
+        if (request.requests.front().imageBuffers.empty()) {
+            const auto counts = runtime_->countPromptTokens(request);
+            if (counts.size() != 1)
+                throw std::runtime_error("Muse-Glimmer Edge returned invalid prompt counts");
+            validate_capacity(counts.front(), input_limit_, capacity_, request.maxGenerateLength);
+        } else if (request.maxGenerateLength <= 0 || request.maxGenerateLength >= capacity_) {
+            throw std::invalid_argument("Muse-Glimmer Edge media output budget exceeds capacity");
+        }
         trt_edgellm::rt::LLMGenerationResponse response{};
         // Complete queued work before response/request storage is destroyed,
         // including exception paths in a persistent task.
@@ -243,6 +298,18 @@ class EdgeTask final : public ITextGeneration {
             (response.finishReasons.front() != trt_edgellm::rt::FinishReason::kEndId &&
              response.finishReasons.front() != trt_edgellm::rt::FinishReason::kLength))
             throw std::runtime_error("Muse-Glimmer Edge generation did not complete successfully");
+#ifdef TRTMC_MUSE_GLIMMER_EDGE_012
+        if (!request.requests.front().imageBuffers.empty()) {
+            // countPromptTokens is text-only. Edge reports its actual expanded media length here.
+            if (response.inputTokenCounts.size() != 1)
+                throw std::runtime_error("Muse-Glimmer Edge returned no expanded token count");
+            validate_capacity(response.inputTokenCounts.front(), input_limit_, capacity_,
+                              request.maxGenerateLength);
+            if (response.finishReasons.front() == trt_edgellm::rt::FinishReason::kLength &&
+                response.outputIds.front().size() != static_cast<size_t>(request.maxGenerateLength))
+                throw std::runtime_error("Muse-Glimmer Edge clipped the media output budget");
+        }
+#endif
         // This API does not expose per-request stage times; zero means unavailable.
         return {std::move(response.outputTexts.front()), std::move(response.outputIds.front())};
     }
@@ -255,28 +322,97 @@ class EdgeTask final : public ITextGeneration {
     std::unique_ptr<trt_edgellm::rt::LLMInferenceRuntime> runtime_;
     int capacity_;
     int input_limit_;
-    bool greedy_only_;
+    bool v1_;
+    bool tree_;
     std::mutex mutex_;
 };
+#ifdef TRTMC_MUSE_GLIMMER_EDGE_012
+class EdgeMediaTask final : public EdgeTask,
+                            public internal::IModel,
+                            public internal::ITextContinuation,
+                            public internal::IImagesTextToText,
+                            public internal::IVideoTextToText {
+  public:
+    EdgeMediaTask(const BundleReader& b, const nlohmann::json& marker)
+        : EdgeTask(b, marker), task_(b.info().task), fps_(marker.at("vision").at("fps")) {}
+    const char* task() const noexcept override { return task_.c_str(); }
+    std::vector<internal::TaskInstance> task_bindings() override {
+        return {internal::bind<internal::ITextContinuation>(*this, media_fields()),
+                internal::bind<internal::IImagesTextToText>(*this, media_fields()),
+                internal::bind<internal::IVideoTextToText>(*this, media_fields())};
+    }
+    TextResult run(const internal::TextContinuationRequest& r, internal::ConfigView v) override {
+        const auto* text = std::get_if<std::string_view>(&r.prefix);
+        if (!text)
+            throw std::invalid_argument("Muse-Glimmer text continuation requires UTF-8 text");
+        return generate(std::string(*text), media_config(v));
+    }
+    TextResult run(const internal::ImagesTextToTextRequest& r, internal::ConfigView v) override {
+        return run_media(r, v);
+    }
+    TextResult run(const internal::VideoTextToTextRequest& r, internal::ConfigView v) override {
+        return run_media(r, v);
+    }
+
+  private:
+    template <typename R>
+    TextResult run_media(const R& input, internal::ConfigView view) {
+        auto cfg = media_config(view);
+        auto request =
+            media_request(media_turns(input, cfg), cfg, default_max_new_tokens(), capacity(), fps_);
+        return execute(request, cfg);
+    }
+    std::string task_;
+    double fps_;
+};
+#endif
 } // namespace
 
 ITask* create(const BundleReader& bundle) {
     const auto bytes = bundle.read_section("edge_llm.json");
     const auto marker = nlohmann::json::parse(bytes.begin(), bytes.end());
     const auto variant = marker.at("execution_variant").get<std::string>();
-    const bool paired =
+    const bool chain =
         variant == "dflash" &&
         (marker.value("dflash_version", 0) == 1 || marker.value("dflash_version", 0) == 2) &&
         marker.value("dflash_block_size", 0) == 16;
-    if (marker.at("version") != 1 || marker.at("edge_revision") != kRevision ||
+#ifdef TRTMC_MUSE_GLIMMER_EDGE_012
+    const bool paired =
+        chain || (variant == "dflash_tree" && marker.value("dflash_version", 0) == 2 &&
+                  marker.value("dflash_block_size", 0) == 16 &&
+                  marker.value("dflash_top_k", 0) == 4 && marker.value("dflash_verify", 0) == 32);
+    const auto& revision = marker.at("edge_revision");
+    const bool supported_weights =
+        marker.at("weight_format") == "floating" || marker.at("weight_format") == "nvfp4";
+    const bool compatible = marker.at("edge_release") == "0.12.0" &&
+                            marker.at("builder_flow") == "onnx" &&
+                            (revision.is_null() || revision == kRevision);
+#else
+    const bool paired = chain;
+    const bool supported_weights = marker.at("weight_format") == "nvfp4";
+    const bool compatible = marker.at("edge_revision") == kRevision;
+#endif
+    if (marker.at("version") != 1 || !compatible ||
         marker.at("max_sequence_length").get<int>() <= 1 ||
         marker.at("max_input_length").get<int>() <= 0 ||
         marker.at("max_input_length").get<int>() > marker.at("max_sequence_length").get<int>() ||
         marker.at("max_batch_size") != 1 || marker.at("precision") != "fp16" ||
-        marker.at("weight_format") != "nvfp4" || (variant != "autoregressive" && !paired) ||
+        !supported_weights || (variant != "autoregressive" && !paired) ||
         !marker.at("artifacts").is_array())
         throw std::runtime_error("Invalid Muse-Glimmer Edge bundle contract");
     validate_target(marker.at("target"));
+    const auto& task = bundle.info().task;
+#ifdef TRTMC_MUSE_GLIMMER_EDGE_012
+    if (task == "images_text_to_text" || task == "video_text_to_text") {
+        if (marker.at("weight_format") != "floating" || !marker.contains("vision") ||
+            !std::isfinite(marker.at("vision").at("fps").get<double>()) ||
+            marker.at("vision").at("fps").get<double>() <= 0)
+            throw std::runtime_error("Invalid Muse-Glimmer Edge media contract");
+        return new EdgeMediaTask(bundle, marker);
+    }
+#endif
+    if (task != "text_generation" || marker.contains("vision"))
+        throw std::runtime_error("Unexpected Muse-Glimmer Edge bundle task");
     return new EdgeTask(bundle, marker);
 }
 

@@ -41,9 +41,10 @@ def build(
     precision: str = "fp16",
     backend: str = "trt",
     max_sequence_length: int | None = None,
-    quantization: str = "nvfp4",
+    quantization: str | None = None,
     execution_variant: str = "autoregressive",
     companion: str | None = None,
+    edge_builder_python: Path | None = None,
     verbose: bool = False,
 ) -> int:
     """Resolve a checkpoint and invoke family-owned Edge or native selection."""
@@ -61,6 +62,7 @@ def build(
         execution_variant=execution_variant,
         companion=resolve_model(companion, None) if companion is not None else None,
         verbose=verbose,
+        edge_builder_python=edge_builder_python,
     )
     build_bundle(request, output)
     return 0

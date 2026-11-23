@@ -158,7 +158,7 @@ class Graph:
         layer.set_input(2, one_row)
         return layer.get_output(0)
 
-    def populate(self, target_layer_ids=()):
+    def populate(self, target_layer_ids=(), *, visual_inputs=False):
         c = self.config
         if len(set(target_layer_ids)) != len(target_layer_ids) or any(i < 0 or i >= c.num_hidden_layers for i in target_layer_ids):
             raise ValueError("Muse draft feature layers must be unique target layer indices")
@@ -168,6 +168,11 @@ class Graph:
         embedding = self.checkpoint.projection("embed_tokens", c.vocab_size, c.hidden_size)
         embedding = weight_tensor(self.network, embedding, self.keep_alive, trt.float16)
         x = self.network.add_gather(embedding, token, 0).get_output(0)
+        if visual_inputs:
+            # Both text and projected image/video rows enter the decoder's embedding RMSNorm.
+            visual = self.network.add_input("visual_embeddings", trt.float16, (-1, c.hidden_size))
+            is_visual = self.network.add_input("is_visual", trt.int32, (-1, 1))
+            x = self.network.add_select(self.cast(is_visual, trt.bool), visual, x).get_output(0)
         x = self.norm(x, c.rms_norm_eps)
         hidden = {}
         for i in range(c.num_hidden_layers):
@@ -207,7 +212,7 @@ class Graph:
         self.network.mark_output(logits)
 
 
-def build_target(config, checkpoint, capacity, *, target_layer_ids=(), verbose=False):
+def build_target(config, checkpoint, capacity, *, target_layer_ids=(), visual_inputs=False, verbose=False):
     if type(capacity) is not int or capacity < 1 or capacity > config.max_position_embeddings:
         raise ValueError("Muse native capacity must fit the checkpoint context")
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -215,7 +220,7 @@ def build_target(config, checkpoint, capacity, *, target_layer_ids=(), verbose=F
     builder.max_threads = min(8, os.cpu_count() or 1)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     graph = Graph(network, checkpoint, config, capacity)
-    graph.populate(target_layer_ids)
+    graph.populate(target_layer_ids, visual_inputs=visual_inputs)
     settings = builder.create_builder_config()
     settings.builder_optimization_level = 1
     # Profile 0 prefills 1..max_rows prompt rows; profile 1 decodes one row.
@@ -225,6 +230,9 @@ def build_target(config, checkpoint, capacity, *, target_layer_ids=(), verbose=F
         for name in ("token_id", "position_id"):
             profile.set_shape(name, (low,), (opt,), (high,))
         profile.set_shape("attention_mask", (low, capacity), (opt, capacity), (high, capacity))
+        if visual_inputs:
+            for name, width in (("is_visual", 1), ("visual_embeddings", config.hidden_size)):
+                profile.set_shape(name, (low, width), (opt, width), (high, width))
         settings.add_optimization_profile(profile)
     if "NVFP4" in checkpoint.formats.values():
         settings.max_aux_streams = 0

@@ -13,10 +13,10 @@ import sys
 import tempfile
 import traceback
 
+from ..vision import MEDIA_TASKS
 from . import builder as edge_llm
 
 _LOG = logging.getLogger(__name__)
-EDGE_DISPATCH = {("linux", "x86_64", 120, "nvfp4"): edge_llm.prepare}
 _SHAPE = (52, 6656, 19968, 32, 2, 128, 202048)
 
 
@@ -38,9 +38,9 @@ def candidate(request, raw: dict) -> bool:
         raw.get("model_type") == "muse_glimmer"
         and text.get("model_type") == "muse_glimmer_text"
         and shape == _SHAPE
-        and getattr(request, "execution_variant", "autoregressive") in {"autoregressive", "dflash"}
+        and getattr(request, "execution_variant", "autoregressive") in {"autoregressive", "dflash", "dflash_tree"}
         and request.backend == "trt"
-        and request.task == "text_generation"
+        and request.task in ("text_generation", *MEDIA_TASKS)
         and request.precision.lower() == "fp16"
         and request.quantization in {None, "none", "nvfp4"}
         and request.max_batch_size
@@ -87,9 +87,15 @@ def build(request, writer, native) -> None:
         try:
             target = edge_llm.local_target()
             weight_format = edge_llm.request_weight_format(request, raw)
-            adapter = EDGE_DISPATCH.get((target["os"], target["arch"], target["sm"], weight_format))
-            if adapter is not None:
-                files, marker = adapter(request, raw, target, Path(directory), log_path)
+            package = edge_llm.installed_package(target)
+            # Only the legacy offload was qualified on the x86 SM120 stack.
+            # For 0.12 the matched SDK declares its native GPU architectures.
+            eligible = package["version"] == "0.12.0" or (
+                getattr(request, "execution_variant", "autoregressive") != "dflash_tree"
+                and request.task == "text_generation" and weight_format == "nvfp4" and (target["arch"], target["sm"]) == ("x86_64", 120)
+            )
+            if eligible:
+                files, marker = edge_llm.prepare(request, raw, target, Path(directory), log_path, package)
         except Exception as error:
             failure = error
             with log_path.open("a", encoding="utf-8") as log:
@@ -105,7 +111,7 @@ def build(request, writer, native) -> None:
             log_path.unlink(missing_ok=True)
             raise
         else:
-            if adapter is not None:
+            if eligible:
                 edge_llm.publish(request, writer, files, marker)
                 log_path.unlink()
                 return
