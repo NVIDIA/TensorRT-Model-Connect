@@ -36,16 +36,17 @@ def build(request, writer) -> None:
         or request.context_parallel_size != 1
     ):
         raise NotImplementedError("cohere2 supports batch one on a single GPU")
-    if (
-        request.quantization not in (None, "none")
-        or request.fp32_layers
-        or request.dynamic_kv_cache
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("cohere2 does not support dynamic_kv_cache")
+    if request.quantization not in (None, "none") or request.fp32_layers:
+        raise NotImplementedError("cohere2 does not implement quantization or layer overrides")
+    for name, value in (
+        ("image_height", request.image_height),
+        ("image_width", request.image_width),
+        ("video_num_frames", request.video_num_frames),
+        ("mtp_seq_len", request.mtp_seq_len),
     ):
-        raise NotImplementedError(
-            "cohere2 does not implement quantization, layer overrides, or a dynamic KV cache"
-        )
-    for name in ("image_height", "image_width", "video_num_frames", "mtp_seq_len"):
-        if getattr(request, name) is not None:
+        if value is not None:
             raise NotImplementedError(f"cohere2 does not implement {name}")
     directory = Path(request.model_dir)
     cfg = parse_config(json.loads((directory / "config.json").read_text()))

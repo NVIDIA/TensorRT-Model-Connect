@@ -12,17 +12,20 @@
     {
       "name": "tiny-aya-global-english",
       "prompt": "The capital of France is",
-      "max_new_tokens": 12
+      "max_new_tokens": 12,
+      "premerge": true
     },
     {
       "name": "tiny-aya-global-multilingual",
       "prompt": "La capital de España es",
-      "max_new_tokens": 12
+      "max_new_tokens": 12,
+      "premerge": true
     },
     {
       "name": "tiny-aya-global-arabic",
       "prompt": "عاصمة مصر هي",
-      "max_new_tokens": 12
+      "max_new_tokens": 12,
+      "premerge": true
     }
   ]
 }

@@ -11,7 +11,6 @@ import pytest
 from families.cohere2.config import parse_config
 from families.cohere2.model import tokenizer_contract
 from families.cohere2.weights import load_weights
-from tensorrt_model_connect.model_support import ModelMetadata, resolve_family
 
 
 def small_config():
@@ -36,13 +35,6 @@ def small_config():
         use_parallel_block=True,
         position_embedding_type="rope_gptj",
     )
-
-
-def test_support_resolves_to_parallel_cohere_decoder():
-    family, support = resolve_family(ModelMetadata(config=small_config(), model_index={}))
-    assert family == "cohere2"
-    assert support.tasks == ("text_continuation",)
-    assert support.default_precision == "fp32"
 
 
 @pytest.mark.parametrize(

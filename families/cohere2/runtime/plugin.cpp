@@ -28,8 +28,7 @@ std::set<std::string> names(const std::vector<TensorInfo>& tensors) {
 
 ITask* create(const FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
-        throw std::invalid_argument(
-            "cohere2 uses full-prefix recomputation and has no configurable KV cache");
+        throw std::invalid_argument("cohere2 does not support --kv-cache-size");
     if (context.reader.info().task != internal::ITextContinuation::kTask ||
         std::string(context.backend.name()) != "trt")
         throw std::invalid_argument("cohere2 requires text_continuation");

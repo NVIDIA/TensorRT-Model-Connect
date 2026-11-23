@@ -145,6 +145,7 @@ def build_engine(config: Config, weights: dict, length: int, verbose=False) -> b
     logits.name = "logits"
     network.mark_output(logits)
     settings = builder.create_builder_config()
+    settings.builder_optimization_level = 3
     settings.clear_flag(trt.BuilderFlag.TF32)
     plan = builder.build_serialized_network(network, settings)
     if plan is None:

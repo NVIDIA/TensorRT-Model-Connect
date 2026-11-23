@@ -104,6 +104,7 @@ def test_e2e(case_name, request, tmp_path_factory):
                     task="text_continuation",
                     precision="fp32",
                     max_sequence_length=MANIFEST["max_sequence_length"],
+                    tensor_parallel_size=MANIFEST["tensor_parallel_size"],
                 )
             )
     record_evidence("bundle", {"path": str(_BUNDLE), "bytes": _BUNDLE.stat().st_size})
