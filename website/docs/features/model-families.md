@@ -259,6 +259,10 @@ checks. The original 4B, 9B and 27B DFlash pairs passed the measured short
 and long greedy checks with both linear and top-k-four tree decoding. Some other
 ordinary text profiles remain runnable but miss sampled quality; see the
 family recipe below for the per-checkpoint results and tested scope.
+The prepared 4B NVFP4 target and its matching NVFP4 DFlash draft use the
+0.12 ONNX exporter (install the Edge Python `onnx` extra and configure
+`-DTRTMC_EDGELLM_ONNX=ON`). The native fallback preserves paired decoding
+without ONNX.
 For the 27B TP2 image case, the recipe also identifies a tested A100 pair
 where both Edge runners failed in prefill and MC selects native TensorRT.
 Use `--task images_text_to_text` for ordered images; the legacy single-image
