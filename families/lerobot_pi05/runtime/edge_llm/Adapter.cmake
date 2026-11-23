@@ -33,9 +33,10 @@ get_filename_component(_pi05_prefix "${TensorRTEdgeLLM_DIR}/../../.." ABSOLUTE)
 set(_pi05_include "${_pi05_prefix}/include/tensorrt_edgellm/pi05")
 get_filename_component(_pi05_libdir "${TensorRTEdgeLLM_DIR}/../.." ABSOLUTE)
 set(_pi05_lib "${_pi05_libdir}/libpi05Experimental.a")
-# These are the release's policy API and its transitive add-on headers.
+# Check the core interop header used by the adapter as well as the policy API.
 # A partially installed external SDK must not make the native family unbuildable.
 foreach(_pi05_file IN ITEMS "${_pi05_lib}"
+    "${_pi05_prefix}/include/tensorrt_edgellm/common/trtInterop.h"
     "${_pi05_include}/runtime/pi05Policy.h" "${_pi05_include}/runtime/pi05Runtime.h"
     "${_pi05_include}/action/pi05ActionRunner.h" "${_pi05_include}/common/pi05Common.h"
     "${_pi05_include}/multimodal/pi05VisualRunner.h")
