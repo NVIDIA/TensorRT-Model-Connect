@@ -47,9 +47,14 @@ stated value is checked against them.
   right-padded with `<pad>` to the 64-token window, and a longer prompt keeps its
   first 63 tokens and `<eos>`, as the reference truncation does. The pooled row is
   the last row of the window, so the window length is a correctness rule, not a
-  capacity. The tokenizer source is the repository's family-local BPE
-  implementation, copied from `families/embeddinggemma2/runtime/bpe_tokenizer.cpp`
-  with its factory renamed.
+  capacity. The tokenizer is adapted from the repository's family-local BPE
+  implementation in `families/embeddinggemma2/runtime/bpe_tokenizer.cpp`. It merges in
+  the reference tokenizer's order (the lowest-ranked adjacent pair, the leftmost on a
+  tie, one at a time). Like the builder, it refuses on load a `tokenizer.json` that it
+  would tokenise differently: a byte fallback that could need the unknown token,
+  added tokens with matching options or with an id other than their vocabulary id,
+  and an end token that expands to other ids than its own. It has no decoder: the
+  family never turns ids back into text.
 
 ## Reference behaviours this family takes a position on
 
@@ -131,7 +136,9 @@ Outside the E2E, the host preprocessing was also compared value for value with
 the reference processor on 17 images from 1 x 1 to 3000 x 20 and 2 x 4000 pixels
 (identical grids and pixels), and the runtime tokenizer with the reference
 tokenizer on 2,614 strings (identical ids), including all 256 single-byte code
-points, nine scripts, whitespace runs, added tokens and over-long prompts.
+points, nine scripts, whitespace runs, added tokens and over-long prompts, and on
+5,709 more built around the merge table's 903 rank inversions (a merge whose
+result forms a pair that ranks before it), also with identical ids.
 
 ## Assets
 
