@@ -121,13 +121,15 @@ def _checkpoint(source: Path, staging: Path) -> Path:
 
 
 def try_build(request, writer, source: Path) -> bool:
-    """Choose Edge only for an installed GR00T consumer; publish nothing if preparation fails."""
+    """Keep the qualified native policy by default; Edge is an explicit experiment."""
+    edge_python = getattr(request, "edge_builder_python", None)
+    if edge_python is None:
+        return False
     if sys.platform != "linux" or request.backend != "trt" or request.graph_transform is not None:
         return False
     prefix = _sdk_prefix()
     if prefix is None or not (prefix / "share/trtmc/lerobot_groot/edge-0.12.json").is_file():
-        if getattr(request, "edge_builder_python", None):
-            _LOG.warning("The selected MC runtime lacks the GR00T Edge add-on. Using native FP16.")
+        _LOG.warning("The selected MC runtime lacks the GR00T Edge add-on. Using native FP16.")
         return False
     receipt_path = prefix / "share/trtmc/edge-llm.json"
     log_path: Path | None = None
@@ -140,9 +142,9 @@ def try_build(request, writer, source: Path) -> bool:
                 raise ValueError("Invalid installed GR00T Edge runtime capability")
             receipt = json.loads(receipt_path.read_text())
             if receipt.get("version") != _RELEASE:
-                return False
+                raise ValueError("The GR00T Edge experiment requires the matching 0.12.0 runtime")
             target = detect_local_platform()
-            python, plugin = _tools(prefix, receipt, target, getattr(request, "edge_builder_python", None))
+            python, plugin = _tools(prefix, receipt, target, edge_python)
             checkpoint = _checkpoint(source, staging)
             cmd = [str(python), "-I", "-c", "from tensorrt_edgellm.builder.cli import main; main()",
                    "--model-dir", str(checkpoint), "--engine-dir", str(engine), "--components", "all",

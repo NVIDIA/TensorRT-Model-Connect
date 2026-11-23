@@ -30,12 +30,12 @@ seven-coordinate actions in the robot's units. It does not binarize the gripper.
 trtmc lerobot_groot build nvidia/GR00T-N1.7-LIBERO --precision fp16 -o isaac-libero10.bundle
 ```
 
-Native TensorRT builds directly from the checkpoint. Optional complete-network offload uses the
-Edge 0.12.0 builder and its C++ GR00T runtime. It requires an MC installation built with the
-matching GR00T SDK archive and headers; the **base** Edge 0.12.0 SDK does not install them.
-If that capability is unavailable, MC uses the same native FP16 policy. For an isolated Edge
-builder install, pass `--edge-builder-python /absolute/path/to/python`. An Edge builder error
-emits a warning before retrying native.
+The command above always builds the native FP16 Isaac policy, including when
+the matching Edge SDK is installed. To try the unqualified Edge route, add
+`--edge-builder-python /absolute/path/to/python`. That interpreter must have
+the Edge 0.12.0 builder, and Model Connect must have its matching GR00T C++
+archive and headers. The base Edge 0.12.0 SDK does not install these policy
+components. If Edge preparation fails, MC warns and retries the same native policy.
 
 **Accuracy status:** On the recorded episode 1272 frame 0 with fixed initial noise, native
 passed the Isaac FP32 robot-action comparison. Released Edge inference completed but failed

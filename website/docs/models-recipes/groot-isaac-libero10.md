@@ -11,16 +11,16 @@ trtmc lerobot_groot build nvidia/GR00T-N1.7-LIBERO \
   --precision fp16 -o isaac-libero10.bundle
 ```
 
-With the standard installation, the family can build and run the native
-TensorRT policy. Optional Edge offload requires **both** a Model Connect runtime
+This command builds the native FP16 policy even with a complete Edge SDK
+installed. To opt in to the experimental Edge route, add
+`--edge-builder-python /absolute/path/to/python`. The Edge route requires **both** a Model Connect runtime
 built with the matching Edge 0.12.0 GR00T C++ archive and headers **and** the
 matching Edge Python builder. The base 0.12.0 SDK omits that archive and those
 headers; installing the Python wheel alone does not enable offload. For a
 [Model Connect source build](../getting-started/source-build.md), configure
 `-DTRTMC_ENABLE_EDGELLM=ON -DTRTMC_EDGELLM_RELEASE=0.12.0 -DTRTMC_EDGELLM_POLICY_SDK=ON`.
 This provisions the pinned policy components or checks that the external SDK
-you selected already contains them. Use
-`--edge-builder-python /absolute/path/to/python` for an isolated builder.
+you selected already contains them.
 If Edge preparation fails, the builder warns and retries the same FP16 policy
 through native TensorRT.
 

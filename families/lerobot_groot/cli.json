@@ -56,7 +56,7 @@
             "--edge-builder-python"
           ],
           "type": "path",
-          "help": "Absolute Python interpreter for the optional Edge builder"
+          "help": "Opt in to the experimental Isaac LIBERO-10 Edge route using this absolute Python interpreter; omit for native FP16"
         },
         {
           "name": "checkpoint_subdir",
