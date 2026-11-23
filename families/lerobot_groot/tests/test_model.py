@@ -686,4 +686,9 @@ def test_family_build_preserves_native_and_isaac_inputs(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="unquantized"):
         cli.build(model=str(stage), output=output, quantization="fp8")
     with pytest.raises(ValueError, match="only to LIBERO-10"):
-        cli.build(model=str(native), output=output, checkpoint_subdir=stage.name)
+        cli.build(model=str(native), output=output, edge_builder_python=tmp_path / "interpreter")
+    # Even a valid Isaac root is not a substitute for an explicitly named child.
+    for root in (native, stage):
+        with pytest.raises(FileNotFoundError, match="No staged Isaac checkpoint"):
+            cli.build(model=str(root), output=output, checkpoint_subdir=stage.name)
+    assert len(requests) == 4

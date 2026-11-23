@@ -64,9 +64,11 @@ def build(*, model: str, output: Path, source_revision: str | None = None,
             )) / "libero_10"
         else:
             directory = Path(snapshot_download(_LEROBOT, revision=source_revision or _LEROBOT_REVISION))
-    elif checkpoint_subdir and (directory / checkpoint_subdir / "config.json").is_file():
+    elif checkpoint_subdir:
         directory = directory / checkpoint_subdir
-    elif not (directory / "config.json").is_file() and not checkpoint_subdir:
+        if not (directory / "config.json").is_file():
+            raise FileNotFoundError(f"No staged Isaac checkpoint at {directory / 'config.json'}")
+    elif not (directory / "config.json").is_file():
         directory = directory / "libero_10"
 
     metadata = load_model_metadata(directory)
