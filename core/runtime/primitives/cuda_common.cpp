@@ -5,6 +5,8 @@
 
 #include "runtime/primitives/cuda_common.h"
 
+#include <mutex>
+
 namespace trtmc {
 
 CudaStream::CudaStream() {
@@ -85,6 +87,39 @@ void* CudaBuffer::data() const {
 
 std::size_t CudaBuffer::size() const {
     return mBytes;
+}
+
+bool use_full_size_mem_pool(int device) {
+    static std::mutex mutex;
+    const std::lock_guard<std::mutex> lock(mutex);
+    int integrated = 0;
+    cudaMemPool_t current = nullptr;
+    cudaMemPool_t fallback = nullptr;
+    cudaDeviceProp properties{};
+    if (cudaDeviceGetAttribute(&integrated, cudaDevAttrIntegrated, device) != cudaSuccess ||
+        integrated == 0 || cudaDeviceGetMemPool(&current, device) != cudaSuccess ||
+        cudaDeviceGetDefaultMemPool(&fallback, device) != cudaSuccess || current != fallback ||
+        cudaGetDeviceProperties(&properties, device) != cudaSuccess) {
+        // Leave no sticky error from a query the caller did not make.
+        cudaGetLastError();
+        return false;
+    }
+    cudaMemPoolProps props{};
+    props.allocType = cudaMemAllocationTypePinned;
+    props.location.type = cudaMemLocationTypeDevice;
+    props.location.id = device;
+    props.maxSize = properties.totalGlobalMem;
+    cudaMemPool_t pool = nullptr;
+    if (cudaMemPoolCreate(&pool, &props) != cudaSuccess) {
+        cudaGetLastError();
+        return false;
+    }
+    if (cudaDeviceSetMemPool(device, pool) != cudaSuccess) {
+        cudaMemPoolDestroy(pool);
+        cudaGetLastError();
+        return false;
+    }
+    return true;
 }
 
 } // namespace trtmc
