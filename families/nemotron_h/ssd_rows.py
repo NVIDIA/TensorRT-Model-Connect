@@ -90,36 +90,43 @@ def last_row(network, tensor: trt.ITensor, width: int) -> trt.ITensor:
 def add_short_conv_rows(
     network: trt.INetworkDefinition,
     *,
-    columns: trt.ITensor,
+    rows: trt.ITensor,
     conv_state: trt.ITensor,
     weight: trt.ITensor,
     channels: int,
     kernel: int,
 ) -> tuple[trt.ITensor, trt.ITensor]:
-    """Causal depthwise conv over ``columns`` ``[C, S]`` with a ``[C, kernel]`` history.
+    """Causal depthwise conv over ``rows`` ``[S, C]`` with a ``[C, kernel]`` history.
 
-    The history holds the last ``kernel`` inputs (newest last). Output column
-    ``t`` is ``sum_j weight[:, j] * window[:, t + j]`` over
-    ``window = [history[:, 1:], columns]``; the new history is the last
-    ``kernel`` columns of the window. Returns ``(outputs [C, S], history)``.
+    The history holds the last ``kernel`` inputs (newest last). Output row ``t``
+    is ``sum_j weight[:, j] * window[t + j]`` over ``window = [history[:, 1:]^T;
+    rows]``; the new history is the last ``kernel`` rows of the window, as
+    ``[C, kernel]``. Returns ``(outputs [S, C], history)``.
+
+    Time runs along axis 0, so the input projection's columns enter the window
+    without a transpose. On Jetson Thor (TensorRT 11.1 to 11.5) the FP32 GEMM of
+    a channel-major window ``[history[:, 1:], rows^T]`` read its K operand
+    modulo ``S`` once the network also held two KV-cache attention layers, which
+    garbled every prefill.
     """
-    rows = row_count(network, shuffle(network, columns, transpose=(1, 0)))
+    count = row_count(network, rows)
     if kernel > 1:
         past = network.add_slice(conv_state, (0, 1), (channels, kernel - 1), (1, 1)).get_output(0)
-        window = network.add_concatenation([past, columns])
-        window.axis = 1
+        window = network.add_concatenation([shuffle(network, past, transpose=(1, 0)), rows])
+        window.axis = 0
         window = window.get_output(0)
     else:
-        window = columns
+        window = rows
+    taps = shuffle(network, weight, transpose=(1, 0))  # [kernel, C]
     total = None
     for tap in range(kernel):
-        tap_weight = network.add_slice(weight, (0, tap), (channels, 1), (1, 1)).get_output(0)
-        shifted = dynamic_slice(network, window, (0, tap), (channels, rows))
+        tap_weight = network.add_slice(taps, (tap, 0), (1, channels), (1, 1)).get_output(0)
+        shifted = dynamic_slice(network, window, (tap, 0), (count, channels))
         term = _ew(network, shifted, tap_weight, trt.ElementWiseOperation.PROD)
         total = term if total is None else _ew(network, total, term, trt.ElementWiseOperation.SUM)
-    last = _ew(network, rows, _i64(network, [1]), trt.ElementWiseOperation.SUB)
-    history = dynamic_slice(network, window, (0, last), (channels, kernel))
-    return total, history
+    last = _ew(network, count, _i64(network, [1]), trt.ElementWiseOperation.SUB)
+    history = dynamic_slice(network, window, (last, 0), (kernel, channels))
+    return total, shuffle(network, history, transpose=(1, 0))
 
 
 def add_chunked_ssd(

@@ -227,3 +227,51 @@ def test_chunked_ssd_state_stays_finite_at_large_decays() -> None:
     got = out["final"].cpu().numpy()
     assert np.isfinite(got).all()
     np.testing.assert_allclose(got, want, rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_short_conv_rows_match_the_token_by_token_window() -> None:
+    """Outputs and the new history of the row convolution against the one-token window update."""
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    from .. import ssd_rows
+
+    rows, channels, kernel = 5, 6, 4
+    rng = np.random.default_rng(5)
+    values = {
+        "rows": rng.standard_normal((rows, channels)).astype(np.float32),
+        "history": rng.standard_normal((channels, kernel)).astype(np.float32),
+    }
+    weight = rng.standard_normal((channels, kernel)).astype(np.float32)
+
+    builder = trt.Builder(trt.Logger(trt.Logger.WARNING))
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    inputs = {name: network.add_input(name, trt.float32, value.shape) for name, value in values.items()}
+    out, history = ssd_rows.add_short_conv_rows(
+        network, rows=inputs["rows"], conv_state=inputs["history"],
+        weight=network.add_constant(weight.shape, trt.Weights(weight)).get_output(0),
+        channels=channels, kernel=kernel,
+    )
+    out.name, history.name = "out", "new_history"
+    network.mark_output(out)
+    network.mark_output(history)
+    engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(
+        builder.build_serialized_network(network, builder.create_builder_config())
+    )
+    context = engine.create_execution_context()
+    tensors = {name: torch.from_numpy(value).cuda() for name, value in values.items()}
+    tensors.update({name: torch.empty(tuple(engine.get_tensor_shape(name)), device="cuda")
+                    for name in ("out", "new_history")})
+    for name, value in tensors.items():
+        context.set_tensor_address(name, value.data_ptr())
+    assert context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+    torch.cuda.synchronize()
+
+    window = values["history"].copy()
+    want = []
+    for t in range(rows):  # the decoder's step: shift in one input, then one dot product per channel
+        window = np.concatenate([window[:, 1:], values["rows"][t, :, None]], 1)
+        want.append((window * weight).sum(1))
+    np.testing.assert_allclose(tensors["out"].cpu().numpy(), np.stack(want), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(tensors["new_history"].cpu().numpy(), window, rtol=0, atol=0)
