@@ -7,10 +7,17 @@
 #include "contract.h"
 
 #include <cstring>
+#ifdef TRTMC_COSMOS3_EDGE_012
+#include <tensorrt_edgellm/runtime/llmRuntimeUtils.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#else
 #include <edgellm/cpp/runtime/llmRuntimeUtils.h>
 #include <edgellm/cpp/runtime/streaming.h>
+#endif
 
 namespace trtmc::cosmos3_edge::edge_llm {
+
+using EdgeDataType = decltype(trt_edgellm::rt::Tensor{}.getDataType());
 using namespace internal;
 
 inline void validate_capacity(int prompt, int input_limit, int capacity, int64_t budget) {
@@ -66,7 +73,7 @@ inline trt_edgellm::rt::imageUtils::ImageData image_data(Span<const ImageView> f
             throw std::invalid_argument("Cosmos3-Edge video requires equal frame dimensions");
     }
     trt_edgellm::rt::Tensor tensor({int64_t(frames.size()), first.height, first.width, 3},
-                                   trt_edgellm::rt::DeviceType::kCPU, nvinfer1::DataType::kUINT8);
+                                   trt_edgellm::rt::DeviceType::kCPU, EdgeDataType::kUINT8);
     auto* output = static_cast<uint8_t*>(tensor.rawPointer());
     for (const auto& frame : frames) {
         if (frame.format == ImageFormat::UInt8)

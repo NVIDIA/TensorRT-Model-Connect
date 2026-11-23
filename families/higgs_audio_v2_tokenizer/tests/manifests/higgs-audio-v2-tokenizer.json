@@ -1,0 +1,20 @@
+{
+  "name": "higgs-audio-v2-tokenizer",
+  "hf_id": "eustlb/higgs-audio-v2-tokenizer",
+  "hf_revision": "0e3a9177c2991016b8e5e17d23aa474ee665bef2",
+  "family": "higgs_audio_v2_tokenizer",
+  "bundle": "higgs-audio-v2-tokenizer.bundle",
+  "task": "audio_codebook_tokens_to_audio",
+  "precision": "fp32",
+  "max_sequence_length": 50,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "higgs-audio-v2-tokenizer-speech-decode",
+      "premerge": true,
+      "audio": "librispeech-test-clean-6930-75918-0003.wav",
+      "max_abs_error": 0.0001,
+      "min_snr_db": 60
+    }
+  ]
+}

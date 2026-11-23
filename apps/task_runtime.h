@@ -43,6 +43,7 @@ inline bool uses_existing_task_runtime(std::string_view primary_task) noexcept {
         IMonocularGeometry::kTask,
         IImageClassification::kTask,
         IObjectDetection::kTask,
+        IDocumentLayout::kTask,
         IPoseHypothesisRefinement::kTask,
         IImageFeatureExtractor::kTask,
         IVideoSegmentation::kTask,

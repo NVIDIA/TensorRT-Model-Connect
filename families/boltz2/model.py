@@ -263,7 +263,7 @@ class Boltz2Plugin:
         *,
         precision: str = _PRECISION,
         verbose: bool = False,
-        diffusion_token_precision: str = "bf16",
+        diffusion_token_precision: str = "fp16",
         **_kwargs: Any,
     ) -> dict[str, bytes]:
         self._require_precision(precision)

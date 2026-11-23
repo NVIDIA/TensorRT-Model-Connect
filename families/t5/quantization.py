@@ -19,12 +19,10 @@ Each quantized projection becomes::
     activation -> Quantize -> Dequantize(act type) -> MatMul(act type)
     FP8 weight -> Dequantize(act type) -----------------------^
 
-Both Dequantize layers output the activation type of the build, so the FP8 GEMM writes that type
-and the ReLU after ``wi`` stays in the GEMM epilogue. FP8 works with both precisions of the family:
-``fp16`` (activation type fp16) and ``fp32`` (activation type fp32, the FP8 GEMM writes fp32). Use
-``fp32`` for t5-base and larger: their activations exceed the fp16 range (the feed-forward output
-``wo`` and the residual stream reach 1e5 and more), so the fp16 engine of those models gives
-non-finite logits with or without FP8.
+Both Dequantize layers and the FP8 GEMM use the projection's activation type. Most projections use
+the build precision (``fp16`` or ``fp32``); the feed-forward output ``wo`` uses fp32 to keep its
+output and the residual stream finite when their values exceed the fp16 range. The ReLU after
+``wi`` stays in the GEMM epilogue when TensorRT can fuse it.
 
 Quantized projections (internal weight names, ``N`` is the layer index):
 

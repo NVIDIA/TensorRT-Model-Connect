@@ -73,6 +73,16 @@ std::vector<int32_t> optional_int_array(const nlohmann::json& document, const ch
     return document.contains(key) ? require_int_array(document, key) : std::vector<int32_t>{};
 }
 
+std::string optional_string(const nlohmann::json& document, const char* key,
+                            const std::string& default_value) {
+    const auto it = document.find(key);
+    if (it == document.end())
+        return default_value;
+    if (!it->is_string())
+        throw std::runtime_error(std::string("runtime.json field must be a string: ") + key);
+    return it->get<std::string>();
+}
+
 bool optional_int_flag(const nlohmann::json& document, const char* key, bool default_value) {
     if (!document.contains(key))
         return default_value;
@@ -197,6 +207,9 @@ FluxDiffusionConfig make_diffusion_config(const std::string& json) {
     dc.rope_theta = optional_number(document, "rope_theta", 10000.0F);
     dc.guidance_embeds = optional_int_flag(document, "guidance_embeds", false);
     dc.use_rope = optional_int_flag(document, "use_rope", true);
+    dc.text_template = optional_string(document, "text_template", "");
+    dc.pad_token = optional_string(document, "pad_token", "<pad>");
+    dc.true_cfg = optional_int_flag(document, "true_cfg", false);
     dc.vae_scaling_factor = optional_number(document, "vae_scaling_factor", 0.0F);
     dc.diffusion_backend_type = require_string(document, "diffusion_backend_type");
     return dc;

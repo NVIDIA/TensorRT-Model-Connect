@@ -1,0 +1,5 @@
+{
+  "threshold_overrides": {
+    "min_psnr_db_same_precision": 38.0
+  }
+}

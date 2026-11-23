@@ -36,6 +36,9 @@ struct SemanticAcousticHistoryView {
                 fine_tokens.c_view()};
     }
 };
+struct AudioCodebookTokensToAudioRequest {
+    AudioCodebookTokensView codes; // Nonempty [codebook, frame]; borrowed through run.
+};
 struct TextAudioTokenHistoryToAudioRequest {
     std::string prompt;
     SemanticAcousticHistoryView history; // Tokens borrow caller storage through run.
@@ -176,6 +179,32 @@ class TextAudioTokenHistoryToAudio {
           api_(reinterpret_cast<const trtmc_text_audio_token_history_to_audio_api_v1*>(table)) {}
     std::shared_ptr<detail::ModelState> state_;
     const trtmc_text_audio_token_history_to_audio_api_v1* api_;
+};
+
+class AudioCodebookTokensToAudio {
+  public:
+    static constexpr std::string_view kTask = TRTMC_TASK_AUDIO_CODEBOOK_TOKENS_TO_AUDIO;
+    static constexpr std::uint32_t kMajor = 1, kMinor = 0;
+    AudioGenerationResult run(const AudioCodebookTokensToAudioRequest& input,
+                              const Config& config = {}) const {
+        const trtmc_audio_codebook_tokens_to_audio_request_v1 request{input.codes.c_view()};
+        return detail::run_audio(state_, api_, request, config);
+    }
+    std::vector<ConfigField> config_fields() const {
+        return detail::config_fields(state_, kTask, kMajor, kMinor);
+    }
+    static void validate_table(const trtmc_api_header* table) {
+        detail::validate_audio_table<trtmc_audio_codebook_tokens_to_audio_api_v1>(table);
+    }
+
+  private:
+    friend class Model;
+    AudioCodebookTokensToAudio(std::shared_ptr<detail::ModelState> state,
+                               const trtmc_api_header* table) noexcept
+        : state_(std::move(state)),
+          api_(reinterpret_cast<const trtmc_audio_codebook_tokens_to_audio_api_v1*>(table)) {}
+    std::shared_ptr<detail::ModelState> state_;
+    const trtmc_audio_codebook_tokens_to_audio_api_v1* api_;
 };
 
 class TextToAudio {

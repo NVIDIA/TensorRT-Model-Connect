@@ -225,7 +225,9 @@ void MixtralTextGenerationPipeline::prime_decoder_after_batched_prefill(
 
 void MixtralTextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
                                                 std::vector<float>& logits) {
-    if (prefill_) {
+    // A prompt longer than the prefill profile keeps the token loop, whose KV
+    // cache slides once full.
+    if (prefill_ && static_cast<int32_t>(input_ids.size()) <= config_.prefill_max_length) {
         run_prefill_batched(input_ids, logits);
         prime_decoder_after_batched_prefill(input_ids);
     } else {

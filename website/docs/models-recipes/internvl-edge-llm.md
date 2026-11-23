@@ -2,9 +2,65 @@
 title: InternVL with Edge-LLM
 ---
 
-InternVL owns optional Edge-LLM 0.11.0 execution for its admitted InternVL3 and
-InternVL3.5 configurations. The family selects the direct or ONNX builder and
-maps persistent C++ inference; no shared backend selector is added.
+InternVL selects its own Edge builder and C++ runner. Edge 0.11.0 is the
+default SDK during migration. To opt into 0.12.0, enable the native Edge
+dependency with `TRTMC_ENABLE_EDGELLM=ON` and
+`TRTMC_EDGELLM_RELEASE=0.12.0`. Build on the execution GPU. A Python wheel
+or source installation supplies the builder tools, not the native C++ SDK.
+
+An installed Model Connect wheel uses its own native Edge SDK, not a
+different SDK on `CMAKE_PREFIX_PATH`. To switch releases, use a matching
+wheel or a standalone Model Connect builder and runner together.
+
+### Edge 0.12.0
+
+For InternVL3 original checkpoints the family selects the direct builder.
+InternVL3.5 uses the official Edge ONNX exporter to preserve the nested
+decoder's query/key normalization. For the latter, configure
+`TRTMC_EDGELLM_ONNX=ON` and use the release's ONNX Python extras:
+
+```sh
+trtmc internvl build /path/to/InternVL3_5-2B-HF --precision fp16 \
+  --max-sequence-length 4096 --edge-builder-python /path/to/edge-env/bin/python \
+  -o internvl.bundle
+trtmc run internvl.bundle --image vehicle.jpg \
+  --prompt "What color is the vehicle in this image? Answer in one word." --max-new-tokens 10
+```
+
+The original InternVL3 1B, 2B, 8B and 14B and InternVL3.5 1B, 2B, 4B and 8B checkpoints
+matched the independent FP32 reference on the vehicle-image case at batch 1,
+TP1 and context 4096 through both Edge and native TensorRT. This does not
+qualify other sizes, weight formats, images or GPU targets. The native path
+uses TensorRT directly, not ONNX.
+
+For the InternVL3.5-14B original at the same profile, ONNX export succeeded
+on an x86 A100 40 GiB with CUDA 13.4 and TensorRT 11.4.0.106. The Edge
+LLM builder then requested a single 45,718,743,296-byte allocation. The
+Edge visual builder and decode did not run there. The family warns and
+retries the unchanged native request for this measured profile when the
+allocation exceeds total GPU memory. The native fallback matched the
+independent FP32 answer and passed the image-feature health check.
+
+On a native Linux ARM64 GB300, the same checkpoint and build profile passed
+the official ONNX exporter, LLM builder and visual builder with the 0.12
+SDK's CTM decode kernels enabled. The Model Connect C++ runner matched the
+independent FP32 token IDs on the same vehicle-image question; the visual
+encoder produced all 1792 image tokens. This does not change the A100 result
+or qualify other prompts and GPU targets.
+
+For the prepared InternVL3 1B, 2B, 8B and 14B AWQ checkpoints, configure
+`TRTMC_EDGELLM_ALL_KERNELS=ON` and use an Edge builder Python with PyTorch
+installed to read the checkpoint files. Leave `--quantization` unset.
+The direct Edge route with `--int4-gemm-plugin-version 2` and the native
+fallback without that Edge-specific option both matched the FP32 reference
+for the same prepared weights on the vehicle-image case above.
+
+The 14B AWQ Edge build and decode passed on a 40 GiB A100. The native
+TensorRT builder could not allocate 29,535,502,976 bytes on that GPU; the
+same native request passed on a 48 GiB RTX A6000. This is an observed
+build-memory limit, not a minimum-memory guarantee or an SM restriction.
+
+### Default Edge 0.11.0
 
 ```sh
 trtmc internvl build /path/to/InternVL3-2B-hf --precision fp16 \

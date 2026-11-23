@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -18,6 +19,7 @@ namespace {
 class RecordingModule final : public trtmc::ITrtModule {
   public:
     trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
+        ++calls;
         const auto& value_tensor = inputs.at("past_values");
         const auto* value_data = static_cast<const float*>(value_tensor.data);
         values.assign(value_data, value_data + value_tensor.numel());
@@ -29,7 +31,7 @@ class RecordingModule final : public trtmc::ITrtModule {
 
         const auto& frequency_tensor = inputs.at("freq");
         frequency = *static_cast<const std::int32_t*>(frequency_tensor.data);
-        return {{"mean_predictions", {output.data(), {1, 2}, trtmc::DType::kFloat32}}};
+        return {{"mean_predictions", {output.data(), output_shape, output_dtype}}};
     }
 
     trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
@@ -69,6 +71,9 @@ class RecordingModule final : public trtmc::ITrtModule {
     std::vector<std::int64_t> shape;
     std::int32_t frequency{-1};
     std::vector<float> output = std::vector<float>(2, 0.0F);
+    std::vector<std::int64_t> output_shape{1, 2};
+    trtmc::DType output_dtype{trtmc::DType::kFloat32};
+    int calls{0};
 };
 
 void require(bool condition, const char* message) {
@@ -76,9 +81,17 @@ void require(bool condition, const char* message) {
         throw std::runtime_error(message);
 }
 
-trtmc::ForecastRequest request(const std::vector<float>& values, const std::vector<float>& mask,
-                               std::int32_t frequency) {
-    return {{values.data(), values.size()}, {mask.data(), mask.size()}, frequency};
+trtmc::internal::SeriesToPointForecastRequest request(const std::vector<float>& values,
+                                                      const std::vector<std::uint8_t>& mask) {
+    return {{{{values.data(), values.size()}, 0, 0}, {mask.data(), mask.size()}}};
+}
+
+trtmc::internal::PointForecastResult forecast(trtmc::timesfm::Pipeline& pipeline,
+                                              const std::vector<float>& values,
+                                              const std::vector<std::uint8_t>& mask,
+                                              std::int64_t frequency) {
+    const trtmc::internal::ConfigEntry config[] = {{"frequency", frequency}};
+    return pipeline.run(request(values, mask), config);
 }
 
 void test_short_series_is_left_padded_and_frequency_is_explicit() {
@@ -86,9 +99,9 @@ void test_short_series_is_left_padded_and_frequency_is_explicit() {
     auto* recording = module.get();
     trtmc::timesfm::Pipeline pipeline(std::move(module), {4, 2, 3, 1});
     const std::vector<float> values{11.0F, 12.0F};
-    const std::vector<float> mask;
+    const std::vector<std::uint8_t> mask;
 
-    pipeline.forecast(request(values, mask, 1));
+    forecast(pipeline, values, mask, 1);
 
     require(recording->shape == std::vector<std::int64_t>({1, 4}),
             "TimesFM must send its configured context length");
@@ -103,10 +116,10 @@ void test_out_of_range_frequency_is_rejected() {
     auto module = std::make_unique<RecordingModule>();
     trtmc::timesfm::Pipeline pipeline(std::move(module), {4, 2, 3, 1});
     const std::vector<float> values{1.0F};
-    const std::vector<float> mask{1.0F};
+    const std::vector<std::uint8_t> mask{1};
     bool rejected = false;
     try {
-        pipeline.forecast(request(values, mask, 3));
+        forecast(pipeline, values, mask, 3);
     } catch (const std::invalid_argument&) {
         rejected = true;
     }
@@ -118,9 +131,9 @@ void test_overlong_series_is_left_truncated() {
     auto* recording = module.get();
     trtmc::timesfm::Pipeline pipeline(std::move(module), {4, 2, 3, 1});
     const std::vector<float> values{1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F};
-    const std::vector<float> mask(values.size(), 1.0F);
+    const std::vector<std::uint8_t> mask(values.size(), 1);
 
-    pipeline.forecast(request(values, mask, 2));
+    forecast(pipeline, values, mask, 2);
 
     require(recording->values == std::vector<float>({3.0F, 4.0F, 5.0F, 6.0F}),
             "TimesFM must retain the newest context window");
@@ -129,12 +142,98 @@ void test_overlong_series_is_left_truncated() {
     require(recording->frequency == 2, "TimesFM must forward each request frequency");
 }
 
+template <class Exception, class Function>
+void rejects(Function operation) {
+    bool rejected = false;
+    try {
+        operation();
+    } catch (const Exception&) {
+        rejected = true;
+    }
+    require(rejected, "invalid request must be rejected");
+}
+
+void test_sdk_binding_defaults_and_result_ownership() {
+    auto module = std::make_unique<RecordingModule>();
+    auto* recording = module.get();
+    recording->output = {1.25F, 2.5F};
+    trtmc::timesfm::Pipeline pipeline(std::move(module), {4, 2, 3, 1});
+    require(std::string(pipeline.task()) == "series_to_point_forecast", "semantic primary task");
+    const auto bindings = pipeline.task_bindings();
+    require(bindings.size() == 1 && bindings[0].key.id == pipeline.task(), "exact Task binding");
+    require(bindings[0].implementation ==
+                static_cast<trtmc::internal::ISeriesToPointForecast*>(&pipeline),
+            "binding must retain the adjusted interface pointer");
+    require(bindings[0].fields.size() == 1 && bindings[0].fields[0].name == "frequency",
+            "frequency is declared by the family");
+    const std::vector<float> values{7, 8};
+    auto first = pipeline.run(request(values, {}), {});
+    require(recording->frequency == 0, "omitted frequency keeps the original zero default");
+    require(first.values.rows == 2 && first.values.columns == 1 &&
+                first.values.values == std::vector<float>({1.25F, 2.5F}) &&
+                first.axes.horizon_steps == std::vector<std::int64_t>({1, 2}),
+            "result keeps the complete point forecast and positive horizon steps");
+    require(first.axes.channel_names.empty() && first.axes.channel_units.empty(),
+            "unnamed checkpoint channels stay unspecified");
+    recording->output = {3, 4};
+    forecast(pipeline, values, {}, 2);
+    require(recording->frequency == 2, "frequency is resolved for each request");
+    pipeline.run(request(values, {}), {});
+    require(recording->frequency == 0, "a previous override must not become the next default");
+    require(first.values.values == std::vector<float>({1.25F, 2.5F}),
+            "later calls cannot overwrite a retained result");
+}
+
+void test_history_shape_mask_and_invalid_config() {
+    auto module = std::make_unique<RecordingModule>();
+    auto* recording = module.get();
+    trtmc::timesfm::Pipeline pipeline(std::move(module), {4, 2, 3, 1});
+    const std::vector<float> values{1, 2, 3, 4, 5, 6};
+    const std::vector<std::uint8_t> mask{1, 0, 0, 1, 0, 1};
+    auto input = request(values, mask);
+    input.history.past_values.rows = values.size();
+    input.history.past_values.columns = 1;
+    pipeline.run(input, {});
+    require(recording->padding == std::vector<std::int32_t>({1, 0, 1, 0}),
+            "an explicit observed mask is truncated with its values");
+    const auto calls = recording->calls;
+    for (const auto shape :
+         {std::pair<std::uint64_t, std::uint64_t>{0, 1}, {6, 0}, {3, 2}, {5, 1}}) {
+        input.history.past_values.rows = shape.first;
+        input.history.past_values.columns = shape.second;
+        rejects<std::invalid_argument>([&] { pipeline.run(input, {}); });
+    }
+    rejects<std::invalid_argument>([&] { pipeline.run(request({}, {}), {}); });
+    rejects<std::invalid_argument>([&] { pipeline.run(request(values, {1}), {}); });
+    rejects<std::invalid_argument>([&] { pipeline.run(request(values, {1, 1, 1, 1, 1, 2}), {}); });
+    auto missing = request(values, {});
+    missing.history.past_values.values = {nullptr, values.size()};
+    rejects<std::invalid_argument>([&] { pipeline.run(missing, {}); });
+    for (const std::int64_t frequency : {-1LL, 3LL, std::numeric_limits<long long>::max()})
+        rejects<trtmc::internal::ConfigError>([&] { forecast(pipeline, values, {}, frequency); });
+    for (const auto name : {"frequency", "unknown"}) {
+        const trtmc::internal::ConfigEntry wrong[] = {{name, true}};
+        rejects<trtmc::internal::ConfigError>([&] { pipeline.run(request(values, {}), wrong); });
+    }
+    const trtmc::internal::ConfigEntry duplicate[] = {{"frequency", std::int64_t{0}},
+                                                      {"frequency", std::int64_t{1}}};
+    rejects<trtmc::internal::ConfigError>([&] { pipeline.run(request(values, {}), duplicate); });
+    require(recording->calls == calls, "invalid requests must fail before engine execution");
+    recording->output_shape = {2, 1};
+    rejects<std::runtime_error>([&] { pipeline.run(request(values, {}), {}); });
+    recording->output_shape = {1, 2};
+    recording->output_dtype = trtmc::DType::kInt32;
+    rejects<std::runtime_error>([&] { pipeline.run(request(values, {}), {}); });
+}
+
 } // namespace
 
 int main() {
     test_short_series_is_left_padded_and_frequency_is_explicit();
     test_overlong_series_is_left_truncated();
     test_out_of_range_frequency_is_rejected();
+    test_sdk_binding_defaults_and_result_ownership();
+    test_history_shape_mask_and_invalid_config();
     std::cerr << "ALL PASSED\n";
     return 0;
 }

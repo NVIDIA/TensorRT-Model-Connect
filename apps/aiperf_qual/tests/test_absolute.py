@@ -135,6 +135,18 @@ def test_benchmarks_take_the_route_and_gate_of_the_catalog_request():
         _absolute(["hellaswag"], DEFINITIONS, {}, quantized=False)
 
 
+def test_a_quantized_parity_gate_replaces_the_mismatched_precision_tolerance():
+    parity = {"encoder_parity": {"suite": "encoder-parity", "metric": "vector_parity",
+                                 "gate": {"min_cosine": 0.999, "max_relative_l2": 0.02},
+                                 "mismatched_precision_gate": {"min_cosine": 0.998, "max_relative_l2": 0.04},
+                                 "quantized_gate": {"min_cosine": 0.99, "max_relative_l2": 0.15}}}
+    fp8, = _absolute(["encoder_parity"], parity, {}, quantized=True)
+    assert fp8["gate"] == {"min_cosine": 0.99, "max_relative_l2": 0.15} and "mismatched_precision_gate" not in fp8
+    fp16, = _absolute(["encoder_parity"], parity, {}, quantized=False)
+    assert fp16["gate"] == {"min_cosine": 0.999, "max_relative_l2": 0.02}
+    assert fp16["mismatched_precision_gate"] == {"min_cosine": 0.998, "max_relative_l2": 0.04}
+
+
 def test_workload_perf_compares_problems_answered_with_the_same_length():
     raw = [{"metadata": {"session_num": index},
             "responses": [{"text": '{"usage": {"prompt_tokens": 500, "completion_tokens": %d}, '
@@ -599,6 +611,71 @@ def test_an_adapter_checkpoint_without_a_tokenizer_uses_the_base_models(monkeypa
     full = {"candidate": {"checkpoint": "org/full", "revision": "f1"}, "reference": {"model": "org/base"}}
     assert absolute.tokenizer_source(full) == ("org/full", "f1")
     assert absolute.tokenizer_source({"candidate": {"checkpoint": "org/adapter"}, "reference": {}}) == ("org/adapter", None)
+
+
+def test_a_profile_tokenizer_json_is_loaded_without_the_checkpoints_remote_code(monkeypatch, tmp_path):
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    (hub / "tokenizer.json").write_text('{"model": "bpe"}')
+    (hub / "tokenizer_config.json").write_text(json.dumps({
+        "auto_map": {"AutoTokenizer": ["tokenization_x.XTokenizer", None]}, "tokenizer_class": "XTokenizer",
+        "bos_token": "<s>", "chat_template": "{{ messages }}"}))
+    downloads = []
+
+    def download(repo, filename, revision=None):
+        downloads.append((repo, filename, revision))
+        return str(hub / filename)
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", download)
+    monkeypatch.setattr("huggingface_hub.constants.HF_HOME", str(tmp_path / "hf"))
+    absolute._tokenizer_json_directory.cache_clear()
+    model = {"candidate": {"checkpoint": "org/remote", "revision": "c1",
+                           "tokenizer_json": {"repo": "org/files", "revision": "t1"}},
+             "reference": {"trust_remote_code": True}}
+
+    name, revision = absolute.tokenizer_source(model)
+
+    directory = Path(name)
+    assert revision is None and directory.parent == tmp_path / "hf" / "trtmc-aiperf-tokenizers"
+    assert directory.stat().st_mode & 0o777 == 0o700  # it is loaded with trust_remote_code: private to the user
+    assert [path.name for path in directory.parent.iterdir()] == [directory.name]  # no staging copy left
+    assert sorted(downloads) == [("org/files", "tokenizer.json", "t1"), ("org/remote", "tokenizer_config.json", "c1")]
+    assert (directory / "tokenizer.json").read_text() == '{"model": "bpe"}'
+    # The checkpoint's special tokens and chat template stay; its remote-code class does not.
+    assert json.loads((directory / "tokenizer_config.json").read_text()) == {
+        "tokenizer_class": "PreTrainedTokenizerFast", "bos_token": "<s>", "chat_template": "{{ messages }}"}
+    assert absolute.tokenizer_source(model) == (name, None)
+    absolute._tokenizer_json_directory.cache_clear()
+    assert absolute.tokenizer_source(model) == (name, None) and len(downloads) == 2  # reused, not rewritten
+
+
+def test_a_failed_tokenizer_rename_is_raised_unless_another_process_won(monkeypatch, tmp_path):
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    (hub / "tokenizer.json").write_text("{}")
+    (hub / "tokenizer_config.json").write_text("{}")
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", lambda repo, filename, revision=None: str(hub / filename))
+    monkeypatch.setattr("huggingface_hub.constants.HF_HOME", str(tmp_path / "hf"))
+    root = tmp_path / "hf" / "trtmc-aiperf-tokenizers"
+
+    def refused(self, target):
+        raise PermissionError("denied")
+
+    absolute._tokenizer_json_directory.cache_clear()
+    monkeypatch.setattr(Path, "rename", refused)
+    with pytest.raises(PermissionError):
+        absolute._tokenizer_json_directory("org/remote", "c1", "org/files", "t1")
+    assert list(root.iterdir()) == []  # the staging copy is removed
+
+    def raced(self, target):  # another process of the run renames its copy first
+        Path(target).mkdir()
+        raise FileExistsError(target)
+
+    absolute._tokenizer_json_directory.cache_clear()
+    monkeypatch.setattr(Path, "rename", raced)
+    directory = absolute._tokenizer_json_directory("org/remote", "c1", "org/files", "t1")
+    assert Path(directory).is_dir() and [path.name for path in root.iterdir()] == [Path(directory).name]
+    absolute._tokenizer_json_directory.cache_clear()
 
 
 def test_an_empty_answer_is_a_wrong_answer_not_a_failed_request():
@@ -1495,6 +1572,47 @@ def test_rerank_documents_keep_their_head_so_each_pair_fits_the_bundle(monkeypat
     assert absolute._pairs_fitted({"candidate": {}, "reference": {}}, [sample], "{query}{document}") == [sample]
 
 
+
+def test_truncated_documents_fit_the_bundle_with_its_special_tokens(monkeypatch):
+    """Documents keep their first ``truncate_tokens`` tokens, fewer when the bundle cannot hold that many plus the
+    tokenizer's special tokens (less the margin); a bundle without a length keeps the suite's cut."""
+    from trtmc_aiperf_qual.suites import request_sha
+
+    class Words:  # one token per word, plus two special tokens around them
+        def __call__(self, text, add_special_tokens=True):
+            ids = list(range(1, len(text.split()) + 1))
+            return {"input_ids": [0, *ids, 0] if add_special_tokens else ids}
+
+        def decode(self, ids, skip_special_tokens=True):
+            return " ".join(f"w{index}" for index in ids)
+
+    monkeypatch.setattr(absolute, "_candidate_tokenizer", lambda model: Words())
+    request = {"prompt": " ".join(f"w{index}" for index in range(1, 41))}
+    sample = {"sample_id": "d", "request": request, "request_sha": request_sha(request)}
+
+    def kept(length):
+        model = {"candidate": {"max_sequence_length": length} if length else {}, "reference": {}}
+        cut = absolute._head_truncated(model, [sample], 30)[0]
+        assert cut["request_sha"] == request_sha(cut["request"])
+        return len(cut["request"]["prompt"].split())
+
+    assert kept(None) == 30 and kept(64) == 30
+    assert kept(32) == 32 - 2 - absolute.PAIR_MARGIN_TOKENS  # 30 words and 2 specials would fill it exactly
+    assert kept(2 + absolute.PAIR_MARGIN_TOKENS + 1) == 1  # the smallest bundle that holds a document token
+    # A bundle that leaves no room (budget 0) or less than none (budget -3) is rejected, never sliced.
+    for length in (2 + absolute.PAIR_MARGIN_TOKENS, 3 + absolute.PAIR_MARGIN_TOKENS - 4):
+        with pytest.raises(ValueError, match="no room for document tokens"):
+            kept(length)
+    with pytest.raises(ValueError, match="no room for a query-document pair"):
+        absolute._pairs_fitted({"candidate": {"max_sequence_length": absolute.PAIR_MARGIN_TOKENS}, "reference": {}},
+                               [sample], "{query}{document}")
+    # A positive budget that the query alone exceeds cannot be met by emptying the document either.
+    long_query = {"query": " ".join(["q"] * 20), "documents": ["d1 d2"]}
+    crowded = {"sample_id": "q2", "request": long_query, "request_sha": request_sha(long_query)}
+    with pytest.raises(ValueError, match="sample q2 needs"):
+        absolute._pairs_fitted({"candidate": {"max_sequence_length": 10}, "reference": {}}, [crowded], "{query} {document}")
+
+
 def _rejection(session, message):
     body = '{"error":{"message":"%s","type":"invalid_request_error","code":"backend_rejected_request"}}' % message
     return {"metadata": {"session_num": session}, "status": 422, "responses": [],
@@ -1662,6 +1780,57 @@ def test_a_parity_entry_with_a_capacity_rejection_keeps_its_own_sample_ids():
     entry = absolute.judge_in_capacity(item, problems, trtmc, native)  # 1 missing, 1 outside: no renumbering crash
     assert entry["out_of_capacity"] == 1 and entry["passed"] == 0
     assert [failure["sample_id"] for failure in entry["failures"]] == ["2:sentence1", "1:sentence1"]
+
+
+def test_a_few_outliers_within_the_outlier_gate_pass_a_parity_entry():
+    outliers = {"max_fraction": 0.01, "gate": {"min_cosine": 0.998, "max_relative_l2": 0.04}}
+    gate = {"min_cosine": 0.999, "max_relative_l2": 0.02, "outliers": outliers}
+    item = {"suite": "encoder-parity", "metric": "vector_parity", "gate": gate}
+    problems = [{"sample_id": f"{index}:sentence1"} for index in range(100)]  # 1% of 100: one outlier allowed
+    native = {"observations": {"greedy": {i: {"values": [1.0, 0.0]} for i in range(100)}}, "exit": {}}
+
+    def judged(changed, policy=True):
+        outputs = {i: {"values": [1.0, 0.0]} for i in range(100)}
+        outputs.update(changed)
+        entry_item = item if policy else {**item, "gate": {"min_cosine": 0.999, "max_relative_l2": 0.02}}
+        return absolute.judge_parity(entry_item, problems, {"observations": {"greedy": outputs}, "exit": {}}, native)
+
+    near, far = {"values": [1.0, 0.03]}, {"values": [1.0, 0.05]}  # relative L2 0.03 and 0.05
+    entry = judged({7: near})
+    assert entry["status"] == "pass" and entry["passed"] == 99 and entry["required_passes"] == 99
+    assert entry["outliers"][0]["sample_id"] == "7:sentence1" and "within the outlier gate" in entry["notes"][0]
+    assert judged({7: near, 8: near})["status"] == "fail"  # more outliers than allowed
+    assert judged({7: far})["status"] == "fail"  # beyond the outlier gate
+    missing = {i: {"values": [1.0, 0.0]} for i in range(100) if i != 7}
+    assert absolute.judge_parity(item, problems, {"observations": {"greedy": missing}, "exit": {}},
+                                 native)["status"] == "fail"  # a missing answer is never an outlier
+    assert judged({7: near}, policy=False)["status"] == "fail"  # without a policy every sample must pass
+    assert judged({})["status"] == "pass" and "outliers" not in judged({})
+
+
+def test_one_gripper_sign_change_is_a_tolerated_action_outlier_only_with_the_arm_in_tolerance():
+    gate = {"max_abs_error": 0.05, "gripper_component": -1,
+            "outliers": {"max_fraction": 0.02, "gate": {"max_gripper_sign_changes": 1}}}
+    item = {"suite": "action-chunk-parity", "metric": "action_parity", "gate": gate}
+    problems = [{"sample_id": f"frame{index}"} for index in range(50)]  # 2% of 50: one outlier allowed
+
+    def chunk(*actions):  # steps of [arm, gripper], as both sides report them
+        return {"action_dim": 2, "actions": list(actions)}
+
+    native = {"observations": {"greedy": {i: chunk(0.1, 1.0, 0.2, 1.0) for i in range(50)}}, "exit": {}}
+
+    def judged(changed):
+        outputs = {i: chunk(0.1, 1.0, 0.2, 1.0) for i in range(50)}
+        outputs.update(changed)
+        return absolute.judge_parity(item, problems, {"observations": {"greedy": outputs}, "exit": {}}, native)
+
+    flip = chunk(0.1, 1.0, 0.2, -1.0)
+    entry = judged({3: flip})
+    assert entry["status"] == "pass" and entry["outliers"][0]["sample_id"] == "frame3"
+    assert judged({3: flip, 4: flip})["status"] == "fail"  # more outliers than allowed
+    assert judged({3: chunk(0.1, -1.0, 0.2, -1.0)})["status"] == "fail"  # two sign changes
+    assert judged({3: chunk(0.2, 1.0, 0.2, -1.0)})["status"] == "fail"  # the arm out of tolerance too
+    assert judged({3: chunk(0.2, 1.0, 0.2, 1.0)})["status"] == "fail"  # an arm error is never an outlier
 
 
 def test_a_harmony_answer_is_graded_on_its_final_channel_only():

@@ -11,6 +11,8 @@ from __future__ import annotations
 import numpy as np
 import tensorrt as trt
 
+from .gptq import W8A16Projection
+
 
 def _cast_back_to_trt_dtype(
     network: trt.INetworkDefinition,
@@ -43,7 +45,7 @@ def add_matmul_rhs_constant(
     lhs: trt.ITensor,
     lhs_width: int,
     rhs_width: int,
-    rhs_weights: np.ndarray,
+    rhs_weights: np.ndarray | W8A16Projection,
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Matrix multiply: lhs @ rhs_constant.  rhs is [lhs_width, rhs_width]."""
@@ -53,12 +55,16 @@ def add_matmul_rhs_constant(
         if rank <= 2
         else (1,) * (rank - 2) + (lhs_width, rhs_width)
     )
-    rhs = add_constant(
-        network,
-        rhs_shape,
-        np.asarray(rhs_weights).reshape(rhs_shape),
-        dtype=dtype,
-    )
+    if isinstance(rhs_weights, W8A16Projection):
+        if lhs.dtype != trt.float16 or rhs_weights.shape != (lhs_width, rhs_width):
+            raise ValueError("Mistral W8A16 requires FP16 activations and aligned INT8 weights")
+        packed = add_constant(network, rhs_shape, rhs_weights.values, dtype=np.int8)
+        scales = add_constant(network, (rhs_width,), rhs_weights.scales, dtype=np.float16)
+        dq = network.add_dequantize(packed, scales, trt.float16)
+        dq.axis = len(rhs_shape) - 1
+        rhs = dq.get_output(0)
+    else:
+        rhs = add_constant(network, rhs_shape, np.asarray(rhs_weights).reshape(rhs_shape), dtype=dtype)
     rhs = _cast_back_to_trt_dtype(network, rhs, lhs.dtype)
     mm = network.add_matrix_multiply(
         lhs, trt.MatrixOperation.NONE,

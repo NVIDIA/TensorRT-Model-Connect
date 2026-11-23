@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/mistral/runtime/chat_templates.h"
 #include "families/mistral/runtime/kv_cache.h"
 #include "families/mistral/runtime/pipeline.h"
 
@@ -205,6 +206,15 @@ int main() {
         return 77;
     }
     try {
+        const auto render = [](const char* source) {
+            return trtmc::mistral_apply_chat_template(
+                trtmc::mistral_detect_chat_template_format(source), "Hello");
+        };
+        require(render("{{ '[INST] ' + messages[0]['content'] + ' ' + '[/INST]' }}") ==
+                    "[INST] Hello [/INST]",
+                "split closing separator was lost");
+        require(render("{{ '[INST] ' + message['content'] + '[/INST]' }}") == "[INST] Hello[/INST]",
+                "compact closing delimiter was separated");
         exercise(true);
         exercise(false);
         std::cout << "Mistral decoder work and token parity checks passed\n";

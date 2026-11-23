@@ -110,8 +110,9 @@ def _add_vit_attention(
     num_heads: int,
     seq_len: int,
     attn_style: str,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    """Add bidirectional self-attention for one InternViT layer."""
+    """Add bidirectional self-attention for one InternViT layer (``normed`` in ``dtype``)."""
 
     if attn_style == "hf":
         # InternVL3-8B-hf: attention.q_proj, attention.k_proj, attention.v_proj, attention.projection_layer
@@ -159,6 +160,7 @@ def _add_vit_attention(
         k_bias=k_bias.astype(np.float32) if k_bias is not None else None,
         v_bias=v_bias.astype(np.float32) if v_bias is not None else None,
         o_bias=o_bias.astype(np.float32) if o_bias is not None else None,
+        dtype=dtype,
     )
 
 
@@ -169,25 +171,33 @@ def _add_gelu_mlp(
     prefix: str,
     embed_dim: int,
     mlp_hidden: int,
+    dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    """Add GELU MLP for one InternViT layer (fc1 + GELU + fc2)."""
+    """Add GELU MLP for one InternViT layer (fc1 + GELU + fc2, ``normed`` in ``dtype``)."""
     fc1_w = weights[f"{prefix}.mlp.fc1.weight"].astype(np.float32).T.copy()
     fc1_b = weights.get(f"{prefix}.mlp.fc1.bias")
     fc2_w = weights[f"{prefix}.mlp.fc2.weight"].astype(np.float32).T.copy()
     fc2_b = weights.get(f"{prefix}.mlp.fc2.bias")
 
     fc1 = graph_ops.add_matmul_rhs_constant(
-        network, normed, embed_dim, mlp_hidden, fc1_w)
+        network, normed, embed_dim, mlp_hidden, fc1_w, dtype=dtype)
     if fc1_b is not None:
         fc1 = graph_ops.add_bias_sum(
-            network, fc1, mlp_hidden, fc1_b.astype(np.float32))
-    activated = graph_ops.add_gelu_new(network, fc1)
+            network, fc1, mlp_hidden, fc1_b.astype(np.float32), dtype=dtype)
+    activated = graph_ops.add_gelu_new(network, fc1, dtype=dtype)
     fc2 = graph_ops.add_matmul_rhs_constant(
-        network, activated, mlp_hidden, embed_dim, fc2_w)
+        network, activated, mlp_hidden, embed_dim, fc2_w, dtype=dtype)
     if fc2_b is not None:
         fc2 = graph_ops.add_bias_sum(
-            network, fc2, embed_dim, fc2_b.astype(np.float32))
+            network, fc2, embed_dim, fc2_b.astype(np.float32), dtype=dtype)
     return fc2
+
+
+def _cast(network: trt.INetworkDefinition, tensor: trt.ITensor, dtype) -> trt.ITensor:
+    """``tensor`` in TensorRT type ``dtype`` (itself when it already is)."""
+    if tensor.dtype == dtype:
+        return tensor
+    return network.add_cast(tensor, dtype).get_output(0)
 
 
 def _add_layer_scale(
@@ -258,20 +268,30 @@ def build_internvit_vision_engine(
     weights: 'WeightDict',
     *,
     fixed_image_size: int = 448,
+    precision: str = "fp32",
     verbose: bool = False,
 ) -> bytes:
     """Build InternViT vision encoder + MLP projector as a single TRT engine.
+
+    With ``precision="fp16"`` the attention and MLP of every ViT layer compute in
+    FP16; the residual stream, the layer norms, the layer scales, the patch
+    embedding and the projector stay FP32.
 
     Args:
         top_config: Full model config dict (for downsample_ratio, etc.).
         vision_config: The "vision_config" dict from the HF config.json.
         weights: Weight dict containing vision + projector keys.
         fixed_image_size: Image height/width the engine is compiled for.
+        precision: "fp32", or "fp16" for FP16 attention and MLP blocks.
         verbose: Print detailed logs.
 
     Returns:
         Serialized TRT engine plan bytes.
     """
+    if precision not in ("fp32", "fp16", "bf16"):
+        raise ValueError(f"Unsupported InternViT precision: {precision}")
+    block_np = np.float16 if precision == "fp16" else np.float32
+    block_trt = trt.float16 if precision == "fp16" else trt.float32
     embed_dim = vision_config.get("hidden_size", 1024)
     num_heads = vision_config.get("num_attention_heads", 16)
     num_layers = vision_config.get("num_hidden_layers", 24)
@@ -440,9 +460,9 @@ def build_internvit_vision_engine(
             network, hidden, embed_dim, ln1_gamma, ln1_beta, eps_tensor)
 
         # Self-attention (bidirectional, no RoPE)
-        attn_out = _add_vit_attention(
-            network, normed, weights, prefix,
-            embed_dim, num_heads, seq_len, attn_style)
+        attn_out = _cast(network, _add_vit_attention(
+            network, _cast(network, normed, block_trt), weights, prefix,
+            embed_dim, num_heads, seq_len, attn_style, dtype=block_np), trt.float32)
 
         # Layer scale on attention output
         if has_layer_scale:
@@ -469,8 +489,9 @@ def build_internvit_vision_engine(
             ln2_gamma, ln2_beta, eps_tensor)
 
         # GELU MLP
-        mlp_out = _add_gelu_mlp(
-            network, normed2, weights, prefix, embed_dim, mlp_hidden)
+        mlp_out = _cast(network, _add_gelu_mlp(
+            network, _cast(network, normed2, block_trt), weights, prefix,
+            embed_dim, mlp_hidden, dtype=block_np), trt.float32)
 
         # Layer scale on MLP output
         if has_layer_scale:

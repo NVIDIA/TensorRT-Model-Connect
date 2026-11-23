@@ -136,3 +136,28 @@ def test_nonfinite_responses_temperature_is_rejected_before_native_dispatch(valu
     assert response.status_code == 400
     assert response.json()["error"]["param"] == "temperature"
     assert not registry.requests
+
+
+@pytest.mark.parametrize("location", ["input", "message", "text_part", "instructions"])
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
+def test_surrogate_text_is_rejected_before_worker_acquisition(location, surrogate):
+    registry = TextRegistry()
+    registry.saturated = True
+    payload = {"model": "test/model", "input": "Capital?"}
+    if location == "input":
+        payload["input"] = surrogate
+    elif location == "instructions":
+        payload["instructions"] = surrogate
+    else:
+        content = [{"type": "input_text", "text": surrogate}] if location == "text_part" else surrogate
+        payload["input"] = [{"role": "user", "content": content}]
+    with make_client(registry) as client:
+        response = client.post("/v1/responses", content=json.dumps(payload),
+                               headers={"content-type": "application/json"})
+        assert response.status_code == 400
+        assert response.json()["error"]["type"] == "invalid_request_error"
+        assert not registry.requests
+        registry.saturated = False
+        valid = client.post("/v1/responses", json={"model": "test/model", "input": "\U0001f600"})
+        assert valid.status_code == 200
+        assert registry.requests[-1][1]["prompt"] == "\U0001f600"

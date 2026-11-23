@@ -287,6 +287,9 @@ class NativeGraph:
         else:
             biases = self.trt.Weights()
         kernel = self._tuple(module.kernel_size, dimensions)
+        if deconv and self._subpixel_deconvolution(module, dimensions, tensor):
+            output = self._subpixel_deconv2d(tensor, weight, bias, int(module.out_channels))
+            return self.cast(output, output_dtype)
         if deconv:
             layer = self.network.add_deconvolution_nd(
                 tensor, int(module.out_channels), kernel, weights, biases
@@ -310,6 +313,69 @@ class NativeGraph:
         else:
             layer.padding_nd = padding
         return self.cast(layer.get_output(0), output_dtype)
+
+    # Taps and padding of the two output phases of a kernel-4, stride-2, padding-1
+    # transposed convolution along one axis: output 2m + r reads input rows
+    # m - 1, m (r = 0) or m, m + 1 (r = 1).
+    _SUBPIXEL_TAPS = {0: (3, 1), 1: (2, 0)}
+    _SUBPIXEL_PADDING = {0: (1, 0), 1: (0, 1)}
+
+    def _subpixel_deconvolution(self, module: Any, dimensions: int, tensor: Any) -> bool:
+        """Whether a 2D deconvolution runs as four stride-1 convolutions (see _subpixel_deconv2d)."""
+        if dimensions != 2 or int(module.groups) != 1:
+            return False
+        shape = tuple(int(dim) for dim in tensor.shape)
+        return (
+            len(shape) == 4
+            and all(dim > 0 for dim in shape)
+            and self._tuple(module.kernel_size, 2) == (4, 4)
+            and self._tuple(module.stride, 2) == (2, 2)
+            and self._tuple(module.padding, 2) == (1, 1)
+            and self._tuple(module.dilation, 2) == (1, 1)
+            and self._tuple(getattr(module, "output_padding", 0), 2) == (0, 0)
+        )
+
+    def _subpixel_deconv2d(
+        self, tensor: Any, weight: np.ndarray, bias: np.ndarray | None, out_channels: int
+    ) -> Any:
+        """Kernel-4, stride-2, padding-1 transposed convolution as four 2x2 convolutions.
+
+        Each output phase ``(a, b)`` (row ``2m + a``, column ``2l + b``) is a stride-1
+        convolution with the taps of ``_SUBPIXEL_TAPS``; the phases are interleaved
+        into the doubled grid. TensorRT 11.4 has no FP16 deconvolution tactic for some
+        of these layers on GB10 (sm_121), while the convolutions build everywhere.
+        """
+        batch, _, height, width = (int(dim) for dim in tensor.shape)
+        phases = []
+        for row in (0, 1):
+            for column in (0, 1):
+                taps = weight[:, :, self._SUBPIXEL_TAPS[row], :][
+                    :, :, :, self._SUBPIXEL_TAPS[column]
+                ]
+                phase_weight = np.ascontiguousarray(taps.transpose(1, 0, 2, 3))
+                self._weight_buffers.append(phase_weight)
+                biases = self.trt.Weights()
+                if bias is not None:
+                    self._weight_buffers.append(bias)
+                    biases = self.trt.Weights(bias)
+                layer = self.network.add_convolution_nd(
+                    tensor, out_channels, (2, 2), self.trt.Weights(phase_weight), biases
+                )
+                layer.stride_nd = (1, 1)
+                layer.pre_padding = (
+                    self._SUBPIXEL_PADDING[row][0],
+                    self._SUBPIXEL_PADDING[column][0],
+                )
+                layer.post_padding = (
+                    self._SUBPIXEL_PADDING[row][1],
+                    self._SUBPIXEL_PADDING[column][1],
+                )
+                phases.append(layer.get_output(0))
+        stacked = self.reshape(
+            self.concat(phases, axis=1), (batch, 2, 2, out_channels, height, width)
+        )
+        interleaved = self.transpose(stacked, (0, 3, 4, 1, 5, 2))
+        return self.reshape(interleaved, (batch, out_channels, 2 * height, 2 * width))
 
     def _fold_batch_norm_into_convolution(
         self,

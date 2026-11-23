@@ -14,6 +14,7 @@ from . import graph_ops
 from .checkpoint_mapper import (
     _target_np_dtype,
 )
+from .quantization import configure_fp8_build
 
 
 _PROCESS_LOGGER: trt.Logger | None = None
@@ -36,6 +37,7 @@ def build_serialized_network(
     precision: str,
     verbose: bool = False,
     tag: str = "time_series",
+    quant_ctx=None,
 ) -> bytes:
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
@@ -44,6 +46,7 @@ def build_serialized_network(
     config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
     config.clear_flag(trt.BuilderFlag.TF32)
+    configure_fp8_build(config, quant_ctx)
 
     if verbose:
         print(

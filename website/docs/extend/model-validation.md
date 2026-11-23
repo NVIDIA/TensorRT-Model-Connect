@@ -52,9 +52,10 @@ cmake --build build --target trtmc_model_<family>
 ctest --test-dir build --output-on-failure
 ```
 
-A family with `tests/sdk_consumer.c` or `tests/sdk_consumer.cpp` also builds
-`test_<family>_sdk_c` and `test_<family>_sdk_cpp`; its E2E runs them from the
-build directory.
+When a selected E2E locates SDK consumers through `TRTMC_NATIVE_BUILD_DIR`,
+set it to the matching configured CMake build tree. The CI E2E runner forwards
+that directory. For the Qwen example below, building `trtmc_model_qwen` with
+`TRTMC_BUILD_TESTS=ON` also builds both C/C++ SDK consumers.
 
 Passing shared architecture tests does not replace family-specific proof.
 
@@ -78,6 +79,7 @@ binary/runtime root through the environment:
 ```bash
 TRTMC_BINARY="$PWD/build/apps/cli/trtmc" \
 TRTMC_RUNTIME_ROOT="$PWD/build/install/lib" \
+TRTMC_NATIVE_BUILD_DIR="$PWD/build" \
 python3 -m pytest families/qwen/tests/test_e2e.py \
   --e2e-testcase qwen3-0.6b-fp16 \
   -q -x
@@ -92,6 +94,30 @@ Confirm that the manifest has a meaningful task/testcase, exact inputs,
 premerge selection where intended, and thresholds that reject adversarial or
 known-wrong outputs. Never weaken a criterion to pass CI.
 
+A toolchain sweep only needs every bundle to build and load. A family declares
+the point where that is true by calling `mark_loaded()` from
+`tools.e2e_evidence` once, after the native runtime has created an execution
+context for the last engine of the testcase and before any reference or
+comparison work:
+
+```python
+with evidence_stage("native"):
+    output = run_native(bundle)
+mark_loaded()
+with evidence_stage("reference"):
+    ...
+```
+
+With `TRTMC_E2E_STOP_AFTER=loaded`, a testcase that reaches `mark_loaded()` is
+skipped there with the reason `trtmc-e2e-stopped-after:loaded`; a testcase that
+does not call it runs to completion, so an undeclared family is checked in full
+rather than wrongly passed. Call it only where every engine is loaded: a native
+block that loads one component (for example a vision oracle) is not that point.
+While the variable is set, the CI E2E runner counts these skips as stopped
+testcases, runs every selected testcase and the family hardware tests without
+stopping at the first failure, and then reports all failures. This mode checks
+build and load; it is not correctness evidence.
+
 ## 5. Save and read correctness evidence
 
 Set an artifact directory when running a selected family E2E to retain the
@@ -102,6 +128,7 @@ evaluated values, stage timings, and reproduction commands:
 TRTMC_E2E_ARTIFACT_DIR=/tmp/trtmc-e2e \
 TRTMC_BINARY="$PWD/build/apps/cli/trtmc" \
 TRTMC_RUNTIME_ROOT="$PWD/build/install/lib" \
+TRTMC_NATIVE_BUILD_DIR="$PWD/build" \
 python3 -m pytest families/qwen/tests/test_e2e.py \
   --e2e-testcase qwen3-0.6b-fp16 -q
 

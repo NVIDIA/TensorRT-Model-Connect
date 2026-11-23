@@ -5,7 +5,7 @@
 
 Only confirmed target features enter the draft. Reprojecting those features
 avoids a second persistent cache and never commits rejected proposals. Both
-linear and DDTree verification consume this same bidirectional block graph.
+DFlash modes use bidirectional proposal attention; JetSpec uses causal proposal rows.
 """
 
 from dataclasses import dataclass
@@ -15,6 +15,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import graph_ops
+from .draft_policy import block_policy
 from .checkpoint_mapper import _has_tensor, _load_tensor, _open_safetensors
 from .quantization import PackedLinear, load_projection
 
@@ -37,9 +38,7 @@ class DraftConfig:
 
     @classmethod
     def from_dict(cls, raw, target, variant):
-        if variant not in {"dflash", "dflash_ddtree"}:
-            raise ValueError("Unsupported native Qwen3.5-MoE DFlash variant")
-        policy = raw.get("dflash_config") or {}
+        policy = block_policy(raw, variant)
         feature_layers = tuple(policy.get("target_layer_ids", ()))
         hidden, vocab = int(raw["hidden_size"]), int(raw["vocab_size"])
         if (

@@ -35,6 +35,10 @@ if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
     from typing import Any as QuantContext
 
+# Optimal cache rows of a runtime-sized decode engine: a typical image prompt
+# plus its answer.
+DECODE_OPT_CACHE_ROWS = 2048
+
 
 def _mark_debug_output(
     network: trt.INetworkDefinition,
@@ -164,6 +168,15 @@ def build_standard_decoder_engine(
     kv_attention_size = graph_blocks.infer_kv_attention_size(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
     attention_window = max_cache_length + 1
+    # The split layout's decode engine attends over the cache rows the runtime
+    # binds (the cached prefix, 1..max_cache_length) instead of the whole
+    # allocation; its inputs are cache_k_i/cache_v_i [rows, kv] and an
+    # attention_mask [1, rows + 1].
+    dynamic_cache_rows = decoder_engine_role == "decode"
+    if dynamic_cache_rows and position_type == "alibi":
+        raise NotImplementedError(
+            "a runtime-sized decode cache needs RoPE or learned positions")
+    cache_rows = -1 if dynamic_cache_rows else max_cache_length
 
     builder_context = create_builder_context(
         verbose=verbose,
@@ -191,7 +204,7 @@ def build_standard_decoder_engine(
     position_id = network.add_input("position_id", trt.int32, (1,))
     attention_mask = network.add_input(
         "attention_mask", trt.float32,
-        (1, attention_window))
+        (1, -1 if dynamic_cache_rows else attention_window))
 
     # Optional VL inputs: when embed_input=True, the decoder can accept
     # a pre-computed embedding vector instead of a token ID.
@@ -209,13 +222,24 @@ def build_standard_decoder_engine(
         ck = network.add_input(
             graph_ops.layer_tensor_name("cache_k", i),
             work_trt_dtype,
-            (max_cache_length, kv_attention_size))
+            (cache_rows, kv_attention_size))
         cv = network.add_input(
             graph_ops.layer_tensor_name("cache_v", i),
             work_trt_dtype,
-            (max_cache_length, kv_attention_size))
+            (cache_rows, kv_attention_size))
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
+
+    if dynamic_cache_rows:
+        opt_rows = min(max_cache_length, DECODE_OPT_CACHE_ROWS)
+        profile = builder.create_optimization_profile()
+        profile.set_shape(
+            "attention_mask", (1, 2), (1, opt_rows + 1), (1, attention_window))
+        for cache_input in (*cache_k_inputs, *cache_v_inputs):
+            profile.set_shape(
+                cache_input.name, (1, kv_attention_size),
+                (opt_rows, kv_attention_size), (max_cache_length, kv_attention_size))
+        trt_config.add_optimization_profile(profile)
 
 
     # Cast the attention mask so elementwise operands share the work dtype
@@ -401,6 +425,7 @@ def build_standard_decoder_engine(
             sin_half_tensor=_cast_layer_dtype(sin_half_tensor),
             rotary_embedding_dim=rotary_embedding_dim,
             interleaved_rope=interleaved_rope,
+            dynamic_cache_rows=dynamic_cache_rows,
         )
 
         hidden_state = _cast_work_dtype(result["hidden"])
@@ -531,6 +556,7 @@ def _add_decoder_layer(
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
     eps: float | None = None,
+    dynamic_cache_rows: bool = False,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
 
@@ -554,6 +580,7 @@ def _add_decoder_layer(
         sin_half_tensor=sin_half_tensor,
         rotary_embedding_dim=rotary_embedding_dim,
         interleaved_rope=interleaved_rope,
+        dynamic_cache_rows=dynamic_cache_rows,
     )
     attn_out = attn["attn_out"]
     present_k = attn["present_k"]

@@ -1,0 +1,23 @@
+{
+  "name": "mt5-small",
+  "hf_id": "google/mt5-small",
+  "hf_revision": "73fb5dbe4756edadc8fbe8c769b0a109493acf7a",
+  "bundle": "mt5-small.bundle",
+  "family": "mt5",
+  "task": "text_generation",
+  "precision": "fp32",
+  "max_sequence_length": 128,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "mt5-small",
+      "premerge": true,
+      "max_new_tokens": 24,
+      "prompts": [
+        "The capital of France is <extra_id_0>.",
+        "日本の首都は<extra_id_0>です。",
+        "Café <extra_id_0> ＡＢＣ ① ﬃ."
+      ]
+    }
+  ]
+}

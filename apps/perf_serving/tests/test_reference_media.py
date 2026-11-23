@@ -135,3 +135,64 @@ def test_transcription_runs_the_declared_decoder_contract_and_counts_generation_
     assert calls["language"] == "en" and calls["task"] == "transcribe" and observation["output_tokens"] == 77
     recognizer.invoke({"audio_path": "a.wav", "language": "fr"}, None)
     assert calls["language"] == "fr"
+
+
+def test_ctc_transcription_is_the_greedy_path_without_repeats_or_blanks(monkeypatch):
+    """A CTC checkpoint (wav2vec2): one forward pass, the argmax path decoded by the processor, and the output
+    tokens are the path's distinct non-blank emissions."""
+    import numpy as np
+
+    from trtmc_perf_serving.backends.reference import media
+
+    path = [0, 5, 5, 0, 7, 7, 7, 0, 5]  # blank 0: emissions 5, 7, 5
+
+    class Model:
+        config = SimpleNamespace(pad_token_id=0)
+
+        def __call__(self, **inputs):
+            return SimpleNamespace(logits=torch.nn.functional.one_hot(torch.tensor([path]), 9).float())
+
+    class Processor:
+        def __call__(self, audio, sampling_rate, return_tensors):
+            return {"input_values": torch.zeros(1, len(audio))}
+
+        def decode(self, ids):
+            assert ids == path
+            return "A B A"
+
+    recognizer = object.__new__(media.SpeechRecognition)
+    recognizer.kind, recognizer.spec = "ctc", SimpleNamespace(device="cpu", dtype=torch.float32, options={})
+    recognizer.processor, recognizer.model, recognizer.sample_rate = Processor(), Model(), 16000
+    monkeypatch.setattr(media, "load_audio", lambda path, rate: np.zeros(16000, dtype=np.float32))
+    observation = recognizer.invoke({"audio_path": "a.wav"}, None).observation
+    assert observation["text"] == "A B A" and observation["output_tokens"] == 3
+
+
+def test_tdt_transcription_generates_within_the_request_budget(monkeypatch):
+    """A TDT transducer (parakeet) decodes with its own greedy generate, bounded by the request's max_new_tokens
+    as the TRTMC transducer is."""
+    import numpy as np
+
+    from trtmc_perf_serving.backends.reference import media
+
+    calls = {}
+
+    class Model:
+        def generate(self, **kwargs):
+            calls.update(kwargs)
+            return SimpleNamespace(sequences=torch.tensor([[4, 8, 15, 16]]))
+
+    class Processor:
+        def __call__(self, audio, sampling_rate, return_tensors):
+            return {"input_features": torch.zeros(1, 80, 10)}
+
+        def decode(self, sequences, skip_special_tokens):
+            return ["hello world"]
+
+    recognizer = object.__new__(media.SpeechRecognition)
+    recognizer.kind, recognizer.spec = "tdt", SimpleNamespace(device="cpu", dtype=torch.float32, options={})
+    recognizer.processor, recognizer.model, recognizer.sample_rate = Processor(), Model(), 16000
+    monkeypatch.setattr(media, "load_audio", lambda path, rate: np.zeros(16000, dtype=np.float32))
+    observation = recognizer.invoke({"audio_path": "a.wav", "max_new_tokens": 200}, None).observation
+    assert calls["max_new_tokens"] == 200 and calls["return_dict_in_generate"] is True
+    assert observation["text"] == "hello world" and observation["output_tokens"] == 4

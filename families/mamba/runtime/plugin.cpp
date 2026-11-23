@@ -77,7 +77,8 @@ ITask* create(const FamilyContext& context) {
     if (hidden_size <= 0 || num_layers <= 0 || vocab_size <= 0 || inner <= 0 || state_size <= 0 ||
         conv_kernel <= 1 || tp_size <= 0 || max_cache_length <= 0 || num_attention_heads <= 0 ||
         num_key_value_heads <= 0 || head_dim <= 0 || expand <= 0 ||
-        (layout != "single" && layout != "dual_profile") ||
+        (layout != "single" && layout != "dual_profile" && layout != "split") ||
+        (layout == "split" && tp_size != 1) ||
         tp_mode != (tp_size > 1 ? "tensor_parallel" : "single") ||
         (precision != "fp16" && precision != "bf16" && precision != "fp32")) {
         throw std::runtime_error("mamba runtime.json contains invalid geometry");
@@ -97,6 +98,18 @@ ITask* create(const FamilyContext& context) {
         throw std::runtime_error("mamba failed to load decoder");
     decoder->set_timing_label("mamba decoder");
     const cudaStream_t stream = decoder->stream();
+    std::unique_ptr<ITrtModule> prefill;
+    if (layout == "split") {
+        // The prefill engine shares the decoder's stream so state copies stay ordered.
+        ModuleCreateOptions prefill_options = options;
+        prefill_options.stream = stream;
+        const auto& prefill_plan = require_section(context.reader, "prefill.plan");
+        prefill = context.backend.create_module(prefill_plan.data(), prefill_plan.size(),
+                                                prefill_options);
+        if (prefill == nullptr || !prefill->ok())
+            throw std::runtime_error("mamba failed to load the prefill engine");
+        prefill->set_timing_label("mamba prefill");
+    }
 
     std::vector<MambaRecurrentState::TensorSpec> specs = {
         {"conv_state", {inner, conv_kernel}, "present_conv"},
@@ -114,7 +127,8 @@ ITask* create(const FamilyContext& context) {
     generation.chat_template_format =
         mamba_detect_chat_template_format(chat_template(context.reader));
     return new RecurrentPipeline(std::move(decoder), std::move(state), std::move(generation),
-                                 stream, "Mamba", create_tokenizer(context.reader), std::string{});
+                                 stream, "Mamba", create_tokenizer(context.reader), std::string{},
+                                 std::move(prefill));
 }
 
 } // namespace trtmc::mamba

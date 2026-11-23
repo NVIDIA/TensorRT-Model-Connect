@@ -4,7 +4,7 @@
   "hf_revision": "e4b9872bb803165eb22f0a867d4e6a64d34fce19",
   "bundle": "falcon-rw-1b.bundle",
   "family": "falcon",
-  "task": "text_generation",
+  "task": "text_continuation",
   "precision": "fp16",
   "trust_remote_code": false,
   "testcases": [

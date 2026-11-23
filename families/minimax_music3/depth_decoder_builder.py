@@ -87,8 +87,13 @@ def add_rms_norm(network: Any, trt: Any, hidden: Any, weight, dtype=None) -> Any
     ).get_output(0)
 
 
-def _linear(network, trt, hidden, weight, out_features: int, dtype=None):
-    """A bias-free ``x @ W.T`` as a constant-operand matrix multiply."""
+def _linear(network, trt, hidden, weight, out_features: int, dtype=None, *,
+            quant=None, name=None):
+    """A bias-free ``x @ W.T`` as a constant-operand matrix multiply.
+
+    With ``quant`` (a :class:`.quantization.BlockQuant`) the projection ``name``
+    becomes an FP8 matmul when it has a calibrated scale.
+    """
 
     import numpy as np
 
@@ -97,6 +102,10 @@ def _linear(network, trt, hidden, weight, out_features: int, dtype=None):
         raise ValueError(
             f"weight has {array.shape[0]} rows, expected {out_features}"
         )
+    if quant is not None:
+        out = quant.linear(network, hidden, array, name)
+        if out is not None:
+            return out
     transposed = _const(network, trt, np.ascontiguousarray(array.T).reshape(
         1, array.shape[1], out_features), dtype)
     return network.add_matrix_multiply(
@@ -105,14 +114,14 @@ def _linear(network, trt, hidden, weight, out_features: int, dtype=None):
 
 
 def add_attention(network: Any, trt: Any, hidden: Any, weights: dict, prefix: str,
-                  steps: int, dtype=None) -> Any:
+                  steps: int, dtype=None, quant: Any = None) -> Any:
     """Causal multi-head attention with no positional rotation."""
 
     heads, dim = NUM_ATTENTION_HEADS, head_dim()
     projections = {}
     for name in ("to_q", "to_k", "to_v"):
         flat = _linear(network, trt, hidden, weights[f"{prefix}.attn.{name}.weight"],
-                       HIDDEN_SIZE, dtype)
+                       HIDDEN_SIZE, dtype, quant=quant, name=f"{prefix}.attn.{name}")
         split = network.add_shuffle(flat)
         split.reshape_dims = (steps, heads, dim)
         split.second_transpose = (1, 0, 2)
@@ -143,33 +152,38 @@ def add_attention(network: Any, trt: Any, hidden: Any, weights: dict, prefix: st
     merge.first_transpose = (1, 0, 2)
     merge.reshape_dims = (1, steps, HIDDEN_SIZE)
     return _linear(network, trt, merge.get_output(0),
-                   weights[f"{prefix}.attn.to_out.weight"], HIDDEN_SIZE, dtype)
+                   weights[f"{prefix}.attn.to_out.weight"], HIDDEN_SIZE, dtype,
+                   quant=quant, name=f"{prefix}.attn.to_out")
 
 
 def add_swiglu(network: Any, trt: Any, hidden: Any, weights: dict, prefix: str,
-               dtype=None) -> Any:
+               dtype=None, quant: Any = None) -> Any:
     """``down(silu(gate(x)) * up(x))``."""
 
     gate = _linear(network, trt, hidden, weights[f"{prefix}.gate_proj.weight"],
-                   INTERMEDIATE_SIZE, dtype)
+                   INTERMEDIATE_SIZE, dtype, quant=quant, name=f"{prefix}.gate_proj")
     activated = network.add_activation(gate, trt.ActivationType.SIGMOID).get_output(0)
     silu = network.add_elementwise(gate, activated, trt.ElementWiseOperation.PROD)
     up = _linear(network, trt, hidden, weights[f"{prefix}.up_proj.weight"],
-                 INTERMEDIATE_SIZE, dtype)
+                 INTERMEDIATE_SIZE, dtype, quant=quant, name=f"{prefix}.up_proj")
     gated = network.add_elementwise(
         silu.get_output(0), up, trt.ElementWiseOperation.PROD
     )
     return _linear(network, trt, gated.get_output(0),
-                   weights[f"{prefix}.down_proj.weight"], HIDDEN_SIZE, dtype)
+                   weights[f"{prefix}.down_proj.weight"], HIDDEN_SIZE, dtype,
+                   quant=quant, name=f"{prefix}.down_proj")
 
 
 def add_depth_decoder(network: Any, trt: Any, inputs_embeds: Any, *, steps: int,
-                      weights: dict, dtype=None) -> Any:
+                      weights: dict, dtype=None, quant: Any = None) -> Any:
     """Add the decoder and return its normalised hidden states.
 
     With ``dtype`` the blocks and the final norm run in that type: the sequence
     is cast after the position table is added, and the normalised states are
     cast back to float32, so the inputs and outputs stay float32.
+
+    ``quant`` (FP8 builds only) quantizes the projections that have a scale;
+    the FP8 matmuls write the block type.
     """
 
     import numpy as np
@@ -186,7 +200,8 @@ def add_depth_decoder(network: Any, trt: Any, inputs_embeds: Any, *, steps: int,
         prefix = f"layers.{layer}"
         normed = add_rms_norm(network, trt, hidden,
                               weights[f"{prefix}.input_layernorm.weight"], dtype)
-        attended = add_attention(network, trt, normed, weights, prefix, steps, dtype)
+        attended = add_attention(network, trt, normed, weights, prefix, steps, dtype,
+                                 quant)
         hidden = network.add_elementwise(
             hidden, attended, trt.ElementWiseOperation.SUM
         ).get_output(0)
@@ -194,7 +209,7 @@ def add_depth_decoder(network: Any, trt: Any, inputs_embeds: Any, *, steps: int,
         normed = add_rms_norm(network, trt, hidden,
                               weights[f"{prefix}.post_attention_layernorm.weight"],
                               dtype)
-        projected = add_swiglu(network, trt, normed, weights, prefix, dtype)
+        projected = add_swiglu(network, trt, normed, weights, prefix, dtype, quant)
         hidden = network.add_elementwise(
             hidden, projected, trt.ElementWiseOperation.SUM
         ).get_output(0)
