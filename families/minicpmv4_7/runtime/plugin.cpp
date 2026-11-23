@@ -5,6 +5,7 @@
 
 #include "families/minicpmv4_7/runtime/image_preprocess.h"
 #include "families/minicpmv4_7/runtime/prompt.h"
+#include "families/minicpmv4_7/runtime/request.h"
 #include "families/minicpmv4_7/runtime/sampler.h"
 #include "families/minicpmv4_7/runtime/state.h"
 #include "families/minicpmv4_7/runtime/tokenizer.h"
@@ -16,19 +17,13 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <cuda_runtime_api.h>
-#include <limits>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
-#include <optional>
 #include <stdexcept>
 #include <string>
-#include <type_traits>
-#include <variant>
 #include <vector>
 
 namespace trtmc::minicpmv4_7 {
@@ -126,43 +121,6 @@ RuntimeConfig parse_runtime(const BundleReader& bundle) {
     return config;
 }
 
-const std::vector<internal::ConfigField>& config_fields() {
-    static const std::vector<internal::ConfigField> fields{
-        {"max_new_tokens", internal::ConfigKind::I64, std::nullopt,
-         "Generated token budget; by default up to 128 within the decoder capacity"},
-        {"temperature", internal::ConfigKind::F64, 1.0, "Sampling temperature"},
-        {"top_k", internal::ConfigKind::I64, int64_t{1},
-         "Top-k sampling; 1 selects greedy decoding"},
-        {"top_p", internal::ConfigKind::F64, 1.0, "Nucleus sampling"},
-        {"seed", internal::ConfigKind::I64, int64_t{-1}, "Sampling seed; -1 leaves it unspecified"},
-        {"enable_thinking", internal::ConfigKind::Bool, false, "Provider template thinking mode"},
-    };
-    return fields;
-}
-
-// Decoded pixels in [0, 255]; Float32 views carry value / 255 as the CLI loads them.
-std::vector<uint8_t> rgb_bytes(const internal::ImageView& image) {
-    if (image.data == nullptr || image.height == 0 || image.width == 0 || image.channels != 3)
-        throw std::invalid_argument("MiniCPM-V 4.7 accepts non-empty RGB images");
-    const auto count = static_cast<std::size_t>(image.height) * image.width * 3;
-    std::vector<uint8_t> out(count);
-    if (image.format == internal::ImageFormat::UInt8) {
-        if (image.byte_size != count)
-            throw std::invalid_argument("MiniCPM-V 4.7 image byte size disagrees with its shape");
-        std::memcpy(out.data(), image.data, count);
-        return out;
-    }
-    if (image.byte_size != count * sizeof(float))
-        throw std::invalid_argument("MiniCPM-V 4.7 image byte size disagrees with its shape");
-    const auto* values = static_cast<const float*>(image.data);
-    for (std::size_t i = 0; i < count; ++i) {
-        if (!std::isfinite(values[i]) || values[i] < 0.0F || values[i] > 1.0F)
-            throw std::invalid_argument("MiniCPM-V 4.7 Float32 pixels must lie in [0, 1]");
-        out[i] = static_cast<uint8_t>(std::lround(values[i] * 255.0F));
-    }
-    return out;
-}
-
 class Model final : public internal::IModel, public internal::IImagesTextToText {
   public:
     explicit Model(const FamilyContext& context)
@@ -209,80 +167,22 @@ class Model final : public internal::IModel, public internal::IImagesTextToText 
     const char* task() const noexcept override { return task_.c_str(); }
 
     std::vector<internal::TaskInstance> task_bindings() override {
-        const auto& fields = config_fields();
-        return {internal::bind<internal::IImagesTextToText>(*this, {fields.data(), fields.size()})};
+        return {internal::bind<internal::IImagesTextToText>(*this, request_config_fields())};
     }
 
     TextResult run(const internal::ImagesTextToTextRequest& request,
                    internal::ConfigView supplied) override {
-        if (!request.tools.empty())
-            throw std::invalid_argument("MiniCPM-V 4.7 does not map tool definitions");
-        const auto& fields = config_fields();
-        const Span<const internal::ConfigField> schema{fields.data(), fields.size()};
-        internal::validate_config(schema, supplied);
-        const auto requested = internal::config_get<int64_t>(supplied, schema, "max_new_tokens");
-        if (requested && (*requested <= 0 || *requested > config_.capacity))
-            throw std::invalid_argument("MiniCPM-V 4.7 max_new_tokens must be in [1, capacity]");
-        const SamplingConfig sampling{
-            *internal::config_get<double>(supplied, schema, "temperature"),
-            *internal::config_get<int64_t>(supplied, schema, "top_k"),
-            *internal::config_get<double>(supplied, schema, "top_p"),
-            *internal::config_get<int64_t>(supplied, schema, "seed")};
-        const bool thinking = *internal::config_get<bool>(supplied, schema, "enable_thinking");
         const auto setup_begin = Clock::now();
+        // Host preparation reads only immutable members; engines and state need the lock.
+        auto prepared = prepare_request(
+            request, supplied, {config_.prompts, config_.processor, *tokenizer_, config_.capacity});
+        const auto& ids = prepared.ids;
+        const int64_t max_new = prepared.max_new_tokens;
 
-        std::vector<ChatMessage> messages;
-        std::vector<ImageCrops> images;
-        for (const auto& message : request.messages) {
-            ChatMessage item;
-            if (message.role == internal::MessageRole::System)
-                item.role = Role::System;
-            else if (message.role == internal::MessageRole::User)
-                item.role = Role::User;
-            else if (message.role == internal::MessageRole::Assistant)
-                item.role = Role::Assistant;
-            else
-                throw std::invalid_argument(
-                    "MiniCPM-V 4.7 accepts system, user and assistant roles");
-            std::vector<std::string> parts;
-            for (const auto& part : message.parts) {
-                std::visit(
-                    [&](const auto& value) {
-                        using T = std::decay_t<decltype(value)>;
-                        if constexpr (std::is_same_v<T, internal::TextPartView>) {
-                            parts.emplace_back(value.text);
-                        } else if constexpr (std::is_same_v<T, internal::ImageView>) {
-                            if (item.role != Role::User)
-                                throw std::invalid_argument(
-                                    "MiniCPM-V 4.7 accepts images in user messages only");
-                            const auto pixels = rgb_bytes(value);
-                            images.push_back(preprocess_image(
-                                pixels.data(), static_cast<int32_t>(value.height),
-                                static_cast<int32_t>(value.width), config_.processor));
-                            parts.emplace_back(kImagePlaceholder);
-                        } else {
-                            throw std::invalid_argument(
-                                "MiniCPM-V 4.7 does not map reasoning or tool parts");
-                        }
-                    },
-                    part);
-            }
-            item.content = join_parts(parts);
-            messages.push_back(std::move(item));
-        }
-
-        const auto formatted =
-            format_conversation(config_.prompts.at(thinking ? "true" : "false"), messages);
-        const auto expanded = expand_images(formatted, images, config_.processor.merge_factor);
-        const auto ids = tokenizer_->encode(expanded);
-        const int64_t max_new =
-            generation_budget(requested, config_.capacity, static_cast<int64_t>(ids.size()));
-
-        // Host preparation above reads only immutable members; engines and state need the lock.
         std::lock_guard<std::mutex> lock(mutex_);
         std::vector<std::array<int32_t, 2>> grids;
         std::vector<uint8_t> features;
-        for (auto& image : images)
+        for (auto& image : prepared.images)
             for (auto& crop : image.crops) {
                 grids.push_back({crop.grid_h, crop.grid_w});
                 encode_crop(crop, features);
@@ -312,11 +212,10 @@ class Model final : public internal::IModel, public internal::IImagesTextToText 
         }
         const auto prefill_end = Clock::now();
 
-        Sampler sampler(sampling);
         std::vector<int32_t> generated;
         const int32_t delta = canvas.decode_position - static_cast<int32_t>(ids.size());
         while (true) {
-            const int32_t token = sampler.sample(logits);
+            const int32_t token = prepared.sampler.sample(logits);
             generated.push_back(token);
             const bool stop =
                 std::find(config_.eos.begin(), config_.eos.end(), token) != config_.eos.end();

@@ -5,27 +5,33 @@
 
 // Host-only contract of the MiniCPM-V 4.7 runtime against values recorded from the provider
 // (transformers 5.22.2, tokenizers 0.23.1): image slicing, vision position ids, canvas M-RoPE,
-// the chat format, the generation budget, BPE merge order and the tokenizer's NFC.
+// the chat format, request preparation, the generation budget and sampling, BPE merge order and
+// the tokenizer's NFC.
 
 #include "families/minicpmv4_7/runtime/bpe_merge.h"
 #include "families/minicpmv4_7/runtime/image_preprocess.h"
 #include "families/minicpmv4_7/runtime/prompt.h"
+#include "families/minicpmv4_7/runtime/request.h"
 #include "families/minicpmv4_7/runtime/sampler.h"
 #include "families/minicpmv4_7/runtime/tokenizer.h"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 using namespace trtmc::minicpmv4_7;
+namespace internal = trtmc::internal;
 
 namespace {
 
@@ -36,6 +42,17 @@ void expect(bool condition, const std::string& what) {
         std::cerr << "FAILED: " << what << "\n";
         ++failures;
     }
+}
+
+// The message of the exception `body` throws; empty when it returns.
+template <typename Body>
+std::string error_of(Body body) {
+    try {
+        body();
+    } catch (const std::exception& error) {
+        return error.what();
+    }
+    return {};
 }
 
 int64_t digest(const std::vector<int32_t>& values) {
@@ -162,9 +179,9 @@ void canvas() {
     }
 }
 
-void conversation() {
-    // Recipe extracted from the checkpoint template at build time (enable_thinking=false).
-    const auto recipe = nlohmann::json::parse(R"({
+// Recipe extracted from the checkpoint template at build time (enable_thinking=false).
+const nlohmann::json& chat_recipe() {
+    static const auto recipe = nlohmann::json::parse(R"({
       "default_prefix": "", "user": {"prefix": "<|im_start|>user\n", "suffix": "<|im_end|>\n"},
       "system": {"prefix": "<|im_start|>system\n", "suffix": "<|im_end|>\n"},
       "empty_system_prefix": "<|im_start|>system\n<|im_end|>\n",
@@ -174,6 +191,11 @@ void conversation() {
         "suffix": "<|im_end|>\n"},
       "assistant_history": {"prefix": "<|im_start|>assistant\n<think>\n\n</think>\n\n", "include_reasoning": false,
         "reasoning_prefix": "", "reasoning_suffix": "", "empty_reasoning": "", "suffix": "<|im_end|>\n"}})");
+    return recipe;
+}
+
+void conversation() {
+    const auto& recipe = chat_recipe();
     const std::string image = kImagePlaceholder;
     expect(format_conversation(recipe, {{Role::User, join_parts({image, "What is shown?"})}}) ==
                "<|im_start|>user\n<|image_pad|>\nWhat is shown?<|im_end|>\n<|im_start|>assistant\n"
@@ -234,6 +256,107 @@ void generation() {
     expect(dominant, "nucleus keeps the dominant candidate");
 }
 
+// Fixed prompt ids; counts how often a prompt was tokenized.
+class CountingTokenizer final : public ITokenizer {
+  public:
+    std::vector<int32_t> encode(const std::string&) const override {
+        ++calls;
+        return std::vector<int32_t>(4, 1000);
+    }
+    std::string decode(const std::vector<int32_t>&) const override { return {}; }
+    int32_t id_for_token(std::string_view) const override { return -1; }
+    mutable int calls = 0;
+};
+
+void request_preparation() {
+    const nlohmann::json prompts{{"false", chat_recipe()}, {"true", chat_recipe()}};
+    const ProcessorConfig processor{};
+    CountingTokenizer tokenizer;
+    const RequestContext context{prompts, processor, tokenizer, 64};
+    const std::vector<uint8_t> pixels(28 * 28 * 3, 128);
+    internal::ImageView image;
+    image.data = pixels.data();
+    image.byte_size = pixels.size();
+    image.height = image.width = 28;
+    image.format = internal::ImageFormat::UInt8;
+    const auto user_turn = [](const std::vector<internal::ImagesTextPart>& parts) {
+        return std::vector<internal::ImagesTextMessage>{
+            {internal::MessageRole::User, {parts.data(), parts.size()}}};
+    };
+    const std::vector<internal::ImagesTextPart> parts{image, internal::TextPartView{"Describe."}};
+    const auto messages = user_turn(parts);
+    const internal::ImagesTextToTextRequest request{{messages.data(), messages.size()}};
+    const auto prepared = prepare_request(request, {}, context);
+    expect(prepared.ids.size() == 4 && prepared.images.size() == 1 &&
+               prepared.max_new_tokens == 61 && tokenizer.calls == 1,
+           "a valid request is prepared");
+
+    // top_p = 0 passes the shared type check; the sampler rejects it before any image work, so a
+    // request that also carries an invalid image still fails on its options.
+    internal::ImageView four_channels = image;
+    four_channels.channels = 4;
+    const std::vector<internal::ImagesTextPart> bad_parts{four_channels,
+                                                          internal::TextPartView{"Describe."}};
+    const auto bad_messages = user_turn(bad_parts);
+    const internal::ImagesTextToTextRequest bad_image{{bad_messages.data(), bad_messages.size()}};
+    const internal::ConfigEntry zero_top_p[] = {{"top_p", 0.0}};
+    tokenizer.calls = 0;
+    expect(error_of([&] {
+               (void)prepare_request(bad_image, zero_top_p, context);
+           }).find("sampling") != std::string::npos &&
+               tokenizer.calls == 0,
+           "sampling options fail before images and the prompt");
+    expect(error_of([&] { (void)prepare_request(bad_image, {}, context); }).find("RGB") !=
+               std::string::npos,
+           "an invalid image fails with valid options");
+
+    // The sides and the byte size are checked before the copy is allocated: a (2^31 - 1)^2 RGB
+    // copy would take about 13.8 EB.
+    const auto rejected = [](const internal::ImageView& view) {
+        try {
+            (void)rgb_bytes(view);
+        } catch (const std::invalid_argument&) {
+            return true;
+        } catch (...) {
+        }
+        return false;
+    };
+    internal::ImageView huge = image;
+    huge.height = huge.width = 2147483647U;
+    huge.byte_size = 3;
+    expect(rejected(huge), "image byte size checked before the copy is allocated");
+    huge.height = huge.width = 2147483648U;
+    expect(rejected(huge), "image sides beyond int32 rejected");
+    const std::vector<float> unit{0.0F, 1.0F, 0.5F, 0.2F, 0.4F, 0.6F};
+    internal::ImageView floats;
+    floats.data = unit.data();
+    floats.byte_size = unit.size() * sizeof(float);
+    floats.height = 2;
+    floats.width = 1;
+    floats.format = internal::ImageFormat::Float32;
+    expect(rgb_bytes(floats) == std::vector<uint8_t>{0, 255, 128, 51, 102, 153},
+           "Float32 pixels scale to bytes");
+}
+
+void sampling() {
+    // Non-finite logits fail on both paths instead of reaching the orderings and the weights.
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    const auto rejected = [](SamplingConfig config, const std::vector<float>& logits) {
+        Sampler sampler(config);
+        try {
+            (void)sampler.sample(logits);
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+        return false;
+    };
+    expect(rejected({1.0, 1, 1.0, 7}, {1.0F, nan, 0.0F}) &&
+               rejected({1.0, 0, 1.0, 7}, {1.0F, nan, 0.0F}) &&
+               rejected({1.0, 0, 1.0, 7}, {inf, 0.0F}) && rejected({0.0, 0, 1.0, 7}, {-inf, 0.0F}),
+           "non-finite logits are rejected");
+}
+
 // BPE merges in the order of the tokenizers BPE model: lowest (rank, position) first over the
 // current symbols, so a pair formed by a merge competes with the pairs queued before it.
 void bpe_merges() {
@@ -290,7 +413,9 @@ int main() {
     positions();
     canvas();
     conversation();
+    request_preparation();
     generation();
+    sampling();
     bpe_merges();
     normalization();
     if (failures == 0)

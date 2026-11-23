@@ -32,6 +32,11 @@ Sampler::Sampler(const SamplingConfig& config) : config_(config) {
 int32_t Sampler::sample(const std::vector<float>& logits) {
     if (logits.empty())
         throw std::invalid_argument("MiniCPM-V 4.7 sampler received no logits");
+    // NaN breaks the strict weak order both paths compare by; an infinite maximum makes NaN
+    // weights.
+    if (!std::all_of(logits.begin(), logits.end(),
+                     [](float value) { return std::isfinite(value); }))
+        throw std::runtime_error("MiniCPM-V 4.7 decoder produced non-finite logits");
     const auto greedy = [&] {
         return static_cast<int32_t>(std::max_element(logits.begin(), logits.end()) -
                                     logits.begin());

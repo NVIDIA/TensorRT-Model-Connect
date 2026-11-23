@@ -27,7 +27,8 @@ struct SamplingConfig {
 };
 
 // Greedy (first maximum) when top_k == 1 or temperature == 0; otherwise temperature, top-k and
-// nucleus filtering followed by one draw from a seeded generator.
+// nucleus filtering followed by one draw from a seeded generator. The constructor rejects invalid
+// options; sample() rejects empty or non-finite logits.
 class Sampler {
   public:
     explicit Sampler(const SamplingConfig& config);

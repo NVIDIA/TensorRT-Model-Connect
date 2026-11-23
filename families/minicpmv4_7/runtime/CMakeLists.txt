@@ -8,6 +8,7 @@ add_library(trtmc_model_minicpmv4_7 SHARED
   image_preprocess.cpp
   plugin.cpp
   prompt.cpp
+  request.cpp
   sampler.cpp
   state.cpp
 )
@@ -36,16 +37,20 @@ install(FILES ${PROJECT_SOURCE_DIR}/families/minicpmv4_7/NOTICE
   DESTINATION ${CMAKE_INSTALL_DATADIR}/trtmc/families/minicpmv4_7)
 
 if(TRTMC_BUILD_TESTS)
-  # Host-only preprocessing, prompt, canvas-position, generation and tokenizer contract (no GPU,
-  # no bundle).
+  # Host-only preprocessing, prompt, canvas-position, request, generation and tokenizer contract
+  # (no GPU, no bundle).
   add_executable(test_minicpmv4_7_prompt
     ${PROJECT_SOURCE_DIR}/families/minicpmv4_7/tests/cpp/test_prompt.cpp
     bpe_tokenizer.cpp
     image_preprocess.cpp
     prompt.cpp
+    request.cpp
     sampler.cpp
   )
-  target_include_directories(test_minicpmv4_7_prompt PRIVATE ${PROJECT_SOURCE_DIR})
+  target_include_directories(test_minicpmv4_7_prompt PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
   target_link_libraries(test_minicpmv4_7_prompt PRIVATE ICU::uc ICU::i18n
     nlohmann_json::nlohmann_json)
   target_compile_options(test_minicpmv4_7_prompt PRIVATE -Wall -Wextra -Wpedantic -Werror)
