@@ -6,7 +6,12 @@
 
 #include "families/gemma/runtime/edge_llm/contract.h"
 
+#ifdef TRTMC_GEMMA_EDGE_012
+#include <tensorrt_edgellm/runtime/llmRuntimeUtils.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#else
 #include <edgellm/cpp/runtime/llmRuntimeUtils.h>
+#endif
 
 namespace trtmc::gemma::edge_llm {
 
@@ -34,7 +39,7 @@ inline trt_edgellm::rt::LLMGenerationRequest make_request(const std::string& pro
     request.applyChatTemplate = config.use_chat_template;
     request.enableThinking = config.enable_thinking;
     request.temperature = config.temperature;
-    request.topK = config.top_k;
+    request.topK = edge_top_k(config);
     request.topP = config.top_p;
     request.maxGenerateLength = config.max_new_tokens > 0 ? config.max_new_tokens : default_length;
     if (config.seed >= 0)

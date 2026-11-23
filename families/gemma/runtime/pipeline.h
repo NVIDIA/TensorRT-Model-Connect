@@ -30,6 +30,9 @@
 namespace trtmc {
 
 class GemmaKvCache;
+namespace gemma {
+struct JetSpecNode;
+} // namespace gemma
 
 struct GemmaTextGenConfig {
     int32_t vocab_size{0};
@@ -49,9 +52,13 @@ struct GemmaTextGenConfig {
     int32_t draft_block_size{0};
     int32_t draft_mask_token_id{0};
     int32_t draft_feature_width{0};
+    bool draft_jetspec{false};
+    bool draft_ddtree = false;
     bool draft_markov{false};
     bool draft_eagle{false};
+    bool draft_eagle_tree{false};
     bool draft_skip_first{false};
+    bool draft_shifted_block_labels{false};
     // A dynamic decoder context can also own batched prefill.
     bool single_context{false};
     // Last target-owned KV layer for each assistant attention type.
@@ -118,7 +125,8 @@ class GemmaTextGenerationPipeline final : public ITextGeneration,
     MtpStats mtp_stats_;
     BlockDraftStats block_stats_;
     std::vector<float> draft_context_;
-    std::vector<int32_t> propose_block(int32_t pending, const std::vector<int32_t>& output);
+    std::vector<int32_t> propose_block(int32_t pending, const std::vector<int32_t>& output,
+                                       std::vector<gemma::JetSpecNode>& tree);
     void verify_block(const std::vector<int32_t>&, std::vector<float>&, std::vector<float>&);
     void run_block_loop(GemmaISampler*, const GemmaSamplingParams&, std::vector<int32_t>&,
                         std::vector<float>&, int32_t, const TextGenerationConfig&, int32_t);

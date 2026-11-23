@@ -16,7 +16,8 @@ import traceback
 
 from tensorrt_model_connect.build import subprocess_environment
 
-from .builder import EDGE_REVISION, installed_package, local_target
+from .builder import exporter_command, installed_package, local_target, release_marker
+from .ple import package_source
 
 _LOG = logging.getLogger(__name__)
 
@@ -33,7 +34,31 @@ _PUBLISHED_NVFP4_CONFIG_GROUPS = {
 }
 
 
-def checkpoint_quantization(raw: dict, source: Path, target: dict) -> str | None:
+def _nvfp4_moe_target(sm: int, release: str) -> str:
+    # The export target selects both the plugin and its FC1 weight packing.
+    if sm in {120, 121}:
+        return "sm12x"
+    if release == "0.12.0" and sm in {100, 101, 103, 110}:
+        return f"sm{sm}"
+    raise ValueError(f"Gemma4 NVFP4 MoE: unsupported Edge {release} plugin target SM{sm}")
+
+
+def _has_fused_experts(source: Path) -> bool:
+    """Inspect the tensor names only: no shard data or conversion is needed."""
+    index = source / "model.safetensors.index.json"
+    if index.is_file():
+        names = json.loads(index.read_text(encoding="utf-8"))["weight_map"]
+    else:
+        from safetensors import safe_open
+
+        with safe_open(str(source / "model.safetensors"), framework="numpy") as weights:
+            names = set(weights.keys())
+    return any(name.endswith(".experts.gate_up_proj")
+               and name.removesuffix("gate_up_proj") + "down_proj" in names for name in names)
+
+
+def checkpoint_quantization(raw: dict, source: Path, target: dict | None,
+                            release: str = "0.11.0") -> str | None:
     """Admit original weights or the published Gemma4 dense/MoE NVFP4 layouts.
 
     This forwards an already quantized checkpoint; it never calibrates weights
@@ -45,6 +70,10 @@ def checkpoint_quantization(raw: dict, source: Path, target: dict) -> str | None
     if any((source / name).exists() for name in ("quantize_config.json", "quant_config.json")):
         raise ValueError("Gemma4 Edge does not map this checkpoint quantization format")
     if not quant and not sidecar.exists():
+        if (release == "0.12.0" and raw.get("model_type") == "gemma4"
+                and text.get("enable_moe_block") is True and _has_fused_experts(source)):
+            raise ValueError("Edge-LLM 0.12 cannot load Gemma4 fused floating-point experts "
+                             "without requantizing the checkpoint")
         return None
     if not isinstance(quant, dict) or not sidecar.is_file():
         raise ValueError("Gemma4 NVFP4 requires matching ModelOpt config and hf_quant_config.json")
@@ -63,8 +92,8 @@ def checkpoint_quantization(raw: dict, source: Path, target: dict) -> str | None
             or quant.get("kv_cache_scheme") != {"dynamic": False, "num_bits": 8, "type": "float"}
             or text.get("quantization_config") not in (None, quant)):
         raise ValueError("Gemma4 Edge requires a published dense31B or MoE26B-A4B ModelOpt NVFP4 layout")
-    if moe and target.get("sm") not in {120, 121}:
-        raise ValueError("Gemma4 NVFP4 offload requires a native SM12x Edge installation")
+    if moe and target is not None:
+        _nvfp4_moe_target(target.get("sm"), release)
     return "nvfp4"
 
 
@@ -81,7 +110,6 @@ def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path):
                                                    request.video_num_frames))):
         raise ValueError("Gemma4 standalone Edge maps FP16 compute, checkpoint weights, TP1/batch1 without build overrides")
     source = Path(request.model_dir).resolve()
-    checkpoint_quant = checkpoint_quantization(raw, source, target)
     text = raw.get("text_config")
     if not isinstance(text, dict) or text.get("model_type") != raw["model_type"] + "_text":
         raise ValueError("Gemma4 standalone requires its original nested text configuration")
@@ -95,6 +123,7 @@ def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path):
     if request.task in {"audio_text_to_text", "image_audio_text_to_text"} and not has_audio:
         raise ValueError("Requested Gemma4 task requires an audio tower")
     package = installed_package(target, vision=has_vision, audio=has_audio)
+    checkpoint_quant = checkpoint_quantization(raw, source, target, package["version"])
     if package.get("onnx") is not True or package.get("all_native_kernels") is not True:
         raise ValueError("Gemma4 requires an ONNX-enabled full native Edge SDK")
     engine, onnx = staging / "edge_llm/engine", staging / "onnx"
@@ -103,16 +132,19 @@ def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path):
     shutil.copy2(source / "config.json", checkpoint / "config.json")
     additions = {"EDGELLM_PLUGIN_PATH": package["plugin"]}
     if checkpoint_quant and text.get("enable_moe_block"):
-        # The upstream exporter otherwise defaults the MoE plugin to Thor.
-        additions["EDGELLM_NVFP4_MOE_TARGET"] = "sm12x"
+        additions["EDGELLM_NVFP4_MOE_TARGET"] = _nvfp4_moe_target(
+            target["sm"], package["version"])
     env = subprocess_environment(
         additions,
         prepend_paths={"LD_LIBRARY_PATH": str(Path(package["plugin"]).parent)},
     )
     input_limit = min(limit - 2, 1024)
+    export = exporter_command(package, target, getattr(request, "edge_builder_python", None))
+    export.extend([str(source), str(onnx), "--dtype", "float16"])
+    if package["version"] == "0.12.0":
+        export.extend(["--externalize-weights", "all"])
     commands = [
-        [package["python"], "-I", "-m", "tensorrt_edgellm.scripts.export",
-         str(source), str(onnx), "--dtype", "float16"],
+        export,
         [package["onnx_builder"], "--onnxDir", str(onnx / "llm"),
          "--engineDir", str(engine), "--maxInputLen", str(input_limit),
          "--maxKVCacheCapacity", str(limit), "--maxBatchSize", "1"],
@@ -147,7 +179,10 @@ def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path):
                            cwd=staging, env=env)
     required = ["llm.engine", "config.json", "embedding.safetensors",
                 "tokenizer.json", "tokenizer_config.json", "chat_template.jinja"]
-    if text.get("hidden_size_per_layer_input", 0):
+    if package["version"] == "0.12.0":
+        package_source(engine / "config.json", source, checkpoint,
+                       ple=bool(text.get("hidden_size_per_layer_input")))
+    elif text.get("hidden_size_per_layer_input", 0):
         required.append("ple_embedding.safetensors")
     if has_vision:
         required.extend(("visual/visual.engine", "visual/config.json"))
@@ -169,7 +204,7 @@ def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path):
             if path.is_file():
                 files[path.relative_to(staging).as_posix()] = path
     return files, {
-        "version": 1, "edge_revision": EDGE_REVISION, "target": target, "precision": "fp16",
+        "version": 1, **release_marker(package), "target": target, "precision": "fp16",
         "max_sequence_length": limit, "max_input_length": input_limit, "max_batch_size": 1,
         "execution_variant": "autoregressive", "builder_flow": "onnx", "task": request.task,
         "checkpoint_quantization": checkpoint_quant,

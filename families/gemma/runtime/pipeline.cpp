@@ -91,8 +91,13 @@ GemmaTextGenerationPipeline::GemmaTextGenerationPipeline(
          config_.draft_mask_token_id >= config_.vocab_size ||
          !prefill_module().has_input("logits_indices") ||
          !prefill_module().has_output("target_features") ||
-         !assistant_->has_input("target_features") || !assistant_->has_output("draft_logits") ||
-         ((config_.draft_markov || config_.draft_eagle) &&
+         !assistant_->has_input("target_features") ||
+         (config_.draft_eagle_tree
+              ? (!config_.draft_eagle || !assistant_->has_input("branch_tokens") ||
+                 !assistant_->has_input("branch_depth") || !assistant_->has_output("branch_ids") ||
+                 !assistant_->has_output("branch_log_probs"))
+              : !assistant_->has_output("draft_logits")) ||
+         ((config_.draft_markov || (config_.draft_eagle && !config_.draft_eagle_tree)) &&
           !assistant_->has_output("proposal_ids")) ||
          (config_.draft_markov && !assistant_->has_output("proposal_confidence"))))
         throw std::runtime_error("Gemma4 native block draft has an invalid paired contract");
