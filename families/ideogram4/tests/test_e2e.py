@@ -72,6 +72,8 @@ def reference(root, prompt, initial):
     from ideogram4.scheduler import get_schedule_for_resolution, make_step_intervals
 
     device = torch.device("cuda")
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
     dtype = torch.bfloat16
     conditional = _build_transformer(
         Ideogram4Config(),
@@ -262,5 +264,8 @@ def test_e2e(case_name, request, tmp_path, tmp_path_factory):
         psnr = float("inf") if mse == 0 else -10 * np.log10(mse)
         mae = float(np.mean(np.abs(actual - expected)))
         record_evidence("thresholds", {"minimum_psnr_db": 25.0, "maximum_mae": 0.03})
-        record_evidence("comparison", {"psnr_db": float(psnr), "mae": mae})
+        record_evidence(
+            "comparison",
+            {"psnr_db": float(psnr) if np.isfinite(psnr) else "infinite (exact match)", "mae": mae},
+        )
         assert psnr >= 25.0 and mae <= 0.03, (psnr, mae)
