@@ -1,0 +1,2 @@
+# The repository base image supplies TensorRT, PyTorch and safetensors.
+transformers==5.2.0
