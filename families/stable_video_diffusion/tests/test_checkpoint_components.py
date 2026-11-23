@@ -76,6 +76,9 @@ def _exact_fp32():
 
 
 def _run(plan: bytes, inputs: dict, outputs: dict) -> dict:
+    # The engine allocates outside PyTorch's caching allocator: hand the blocks the reference
+    # run left cached back to the device first, so that a GPU shared with other jobs suffices.
+    torch.cuda.empty_cache()
     engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(plan)
     assert engine is not None
     context = engine.create_execution_context()
@@ -142,6 +145,7 @@ def test_image_encoder_matches_the_checkpoint(precision, model_dir):
     pixels = torch.randn((1, 3, 224, 224), generator=torch.Generator().manual_seed(1)).cuda()
     reference, baseline = _reference_run(
         module, lambda m: m(pixels.to(next(m.parameters()).dtype)).image_embeds, precision)
+    del module
     actual = _run(plan, {"pixel_values": pixels}, {"image_embeds": tuple(baseline.shape)})
     _check("image encoder", precision, actual["image_embeds"], reference, baseline)
 
@@ -205,6 +209,7 @@ def test_unet_matches_the_checkpoint(precision, model_dir):
                  added_time_ids=time_ids.repeat(2, 1).to(dtype)).sample
 
     reference, baseline = _reference_run(module, call, precision)
+    del module
     actual = _run(plan, {"sample": sample, "timestep": timestep, "encoder_hidden_states": context,
                          "added_time_ids": time_ids}, {"noise_pred": tuple(baseline.shape)})
     _check("UNet", precision, actual["noise_pred"], reference, baseline)
