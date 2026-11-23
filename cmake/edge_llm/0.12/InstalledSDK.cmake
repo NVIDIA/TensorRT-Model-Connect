@@ -48,10 +48,30 @@ if(_edge_provisioned AND TRTMC_EDGELLM_ALL_KERNELS)
 endif()
 get_filename_component(_sdk_prefix "${TensorRTEdgeLLM_DIR}/../../.." ABSOLUTE)
 if(TRTMC_EDGELLM_POLICY_SDK)
-  foreach(_file IN ITEMS lib/libgr00tExperimental.a lib/libpi05Experimental.a
-      include/tensorrt_edgellm/gr00t_n1d7/runtime/gr00tRuntime.h
-      include/tensorrt_edgellm/pi05/runtime/pi05Policy.h)
-    if(NOT EXISTS "${_sdk_prefix}/${_file}" OR IS_DIRECTORY "${_sdk_prefix}/${_file}")
+  # Edge installs its package in <its libdir>/cmake/TensorRTEdgeLLM; the
+  # consuming project's CMAKE_INSTALL_LIBDIR may intentionally be different.
+  get_filename_component(_policy_libdir "${TensorRTEdgeLLM_DIR}/../.." ABSOLUTE)
+  set(_policy_files "${_policy_libdir}/libgr00tExperimental.a" "${_policy_libdir}/libpi05Experimental.a")
+  foreach(_header IN ITEMS
+      gr00t_n1d7/action/gr00tKernels.h
+      gr00t_n1d7/action/gr00tPolicy.h
+      gr00t_n1d7/action/gr00tPolicyRunner.h
+      gr00t_n1d7/builder/gr00tBuilder.h
+      gr00t_n1d7/common/gr00tBindings.h
+      gr00t_n1d7/multimodal/gr00tVisualRunner.h
+      gr00t_n1d7/runtime/gr00tRuntime.h
+      pi05/action/pi05ActionRunner.h
+      pi05/builder/pi05Builder.h
+      pi05/common/pi05Bindings.h
+      pi05/common/pi05Common.h
+      pi05/kernels/pi05Kernels.h
+      pi05/multimodal/pi05VisualRunner.h
+      pi05/runtime/pi05Policy.h
+      pi05/runtime/pi05Runtime.h)
+    list(APPEND _policy_files "${_edge_sdk_include}/tensorrt_edgellm/${_header}")
+  endforeach()
+  foreach(_file IN LISTS _policy_files)
+    if(NOT EXISTS "${_file}" OR IS_DIRECTORY "${_file}")
       message(FATAL_ERROR "Selected Edge SDK is missing policy component ${_file}. Use a complete matching prefix or TRTMC_EDGELLM_SOURCE_DIR to provision it from the pinned source.")
     endif()
   endforeach()
