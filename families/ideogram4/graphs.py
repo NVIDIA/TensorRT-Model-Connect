@@ -158,8 +158,6 @@ class Attention(nn.Module):
         self.module = module
 
     def forward(self, values, segment_ids, cos, sin):
-        from ideogram4.modeling_ideogram4 import _apply_rotary_pos_emb
-
         batch, length, _ = values.shape
         module = self.module
         q, k, v = (
@@ -170,7 +168,7 @@ class Attention(nn.Module):
         q = module.norm_q(q).transpose(1, 2)
         k = module.norm_k(k).transpose(1, 2)
         v = v.transpose(1, 2)
-        q, k = _apply_rotary_pos_emb(q, k, cos, sin)
+        q, k = rotary_positions(q, k, cos, sin)
         mask = (segment_ids.unsqueeze(2) == segment_ids.unsqueeze(1)).unsqueeze(1)
         scores = (q.float() @ k.float().transpose(-1, -2)) * (module.head_dim**-0.5)
         probabilities = torch.softmax(torch.where(mask, scores, float("-inf")), dim=-1)
@@ -275,6 +273,14 @@ def decoder(directory: Path, grid_h, grid_w):
     return Decoder(model.decoder, grid_h, grid_w).eval()
 
 
+def export_silu(values):
+    """Export PyTorch SiLU with one BF16 rounding after FP32 activation math."""
+    from onnxscript import opset23 as op
+
+    wide = op.Cast(values, to=1)
+    return op.CastLike(wide * op.Sigmoid(wide), values)
+
+
 def compile_engine(
     module, inputs, input_names, output_name, directory: Path, verbose=False, sequence_bounds=None
 ):
@@ -296,6 +302,7 @@ def compile_engine(
             dynamo=True,
             optimize=False,
             dynamic_shapes=dynamic_shapes,
+            custom_translation_table={torch.ops.aten.silu.default: export_silu},
         )
     # Fold constant axes without the exporter's algebraic pattern rewrites:
     # its RMSNormalization fusion moves a BF16 cast before the affine multiply.
