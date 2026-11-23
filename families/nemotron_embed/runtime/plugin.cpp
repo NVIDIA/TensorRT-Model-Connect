@@ -39,7 +39,8 @@ class Pipeline final : public internal::IModel, public internal::ITextToEmbeddin
         if (!config.empty())
             throw internal::ConfigError("Nemotron embedding has no runtime config");
         if (request.text.empty())
-            throw std::invalid_argument("Nemotron embedding requires nonempty request text");
+            throw std::invalid_argument(
+                "Nemotron embedding requires a nonempty input within the built profile");
         std::string text;
         switch (request.role) {
         case internal::EmbeddingRole::Default:

@@ -412,7 +412,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             f"Nemotron role={item['role']}, cosine={cosine:.8f}, maxabs={np.max(np.abs(actual - expected)):.6g}"
         )
 
-    for text in ("", "context " * manifest["max_sequence_length"]):
+    rejected = [("default", "context " * manifest["max_sequence_length"])]
+    rejected.extend((role, "") for role in ("default", "query", "document"))
+    for role, text in rejected:
         completed = subprocess.run(
             [
                 str(binary),
@@ -424,6 +426,8 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                 manifest["task"],
                 "--text",
                 text,
+                "--role",
+                role,
             ],
             capture_output=True,
             text=True,
@@ -433,6 +437,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             "rejected_input",
             {
                 "text": text,
+                "role": role,
                 "stdout": completed.stdout[-4096:],
                 "stderr": completed.stderr[-4096:],
                 "returncode": completed.returncode,
