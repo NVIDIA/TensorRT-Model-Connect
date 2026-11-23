@@ -20,18 +20,24 @@ int main(int argc, char** argv) {
         std::cin >> requests;
         nlohmann::json results = nlohmann::json::array();
         for (const auto& request : requests) {
-            std::ifstream input(request.at("noise").get<std::string>(),
-                                std::ios::binary | std::ios::ate);
-            const auto size = input.tellg();
-            if (!input || size <= 0 || size % sizeof(float))
-                return 2;
-            std::vector<float> noise(static_cast<std::size_t>(size) / sizeof(float));
-            input.seekg(0);
-            input.read(reinterpret_cast<char*>(noise.data()), size);
-            if (!input)
-                return 2;
-            auto result =
-                task.run({request.at("prompt").get<std::string>(), {noise.data(), noise.size()}});
+            std::vector<float> noise;
+            if (request.contains("noise")) {
+                std::ifstream input(request.at("noise").get<std::string>(),
+                                    std::ios::binary | std::ios::ate);
+                const auto size = input.tellg();
+                if (!input || size <= 0 || size % sizeof(float))
+                    return 2;
+                noise.resize(static_cast<std::size_t>(size) / sizeof(float));
+                input.seekg(0);
+                input.read(reinterpret_cast<char*>(noise.data()), size);
+                if (!input)
+                    return 2;
+            }
+            trtmc::Config config;
+            if (request.contains("seed"))
+                config.add("seed", request.at("seed").get<int64_t>());
+            auto result = task.run(
+                {request.at("prompt").get<std::string>(), {noise.data(), noise.size()}}, config);
             std::ofstream output(request.at("output").get<std::string>(), std::ios::binary);
             const auto pixels = result.pixels();
             output.write(reinterpret_cast<const char*>(pixels.data()),

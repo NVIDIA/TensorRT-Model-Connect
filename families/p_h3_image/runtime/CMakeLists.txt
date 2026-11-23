@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-find_package(ICU REQUIRED COMPONENTS uc i18n)
+find_package(ICU COMPONENTS uc i18n QUIET)
+if(NOT ICU_FOUND)
+  message(STATUS "Skipping p_h3_image: install ICU development packages for Unicode tokenization")
+  return()
+endif()
 add_library(trtmc_model_p_h3_image SHARED bpe_tokenizer.cpp plugin.cpp)
 target_include_directories(trtmc_model_p_h3_image PRIVATE ${PROJECT_SOURCE_DIR}
   ${PROJECT_SOURCE_DIR}/core/runtime/include)

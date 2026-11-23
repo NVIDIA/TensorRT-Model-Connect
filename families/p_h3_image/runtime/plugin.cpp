@@ -82,9 +82,10 @@ Tiles tiles(int size) {
 
 class Pipeline final : public internal::IModel, public internal::ITextToImage {
   public:
-    Pipeline(Engines engines, std::unique_ptr<ITokenizer> tokenizer, nlohmann::json cfg, F32 sink)
+    Pipeline(Engines engines, std::unique_ptr<ITokenizer> tokenizer, nlohmann::json cfg, F32 sink,
+             F32 means, F32 scales)
         : engines_(std::move(engines)), tokenizer_(std::move(tokenizer)), cfg_(std::move(cfg)),
-          sink_(std::move(sink)),
+          sink_(std::move(sink)), means_(std::move(means)), scales_(std::move(scales)),
           fields_{{"seed", internal::ConfigKind::I64, internal::ConfigValue{int64_t{42}},
                    "Initial Gaussian noise seed"}} {}
     const char* task() const noexcept override { return "text_to_image"; }
@@ -107,7 +108,6 @@ class Pipeline final : public internal::IModel, public internal::ITextToImage {
         for (const auto id : ids)
             if (id < 0 || id >= vocab)
                 throw std::invalid_argument("Invalid P-H3-Image token");
-        auto context = encode(ids);
         const int height = cfg_.at("height"), width = cfg_.at("width");
         const int lh = height / 16, lw = width / 16, rows = lh * lw / 4,
                   packed_rows = length + 4 + rows;
@@ -127,6 +127,7 @@ class Pipeline final : public internal::IModel, public internal::ITextToImage {
         for (const auto value : noise)
             if (!std::isfinite(value))
                 throw std::invalid_argument("Nonfinite image noise");
+        auto context = encode(ids);
         F32 video(image_count), audio(noise.begin() + image_count, noise.end());
         for (int y = 0; y < lh; ++y)
             for (int x = 0; x < lw; ++x)
@@ -208,15 +209,13 @@ class Pipeline final : public internal::IModel, public internal::ITextToImage {
             update(audio, av);
         }
         F32 latents(image_count);
-        const auto means = cfg_.at("vae").at("latents_mean").get<F32>();
-        const auto scales = cfg_.at("vae").at("latents_std").get<F32>();
         for (int y = 0; y < lh; ++y)
             for (int x = 0; x < lw; ++x)
                 for (int c = 0; c < 24; ++c)
                     latents[(y * lw + x) * 24 + c] =
                         video[((y / 2) * (lw / 2) + x / 2) * 96 + c * 4 + (y % 2) * 2 + x % 2] *
-                            scales[c] +
-                        means[c];
+                            scales_[c] +
+                        means_[c];
         return decode(latents, height, width);
     }
 
@@ -363,7 +362,7 @@ class Pipeline final : public internal::IModel, public internal::ITextToImage {
     Engines engines_;
     std::unique_ptr<ITokenizer> tokenizer_;
     nlohmann::json cfg_;
-    F32 sink_;
+    F32 sink_, means_, scales_;
     std::vector<internal::ConfigField> fields_;
 };
 } // namespace
@@ -396,6 +395,13 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     for (std::size_t i = 1; i < sigmas.size(); ++i)
         if (!std::isfinite(sigmas[i]) || sigmas[i] < 0 || sigmas[i] >= sigmas[i - 1])
             throw std::runtime_error("Invalid image schedule");
+    auto means = cfg.at("vae").at("latents_mean").get<F32>();
+    auto scales = cfg.at("vae").at("latents_std").get<F32>();
+    for (const auto* values : {&means, &scales}) {
+        if (values->size() != 24 ||
+            !std::all_of(values->begin(), values->end(), [](float x) { return std::isfinite(x); }))
+            throw std::runtime_error("P-H3-Image VAE statistics require 24 finite values");
+    }
     auto load = [&](const std::string& name) {
         const auto plan = section(context.reader, name + ".plan");
         auto engine = context.backend.create_module(plan.data(), plan.size(), {});
@@ -426,5 +432,5 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const auto tokenizer = section(context.reader, "tokenizer.json");
     return new Pipeline(std::move(engines),
                         CreateBpeTokenizer(tokenizer.data(), tokenizer.size(), false),
-                        std::move(cfg), std::move(sink));
+                        std::move(cfg), std::move(sink), std::move(means), std::move(scales));
 }

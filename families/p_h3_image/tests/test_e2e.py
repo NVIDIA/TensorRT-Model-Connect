@@ -99,11 +99,25 @@ def _native_test_binary(name: str) -> Path:
     """Build source-only helpers in the configured native test tree."""
     build_dir = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
     subprocess.run(
-        ["cmake", "--build", str(build_dir), "--parallel", "2", "--target", name],
+        [
+            "cmake",
+            "--build",
+            str(build_dir),
+            "--config",
+            os.environ.get("CMAKE_BUILD_TYPE", "Release"),
+            "--parallel",
+            "2",
+            "--target",
+            name,
+        ],
         check=True,
         timeout=600,
     )
-    return _required_path(str(build_dir / name), name)
+    config = os.environ.get("CMAKE_BUILD_TYPE", "Release")
+    cache = build_dir / "CMakeCache.txt"
+    multi_config = cache.is_file() and "CMAKE_CONFIGURATION_TYPES:" in cache.read_text()
+    relative = Path(config) / name if multi_config else Path(name)
+    return _required_path(str(build_dir / relative), name)
 
 
 def _record_comparison(tmp_path, label, native, reference, checks):
@@ -134,10 +148,30 @@ def _record_comparison(tmp_path, label, native, reference, checks):
     )
 
 
+def _checkpoint_source(manifest: dict, path: Path, *, override: bool) -> Path:
+    """An arbitrary local directory does not establish the manifest's pinned identity."""
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": None if override else manifest["hf_id"],
+            "revision": None if override else manifest["hf_revision"],
+            "source": "local_override" if override else "pinned_snapshot",
+            "path": str(path.resolve()),
+            "revision_verified": not override,
+            "expected_repo_id": manifest["hf_id"],
+            "expected_revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    return path
+
+
 def _model_dir(manifest: dict) -> Path:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
-        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+        return _checkpoint_source(
+            manifest, _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR"), override=True
+        )
     from huggingface_hub import snapshot_download
 
     try:
@@ -148,11 +182,10 @@ def _model_dir(manifest: dict) -> Path:
         raise AssertionError(
             f"selected {FAMILY} E2E requires the exact cached checkpoint {manifest['hf_id']}"
         ) from error
-    return Path(snapshot)
+    return _checkpoint_source(manifest, Path(snapshot), override=False)
 
 
-def _runtime() -> tuple[Path, Path]:
-    binary = _required_path(os.environ.get("TRTMC_BINARY"), "TRTMC_BINARY")
+def _runtime() -> Path:
     runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
     assert (runtime_root / "libtrtmc_backend_trt.so").is_file()
     assert (runtime_root / f"libtrtmc_model_{FAMILY}.so").is_file()
@@ -160,7 +193,7 @@ def _runtime() -> tuple[Path, Path]:
 
     assert torch.cuda.is_available(), f"selected {FAMILY} E2E requires CUDA"
     assert torch.cuda.device_count() >= 1, f"selected {FAMILY} E2E requires one GPU"
-    return (binary, runtime_root)
+    return runtime_root
 
 
 def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
@@ -214,14 +247,6 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
     record_evidence(
-        "checkpoint",
-        {
-            "repo_id": manifest["hf_id"],
-            "revision": manifest["hf_revision"],
-            "precision": manifest["precision"],
-        },
-    )
-    record_evidence(
         "thresholds",
         {
             key: value
@@ -245,7 +270,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
         directory = _model_dir(manifest)
-    _, runtime_root = _runtime()
+    runtime_root = _runtime()
     import sys
 
     height, width = manifest["image_height"], manifest["image_width"]
@@ -273,16 +298,15 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             check=False,
             timeout=case["runtime_timeout_s"],
         )
-    record_evidence(
-        "reference_process",
-        {
-            "argv": oracle.args,
-            "returncode": oracle.returncode,
-            "stdout": (oracle.stdout or "")[-4096:],
-            "stderr": (oracle.stderr or "")[-16384:],
-        },
-    )
-    with evidence_stage("comparison"):
+        record_evidence(
+            "reference_process",
+            {
+                "argv": oracle.args,
+                "returncode": oracle.returncode,
+                "stdout": (oracle.stdout or "")[-4096:],
+                "stderr": (oracle.stderr or "")[-16384:],
+            },
+        )
         assert oracle.returncode == 0, oracle.stderr + oracle.stdout
     print(oracle.stdout, end="", flush=True)
     requests = json.loads((tmp_path / "reference-requests.json").read_text())
@@ -305,16 +329,15 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             check=False,
             timeout=case["runtime_timeout_s"],
         )
-    record_evidence(
-        "runtime_process",
-        {
-            "argv": completed.args,
-            "returncode": completed.returncode,
-            "stdout": (completed.stdout or "")[-4096:],
-            "stderr": (completed.stderr or "")[-16384:],
-        },
-    )
-    with evidence_stage("comparison"):
+        record_evidence(
+            "runtime_process",
+            {
+                "argv": completed.args,
+                "returncode": completed.returncode,
+                "stdout": (completed.stdout or "")[-4096:],
+                "stderr": (completed.stderr or "")[-16384:],
+            },
+        )
         assert completed.returncode == 0, completed.stderr + completed.stdout
     results = json.loads(completed.stdout.splitlines()[-1])
     with evidence_stage("comparison"):
@@ -408,6 +431,44 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             assert maximum <= case["max_abs_error"]
         with evidence_stage("comparison"):
             assert cosine >= case["cosine_min"]
+
+    seeded = [
+        {
+            "prompt": case["prompts"][0],
+            "seed": seed,
+            "output": str(tmp_path / f"seeded-{index}.f32"),
+        }
+        for index, seed in enumerate((case["seed"], case["seed"], case["seed"] + 1))
+    ]
+    with evidence_stage("seeded_runtime"):
+        generated = subprocess.run(
+            [str(_native_test_binary("test_p_h3_image_runtime")), str(bundle), str(runtime_root)],
+            input=json.dumps(seeded),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=case["runtime_timeout_s"],
+        )
+        record_evidence(
+            "seeded_process",
+            {
+                "returncode": generated.returncode,
+                "stdout": generated.stdout[-4096:],
+                "stderr": generated.stderr[-16384:],
+            },
+        )
+        assert generated.returncode == 0, generated.stderr + generated.stdout
+    seeded_pixels = [np.fromfile(item["output"], dtype="<f4") for item in seeded]
+    record_evidence(
+        "native_seeded", {"requests": seeded, "outputs": [item["output"] for item in seeded]}
+    )
+    with evidence_stage("seeded_comparison"):
+        assert all(
+            pixels.size == height * width * 3 and np.isfinite(pixels).all()
+            for pixels in seeded_pixels
+        )
+        np.testing.assert_array_equal(seeded_pixels[0], seeded_pixels[1])
+        assert not np.array_equal(seeded_pixels[0], seeded_pixels[2])
 
 
 @pytest.mark.parametrize("rotary_dim", [96, 128])

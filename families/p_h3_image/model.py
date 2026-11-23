@@ -11,6 +11,7 @@ import numpy as np
 import tensorrt as trt
 
 from .graph import Graph, Weights
+from .support import is_pipeline_class
 
 
 def _text_layer(g, cfg, index):
@@ -237,7 +238,14 @@ def build(request, writer):
     ):
         raise NotImplementedError("P-H3-Image supports one BF16 image with mixed FP32 modules")
     height, width = request.image_height or 1024, request.image_width or 2048
-    if height % 256 or width % 256 or height * width < 2 * 1024**2 or height * width > 9 * 1024**2:
+    if (
+        not 256 <= height <= 9216
+        or not 256 <= width <= 9216
+        or height % 256
+        or width % 256
+        or height * width < 2 * 1024**2
+        or height * width > 9 * 1024**2
+    ):
         raise ValueError("P-H3-Image profiles require 2–9 megapixels and 256px aligned sides")
     length = request.max_sequence_length or 256
     if length < 1 or length > 256:
@@ -249,7 +257,7 @@ def build(request, writer):
     }
     tc, dc, vc = cfg["text_encoder"]["text_config"], cfg["transformer"], cfg["vae"]
     index = json.loads((directory / "modular_model_index.json").read_text())
-    if index.get("_class_name") != "PH3ImageModularPipeline" or tc["model_type"] != "qwen3_vl_text":
+    if not is_pipeline_class(index.get("_class_name")) or tc["model_type"] != "qwen3_vl_text":
         raise ValueError("Expected the P-H3-Image Qwen3-VL checkpoint")
     if (
         dc["patch_size"] != [1, 2, 2]
@@ -257,8 +265,26 @@ def build(request, writer):
         or dc["audio_in_channels"] != 32
         or vc["decoder_num_register_tokens"] != 4
         or vc["decoder_attention_head_dim"] != 64
+        or tc["hidden_size"] != 2560
+        or tc["num_hidden_layers"] != 36
+        or dc["hidden_size"] != 5376
+        or dc["time_embed_dim"] != 2688
+        or dc["num_layers"] != 50
+        or vc["decoder_num_layers"] != 36
+        or cfg["text_connector"]["hidden_state_indices"] != [13, 19, 25, 31, 36]
     ):
         raise NotImplementedError("Unsupported P-H3-Image component layout")
+    sigmas = np.asarray(index["sample_sigmas"], dtype=np.float32)
+    if (
+        sigmas.shape != (9,)
+        or not np.isfinite(sigmas).all()
+        or sigmas[0] != 1
+        or sigmas[-1] != 0
+        or not np.all(sigmas[1:] < sigmas[:-1])
+    ):
+        raise ValueError(
+            "P-H3-Image requires nine finite, strictly decreasing FP32 sigmas from 1 to 0"
+        )
     scheduler = json.loads((directory / "scheduler/scheduler_config.json").read_text())
     audio_scheduler = json.loads((directory / "audio_scheduler/scheduler_config.json").read_text())
     if scheduler != audio_scheduler:
@@ -372,6 +398,6 @@ def build(request, writer):
             connector=cfg["text_connector"],
             denoiser=dc,
             vae=vc,
-            sigmas=index["sample_sigmas"],
+            sigmas=sigmas.tolist(),
         ),
     )
