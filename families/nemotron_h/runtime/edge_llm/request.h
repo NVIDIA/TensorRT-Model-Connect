@@ -55,6 +55,10 @@ inline trt_edgellm::rt::LLMGenerationRequest make_request(const std::string& pro
     request.temperature = greedy ? 0.0F : config.temperature;
     request.topK = greedy ? 1 : (nucleus && config.top_k <= 1 ? 0 : config.top_k);
     request.topP = !greedy && nucleus ? config.top_p : 1.0F;
+    if (!greedy &&
+        !trt_edgellm::shouldUseNonGreedySampling(request.temperature, request.topK, request.topP))
+        throw std::invalid_argument("Nemotron-H Edge cannot preserve this sampling distribution; "
+                                    "the SDK would decode greedily");
     if (!greedy)
         request.samplingSeed =
             config.seed < 0 ? 42U : static_cast<uint64_t>(config.seed == 0 ? 1 : config.seed);

@@ -114,7 +114,9 @@ modern Nemotron ChatML empty-system/thinking suffix is retained. Empty prompts,
 submitted counts, total capacity and generation completion are checked.
 
 The runtime is persistent and serialized, with scoped plugin, stream and artifact
-ownership. Supported ordinary sampling controls are forwarded; unmapped controls
+ownership. A seeded full-vocabulary request at temperature 1 (`top_k=0`, `top_p=1`)
+is rejected on Edge 0.12: the released SDK would turn it greedy.
+Supported ordinary sampling controls are forwarded; unmapped controls
 are rejected. The current DFlash adapter uses block16/verify16 and remains
 greedy-only, as does DSpark DDTree. DSpark chain forwards filtered sampling.
 Exact native paired outcomes are listed below. Runtime errors are not converted
@@ -171,10 +173,10 @@ not evidence for disabling native build on every SM120 GPU. On an RTX PRO
 4500 Blackwell, the same Nano 30B native build also segfaulted before
 producing an engine. MC rejects that native retry on x86-64 for this model,
 capacity and compiler stack; other named SM120 GPUs are not excluded by it.
-If MC cannot identify the toolkit on a matching device, it reports the
-platform discovery error. Set `CUDACXX` to the actual toolkit compiler to
-distinguish the tested stack from a different one. An unidentified toolkit
-is not a demonstrated compiler failure.
+If toolkit discovery fails, the family warns and leaves native available.
+A missing compiler does not identify the measured failing stack. On an
+affected device, set `CUDACXX` to the actual toolkit compiler so the family
+can recognize the measured profile before invoking TensorRT.
 
 Nano 30B's short Edge result matches the independent reference. Its long
 greedy and sampled results miss the gates through both MC and the standalone

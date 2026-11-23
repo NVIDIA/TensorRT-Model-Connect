@@ -251,7 +251,10 @@ def test_edge_pair_requires_draft_and_rechecks_local_inputs(tmp_path, monkeypatc
     from families.nemotron_h.edge_llm import dispatch
     from families.nemotron_h import paired
     draft.mkdir()
-    (source / "config.json").write_text(json.dumps({"max_position_embeddings": 4096}))
+    (source / "config.json").write_text(json.dumps({
+        "model_type": "nemotron_h", "max_position_embeddings": 4096,
+        "layer_types": ["linear_attention", "full_attention"],
+    }))
     monkeypatch.setattr(dispatch, "candidate", lambda *_: True)
     monkeypatch.setattr(dispatch, "source_quantization", lambda *_: "nvfp4")
     monkeypatch.setattr(dispatch.edge_llm, "local_target", lambda: {
@@ -274,8 +277,16 @@ def test_edge_pair_requires_draft_and_rechecks_local_inputs(tmp_path, monkeypatc
     def failed(*_):
         raise RuntimeError("paired preparation failed")
 
-    monkeypatch.setattr(dispatch.edge_llm, "prepare_paired", failed)
+    prepared = []
+    def preparation_fails(original, raw, *_):
+        prepared.append((original, raw))
+        raise RuntimeError("paired preparation failed")
+
+    monkeypatch.setattr(dispatch.edge_llm, "prepare_paired", preparation_fails)
     dispatch.build_speculative(request, writer, draft, "dspark")
+    [(original, raw)] = prepared
+    assert original is request
+    assert raw["num_hidden_layers"] == 2 and raw["layer_types"] == ["mamba", "attention"]
     assert native_calls.pop() == "dspark"
     assert "unchanged native pair" in caplog.text
     diagnostics = list(tmp_path.glob(".out.edge-onnx-*.log"))

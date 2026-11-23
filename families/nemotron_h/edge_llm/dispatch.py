@@ -155,15 +155,12 @@ def _check_native_route(request, raw: dict, target: dict | None, variant: str) -
     if target is None:
         try:
             target = edge_llm.local_target()
-        except RuntimeError:
-            # A different GPU cannot be the failing stack. On the matching
-            # device, propagate the original discovery error rather than assume
-            # an unknown toolkit is safe or report an unproved compiler crash.
-            if arch == "aarch64":
-                gpu = _native_gpu()
-                if gpu is not None and gpu.major * 10 + gpu.minor != sm:
-                    return
-            raise
+        except RuntimeError as error:
+            # The native graph does not require nvcc. A failed optional probe is
+            # not evidence that this device and toolkit match the measured crash.
+            _LOG.warning("Cannot identify the measured native compiler stack: %s. "
+                         "Continuing with native TensorRT.", error)
+            return
     if _measured_native_stack(target, sm, arch):
         raise ValueError(
             f"Nemotron {name} ({variant}, capacity 256): native TensorRT serialization crashed "
@@ -250,7 +247,9 @@ def build_speculative(request, writer, draft: Path, variant: str) -> None:
     """Offload the complete pair, or warn and retry the same native pair once."""
     from ..paired import build as native_paired
 
-    raw = json.loads((Path(request.model_dir) / "config.json").read_text(encoding="utf-8"))
+    raw = normalize_target_layers(json.loads(
+        (Path(request.model_dir) / "config.json").read_text(encoding="utf-8")
+    ))
     if not candidate(request, raw) or source_quantization(request, raw) != "nvfp4":
         raise ValueError("Nemotron-H paired execution requires a compatible NVFP4 target and TP1 text request")
     if edge_llm.sequence_length(request, raw) > raw["max_position_embeddings"]:
