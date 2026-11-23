@@ -85,17 +85,24 @@ for every query and document without prompt, the public C and C++ consumers on
 the first query and the pooled-feature Task on the first document. The oracle is
 the checkpoint's documented Transformers recipe in FP32 with TF32 disabled; the
 case texts are written for these tests. Every case requires token IDs identical
-to `AutoTokenizer`, byte offsets that tile each input and the FP32 truth's
-retrieval ranking.
+to `AutoTokenizer`, byte offsets that tile each input, token features with one
+row per token in the reference's shape, L2-normalized embeddings (every norm
+within 1e-5 of 1) and the FP32 truth's retrieval ranking: each query's top
+document, and the order of any two documents whose truth scores differ by more
+than the case's score tolerance (FP32: 1e-5; BF16: 3x the official BF16 run's
+largest score difference). Closer documents are ties. A metric that is not a
+finite number fails as such.
 
 - FP32 bundles must meet absolute thresholds: embedding cosine at least
   0.999999, query-document score difference at most 1e-5, token-feature cosine at
-  least 0.99999 and pooled-feature cosine at least 0.999999.
+  least 0.99999 and relative L2 error at most 4.4e-3, pooled-feature cosine at
+  least 0.999999 and relative L2 error at most 1.4e-3.
 - BF16 bundles are judged only relative to the official BF16 Transformers run's
-  drift from the same FP32 truth (1 - cosine, or the absolute score difference),
-  on statistics pooled over the case (at least 100 tokens of token features):
-  means at most 1.5x and maxima at most 3x for embeddings, scores and token
-  features; the pooled feature and every repeated long document at most 3x.
+  drift from the same FP32 truth (1 - cosine, the absolute score difference, or
+  the relative L2 error of raw features), on statistics pooled over the case (at
+  least 100 tokens of token features): means at most 1.5x and maxima at most 3x
+  for embeddings, scores and token features; the pooled feature and every
+  repeated long document at most 3x.
 
 The long-context cases reach positions beyond 16384, where the Llama-4 query
 scale acts: a bundle built without that scale drifts 5x the official BF16 drift

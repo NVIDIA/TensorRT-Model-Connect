@@ -18,8 +18,10 @@ about 2x between any two BF16 implementations.
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -49,6 +51,9 @@ DEFAULT_THRESHOLDS = {
     # drift on the same inputs.
     "bf16_mean_drift_ratio": 1.5,
     "bf16_max_drift_ratio": 3.0,
+    # Both precisions: text_to_embedding returns the mean L2-normalized in FP64 on
+    # the host, so |norm - 1| of every native embedding stays at FP32 rounding.
+    "embedding_norm_deviation": 1e-5,
 }
 
 
@@ -261,35 +266,56 @@ def _native(binary, runtime_root, native_build, bundle, case) -> dict:
     }
 
 
+@contextmanager
+def _tf32_disabled(torch):
+    """Run the reference without TF32, then restore the two process-wide flags.
+
+    The flags are global to the process, which may run other families' tests
+    next; they are restored whether the reference succeeds or fails. Only these
+    flags are touched: setting the matmul precision through the newer API as
+    well would make ``torch.get_float32_matmul_precision`` raise later.
+    """
+    saved = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        assert torch.get_float32_matmul_precision() == "highest"
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = saved
+
+
 def _official_reference(model_dir: Path, case: dict, precision: str) -> dict:
     import torch
     import torch.nn.functional as functional
     from transformers import AutoModel, AutoTokenizer
 
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    assert torch.get_float32_matmul_precision() == "highest"
-    dtype = {"fp32": torch.float32, "bf16": torch.bfloat16}[precision]
-    prompts = json.loads((model_dir / "config_sentence_transformers.json").read_text())["prompts"]
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    model = AutoModel.from_pretrained(model_dir, dtype=dtype, attn_implementation="sdpa")
-    model = model.to("cuda").eval()
-    embeddings, tokens = [], []
-    with torch.inference_mode():
-        for role, text in _texts(case):
-            encoded = tokenizer(prompts[role] + text, return_tensors="pt", truncation=False)
-            hidden = model(**encoded.to("cuda")).last_hidden_state
-            pooled = hidden.sum(dim=1) / hidden.shape[1]
-            embeddings.append(functional.normalize(pooled, p=2, dim=-1)[0].float().cpu().numpy())
-        for raw in case["queries"] + case["documents"]:
-            encoded = tokenizer(raw, return_tensors="pt", truncation=False)
-            hidden = model(**encoded.to("cuda")).last_hidden_state[0].float()
-            tokens.append(
-                {"token_ids": encoded["input_ids"][0].tolist(), "hidden": hidden.cpu().numpy()}
-            )
-    del model
-    torch.cuda.empty_cache()
-    return {"embeddings": np.stack(embeddings), "tokens": tokens}
+    with _tf32_disabled(torch):
+        dtype = {"fp32": torch.float32, "bf16": torch.bfloat16}[precision]
+        prompts = json.loads((model_dir / "config_sentence_transformers.json").read_text())[
+            "prompts"
+        ]
+        tokenizer = AutoTokenizer.from_pretrained(model_dir)
+        model = AutoModel.from_pretrained(model_dir, dtype=dtype, attn_implementation="sdpa")
+        model = model.to("cuda").eval()
+        embeddings, tokens = [], []
+        with torch.inference_mode():
+            for role, text in _texts(case):
+                encoded = tokenizer(prompts[role] + text, return_tensors="pt", truncation=False)
+                hidden = model(**encoded.to("cuda")).last_hidden_state
+                pooled = hidden.sum(dim=1) / hidden.shape[1]
+                embeddings.append(
+                    functional.normalize(pooled, p=2, dim=-1)[0].float().cpu().numpy()
+                )
+            for raw in case["queries"] + case["documents"]:
+                encoded = tokenizer(raw, return_tensors="pt", truncation=False)
+                hidden = model(**encoded.to("cuda")).last_hidden_state[0].float()
+                tokens.append(
+                    {"token_ids": encoded["input_ids"][0].tolist(), "hidden": hidden.cpu().numpy()}
+                )
+        del model
+        torch.cuda.empty_cache()
+        return {"embeddings": np.stack(embeddings), "tokens": tokens}
 
 
 def _thresholds(case_name: str) -> dict:
@@ -303,15 +329,21 @@ def _thresholds(case_name: str) -> dict:
 
 
 def _row_cosines(left: np.ndarray, right: np.ndarray) -> np.ndarray:
-    a = left.astype(np.float64)
-    b = right.astype(np.float64)
-    return np.sum(a * b, axis=-1) / (np.linalg.norm(a, axis=-1) * np.linalg.norm(b, axis=-1))
+    """Row cosines in FP64; the cosine of a zero row is NaN (undefined), not a warning."""
+    a = np.asarray(left, dtype=np.float64)
+    b = np.asarray(right, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        cosines = np.sum(a * b, axis=-1) / (np.linalg.norm(a, axis=-1) * np.linalg.norm(b, axis=-1))
+    # Round-off can put the cosine of equal rows just above 1, which would make
+    # an exact match drift below 0; NaN stays NaN.
+    return np.clip(cosines, -1.0, 1.0)
 
 
 def _row_relative_errors(values: np.ndarray, reference: np.ndarray) -> np.ndarray:
-    a = values.astype(np.float64)
-    b = reference.astype(np.float64)
-    return np.linalg.norm(a - b, axis=-1) / np.linalg.norm(b, axis=-1)
+    a = np.asarray(values, dtype=np.float64)
+    b = np.asarray(reference, dtype=np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.linalg.norm(a - b, axis=-1) / np.linalg.norm(b, axis=-1)
 
 
 def _scores(embeddings: np.ndarray, queries: int) -> np.ndarray:
@@ -319,20 +351,60 @@ def _scores(embeddings: np.ndarray, queries: int) -> np.ndarray:
     return values[:queries] @ values[queries:].T
 
 
-def _drifts(native: dict, reference: dict, queries: int) -> dict:
-    """Per-text embedding, per-pair score and per-token feature drift from ``reference``."""
+def _token_shapes_match(mine: dict, theirs: dict) -> bool:
+    """One native feature row per token ID and byte offset, shaped like the reference's."""
+    hidden = np.asarray(mine["hidden"])
+    return (
+        hidden.ndim == 2
+        and hidden.shape == np.shape(theirs["hidden"])
+        and hidden.shape[0] == len(mine["token_ids"]) == len(mine["byte_offsets"])
+    )
+
+
+def _drifts(native: dict, reference: dict, queries: int, keep: list[bool] | None = None) -> dict:
+    """Per-text embedding, per-pair score and per-token feature drift from ``reference``.
+
+    Token features enter only for the texts that ``keep`` selects (default: all);
+    a text whose features are misshaped is reported by its own check instead of
+    being broadcast against the reference rows.
+    """
     scores = _scores(native["embeddings"], queries) - _scores(reference["embeddings"], queries)
-    pairs = list(zip(native["tokens"], reference["tokens"]))
+    pairs = [
+        (mine, theirs)
+        for index, (mine, theirs) in enumerate(zip(native["tokens"], reference["tokens"]))
+        if keep is None or keep[index]
+    ]
+    nothing = [np.zeros(0)]
     return {
         "embedding": 1 - _row_cosines(native["embeddings"], reference["embeddings"]),
         "score": np.abs(scores).reshape(-1),
         "token": np.concatenate(
-            [1 - _row_cosines(mine["hidden"], theirs["hidden"]) for mine, theirs in pairs]
+            nothing + [1 - _row_cosines(mine["hidden"], theirs["hidden"]) for mine, theirs in pairs]
         ),
         "token_relative": np.concatenate(
-            [_row_relative_errors(mine["hidden"], theirs["hidden"]) for mine, theirs in pairs]
+            nothing
+            + [_row_relative_errors(mine["hidden"], theirs["hidden"]) for mine, theirs in pairs]
         ),
     }
+
+
+def _largest(values: np.ndarray) -> float:
+    """The largest value; NaN when there is none or one of them is undefined."""
+    return float(np.max(values)) if np.size(values) else math.nan
+
+
+def _order_violations(native_scores: np.ndarray, truth_scores: np.ndarray, tolerance: float) -> int:
+    """Document pairs ranked in the wrong order for some query.
+
+    A pair counts when its FP32 truth scores differ by more than ``tolerance``
+    (the score difference the case allows) and the native scores do not keep the
+    truth's order; pairs closer than that are ties the score check already bounds.
+    """
+    count = 0
+    for mine, theirs in zip(native_scores, truth_scores):
+        ahead = (theirs[:, None] - theirs[None, :]) > tolerance
+        count += int(np.count_nonzero(ahead & ~(mine[:, None] > mine[None, :])))
+    return count
 
 
 def _pooled_cosine(pooled: np.ndarray, reference: dict, queries: int) -> float:
@@ -346,7 +418,22 @@ def _pooled_relative_error(pooled: np.ndarray, reference: dict, queries: int) ->
 
 
 def _check(name: str, label: str, scope: str, actual, operator: str, expected) -> dict:
-    """One row of the recorded comparison; values are plain Python numbers."""
+    """One row of the recorded comparison; values are plain Python numbers.
+
+    A measured value or bound that is not a finite number (for example the cosine
+    of a zero vector) cannot be compared. The row then records the failed contract
+    that both are defined, so the recorded comparison stays complete.
+    """
+    if operator != "==" and not (math.isfinite(float(actual)) and math.isfinite(float(expected))):
+        return {
+            "name": f"{name}_defined",
+            "label": f"{label}: measured value and bound are finite numbers",
+            "scope": "contract",
+            "actual": 0,
+            "operator": "==",
+            "expected": 1,
+            "passed": False,
+        }
     actual, expected = (
         (int(actual), int(expected))
         if operator == "=="
@@ -424,14 +511,59 @@ def _parity_checks(
             f"native byte offsets do not tile the input: {untiled[:1]!r}",
         ),
     ]
-    drift = _drifts(native, truth, queries)
+    shaped = [
+        _token_shapes_match(mine, theirs) for mine, theirs in zip(native["tokens"], truth["tokens"])
+    ]
+    misshaped = [
+        {
+            "text": text,
+            "native_hidden": list(np.shape(mine["hidden"])),
+            "token_ids": len(mine["token_ids"]),
+            "byte_offsets": len(mine["byte_offsets"]),
+            "reference_hidden": list(np.shape(theirs["hidden"])),
+        }
+        for text, mine, theirs, ok in zip(texts, native["tokens"], truth["tokens"], shaped)
+        if not ok
+    ]
+    checks.append(
+        (
+            _check(
+                "token_feature_shapes_mismatched_texts",
+                "Texts whose token features are not one row per token, shaped like the reference",
+                "contract",
+                len(misshaped),
+                "==",
+                0,
+            ),
+            f"native token-feature shape differs: {misshaped[:1]!r}",
+        )
+    )
+    norm_deviation = _largest(
+        np.abs(np.linalg.norm(np.asarray(native["embeddings"], dtype=np.float64), axis=-1) - 1.0)
+    )
+    checks.append(
+        (
+            _check(
+                "embedding_norm_deviation_max",
+                "Largest |L2 norm - 1| of a native embedding",
+                "contract",
+                norm_deviation,
+                "<=",
+                thresholds["embedding_norm_deviation"],
+            ),
+            f"native embeddings are not L2-normalized: |norm - 1| up to {norm_deviation:.3g}",
+        )
+    )
+    drift = _drifts(native, truth, queries, keep=shaped)
+    reference_drift = None if official is None else _drifts(official, truth, queries)
     summary = {
-        "embedding_cosine_min": float(1 - drift["embedding"].max()),
-        "score_abs_diff_max": float(drift["score"].max()) if drift["score"].size else 0.0,
-        "token_feature_cosine_min": float(1 - drift["token"].max()),
-        "token_feature_relative_error_max": float(drift["token_relative"].max()),
+        "embedding_cosine_min": 1 - _largest(drift["embedding"]),
+        "score_abs_diff_max": _largest(drift["score"]) if drift["score"].size else 0.0,
+        "token_feature_cosine_min": 1 - _largest(drift["token"]),
+        "token_feature_relative_error_max": _largest(drift["token_relative"]),
         "pooled_feature_cosine": _pooled_cosine(native["pooled"], truth, queries),
         "pooled_feature_relative_error": _pooled_relative_error(native["pooled"], truth, queries),
+        "embedding_norm_deviation_max": norm_deviation,
         "tokens": int(drift["token"].size),
     }
     if drift["score"].size:
@@ -449,6 +581,31 @@ def _parity_checks(
                     0,
                 ),
                 "retrieval ranking differs",
+            )
+        )
+        # The order of the other documents is held to the score difference the
+        # case allows: FP32 its absolute bound, BF16 the bound on its largest
+        # score difference. Documents closer than that in the truth are ties.
+        tolerance = (
+            thresholds["score_abs_diff"]
+            if reference_drift is None
+            else thresholds["bf16_max_drift_ratio"] * _largest(reference_drift["score"])
+        )
+        reversed_pairs = _order_violations(native_scores, truth_scores, tolerance)
+        summary["retrieval_order_tolerance"] = tolerance
+        checks.append(
+            (
+                _check(
+                    "retrieval_order_violations",
+                    "Document pairs whose FP32 truth scores differ by more than the case's score "
+                    "tolerance but whose native order is not the truth's",
+                    "independent_reference",
+                    reversed_pairs,
+                    "==",
+                    0,
+                ),
+                f"retrieval ranking differs: {reversed_pairs} document pairs out of the FP32 "
+                f"truth's order beyond the score tolerance {tolerance:.3g}",
             )
         )
     if official is None:
@@ -515,7 +672,6 @@ def _parity_checks(
             "BF16 drift statistics need at least 100 tokens of token features",
         )
     )
-    reference_drift = _drifts(official, truth, queries)
     official_pooled = official["tokens"][queries]["hidden"].astype(np.float64).mean(axis=0)
     pooled = {
         "native": 1 - summary["pooled_feature_cosine"],
