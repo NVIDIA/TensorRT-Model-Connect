@@ -9,6 +9,25 @@ import numpy as np
 import tensorrt as trt
 
 
+def _validate_tokenizer(tokenizer):
+    pretokenizer = tokenizer.get("pre_tokenizer") or {}
+    parts = pretokenizer.get("pretokenizers", [])
+    if (
+        pretokenizer.get("type") != "Sequence"
+        or len(parts) != 2
+        or parts[0].get("type") != "Split"
+        or not isinstance(parts[0].get("pattern", {}).get("Regex"), str)
+        or parts[1].get("type") != "ByteLevel"
+        or parts[1].get("use_regex", True)
+        or parts[1].get("add_prefix_space", True)
+    ):
+        raise ValueError(
+            "Nemotron embedding tokenizer requires Sequence[Split(Regex), ByteLevel] "
+            "with use_regex=false and add_prefix_space=false; "
+            f"got {pretokenizer!r}"
+        )
+
+
 def build_engine(weights, cfg, length, verbose=False):
     from transformers import Ministral3Config
     from transformers.models.ministral3.modeling_ministral3 import Ministral3RotaryEmbedding
@@ -170,6 +189,9 @@ def build(request, writer):
     directory = Path(request.model_dir)
     raw = json.loads((directory / "config.json").read_text())
     cfg = raw["text_config"]
+    if cfg.get("hidden_act", "silu") != "silu":
+        raise ValueError("Nemotron embedding requires hidden_act=silu")
+    _validate_tokenizer(json.loads((directory / "tokenizer.json").read_text()))
     if (
         raw.get("model_type") != "mistral3"
         or cfg.get("model_type") != "ministral3"

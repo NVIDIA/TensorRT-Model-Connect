@@ -38,6 +38,8 @@ class Pipeline final : public internal::IModel, public internal::ITextToEmbeddin
                                           internal::ConfigView config) override {
         if (!config.empty())
             throw internal::ConfigError("Nemotron embedding has no runtime config");
+        if (request.text.empty())
+            throw std::invalid_argument("Nemotron embedding requires nonempty request text");
         std::string text;
         switch (request.role) {
         case internal::EmbeddingRole::Default:
@@ -115,6 +117,13 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     auto engine = context.backend.create_module(plan.data(), plan.size(), {});
     if (!engine || !engine->ok())
         throw std::runtime_error("Nemotron engine failed to load");
+    for (const auto* name : {"input_ids", "attention_mask"}) {
+        if (!engine->has_input(name) ||
+            engine->tensor_shape(name) != std::vector<int64_t>{length} ||
+            engine->tensor_dtype(name) != DType::kInt32)
+            throw std::runtime_error(
+                "Nemotron engine input does not match runtime sequence_length");
+    }
     const auto tokenizer_json = nemotron_embed::section(context.reader, "tokenizer.json");
     auto tokenizer = CreateBpeTokenizer(tokenizer_json.data(), tokenizer_json.size(), true);
     return new nemotron_embed::Pipeline(std::move(engine), std::move(tokenizer), length, width,

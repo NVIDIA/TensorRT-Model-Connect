@@ -1422,6 +1422,9 @@ class BpeTokenizer final : public ITokenizer {
         detect_normalizer(j);
         detect_pre_tokenizer(j);
         const auto& pretokenizer = j.at("pre_tokenizer");
+        if (pretokenizer.value("type", "") != "Sequence" ||
+            !pretokenizer.contains("pretokenizers") || !pretokenizer.at("pretokenizers").is_array())
+            throw std::runtime_error("Nemotron tokenizer requires Sequence[Split, ByteLevel]");
         for (const auto& part : pretokenizer.at("pretokenizers")) {
             if (part.value("type", "") == "Split") {
                 const auto pattern = part.at("pattern").at("Regex").get<std::string>();
