@@ -4,8 +4,10 @@
  */
 
 #include "families/clipseg/runtime/image_preprocess_seam.h"
+#include "families/clipseg/runtime/tokenizer.h"
 
 #include <cmath>
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -106,6 +108,24 @@ void test_invalid_input_is_refused() {
     check(threw, "a zero standard deviation is refused");
 }
 
+void test_unicode_tokenizer_normalization() {
+    // Golden token IDs from Hugging Face tokenizers 0.22.2, using the checkpoint's
+    // normalizer/CLIP split and a minimal byte vocabulary without merges.
+    constexpr const char* fixture =
+        R"json({"version":"1.0","truncation":null,"padding":null,"added_tokens":[],"normalizer":{"type":"Sequence","normalizers":[{"type":"NFC"},{"type":"Replace","pattern":{"Regex":"\\s+"},"content":" "},{"type":"Lowercase"}]},"pre_tokenizer":{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":"<\\|startoftext\\|>|<\\|endoftext\\|>|'s|'t|'re|'ve|'m|'ll|'d|[\\p{L}]+|[\\p{N}]|[^\\s\\p{L}\\p{N}]+"},"behavior":"Removed","invert":true},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":true,"use_regex":true}]},"post_processor":null,"decoder":{"type":"ByteLevel","add_prefix_space":true,"trim_offsets":true,"use_regex":true},"model":{"type":"BPE","dropout":null,"unk_token":null,"continuing_subword_prefix":null,"end_of_word_suffix":"</w>","fuse_unk":false,"byte_fallback":false,"vocab":{"a":0,"c":1,"f":2,"i":3,"©":4,"¿":5,"Ã":6,"Ì":7,"Î":8,"Ï":9,"ĥ":10,"ĩ":11,"a</w>":12,"c</w>":13,"f</w>":14,"i</w>":15,"©</w>":16,"¿</w>":17,"Ã</w>":18,"Ì</w>":19,"Î</w>":20,"Ï</w>":21,"ĥ</w>":22,"ĩ</w>":23},"merges":[]}})json";
+    const auto tokenizer = trtmc::CreateBpeTokenizer(fixture, std::strlen(fixture), false);
+    check(tokenizer->encode("CAFÉ") == std::vector<int32_t>{1, 0, 2, 6, 16},
+          "Unicode normalization matches reference token IDs");
+    check(tokenizer->encode("café") == std::vector<int32_t>{1, 0, 2, 6, 16},
+          "Unicode normalization matches reference token IDs");
+    check(tokenizer->encode("café") == std::vector<int32_t>{1, 0, 2, 6, 16},
+          "Unicode normalization matches reference token IDs");
+    check(tokenizer->encode("ΟΣ") == std::vector<int32_t>{8, 5, 9, 22},
+          "Unicode normalization matches reference token IDs");
+    check(tokenizer->encode("İ") == std::vector<int32_t>{15, 7, 23},
+          "Unicode normalization matches reference token IDs");
+}
+
 } // namespace
 
 int main() {
@@ -113,6 +133,7 @@ int main() {
     test_resize_matches_pillow_bilinear_pixels();
     test_normalisation_is_per_channel();
     test_invalid_input_is_refused();
+    test_unicode_tokenizer_normalization();
     if (g_failures == 0)
         std::cout << "clipseg image preprocess seam: all checks passed\n";
     return g_failures == 0 ? 0 : 1;
