@@ -125,7 +125,7 @@ def _checkpoint(source: Path, staging: Path) -> Path:
 
 
 def try_build(request, writer, source: Path) -> bool:
-    """Keep the qualified native policy by default; Edge is an explicit experiment."""
+    """Use the native policy by default; Edge is an explicit experiment."""
     edge_python = getattr(request, "edge_builder_python", None)
     if edge_python is None:
         return False

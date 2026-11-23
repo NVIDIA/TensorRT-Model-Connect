@@ -230,6 +230,11 @@ def _isaac_libero(model_dir: Path, raw: dict[str, Any]) -> GrootConfig:
     expect(processor, {"max_action_horizon": NATIVE_ACTION_HORIZON})
     expect(_read_json(model_dir / "embodiment_id.json"), {tag: 2})
     group = processor["modality_configs"][tag]
+    # Isaac defaults to clipping state and including all state features unless overridden.
+    if (clip := processor.get("clip_outliers", True)) is not True:
+        _unsupported({"clip_outliers": (clip, True)})
+    if (exclude := group["state"].get("exclude_state", False)) is not False:
+        _unsupported({"state.exclude_state": (exclude, False)})
     cameras = ["image", "wrist_image"]
     expect(group["video"], {"modality_keys": cameras, "delta_indices": [0]})
     expect(group["language"], {"modality_keys": ["annotation.human.action.task_description"], "delta_indices": [0]})
