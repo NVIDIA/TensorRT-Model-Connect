@@ -106,7 +106,9 @@ def test_edge_checkpoint_metadata_and_hf_cache_links(tmp_path, monkeypatch, rele
             assert command[1:] == [
                 f"--onnxDir={staging / 'onnx/audio'}",
                 f"--engineDir={staging / 'edge_llm/engine'}",
-                "--minTimeSteps=10",
+                # The shortest supported 320-sample clip has two mel frames;
+                # Edge pads it to one eight-frame encoder step.
+                "--minTimeSteps=8",
                 "--maxTimeSteps=6000",
             ]
             assert kwargs["env"]["EDGELLM_PLUGIN_PATH"] == "fixture.so"

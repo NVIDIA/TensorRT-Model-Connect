@@ -274,7 +274,7 @@ def prepare(request, target: dict, staging: Path, log_path: Path, capacity: int,
                     package["audio_builder"],
                     f"--onnxDir={graph / 'audio'}",
                     f"--engineDir={engine}",
-                    "--minTimeSteps=10",
+                    "--minTimeSteps=8",
                     "--maxTimeSteps=6000",
                 ],
             )
