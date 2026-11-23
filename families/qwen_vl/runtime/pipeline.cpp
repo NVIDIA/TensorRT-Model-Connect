@@ -579,6 +579,12 @@ bool add_mrope_prefill_input(ITrtModule& prefill, const std::vector<int32_t>& in
     return true;
 }
 
+// The next decode step would store one more K/V row. A full cache ends the
+// generation, as max_new_tokens does, instead of dropping the prompt's rows.
+bool kv_cache_full(const QwenVlInferenceState& state) {
+    return state.position() >= state.max_length();
+}
+
 } // namespace
 
 int32_t QwenVlPipeline::resolve_max_new_tokens(const TextGenerationConfig& cfg) const {
@@ -674,6 +680,8 @@ std::vector<int32_t> QwenVlPipeline::generate_from_ids(const std::vector<int32_t
         QwenVlSampleResult result = active_sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
         if (result.is_eos || qwen_vl_is_eos_token(params, result.token_id))
+            break;
+        if (kv_cache_full(*state_))
             break;
         run_text_step(result.token_id, logits);
     }
@@ -786,6 +794,8 @@ void QwenVlPipeline::run_vl_decode_loop(QwenVlISampler* sampler, const QwenVlSam
         QwenVlSampleResult result = sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
         if (result.is_eos || qwen_vl_is_eos_token(params, result.token_id))
+            break;
+        if (kv_cache_full(*state_))
             break;
         run_text_step(result.token_id, logits, mrope_position);
         if (mrope_position >= 0)

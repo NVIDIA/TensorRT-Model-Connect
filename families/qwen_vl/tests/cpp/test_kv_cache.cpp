@@ -17,6 +17,7 @@
 // shim records it and refuses to copy.
 namespace {
 std::vector<void*> allocations;
+int copies = 0;
 bool overlapping_copy = false;
 
 void check(bool condition, const std::string& message) {
@@ -25,6 +26,7 @@ void check(bool condition, const std::string& message) {
 }
 
 cudaError_t copy(void* destination, const void* source, std::size_t count) {
+    ++copies;
     if (!count)
         return cudaSuccess;
     if (!destination || !source)
@@ -53,30 +55,42 @@ void write_present(const std::vector<float>& key, const std::vector<float>& valu
     std::memcpy(allocations[3], value.data(), value.size() * sizeof(float));
 }
 
-void test_full_cache_shift() {
+void test_advance_appends_until_full() {
     allocations.clear();
     trtmc::QwenVlKvCache cache(1, 4, 2, nullptr);
     check(cache.ok(), "Valid cache allocation was rejected");
-    const std::vector<float> key{1, 2, 3, 4, 5, 6, 7, 8};
-    const std::vector<float> value{-1, -2, -3, -4, -5, -6, -7, -8};
-    cache.write_prefill_kv({key.data()}, {value.data()}, 4);
+    const std::vector<float> key{1, 2, 3, 4, 5, 6};
+    const std::vector<float> value{-1, -2, -3, -4, -5, -6};
+    cache.write_prefill_kv({key.data()}, {value.data()}, 3);
 
+    write_present({7, 8}, {-7, -8});
+    cache.advance();
+    check(cache.position() == 4, "Advance did not append the decoded row");
+    check(read(cache.cache_k(0)) == std::vector<float>{1, 2, 3, 4, 5, 6, 7, 8},
+          "Advance wrote the keys to the wrong row");
+    check(read(cache.cache_v(0)) == std::vector<float>{-1, -2, -3, -4, -5, -6, -7, -8},
+          "Advance wrote the values to the wrong row");
+
+    // A full cache never drops its oldest rows: the next advance is rejected
+    // before any copy, and the cached prompt is unchanged.
+    const int copies_before = copies;
+    bool rejected = false;
+    try {
+        cache.advance();
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    check(rejected, "Advancing a full cache must fail explicitly");
+    check(copies == copies_before, "A rejected advance issued a CUDA copy");
+    check(cache.position() == 4, "A rejected advance changed the logical position");
+    check(read(cache.cache_k(0)) == std::vector<float>{1, 2, 3, 4, 5, 6, 7, 8},
+          "A rejected advance changed the cached keys");
+    check(!overlapping_copy, "The cache performed an overlapping CUDA copy");
+
+    cache.reset();
     write_present({9, 10}, {-9, -10});
     cache.advance();
-    check(!overlapping_copy, "Cache shift performed an overlapping CUDA copy");
-    check(cache.position() == 4, "A full cache must keep every slot visible");
-    check(read(cache.cache_k(0)) == std::vector<float>{3, 4, 5, 6, 7, 8, 9, 10},
-          "Full-cache shift corrupted the keys");
-    check(read(cache.cache_v(0)) == std::vector<float>{-3, -4, -5, -6, -7, -8, -9, -10},
-          "Full-cache shift corrupted the values");
-
-    write_present({11, 12}, {-11, -12});
-    cache.advance();
-    check(!overlapping_copy, "Repeated cache shift performed an overlapping CUDA copy");
-    check(read(cache.cache_k(0)) == std::vector<float>{5, 6, 7, 8, 9, 10, 11, 12},
-          "Repeated full-cache shift corrupted the keys");
-    check(read(cache.cache_v(0)) == std::vector<float>{-5, -6, -7, -8, -9, -10, -11, -12},
-          "Repeated full-cache shift corrupted the values");
+    check(cache.position() == 1, "The cache did not recover after reset");
 }
 
 void test_prompt_capacity() {
@@ -84,7 +98,9 @@ void test_prompt_capacity() {
     cache.set_prompt_length(4);
     try {
         cache.set_prompt_length(5);
-    } catch (const std::runtime_error& error) {
+    } catch (const std::invalid_argument& error) {
+        // std::invalid_argument maps to TRTMC_INVALID_ARGUMENT, a request error
+        // that does not retire a serving worker.
         const std::string message = error.what();
         check(message.find("5 tokens") != std::string::npos &&
                   message.find("holds 4") != std::string::npos &&
@@ -92,7 +108,7 @@ void test_prompt_capacity() {
               "Prompt overflow error does not name both lengths and the build option: " + message);
         return;
     }
-    throw std::runtime_error("A prompt longer than the KV cache must be rejected");
+    throw std::runtime_error("A prompt longer than the KV cache must be rejected as invalid");
 }
 } // namespace
 
@@ -126,7 +142,7 @@ extern "C" cudaError_t CUDARTAPI cudaMemsetAsync(void* destination, int value, s
 
 int main() {
     try {
-        test_full_cache_shift();
+        test_advance_appends_until_full();
         test_prompt_capacity();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
