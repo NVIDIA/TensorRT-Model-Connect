@@ -6,7 +6,8 @@
 // Generation stops when the KV cache is full instead of dropping the prompt's
 // rows. A cache of L rows and a P-token prompt yield L - P + 1 new tokens: the
 // final sampled token is never fed back, so it needs no row. A longer prompt is
-// rejected before the decoder runs. Fake modules with a never-EOS argmax drive
+// rejected before the decoder runs; a state without a length limit is bounded by
+// max_new_tokens alone. Fake modules with a never-EOS argmax drive
 // the real pipeline and cache through the text path and the image path (whose
 // prompt takes the token-by-token prefill because there is no prefill engine).
 
@@ -136,13 +137,34 @@ class FixedTokenizer final : public trtmc::ITokenizer {
     std::vector<std::int32_t>* ids_;
 };
 
+// State with no length limit: max_length() is -1, as recurrent state reports.
+class UnboundedState final : public trtmc::QwenVlInferenceState {
+  public:
+    void reset() override { position_ = 0; }
+    void bind_to(trtmc::ITrtModule&) override {}
+    void prepare_step(trtmc::TensorMap&, std::int32_t) override {}
+    void advance(std::int32_t n_tokens) override { position_ += n_tokens; }
+    std::int32_t position() const override { return position_; }
+    std::int32_t max_length() const override { return -1; }
+    std::int32_t num_layers() const override { return 1; }
+    bool needs_attention_mask() const override { return false; }
+    std::size_t device_memory_bytes() const override { return 0; }
+    const char* state_type() const override { return "unbounded"; }
+    bool ok() const override { return true; }
+
+  private:
+    std::int32_t position_{0};
+};
+
 struct Harness {
     FakeDecoder* decoder{nullptr};
     std::vector<std::int32_t> prompt;
     std::unique_ptr<trtmc::QwenVlPipeline> pipeline;
 };
 
-std::unique_ptr<Harness> make_harness(cudaStream_t stream) {
+// Without a state, the pipeline gets a kRows-row KV cache.
+std::unique_ptr<Harness>
+make_harness(cudaStream_t stream, std::unique_ptr<trtmc::QwenVlInferenceState> state = nullptr) {
     auto harness = std::make_unique<Harness>();
     auto decoder = std::make_unique<FakeDecoder>(stream);
     harness->decoder = decoder.get();
@@ -159,9 +181,10 @@ std::unique_ptr<Harness> make_harness(cudaStream_t stream) {
     preprocess.num_image_pad_tokens = 2;
     preprocess.image_token_id = kImageToken;
     preprocess.vision_output_dim = kFeatureDim;
-    auto cache = std::make_unique<trtmc::QwenVlKvCache>(1, kRows, kKvDim, stream);
+    if (!state)
+        state = std::make_unique<trtmc::QwenVlKvCache>(1, kRows, kKvDim, stream);
     harness->pipeline = std::make_unique<trtmc::QwenVlPipeline>(
-        std::move(decoder), std::make_unique<FakeVision>(stream), std::move(cache),
+        std::move(decoder), std::make_unique<FakeVision>(stream), std::move(state),
         std::move(config), std::move(preprocess), stream,
         std::make_shared<FixedTokenizer>(&harness->prompt));
     return harness;
@@ -229,6 +252,16 @@ void test_image_path(cudaStream_t stream) {
     check(overflow->decoder->calls == 0, "a rejected image prompt never reaches the decoder");
 }
 
+void test_unbounded_state(cudaStream_t stream) {
+    // A state without a length limit never fills, so only max_new_tokens ends
+    // generation, even past the KV cache's row count.
+    constexpr std::int32_t kBudget = 2 * kRows;
+    auto harness = make_harness(stream, std::make_unique<UnboundedState>());
+    const auto result = harness->pipeline->generate_ids({1, 1}, budget(kBudget)).token_ids;
+    check(result.size() == static_cast<std::size_t>(2 + kBudget),
+          "an unbounded state generates until max_new_tokens");
+}
+
 } // namespace
 
 int main() {
@@ -241,6 +274,7 @@ int main() {
     try {
         test_text_path(stream);
         test_image_path(stream);
+        test_unbounded_state(stream);
     } catch (const std::exception& error) {
         std::cerr << "FAIL: unexpected exception: " << error.what() << '\n';
         ++failures;
