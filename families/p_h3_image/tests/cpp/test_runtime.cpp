@@ -6,6 +6,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <nlohmann/json.hpp>
 
 int main(int argc, char** argv) {
@@ -34,8 +35,13 @@ int main(int argc, char** argv) {
                     return 2;
             }
             trtmc::Config config;
-            if (request.contains("seed"))
-                config.add("seed", request.at("seed").get<int64_t>());
+            if (request.contains("seed")) {
+                const auto& seed = request.at("seed");
+                if (!seed.is_number_integer() || seed < 0 ||
+                    seed > std::numeric_limits<uint32_t>::max())
+                    throw std::invalid_argument("seed must be an integer in [0, UINT32_MAX]");
+                config.add("seed", seed.get<int64_t>());
+            }
             auto result = task.run(
                 {request.at("prompt").get<std::string>(), {noise.data(), noise.size()}}, config);
             std::ofstream output(request.at("output").get<std::string>(), std::ios::binary);

@@ -402,6 +402,8 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
             !std::all_of(values->begin(), values->end(), [](float x) { return std::isfinite(x); }))
             throw std::runtime_error("P-H3-Image VAE statistics require 24 finite values");
     }
+    if (!std::all_of(scales.begin(), scales.end(), [](float x) { return x > 0; }))
+        throw std::runtime_error("P-H3-Image VAE standard deviations must be positive");
     auto load = [&](const std::string& name) {
         const auto plan = section(context.reader, name + ".plan");
         auto engine = context.backend.create_module(plan.data(), plan.size(), {});

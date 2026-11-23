@@ -98,13 +98,23 @@ def _required_path(value: str | None, label: str) -> Path:
 def _native_test_binary(name: str) -> Path:
     """Build source-only helpers in the configured native test tree."""
     build_dir = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    cache = build_dir / "CMakeCache.txt"
+    configurations = []
+    if cache.is_file():
+        for line in cache.read_text().splitlines():
+            if line.startswith("CMAKE_CONFIGURATION_TYPES:"):
+                configurations = [value for value in line.split("=", 1)[1].split(";") if value]
+                break
+    config = os.environ.get("CMAKE_BUILD_TYPE") or "Release"
+    if configurations and config not in configurations:
+        config = "Release" if "Release" in configurations else configurations[0]
     subprocess.run(
         [
             "cmake",
             "--build",
             str(build_dir),
             "--config",
-            os.environ.get("CMAKE_BUILD_TYPE", "Release"),
+            config,
             "--parallel",
             "2",
             "--target",
@@ -113,10 +123,7 @@ def _native_test_binary(name: str) -> Path:
         check=True,
         timeout=600,
     )
-    config = os.environ.get("CMAKE_BUILD_TYPE", "Release")
-    cache = build_dir / "CMakeCache.txt"
-    multi_config = cache.is_file() and "CMAKE_CONFIGURATION_TYPES:" in cache.read_text()
-    relative = Path(config) / name if multi_config else Path(name)
+    relative = Path(config) / name if configurations else Path(name)
     return _required_path(str(build_dir / relative), name)
 
 
@@ -438,7 +445,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             "seed": seed,
             "output": str(tmp_path / f"seeded-{index}.f32"),
         }
-        for index, seed in enumerate((case["seed"], case["seed"], case["seed"] + 1))
+        for index, seed in enumerate((case["seed"], case["seed"], (case["seed"] + 1) % 2**32))
     ]
     with evidence_stage("seeded_runtime"):
         generated = subprocess.run(
