@@ -62,6 +62,18 @@ int main() {
         plugin->destroy();
     }
 
+    const std::string mixed =
+        R"({"num_inputs":2,"num_outputs":1,"outputs":[{"dims":[{"input":0,"axis":0},64,{"input":1,"axis":2}],"dtype":"bfloat16"}],"workspace_bytes":0})";
+    plugin = create(mixed);
+    check(plugin != nullptr, "mixed fixed and input-axis dimensions accepted");
+    if (plugin != nullptr) {
+        auto* clone = plugin->clone();
+        check(clone != nullptr, "input-axis shape specification survives cloning");
+        if (clone != nullptr)
+            clone->destroy();
+        plugin->destroy();
+    }
+
     require_rejected("{", "invalid JSON rejected");
     require_rejected(
         R"({"num_inputs":1,"num_outputs":1,"outputs":[{"dims":[1],"dtype":"unknown"}],"workspace_bytes":0})",
@@ -75,6 +87,15 @@ int main() {
     require_rejected(
         R"({"num_inputs":1,"num_outputs":1,"outputs":[{"dims":[1],"dtype":"float32"}],"workspace_bytes":0,"unknown":1})",
         "unknown root field rejected");
+
+    for (const auto* dimension :
+         {R"({"input":1,"axis":0})", R"({"input":-1,"axis":0})", R"({"input":0,"axis":-1})",
+          R"({"input":0,"axis":8})", R"({"input":0,"axis":0,"extra":0})", R"({"input":0})",
+          R"({"input":0.0,"axis":0})", "2147483648", "0", "-1"}) {
+        require_rejected(std::string(R"({"num_inputs":1,"num_outputs":1,"outputs":[{"dims":[)") +
+                             dimension + R"(],"dtype":"float32"}],"workspace_bytes":0})",
+                         "invalid fixed dimension or input-axis reference rejected");
+    }
 
     return failures == 0 ? 0 : 1;
 }
