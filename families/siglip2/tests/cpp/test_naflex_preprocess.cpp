@@ -691,11 +691,13 @@ void test_rejections() {
 void test_dump_reports_a_failed_final_write() {
     if (!std::ifstream("/dev/full").good())
         return;
+    // Small enough to stay in the stream's buffer until close(), so the device reports the
+    // failure only when close() flushes it: the writer must check the stream after closing.
     trtmc::Siglip2Patches patches;
     patches.grid_height = 1;
     patches.grid_width = 1;
-    patches.pixel_values.assign(16 * 16 * 3, 0.5F);
-    patches.position_weights.assign(16 * 16, 1.0F / 256.0F);
+    patches.pixel_values.assign(4, 0.5F);
+    patches.position_weights.assign(1, 1.0F);
     bool reported = false;
     try {
         trtmc::write_siglip2_preprocess_dump("/dev/full", patches);

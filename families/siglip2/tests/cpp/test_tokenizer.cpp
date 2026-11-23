@@ -116,8 +116,7 @@ int main() {
         expect("\t", {byte_id(0x09), kEos}, "tab");
         // An added token in the text is matched as itself.
         expect("a<eos>", {5, kEos, kEos}, "added token");
-        // A prompt that ends inside a multi-byte sequence keeps the per-byte fallback, and the
-        // reader does not step past the end of the text to find that out.
+        // A prompt that ends inside a multi-byte sequence falls back to one token per byte.
         expect("a\xc3", {5, byte_id(0xC3), kEos}, "truncated two-byte sequence");
         expect("a\xe2\x82", {5, byte_id(0xE2), byte_id(0x82), kEos},
                "truncated three-byte sequence");
