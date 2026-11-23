@@ -112,11 +112,15 @@ def _checkpoint(source: Path, staging: Path) -> Path:
             (overlay / child.name).symlink_to(child.resolve())
     tokenizer = overlay / "tokenizer"
     tokenizer.mkdir()
+    existing = source / "tokenizer"
+    if existing.is_dir():
+        for child in existing.iterdir():
+            if child.is_file():
+                (tokenizer / child.name).symlink_to(child.resolve())
     for name in names:
-        supplied = source / "tokenizer" / name
-        if not supplied.is_file():
+        if not (tokenizer / name).is_file():
             supplied = Path(hf_hub_download(PUBLIC_COPY, name, revision=PUBLIC_REVISION))
-        (tokenizer / name).symlink_to(supplied.resolve())
+            (tokenizer / name).symlink_to(supplied.resolve())
     return overlay
 
 

@@ -138,7 +138,8 @@ The manifests declare the commit-pinned public tokenizer copy in `external_files
 Internal CI downloads it into the directory `TRTMC_LEROBOT_GROOT_MODEL_DIR` names, and
 the Community GPU image (`ci/Dockerfile.dependencies`) carries it under `/opt/trtmc-ci`.
 The E2E test overlays it on the unchanged checkpoint directory: the Hugging Face cache
-at the manifest's revision, or `TRTMC_LEROBOT_GROOT_CHECKPOINT_DIR` if set.
+at the manifest's revision, or `TRTMC_LEROBOT_GROOT_CHECKPOINT_DIR` for the LeRobot cases.
+The Isaac case uses its own staged `isaac-libero10` directory even when that override is set.
 `test_e2e.py` first checks that both are staged locally, then builds the pinned
 checkpoint, runs each observation through the SDK and compares all 16x7 actions,
 checks the preprocessing against LeRobot's, and checks that the native runtime links

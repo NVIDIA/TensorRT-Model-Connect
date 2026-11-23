@@ -106,9 +106,6 @@ def _checkpoint_dir(manifest: dict) -> Path:
 
     The override is not TRTMC_LEROBOT_GROOT_MODEL_DIR, which CI points at the external files.
     """
-    explicit = os.environ.get("TRTMC_LEROBOT_GROOT_CHECKPOINT_DIR")
-    if explicit:
-        return _required_path(explicit, "TRTMC_LEROBOT_GROOT_CHECKPOINT_DIR")
     if subdir := manifest.get("checkpoint_subdir"):
         # The Isaac repository has four different policies under separate directories, no root
         # config. CI stages only this revision's named files, preserving their relative paths.
@@ -116,6 +113,9 @@ def _checkpoint_dir(manifest: dict) -> Path:
             if root and (Path(root) / subdir / "config.json").is_file():
                 return Path(root) / subdir
         raise FileNotFoundError(f"{subdir} was not staged under {EXTERNAL_FILES_ENV} or {CI_ASSET_DIR}")
+    explicit = os.environ.get("TRTMC_LEROBOT_GROOT_CHECKPOINT_DIR")
+    if explicit:
+        return _required_path(explicit, "TRTMC_LEROBOT_GROOT_CHECKPOINT_DIR")
     from huggingface_hub import snapshot_download
 
     return Path(
