@@ -89,6 +89,7 @@ std::string value(const Json& object, const char* name) {
 struct Message {
     api::MessageRole role;
     std::string text;
+    std::vector<std::size_t> media_offsets{};
 };
 
 std::string format_prompt(const Json& recipe, const std::vector<Message>& messages) {
@@ -128,6 +129,8 @@ std::string format_prompt(const Json& recipe, const std::vector<Message>& messag
         if (messages[i].role != api::MessageRole::Assistant)
             throw std::invalid_argument(
                 "Flash-Next native media accepts system, user and assistant roles");
+        const auto& form = recipe.at(static_cast<int64_t>(i) > last_user ? "assistant_recent"
+                                                                         : "assistant_history");
         std::string body = content[i], reasoning;
         const auto close = body.find("</think>");
         if (recipe.at("parse_assistant_thinking").get<bool>() && close != std::string::npos) {
@@ -138,11 +141,20 @@ std::string format_prompt(const Json& recipe, const std::vector<Message>& messag
             if (open != std::string::npos)
                 reasoning.erase(0, open + 7);
             reasoning = trim(reasoning);
-            body.erase(0, body.rfind("</think>") + 8);
+            const auto body_start = body.rfind("</think>") + 8;
+            const auto reasoning_start = open == std::string::npos ? 0 : open + 7;
+            const auto leading = messages[i].text.find(content[i]);
+            for (auto offset : messages[i].media_offsets) {
+                const auto pos = offset - leading;
+                if (pos < body_start && !(form.at("include_reasoning").get<bool>() &&
+                                          pos >= reasoning_start && pos < close))
+                    throw std::invalid_argument(
+                        "Flash-Next assistant message " + std::to_string(i) +
+                        " contains media discarded by the provider thinking template");
+            }
+            body.erase(0, body_start);
             body.erase(0, body.find_first_not_of('\n'));
         }
-        const auto& form = recipe.at(static_cast<int64_t>(i) > last_user ? "assistant_recent"
-                                                                         : "assistant_history");
         output += value(form, "prefix");
         if (form.at("include_reasoning").get<bool>())
             output += reasoning + value(form, "reasoning_suffix");
@@ -303,7 +315,8 @@ class NativeMediaTask final : public ITextGeneration,
         auto groups = visual_->encode(
             api::ImageView{pixels, static_cast<std::size_t>(height) * width * 3 * sizeof(float),
                            static_cast<uint32_t>(height), static_cast<uint32_t>(width), 3,
-                           api::ImageFormat::Float32});
+                           api::ImageFormat::Float32},
+            std::min(input_limit_, max_visual_tokens_));
         const auto content = native_visual_text(groups) + prompt;
         std::vector<Message> messages;
         if (!cfg.system_prompt.empty())
@@ -324,7 +337,7 @@ class NativeMediaTask final : public ITextGeneration,
         if (!cfg.system_prompt.empty())
             prompt.push_back({api::MessageRole::System, cfg.system_prompt});
         std::vector<NativeVisualGroup> visual_groups;
-        std::size_t visual_tokens = 0;
+        int32_t remaining = std::min(input_limit_, max_visual_tokens_);
         for (const auto& message : messages) {
             if ((message.role != api::MessageRole::User &&
                  message.role != api::MessageRole::Assistant &&
@@ -346,14 +359,10 @@ class NativeMediaTask final : public ITextGeneration,
                             if (message.role == api::MessageRole::System)
                                 throw std::invalid_argument(
                                     "Flash-Next native system message cannot contain media");
-                            auto groups = visual_->encode(value);
+                            auto groups = visual_->encode(value, remaining);
                             for (const auto& group : groups)
-                                visual_tokens +=
-                                    static_cast<std::size_t>(group.height) * group.width;
-                            if (visual_tokens > static_cast<std::size_t>(
-                                                    std::min(input_limit_, max_visual_tokens_)))
-                                throw std::invalid_argument(
-                                    "Flash-Next native media exceeds visual input capacity");
+                                remaining -= group.height * group.width;
+                            item.media_offsets.push_back(item.text.size());
                             item.text += native_visual_text(groups);
                             for (auto& group : groups)
                                 visual_groups.push_back(std::move(group));

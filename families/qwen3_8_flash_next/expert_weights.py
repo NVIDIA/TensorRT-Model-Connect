@@ -45,7 +45,7 @@ def activation_limits(global_scale):
     scale = np.float32(global_scale)
     if not np.isfinite(scale) or scale <= 0:
         raise ValueError("Invalid Flash-Next NVFP4 activation calibration")
-    # All nonnegative finite FP16 values in order, plus an unreachable sentinel.
+    # All nonnegative finite FP16 values in order, plus a sentinel beyond the finite domain.
     values = np.arange(0x7C00, dtype=np.uint16).view(np.float16).astype(np.float32)
     boundaries = np.append(values, np.float32(65536))
     with np.errstate(over="ignore", under="ignore"):

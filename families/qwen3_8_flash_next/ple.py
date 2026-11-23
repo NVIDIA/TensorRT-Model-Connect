@@ -7,14 +7,14 @@ import math
 import numpy as np
 import tensorrt as trt
 
+from .ple_weights import fp16_table_scale
+
 
 def dequantize_ngram_rows(network, rows, scale):
     """Convert the selected FP8 rows [tokens, 16, 160] to FP16 token embeddings."""
     if rows.dtype != trt.fp8 or tuple(rows.shape)[1:] != (16, 160):
         raise ValueError("Flash-Next expects FP8 rows with 16 heads of width 160")
-    if not math.isfinite(scale) or scale <= 0:
-        raise ValueError("Flash-Next requires a finite positive table scale")
-    factor = network.add_constant((), np.array(scale, dtype=np.float16)).get_output(0)
+    factor = network.add_constant((), np.array(fp16_table_scale(scale))).get_output(0)
     value = network.add_dequantize(rows, factor, trt.float16).get_output(0)
     flatten = network.add_shuffle(value)
     flatten.reshape_dims = (0, 2560)
@@ -123,8 +123,7 @@ def dequantize_packed_ngram_rows(network, words, scale):
 
     if words.dtype != trt.int32 or tuple(words.shape)[1:] != (640,):
         raise ValueError("Flash-Next expects 2,560 FP8 bytes per selected token")
-    if not math.isfinite(scale) or scale <= 0:
-        raise ValueError("Invalid Flash-Next lexical table scale")
+    scale = fp16_table_scale(scale)
     n, ew = network, trt.ElementWiseOperation
 
     def const(a):
@@ -141,7 +140,7 @@ def dequantize_packed_ngram_rows(network, words, scale):
     ids = op(shifted, op(op(shifted, radix, ew.FLOOR_DIV), radix, ew.PROD), ew.SUB)
     raw = np.arange(256, dtype=np.uint8).view(ml_dtypes.float8_e4m3fn).astype(np.float16)
     # Same FP16 scale and DQ rounding as the FP8-typed TensorRT dequantizer.
-    table = raw * np.float16(scale)
+    table = raw * scale
     out = n.add_shuffle(n.add_gather(const(table), ids, 0).get_output(0))
     out.reshape_dims = (0, 2560)
     return out.get_output(0)

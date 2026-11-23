@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Stream the lexical table into a native bundle without dequantizing its rows."""
 
-import math
 import re
 
 import ml_dtypes
@@ -13,6 +12,15 @@ from .checkpoint import FlashCheckpoint
 
 _PREFIX = "model.language_model.layers.1.ple.ple_embedding."
 _SHARD = re.compile(re.escape(_PREFIX) + r"ngram_embedding\.shard_(\d+)\.weight")
+
+
+def fp16_table_scale(value):
+    """Validate the scale in the dtype actually consumed by lexical lookup."""
+    with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+        scale = np.float16(value)
+    if not np.isfinite(scale) or scale <= 0:
+        raise ValueError("Flash-Next lexical table scale must be finite and positive in FP16")
+    return scale
 
 
 def write_ngram_table(model_dir, writer):
@@ -33,8 +41,7 @@ def write_checkpoint_ngram_table(checkpoint, writer):
         return checkpoint.tensor(key, dtype, shape)
 
     scale = constant("ngram_embedding.weight_scale", ml_dtypes.bfloat16, [1]).item()
-    if not math.isfinite(scale) or scale <= 0:
-        raise ValueError("Invalid Flash-Next FP8 table scale")
+    fp16_table_scale(scale)
     metadata = {"scale": scale}
     for name, count in (
         ("layer_multipliers", 3),

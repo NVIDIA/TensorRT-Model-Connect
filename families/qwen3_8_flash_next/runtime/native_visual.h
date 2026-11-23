@@ -57,14 +57,15 @@ std::string native_visual_text(const std::vector<NativeVisualGroup>& groups);
 class NativeVisualEncoder {
   public:
     NativeVisualEncoder(std::unique_ptr<ITrtModule>, NativeVisionConfig);
-    std::vector<NativeVisualGroup> encode(const internal::ImageView&);
-    std::vector<NativeVisualGroup> encode(const internal::VideoView&);
+    std::vector<NativeVisualGroup> encode(const internal::ImageView&, int32_t remaining_tokens);
+    std::vector<NativeVisualGroup> encode(const internal::VideoView&, int32_t remaining_tokens);
 
   private:
     std::unique_ptr<ITrtModule> module_;
     NativeVisionConfig config_;
     std::vector<NativeVisualGroup> encode_frames(Span<const internal::ImageView>,
-                                                 Span<const double>, bool video);
+                                                 Span<const double>, bool video,
+                                                 int32_t remaining_tokens);
 };
 
 } // namespace trtmc::qwen3_8_flash_next

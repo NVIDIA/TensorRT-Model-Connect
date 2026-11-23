@@ -245,7 +245,7 @@ std::unique_ptr<FlashNextISampler>
 create_flash_next_sampler(const FlashNextSamplingParams& params) {
     const float top_p = sanitized_top_p(params.top_p);
     const float min_p = sanitized_min_p(params.min_p);
-    if (params.top_k <= 1 && top_p >= 1.0F - kSamplingEpsilon && min_p <= 0.0F && params.seed < 0) {
+    if (params.top_k == 1 && top_p >= 1.0F - kSamplingEpsilon && min_p <= 0.0F) {
         return std::make_unique<FlashNextGreedySampler>();
     }
 

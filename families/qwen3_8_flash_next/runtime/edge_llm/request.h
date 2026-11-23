@@ -54,9 +54,15 @@ make_request(const std::string& prompt, const TextGenerationConfig& config, bool
         request.samplingSeed = static_cast<std::uint64_t>(config.seed);
     request.applyChatTemplate = config.use_chat_template;
     request.enableThinking = config.enable_thinking;
-    request.temperature = config.temperature;
-    request.topK = config.top_k;
-    request.topP = config.top_p;
+    const bool nucleus = config.top_p < 1.0F - 1e-6F;
+    const bool greedy = config.temperature < 1e-6F || (config.top_k == 1 && !nucleus);
+    request.temperature = greedy ? 0.0F : config.temperature;
+    request.topK = greedy ? 1 : (config.top_k == 1 && nucleus ? 0 : config.top_k);
+    request.topP = greedy ? 1.0F : config.top_p;
+    if (!greedy &&
+        !trt_edgellm::shouldUseNonGreedySampling(request.temperature, request.topK, request.topP))
+        throw std::invalid_argument("Flash-Next Edge cannot preserve this sampling distribution: "
+                                    "the SDK would decode greedily");
     // Match the public generation default for legacy callers.
     request.maxGenerateLength = config.max_new_tokens > 0 ? config.max_new_tokens : 128;
     return request;

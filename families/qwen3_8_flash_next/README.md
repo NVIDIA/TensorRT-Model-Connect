@@ -29,6 +29,16 @@ experts' original weight encodings. Its lexical lookup streams the FP8 table
 once into temporary storage for bounded random reads. Allow space for the
 self-contained bundle and for temporary files; this is a large model.
 
+With `top_k=0`, native sampling has no top-k cap, regardless of whether a
+seed is supplied. Edge 0.12 accepts top-k up to 1024 and rejects requests
+the SDK would silently turn greedy (for example `temperature=1, top_k=0,
+top_p=1`). The default top-k-one, unfiltered request remains greedy.
+
+The native vision profile has a separate budget of `min(1024, max_input_length)`
+merged visual tokens per request. The budget includes every image and every temporal
+group in all videos. It does not replace the language prompt limit. An oversized
+provider-resized input is rejected, not silently downsampled.
+
 See [NOTICE](NOTICE) for checkpoint terms. Exposure of a build path is not
 validation of a configuration. Standalone Edge tests, Model Connect offload,
 and native fallback results must be reported separately.

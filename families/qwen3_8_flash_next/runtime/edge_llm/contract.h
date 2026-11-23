@@ -13,6 +13,7 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <tensorrt_edgellm/sampler/sampling.h>
 #include <vector>
 
 namespace trtmc::qwen3_8_flash_next::edge_llm {
@@ -52,7 +53,7 @@ inline bool safe_artifact_path(const std::string& name) {
 /// Reject invalid sampling settings and controls with no equivalent Edge request API.
 inline void validate_generation(const TextGenerationConfig& c) {
     if (!std::isfinite(c.temperature) || c.temperature < 0 || !std::isfinite(c.top_p) ||
-        c.top_p <= 0 || c.top_p > 1 || c.top_k < 0)
+        c.top_p <= 0 || c.top_p > 1 || c.top_k < 0 || c.top_k > trt_edgellm::kMaxSamplingTopK)
         throw std::invalid_argument("Invalid Flash-Next Edge sampling parameters");
     if (c.min_p != 0 || c.seed < -1 || c.eos_token_id != -1 || c.repetition_penalty != 1 ||
         !c.lora_adapter_id.empty() || c.stop_on_boxed_answer ||

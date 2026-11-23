@@ -27,6 +27,12 @@ errors are reported rather than retried on a different backend. Both routes
 build self-contained bundles. Budget for the original checkpoint, the bundle,
 and temporary build and inference files.
 
+The native fallback accepts at most `min(1024, max_input_length)` visual tokens
+per request, shared across all images and video frames. A larger language
+context does not increase this visual limit. If provider-sized media would
+exceed it, the runtime reports the limit rather than silently resizing or
+dropping content.
+
 The resident policy and native fallback passed the family’s three focused text,
 image, and ordered-video checks. The cached policy built and ran but missed the
 last animal’s full name in the video check. Do not interpret successful cached

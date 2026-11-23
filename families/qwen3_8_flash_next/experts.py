@@ -61,6 +61,9 @@ class _ExpertGraph:
             upper = self.op(code, self.const(np.full((1, 1, 1), bit, np.int32)), ew.SUM)
             too_low = self.op(maximum, self.gather(bounds, upper), ew.LESS)
             code = n.add_select(too_low, code, upper).get_output(0)
+        # ModelOpt clamps an infinite block maximum to the largest E4M3 scale.
+        # Code 127 is the sentinel in the threshold table, not a finite E4M3 entry.
+        code = self.op(code, self.const(np.full((1, 1, 1), 126, np.int32)), ew.MIN)
         values = np.arange(127, dtype=np.uint8).view(ml_dtypes.float8_e4m3fn).astype(np.float32)
         effective = self.op(
             self.gather(self.const(values), code), self.reshape(scale, (1, 1, 1)), ew.PROD
@@ -74,7 +77,16 @@ class _ExpertGraph:
             ).get_output(0)
         sign = n.add_unary(blocks, un.SIGN).get_output(0)
         signed = self.op(result, sign, ew.PROD)
-        return self.reshape(self.cast(self.op(signed, effective, ew.PROD), trt.float16), (0, width))
+        quantized = self.op(signed, effective, ew.PROD)
+        # A NaN poisons the block scale in the reference quantizer, not its neighbors.
+        invalid = self.cast(n.add_unary(blocks, un.ISNAN).get_output(0), trt.int32)
+        invalid = n.add_reduce(invalid, trt.ReduceOperation.MAX, 1 << 2, True).get_output(0)
+        quantized = n.add_select(
+            self.cast(invalid, trt.bool),
+            self.const(np.full((1, 1, 1), np.nan, np.float32)),
+            quantized,
+        ).get_output(0)
+        return self.reshape(self.cast(quantized, trt.float16), (0, width))
 
     def projection(self, x, name, rows, width):
         n, ew = self.n, trt.ElementWiseOperation

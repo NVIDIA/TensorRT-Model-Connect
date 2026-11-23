@@ -182,10 +182,13 @@ std::array<int32_t, 2> native_visual_size(const NativeVisionConfig& c, int32_t f
         h = static_cast<int64_t>(std::ceil(raw_h * beta / factor)) * factor;
         w = static_cast<int64_t>(std::ceil(raw_w * beta / factor)) * factor;
     }
-    if (h <= 0 || w <= 0 || h > INT32_MAX || w > INT32_MAX ||
-        (h / factor) * (w / factor) > c.max_tokens)
+    if (h <= 0 || w <= 0 || h > INT32_MAX || w > INT32_MAX)
+        throw std::invalid_argument("Invalid provider-sized Flash-Next visual dimensions");
+    const auto tokens = (h / factor) * (w / factor);
+    if (tokens > c.max_tokens)
         throw std::invalid_argument(
-            "Provider-sized Flash-Next image exceeds the native vision profile");
+            "Provider-sized Flash-Next image needs " + std::to_string(tokens) +
+            " visual tokens; the native limit is " + std::to_string(c.max_tokens));
     return {static_cast<int32_t>(h), static_cast<int32_t>(w)};
 }
 
@@ -312,15 +315,18 @@ NativeVisualEncoder::NativeVisualEncoder(std::unique_ptr<ITrtModule> module,
         throw std::runtime_error("Flash-Next native visual engine profile disagrees with metadata");
 }
 
-std::vector<NativeVisualGroup> NativeVisualEncoder::encode(const internal::ImageView& image) {
-    return encode_frames({&image, 1}, {}, false);
+std::vector<NativeVisualGroup> NativeVisualEncoder::encode(const internal::ImageView& image,
+                                                           int32_t remaining_tokens) {
+    return encode_frames({&image, 1}, {}, false, remaining_tokens);
 }
-std::vector<NativeVisualGroup> NativeVisualEncoder::encode(const internal::VideoView& video) {
-    return encode_frames(video.frames, video.timestamps_seconds, true);
+std::vector<NativeVisualGroup> NativeVisualEncoder::encode(const internal::VideoView& video,
+                                                           int32_t remaining_tokens) {
+    return encode_frames(video.frames, video.timestamps_seconds, true, remaining_tokens);
 }
 std::vector<NativeVisualGroup>
 NativeVisualEncoder::encode_frames(Span<const internal::ImageView> frames,
-                                   Span<const double> timestamps, bool video) {
+                                   Span<const double> timestamps, bool video,
+                                   int32_t remaining_tokens) {
     if (frames.empty() || frames.size() > INT32_MAX ||
         (!timestamps.empty() && timestamps.size() != frames.size()))
         throw std::invalid_argument("Flash-Next native video needs frames and matching timestamps");
@@ -336,6 +342,13 @@ NativeVisualEncoder::encode_frames(Span<const internal::ImageView> frames,
     }
     const auto size = native_visual_size(config_, static_cast<int32_t>(frames.size()), video,
                                          frames[0].height, frames[0].width);
+    const int64_t factor = config_.patch * config_.merge;
+    const int64_t per_group = (size[0] / factor) * (size[1] / factor);
+    const int64_t groups = 1 + (static_cast<int64_t>(frames.size()) - 1) / config_.temporal;
+    if (remaining_tokens < 0 || per_group > remaining_tokens / groups)
+        throw std::invalid_argument(
+            "Flash-Next media exceeds the remaining native visual budget of " +
+            std::to_string(remaining_tokens) + " tokens");
     std::vector<NativeVisualGroup> result;
     for (std::size_t start = 0; start < frames.size(); start += config_.temporal) {
         const auto count = std::min<std::size_t>(config_.temporal, frames.size() - start);
