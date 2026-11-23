@@ -1,12 +1,81 @@
 # InternVL: optional native Edge-LLM execution
 
+When the installed Model Connect wheel includes a native runner and Edge SDK,
+the family uses that SDK. A different SDK on `CMAKE_PREFIX_PATH` cannot
+override the wheel's native runner. To select another release, install a
+Model Connect wheel built for it, or use a matching standalone Model Connect
+builder and runner in an environment without the wheel. For standalone
+installations, `CMAKE_PREFIX_PATH` selects the SDK as usual.
+
 The family owns configuration admission, builder argument mapping, bundle
 composition, runtime orchestration, and validation. Edge owns complete visual
-and language networks. This route uses the official GitHub Edge-LLM **0.11.0**
-snapshot **95515c2f87fba8982db5a519f9022277667b3cc9**, provisioned through the
-optional native CMake package. It does not use another checkout or cross-compile.
+and language networks. Select the official Edge SDK when building Model Connect. The default remains
+0.11.0; opt in to 0.12.0 with `TRTMC_EDGELLM_RELEASE=0.12.0` and
+`TRTMC_ENABLE_EDGELLM=ON`. The native SDK must match the executing worker.
+Use `--edge-builder-python /absolute/path/to/python` on `trtmc internvl build`
+to select compatible wheel- or source-installed tools without changing MC's
+Python dependencies. A build does not install anything or cross-compile.
 
-## Scope
+## 0.12 image and decoder profiles
+
+The original InternVL3 HF checkpoint uses the direct LLM and visual builder.
+The visual profile keeps the source processor's patch limits and reserves
+space for the thumbnail. It does **not** reduce the source to a single tile to
+fit a short text context. An image that needs 1817 prompt tokens cannot run
+in a 384-token native KV cache.
+
+For the original 1B, 2B, 8B and 14B models, at FP16, batch 1, TP1 and context 4096,
+both real backends returned the two independent FP32 reference IDs on the
+owning vehicle-color question. The official processor uses seven tiles for
+this image. The Edge feature helper observed all 1792 visual tokens (not
+just a matching answer on a one-tile input). Native visual health also passed.
+The 8B result also passed its owning frozen-golden comparison. These results
+do not qualify other sizes or weight formats.
+
+Nested Qwen3 checkpoints in the InternVL3.5 family have per-layer Q/K
+normalization. The 0.12 direct graph for the 1B original produced an unrelated
+answer despite decoding successfully; the native route matched HF FP32.
+This family selects the official ONNX exporter for that topology. Configure
+`TRTMC_EDGELLM_ONNX=ON` and select Python with the release's ONNX tools.
+ONNX here is an **Edge** preparation path, not the native MC fallback. The 1B,
+2B, 4B and 8B originals each passed that exporter, both Edge engine builders, and
+the C++ runner at FP16, batch 1, TP1 and context 4096. For all four sizes,
+both the Edge and native TensorRT runs matched the independent HF FP32 token
+IDs on the vehicle-image question. Each Edge vision encoder produced 1792
+image tokens. These results do not qualify other checkpoint sizes.
+
+For the InternVL3.5-14B original at the same profile, ONNX export succeeded
+on an x86 A100 40 GiB with CUDA 13.4 and TensorRT 11.4.0.106. The Edge
+LLM builder then requested a single 45,718,743,296-byte allocation. The
+Edge visual builder and decode did not run there. The family warns and
+retries the unchanged native request for this measured profile when the
+allocation exceeds total GPU memory. The native fallback matched the
+independent FP32 answer and passed the image-feature health check.
+
+On a native Linux ARM64 GB300, the same checkpoint and build profile passed
+the official ONNX exporter, LLM builder and visual builder with the 0.12
+SDK's CTM decode kernels enabled. The Model Connect C++ runner matched the
+independent FP32 token IDs on the same vehicle-image question; the visual
+encoder produced all 1792 image tokens. This does not change the A100 result
+or qualify other prompts and GPU targets.
+
+Prepared AWQ decoders require a native SDK with verified INT4 kernels. Use
+`TRTMC_EDGELLM_ALL_KERNELS=ON` with the managed pinned source build. An SDK
+can expose the INT4 plugin even when its execution kernels were not compiled.
+For published PyTorch `.bin` checkpoints, the Edge Python environment also
+needs PyTorch. Leave `--quantization` unset to use the checkpoint’s AWQ format.
+The prepared InternVL3 1B, 2B, 8B and 14B AWQ checkpoints each matched the independent
+FP32 reference on the same vehicle-image case, using the direct INT4 v2
+builder with all native kernels. The native fallback also matched, using the
+same checkpoint's quantized weights rather than a dense base checkpoint.
+This comparison does not qualify other images, plugin versions or model sizes.
+
+The 14B AWQ Edge build and decode passed on a 40 GiB A100. The native
+TensorRT builder could not allocate 29,535,502,976 bytes on that GPU; the
+same native request passed on a 48 GiB RTX A6000. This is an observed
+build-memory limit, not a minimum-memory guarantee or an SM restriction.
+
+## Historical 0.11 scope and setup
 
 Original-source InternVL3 HF checkpoints and documented group128 AWQ decoders
 with the recorded dense Qwen2 text
@@ -24,7 +93,7 @@ map. If Edge preparation fails, the family logs a warning and retries the
 unchanged native request once. Publication errors never retry into a different
 backend. Runtime loading dispatches on the family-owned Edge bundle marker.
 
-## Build and runtime
+### 0.11 build and runtime
 
 Enable the generic optional SDK with `TRTMC_ENABLE_EDGELLM=ON`, build it on the
 executing GPU, and expose its installation through `CMAKE_PREFIX_PATH`.

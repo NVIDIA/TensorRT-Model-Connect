@@ -254,6 +254,19 @@ void NemotronHKvCache::set_position(int32_t position) {
     position_ = std::max(0, std::min(position, max_length_));
 }
 
+void NemotronHKvCache::append_prefill_from(const ITrtModule& module, int32_t seq_len) {
+    std::vector<const void*> keys(static_cast<std::size_t>(num_layers_));
+    std::vector<const void*> values(static_cast<std::size_t>(num_layers_));
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        const auto layer = static_cast<std::size_t>(i);
+        keys[layer] = module.device_ptr(names_.present_k[layer]);
+        values[layer] = module.device_ptr(names_.present_v[layer]);
+        if (keys[layer] == nullptr || values[layer] == nullptr)
+            throw std::runtime_error("nemotron_h prefill context has no present K/V output");
+    }
+    append_prefill_kv(keys, values, seq_len);
+}
+
 void NemotronHKvCache::advance(int32_t n_tokens) {
     // For now, only single-token advance is supported.
     // n_tokens > 1 reserved for future batched prefill (TASK-10).

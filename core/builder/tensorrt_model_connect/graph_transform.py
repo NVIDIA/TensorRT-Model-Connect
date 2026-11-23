@@ -39,6 +39,12 @@ class _TransformingBuilder:
         self._transform(network, next(self._indexes))
         return self._builder.build_serialized_network_to_stream(network, config, stream)
 
+    def build_serialized_network_to_stream(
+        self, network: Any, config: Any, *args: Any, **kwargs: Any
+    ) -> Any:
+        self._transform(network, next(self._indexes))
+        return self._builder.build_serialized_network_to_stream(network, config, *args, **kwargs)
+
 
 class _BuilderFactory:
     def __init__(self, builder: Any) -> None:

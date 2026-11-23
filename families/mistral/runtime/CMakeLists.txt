@@ -34,6 +34,8 @@ install(TARGETS trtmc_model_mistral
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
+include("${CMAKE_CURRENT_LIST_DIR}/edge_llm/Adapter.cmake")
+
 if(TRTMC_BUILD_TESTS)
   add_executable(test_mistral_pipeline
     ${PROJECT_SOURCE_DIR}/families/mistral/tests/cpp/test_mistral_pipeline.cpp

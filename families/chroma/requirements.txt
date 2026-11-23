@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Build: torch evaluates the reference's sinusoid tables; the tests also use it.
+torch>=2.12
+# Official reference pipeline (ChromaPipeline) for the family tests.
+diffusers==0.39.0
+Pillow

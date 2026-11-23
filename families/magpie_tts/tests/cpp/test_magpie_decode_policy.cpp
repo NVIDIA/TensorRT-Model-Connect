@@ -112,6 +112,30 @@ void test_stop_rule_helpers() {
           "eos helper keeps short outputs alive");
 }
 
+void test_decode_mask_shows_written_rows_and_current_token() {
+    // max_length 4 -> 5 columns; position 2: rows 0, 1 written, row 2 not yet.
+    const float m = trtmc::kMagpieMaskedScore;
+    std::vector<float> mask;
+    for (int32_t column = 0; column < 5; ++column)
+        mask.push_back(trtmc::magpie_decode_mask_value(column, 2, 5));
+    check(mask == std::vector<float>({0.0F, 0.0F, m, m, 0.0F}),
+          "decode mask hides the unwritten row and shows the current token");
+    check(trtmc::magpie_decode_mask_value(0, 0, 5) == m, "empty cache hides every cache row");
+    check(trtmc::magpie_decode_mask_value(4, 0, 5) == 0.0F, "empty cache shows the current token");
+    check(trtmc::magpie_decode_mask_value(3, 4, 5) == 0.0F, "full cache shows every cache row");
+}
+
+void test_eos_gate_follows_the_attended_text_position() {
+    const auto early = trtmc::magpie_eos_gate(true, 2, 20, 0);
+    check(early.forbid && !early.force, "eos is forbidden before the end of the text");
+    const auto near_end = trtmc::magpie_eos_gate(true, 18, 20, 5);
+    check(!near_end.forbid && !near_end.force, "eos is allowed near the end of the text");
+    const auto finished = trtmc::magpie_eos_gate(true, 18, 20, 6);
+    check(!finished.forbid && finished.force, "eos is forced after the end of the text");
+    const auto no_prior = trtmc::magpie_eos_gate(false, 0, 20, 100);
+    check(!no_prior.forbid && !no_prior.force, "no gating without an attention prior");
+}
+
 } // namespace
 
 int main() {
@@ -119,6 +143,8 @@ int main() {
     test_sampling_decode_uses_sampler();
     test_sampling_decode_stops_on_sampled_eos();
     test_stop_rule_helpers();
+    test_decode_mask_shows_written_rows_and_current_token();
+    test_eos_gate_follows_the_attended_text_position();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " Magpie decode policy test(s) failed\n";

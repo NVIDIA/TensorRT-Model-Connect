@@ -21,6 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ninja-build \
       nlohmann-json3-dev \
       libicu-dev \
+      libopencv-core-dev \
+      libopencv-imgproc-dev \
       openmpi-bin \
       patchelf \
       pkg-config \

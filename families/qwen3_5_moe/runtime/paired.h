@@ -38,7 +38,8 @@ class Qwen35MoePairedDraft {
     void observe(ITrtModule& target, int32_t position);
     std::vector<Qwen35MoeProposal> propose(int32_t anchor, const Qwen35MoeSamplingParams& sampling,
                                            int32_t budget, std::uint64_t& rng);
-    bool tree() const { return config_.variant == "dflash_ddtree"; }
+    const std::string& variant() const { return config_.variant; }
+    bool tree() const { return variant() == "dflash_ddtree" || variant() == "jetspec"; }
 
   private:
     Qwen35MoePairedConfig config_;

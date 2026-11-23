@@ -50,12 +50,43 @@ class ModelMetadata:
 
 
 @dataclass(frozen=True)
+class Variant:
+    """One precision and quantization combination that a family builds.
+
+    ``supported`` variants are expected to have a manifest testcase and a
+    hardware test; ``experimental`` variants may be built without that coverage.
+    ``manifests`` names the manifests that cover the variant when matching by
+    precision and quantization is not exact, for example a profile-restricted variant.
+    """
+
+    precision: str
+    quantization: str | None = None
+    status: str = "supported"
+    manifests: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if _ID.fullmatch(self.precision) is None:
+            raise ValueError("variant precision must be a lowercase identifier")
+        if self.quantization is not None and _ID.fullmatch(self.quantization) is None:
+            raise ValueError("variant quantization must be a lowercase identifier or None")
+        if self.quantization == "none":
+            raise ValueError("an unquantized variant uses quantization=None")
+        if self.status not in {"supported", "experimental"}:
+            raise ValueError("variant status must be supported or experimental")
+        if any(not name for name in self.manifests) or len(set(self.manifests)) != len(
+            self.manifests
+        ):
+            raise ValueError("variant manifests must be non-empty and unique")
+
+
+@dataclass(frozen=True)
 class FamilySupport:
     """Task capabilities returned by one matching family."""
 
     tasks: tuple[str, ...]
     default_task: str
     default_precision: str = "fp32"
+    variants: tuple[Variant, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.tasks or len(set(self.tasks)) != len(self.tasks):
@@ -66,6 +97,9 @@ class FamilySupport:
             raise ValueError("default_task must be one of the supported tasks")
         if self.default_precision not in {"fp16", "bf16", "fp32"}:
             raise ValueError("default_precision must be fp16, bf16, or fp32")
+        keys = [(variant.precision, variant.quantization) for variant in self.variants]
+        if len(set(keys)) != len(keys):
+            raise ValueError("family support variants must be unique by precision and quantization")
 
 
 DescribeSupport = Callable[[ModelMetadata], FamilySupport | None]
@@ -97,8 +131,14 @@ def family_support(
     tasks: tuple[str, ...],
     default_task: str,
     default_precision: str = "fp32",
+    variants: tuple[Variant, ...] = (),
 ) -> DescribeSupport:
-    """Create one exact, family-owned support function."""
+    """Create one exact, family-owned support function.
+
+    ``variants`` declares the precision and quantization combinations the family
+    builds. ``python -m tools.variant_coverage`` compares the declaration with the
+    family code, manifests and hardware tests.
+    """
 
     model_type_keys = frozenset(key for value in model_types if (key := _key(value)))
     architecture_keys = frozenset(key for value in architectures if (key := _key(value)))
@@ -110,6 +150,7 @@ def family_support(
         tasks=tasks,
         default_task=default_task,
         default_precision=default_precision,
+        variants=variants,
     )
 
     def describe(metadata: ModelMetadata) -> FamilySupport | None:

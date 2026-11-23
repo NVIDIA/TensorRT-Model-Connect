@@ -32,6 +32,7 @@ import tensorrt as trt
 
 from . import graph
 from .checkpoint import Checkpoint
+from .quantization import calibrate_timm_nfnet, configure_fp8_build
 
 
 if TYPE_CHECKING:
@@ -246,23 +247,37 @@ def _activation(network, tensor, dtype: np.dtype):
     return graph.gamma_activation(network, tensor, gamma=_GELU_GAMMA, dtype=dtype)
 
 
-def _convolution(network, tensor, weights, prefix, dtype, *, stride=1, groups=1):
+def _convolution(
+    network, tensor, weights, prefix, dtype, *, stride=1, groups=1, quant=None, dequantized=None
+):
+    """One convolution with SAME padding.
+
+    A convolution that ``quant`` quantizes runs with its FP8 weight; ``dequantized`` is an
+    already quantized input to reuse (the shared input of ``conv1`` and the downsample).
+    """
     weight = weights[f"{prefix}.weight"]
     kernel = int(weight.shape[2])
     size = int(tensor.shape[2])
+    padding = same_padding(size, kernel, stride)
+    if quant is not None and quant.should_quantize(prefix):
+        if dequantized is None:
+            dequantized = quant.quantize_input(network, tensor, prefix)
+        return quant.convolution(
+            network, dequantized, prefix, weights[f"{prefix}.bias"], stride=stride, padding=padding
+        )
     return graph.convolution(
         network,
         tensor,
         weight,
         weights[f"{prefix}.bias"],
         stride=stride,
-        padding=same_padding(size, kernel, stride),
+        padding=padding,
         groups=groups,
         dtype=dtype,
     )
 
 
-def _block(network, tensor, weights, block: dict[str, object], dtype: np.dtype):
+def _block(network, tensor, weights, block: dict[str, object], dtype: np.dtype, quant=None):
     """One normalizer-free block.
 
     The activation comes first and is scaled by beta, and both the shortcut and
@@ -274,16 +289,37 @@ def _block(network, tensor, weights, block: dict[str, object], dtype: np.dtype):
     entry = graph.scale_by(
         network, _activation(network, tensor, dtype), float(block["beta"]), dtype=dtype
     )
+    first = f"{prefix}.conv1"
+    # An FP8 block quantizes the scaled activation once when conv1 and the downsample
+    # (no pooling, same scale) both read it.
+    shared = None
+    if quant is not None and quant.should_quantize(first):
+        shared = quant.quantize_input(network, entry, first)
 
     shortcut = tensor
     if bool(block["has_downsample"]):
         # The shortcut is taken from the activated tensor, not the block input.
+        down = f"{prefix}.downsample.conv"
         pooled = entry
         if stride > 1:
             pooled = graph.average_pool(network, entry, kernel=2, stride=stride)
-        shortcut = _convolution(network, pooled, weights, f"{prefix}.downsample.conv", dtype)
+        reuse = (
+            stride == 1
+            and shared is not None
+            and quant.should_quantize(down)
+            and quant.input_scale(down) == quant.input_scale(first)
+        )
+        shortcut = _convolution(
+            network,
+            pooled,
+            weights,
+            down,
+            dtype,
+            quant=quant,
+            dequantized=shared if reuse else None,
+        )
 
-    out = _convolution(network, entry, weights, f"{prefix}.conv1", dtype)
+    out = _convolution(network, entry, weights, first, dtype, quant=quant, dequantized=shared)
     grouped = weights[f"{prefix}.conv2.weight"]
     groups = max(1, int(grouped.shape[0]) // int(grouped.shape[1]))
     out = _convolution(
@@ -294,6 +330,7 @@ def _block(network, tensor, weights, block: dict[str, object], dtype: np.dtype):
         dtype,
         stride=stride,
         groups=groups,
+        quant=quant,
     )
     if bool(block["has_second_conv"]):
         second = weights[f"{prefix}.conv2b.weight"]
@@ -304,8 +341,11 @@ def _block(network, tensor, weights, block: dict[str, object], dtype: np.dtype):
             f"{prefix}.conv2b",
             dtype,
             groups=max(1, int(second.shape[0]) // int(second.shape[1])),
+            quant=quant,
         )
-    out = _convolution(network, _activation(network, out, dtype), weights, f"{prefix}.conv3", dtype)
+    out = _convolution(
+        network, _activation(network, out, dtype), weights, f"{prefix}.conv3", dtype, quant=quant
+    )
     if bool(block["has_gate"]):
         gated = graph.squeeze_excite(
             network,
@@ -327,6 +367,7 @@ def _build_engine(
     checkpoint: Checkpoint,
     precision: str,
     verbose: bool,
+    quantization: str | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     if precision == "fp16":
         numpy_dtype, tensor_dtype = np.float16, trt.float16
@@ -339,6 +380,11 @@ def _build_engine(
     weights = _weights(checkpoint, blocks, numpy_dtype)
     if weights["head.fc.weight"].shape[0] != config["num_classes"]:
         raise ValueError("NFNet classifier dimensions do not match config.json")
+    quant_ctx = None
+    if quantization not in {None, "none"}:
+        quant_ctx = calibrate_timm_nfnet(
+            config, blocks, checkpoint, quantization, precision=precision, standardise=standardise
+        )
 
     # The stem strides twice, then every stage after the first halves again.
     total_stride = 4
@@ -366,6 +412,7 @@ def _build_engine(
     builder_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
     _configure_precision(builder_config, precision)
+    configure_fp8_build(builder_config, quant_ctx)
 
     pixels = network.add_input("pixel_values", trt.float32, (1, 3, height, width))
     if pixels is None:
@@ -385,12 +432,14 @@ def _build_engine(
         if position:
             hidden = _activation(network, hidden, numpy_dtype)
         stride = 2 if position in (0, count - 1) else 1
-        hidden = _convolution(network, hidden, weights, prefix, numpy_dtype, stride=stride)
+        hidden = _convolution(
+            network, hidden, weights, prefix, numpy_dtype, stride=stride, quant=quant_ctx
+        )
 
     for block in blocks:
-        hidden = _block(network, hidden, weights, block, numpy_dtype)
+        hidden = _block(network, hidden, weights, block, numpy_dtype, quant=quant_ctx)
 
-    hidden = _convolution(network, hidden, weights, "final_conv", numpy_dtype)
+    hidden = _convolution(network, hidden, weights, "final_conv", numpy_dtype, quant=quant_ctx)
     hidden = _activation(network, hidden, numpy_dtype)
     hidden = graph.global_average_pool(
         network, hidden, height // total_stride, width // total_stride
@@ -421,6 +470,18 @@ def _configure_precision(builder_config, precision: str) -> None:
         builder_config.clear_flag(trt.BuilderFlag.TF32)
 
 
+def _refuse_quantized_checkpoint(model_dir: Path, raw: dict, checkpoint: Checkpoint) -> None:
+    """FP8 self-quantization needs the original checkpoint, not an already quantized one."""
+    if (
+        "quantization_config" in raw
+        or (model_dir / "hf_quant_config.json").is_file()
+        or any(str(name).endswith((".weight_scale", ".input_scale")) for name in checkpoint.names)
+    ):
+        raise ValueError(
+            "the checkpoint is already quantized; FP8 self-quantization needs the original"
+        )
+
+
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one timm NFNet image-classification bundle."""
     if request.dynamic_kv_cache:
@@ -439,8 +500,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_nfnet does not support context parallelism")
     if request.task != "classification":
         raise ValueError("timm_nfnet supports only task=classification")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("timm_nfnet does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"timm_nfnet supports quantization fp8 or none; got {request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("timm_nfnet does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -449,8 +512,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_nfnet supports only max_sequence_length=1")
     model_dir = Path(request.model_dir)
     raw = _read_config(model_dir)
+    checkpoint = Checkpoint.open(model_dir)
+    quantization = None
+    if request.quantization == "fp8":
+        _refuse_quantized_checkpoint(model_dir, raw, checkpoint)
+        quantization = "fp8"
     plan, runtime = _build_engine(
-        raw, Checkpoint.open(model_dir), str(request.precision).lower(), bool(request.verbose)
+        raw,
+        checkpoint,
+        str(request.precision).lower(),
+        bool(request.verbose),
+        quantization,
     )
     writer.set_header(family="timm_nfnet", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)

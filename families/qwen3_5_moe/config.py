@@ -44,6 +44,7 @@ class ModelConfig:
         raw = json.loads(value)
         text = raw.get("text_config", raw)
         rope = text.get("rope_parameters") or text.get("rope_scaling") or {}
+        bos_token_id = text.get("bos_token_id")
         return ModelConfig(
             model_type=raw["model_type"], architectures=raw.get("architectures", []),
             vocab_size=text["vocab_size"], hidden_size=text["hidden_size"],
@@ -53,7 +54,7 @@ class ModelConfig:
             num_key_value_heads=text["num_key_value_heads"],
             rms_norm_eps=text.get("rms_norm_eps", 1e-6),
             rope_theta=float(rope.get("rope_theta", text.get("rope_theta", 10000000))),
-            bos_token_id=text.get("bos_token_id", -1),
+            bos_token_id=-1 if bos_token_id is None else bos_token_id,
             eos_token_id=text.get("eos_token_id", -1),
             pad_token_id=text.get("pad_token_id", -1),
             tie_word_embeddings=text.get("tie_word_embeddings", raw.get("tie_word_embeddings", False)),

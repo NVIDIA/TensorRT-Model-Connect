@@ -38,7 +38,7 @@ def counted(item: Mapping[str, Any], limit: int = 3) -> str:
 
 
 # What a gold-scored entry's score is, by its metric (right/wrong benchmarks score the percent answered right).
-SCORE_NAMES = {"wer": "WER %", "chrf": "chrF++", "coco_map": "COCO mAP", "miou": "mIoU %", "mask_iou": "mask IoU %",
+SCORE_NAMES = {"wer": "WER %", "cer": "CER %", "chrf": "chrF++", "coco_map": "COCO mAP", "miou": "mIoU %", "point_miou": "mIoU %", "mask_iou": "mask IoU %",
                "sts_spearman": "Spearman x100", "rerank_ndcg": "nDCG", "retrieval_ndcg": "nDCG",
                "retrieval_ndcg10": "nDCG@10", "forecast_mse": "MSE", "precomputed_mean": "mean score"}
 
@@ -158,6 +158,9 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
         if item.get("reasons") or item.get("notes"):
             text = "; ".join([*item.get("reasons", []), *item.get("notes", [])])
             lines.append(f"|  | {text[:300].replace('|', '/')} |  |  |  |")
+        for outlier in item.get("outliers") or []:  # every sample a parity gate tolerated, with its measurement
+            text = f"{outlier.get('sample_id')}: {outlier.get('explanation')}".replace("|", "/")
+            lines.append(f"|  | tolerated outlier {text} |  |  |  |")
     lines += ["", "## Performance (server task-call time)", "",
               "| reference mode | light | TRTMC ms | CI % | reference ms (aggregation) | CI % | notes |",
               "|---|---|---|---|---|---|---|"]

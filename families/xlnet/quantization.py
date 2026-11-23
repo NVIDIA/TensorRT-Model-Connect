@@ -14,14 +14,19 @@ calibration. Each quantized projection becomes ``activation -> Quantize -> Dequa
 MatMul`` with ``FP8 weight -> Dequantize`` on the other input.
 
 Recipe (the public recipe for small text encoders, adapted to the per-tensor scales of this
-path and narrowed by measurement): the attention output projection and the two feed-forward
-projections of every layer are quantized. The query, key and value projections stay in the
-work type: their input (the previous layer's output) has a heavy tail (calibrated maximum up to
-158 in xlnet-base-cased against a median of 27 over the layers), and quantizing them with one
-per-tensor scale raised the language-model-head KL against the reference from 0.008 to 0.045
-for a speed change below 1%. The word embedding, the relative position projection ``r`` (its
-input is the sinusoidal table, a constant of the build), the relative biases, the segment
-embedding, the layer norms, the GELU and the attention matmuls stay in the work type too. A
+path and narrowed by measurement): the two feed-forward projections of every layer are
+quantized. The query, key and value projections stay in the work type: their input (the
+previous layer's output) has a heavy tail (calibrated maximum up to 158 in xlnet-base-cased
+against a median of 27 over the layers), and quantizing them with one per-tensor scale raised
+the language-model-head KL against the reference from 0.008 to 0.045 for a speed change below
+1%. The attention output projection stays in the work type too: with one per-tensor scale on
+its input (the attention context), 10 of the 351 sentences of the AIPerf encoder-parity
+qualification were outside cosine 0.99 / relative L2 0.15 against the native float32 model
+(relative L2 up to 0.23); without it all are within (largest relative L2 0.147), and an FP8
+engine call is still 1.08x faster than fp16 (GB300, 256 tokens: 546 against 590 us; 1.09x when
+it was FP8). The word embedding, the relative position projection ``r`` (its input is the
+sinusoidal table, a constant of the build), the relative biases, the segment embedding, the
+layer norms, the GELU and the attention matmuls stay in the work type too. A
 projection whose calibrated input scale is more than 20 times the median of its kind is stored
 as ``null`` in the table and stays unquantized.
 
@@ -50,9 +55,8 @@ CALIBRATION_TOOL = "families/xlnet/calibrate_fp8_scales.py"
 _SUPPORTED = ("fp8",)
 # Table name of each quantized projection (``layer.N.`` plus this stem) and the loaded weight
 # names it feeds with their layout: ``in_out`` is ``[in, out]`` (the feed-forward weights after
-# loading), ``out_in`` is ``[out, in]`` (the attention output projection).
+# loading) and is transposed to ``[out, in]``; ``out_in`` would be used as loaded.
 LAYER_PROJECTIONS = {
-    "rel_attn.o": (("w_o", "out_in"),),
     "ff.layer_1": (("w_fc1", "in_out"),),
     "ff.layer_2": (("w_fc2", "in_out"),),
 }

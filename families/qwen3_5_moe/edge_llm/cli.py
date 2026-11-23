@@ -16,7 +16,7 @@ def execution_inputs(
         if companion:
             raise ValueError("--companion requires --execution-variant")
         return None
-    if execution_variant not in {"dflash", "dflash_ddtree", "mtp"}:
+    if execution_variant not in {"dflash", "dflash_ddtree", "jetspec", "mtp"}:
         raise ValueError("unsupported qwen3_5_moe execution variant")
     checkpoints = []
     for value in companion:

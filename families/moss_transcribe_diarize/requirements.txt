@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The checkpoint's tokenizer configuration needs a newer Transformers than the
+# repository pin (5.2.0 passes fix_mistral_regex twice), and the checkpoint's
+# official package requires 5.6 or newer. 5.20 and later ship a built-in
+# moss_transcribe_diarize config (5.22.2 rejects this checkpoint's config.json
+# with it). 5.19.0 loads the tokenizer and the checkpoint's own processor and
+# model code.
+transformers==5.19.0
+# Transformers 5.19.0 requires huggingface-hub>=1.31.0 (the repository's
+# environment pins 1.21.0), safetensors>=0.8.0 and tokenizers>=0.23.1. These
+# are pinned to the versions the family was validated with, so that pip
+# installs the same set on top of an existing environment.
+huggingface-hub==2.4.0
+safetensors==0.8.0
+tokenizers==0.23.3

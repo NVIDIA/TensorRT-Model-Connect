@@ -75,4 +75,24 @@ if(TRTMC_BUILD_TESTS)
     target_compile_options(${test_name} PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
+
+  add_executable(test_magpie_decode_mask_kernel
+    ${PROJECT_SOURCE_DIR}/families/magpie_tts/tests/cpp/test_magpie_decode_mask_kernel.cpp
+  )
+  target_include_directories(test_magpie_decode_mask_kernel PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_magpie_decode_mask_kernel SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(test_magpie_decode_mask_kernel PRIVATE
+    trtmc_model_magpie_tts trtmc_core ${TRTMC_CUDART_LIBRARY}
+  )
+  target_compile_options(test_magpie_decode_mask_kernel PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME test_magpie_decode_mask_kernel COMMAND test_magpie_decode_mask_kernel)
+  set_tests_properties(test_magpie_decode_mask_kernel PROPERTIES
+    SKIP_RETURN_CODE 77
+    LABELS gpu
+  )
 endif()

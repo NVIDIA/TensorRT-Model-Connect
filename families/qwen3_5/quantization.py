@@ -50,8 +50,8 @@ from typing import Any
 import ml_dtypes
 import numpy as np
 import tensorrt as trt
-import torch
-from safetensors import safe_open
+
+from .checkpoint_mapper import _open_safetensors
 
 NVFP4_BLOCK_SIZE = 16
 FP8_E4M3_MAX = 448.0
@@ -236,22 +236,8 @@ class Qwen35QuantContext:
 
 
 def _open_raw_readers(model_dir: Path) -> dict[str, Any]:
-    """Map tensor name -> torch-framework reader (raw dtypes, no conversion)."""
-    single = model_dir / "model.safetensors"
-    if single.is_file():
-        reader = safe_open(str(single), framework="pt")
-        return {name: reader for name in reader.keys()}
-    index_path = model_dir / "model.safetensors.index.json"
-    if not index_path.is_file():
-        raise FileNotFoundError(f"No model.safetensors checkpoint in {model_dir}")
-    weight_map = json.loads(index_path.read_text(encoding="utf-8")).get("weight_map")
-    if not isinstance(weight_map, dict) or not weight_map:
-        raise ValueError("model.safetensors.index.json has no weight_map")
-    by_file = {
-        shard: safe_open(str(model_dir / shard), framework="pt")
-        for shard in sorted(set(weight_map.values()))
-    }
-    return {name: by_file[shard] for name, shard in weight_map.items()}
+    """Index the checkpoint with the family reader that preserves packed storage."""
+    return _open_safetensors(model_dir, prepared=True).tensor_map
 
 
 def _scalar(tensors: dict[str, Any], key: str) -> float | None:
@@ -259,7 +245,7 @@ def _scalar(tensors: dict[str, Any], key: str) -> float | None:
     reader = tensors.get(key)
     if reader is None:
         return None
-    value = reader.get_tensor(key).float().numpy().reshape(-1)
+    value = np.asarray(reader.get_tensor(key), dtype=np.float32).reshape(-1)
     if value.size != 1 or not np.isfinite(value[0]) or value[0] <= 0:
         return None
     return float(value[0])
@@ -268,7 +254,7 @@ def _scalar(tensors: dict[str, Any], key: str) -> float | None:
 def _raw_bytes(tensors: dict[str, Any], key: str) -> np.ndarray:
     """The tensor's raw bytes as a contiguous uint8 array (no dtype conversion)."""
     tensor = tensors[key].get_tensor(key)
-    return np.ascontiguousarray(tensor.view(torch.uint8).numpy())
+    return np.ascontiguousarray(tensor.view(np.uint8))
 
 
 def is_nvfp4_checkpoint(model_dir: Path) -> bool:
@@ -460,7 +446,7 @@ def _calibrate_fp8(
             raise ValueError(
                 f"{prefix} is already quantized; fp8 self-quantization needs the BF16 checkpoint"
             )
-        return tensors[key].get_tensor(key).float().numpy()
+        return np.asarray(tensors[key].get_tensor(key), dtype=np.float32)
 
     def entry(name: str, weight: np.ndarray, input_scale: float) -> _LayerScales:
         packed, weight_scale = quantize_fp8_weight(weight)

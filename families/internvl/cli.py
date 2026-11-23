@@ -44,6 +44,7 @@ def build(
     max_sequence_length: int | None = None,
     tensor_parallel_size: int = 1,
     int4_gemm_plugin_version: int | None = None,
+    edge_builder_python: Path | None = None,
     quantization: str | None = None,
     verbose: bool = False,
 ) -> int:
@@ -60,6 +61,7 @@ def build(
         max_sequence_length=max_sequence_length,
         tensor_parallel_size=tensor_parallel_size,
         int4_gemm_plugin_version=int4_gemm_plugin_version,
+        edge_builder_python=edge_builder_python,
         quantization=quantization,
         verbose=verbose,
     )

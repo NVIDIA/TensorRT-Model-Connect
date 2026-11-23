@@ -1,12 +1,37 @@
 # TimesFM
 
 This family builds `google/timesfm-2.0-500m-pytorch` (TimesFM 2.0, 500M) as one
-TensorRT engine for the `time_series_forecast` task. The engine takes a context
+TensorRT engine for the `series_to_point_forecast` task. The engine takes a context
 of up to 2048 values (left padded, with a padding mask) and a frequency index,
-and returns the mean and quantile forecasts for a horizon of 128 steps in one
+and exposes the mean forecast for a horizon of 128 steps in one
 forward pass; there is no decode loop. The family build accepts precision fp32
 only, and the manifests build fp32 (tensor parallel size 1 and 4). Batch size is
 1.
+
+## Task SDK migration
+
+This family builds the checkpoint's existing mean-prediction head and exposes
+the `series_to_point_forecast` Task through the public C and C++ SDKs.
+The Task returns the complete `[horizon, channel]` forecast with one channel and
+positive horizon offsets. Channel names and units remain unspecified.
+
+Pass history as `[time, 1]` or an unspecified flat shape. The family keeps the
+newest context window, left-pads short histories, and forwards missing
+observations as padding. The optional integer `frequency` Config selects the
+checkpoint's frequency embedding; its default is zero and its value must be
+within the loaded checkpoint's embedding range. Overrides apply to one call.
+
+Rebuild existing `time_series_forecast` bundles after upgrading this family:
+the primary Task identity has changed. The TensorRT graph, weights, supported
+precision, rank-plan selection, and reference acceptance criteria are unchanged.
+Only the existing point head is advertised; quantile, batch, streaming, and
+stateful Tasks are not implemented by this family.
+
+With `TRTMC_BINARY`, `TRTMC_RUNTIME_ROOT`, `TRTMC_NATIVE_BUILD_DIR`, and
+`TRTMC_REFERENCE_SOURCE_DIR` set for a prepared environment, select the original
+`timesfm-2.0-500m-official` or `timesfm-2.0-500m-official-tp4` E2E testcase. The
+tests compare the CLI and public C/C++ SDK outputs against the official model.
+The SDK consumers also cover error handling, repeated calls, and result lifetime.
 
 ## FP8 quantization study (not shipped)
 

@@ -22,6 +22,13 @@ _TEST_DIR = Path(__file__).resolve().parent
 _FAMILY = _TEST_DIR.parent.name
 
 
+def _asset(name: str) -> str:
+    """A testcase image, named relative to tests/ as the benchmark resolves it."""
+    path = _TEST_DIR / name
+    assert path.is_file(), f"selected {_FAMILY} E2E asset does not exist: {path}"
+    return str(path)
+
+
 def _load_cases() -> dict[str, tuple[dict, dict]]:
     cases: dict[str, tuple[dict, dict]] = {}
     for path in sorted((_TEST_DIR / "manifests").glob("*.json")):
@@ -202,9 +209,9 @@ def _native_arguments(bundle: Path, runtime_root: Path, prompt: str, case: dict)
     if "images" in case:
         if not case["images"]:
             raise ValueError("Ordered images cannot be empty")
-        arguments.extend(["--images", json.dumps(case["images"])])
+        arguments.extend(["--images", json.dumps([_asset(name) for name in case["images"]])])
     elif "image" in case:
-        arguments.extend(["--image", str(case["image"])])
+        arguments.extend(["--image", _asset(case["image"])])
     options = {
         "temperature": "--temperature",
         "top_k": "--top-k",
@@ -375,7 +382,7 @@ def _reference_inputs(model_dir: Path, manifest: dict, tokenizer, prompt: str, c
                 "shortest_edge": 128 * factor * factor,
                 "longest_edge": 1280 * factor * factor,
             }
-            image_paths = case["images"] if "images" in case else [case["image"]]
+            image_paths = [_asset(name) for name in (case["images"] if "images" in case else [case["image"]])]
             if not image_paths:
                 raise ValueError("Ordered images cannot be empty")
             for path in image_paths:

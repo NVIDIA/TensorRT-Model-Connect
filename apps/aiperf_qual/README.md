@@ -43,6 +43,16 @@ ADE20K mIoU, mask IoU, ETTh1 MSE, WMT / FLORES chrF++). Selections are seeded an
 filtered to the shipped bundle's length (rendered through the chat template on the chat route). A model
 whose catalog request samples answers once per seed on each side and is judged on per-problem seed means.
 Each benchmark's `margin`, `relative_margin`, and size are set in `config/tasks.yaml`.
+
+HumanEval and MBPP grading requires a host that can apply the configured `setpriv` UID/GID and
+capability boundary. Before model preparation, code profiles verify that `nobody` cannot write the
+result, bundle, cache, data, reference-environment and runtime roots or read the protected home.
+An unavailable boundary produces an `environment-blocked` result in `error.json`, a White
+"environment blocked" summary label, and a nonzero exit status, with no model qualification claim.
+Blocked profiles are retained on resume while the boundary remains unavailable; a repaired host
+retries with the normal execution key.
+The same verification still runs before every generated program. There is no unsandboxed fallback;
+ordinary non-root hosts that cannot apply the boundary cannot execute these code benchmarks.
 Native absolute scores do not decide conversion acceptance: the paired difference does.
 A low score limits what this benchmark establishes about model capability, but does not
 prevent comparing conversion results. Historical `min_native` fields are ignored.
@@ -57,14 +67,22 @@ A family configuration can declare a complete local `benchmarks` entry (`suite`,
 `suite_definition`, `metric`, and `gate`) and select it through `absolute`, without adding
 family policy to the shared Task defaults. `family_parity` delegates
 to `gate.checker`, a `families.<family>.<module>:<function>` taking the two observations and gate;
-the ordinary parity decision still requires every selected sample to pass.
+the ordinary parity decision still requires every selected sample to pass, unless the gate declares
+`outliers` (`max_fraction` of the samples, each within `outliers.gate` merged over the gate): then that many
+single-sample outliers pass and are listed in every report, while a missing answer or a larger error still
+fails. A profile's family file declares it (DINOv3; camembert-base, roberta-large and fnet-base for
+encoder-parity; the GR00T FP8 and pi0.5 bf16 and FP8 action chunks); the shared Task defaults do not.
+`action_parity` with `gripper_component` bounds the arm components by the gate's error and compares the
+gripper by sign (`max_gripper_sign_changes` steps may differ, default 0), the open or close command a
+LIBERO robot executes.
 DINOv3 uses 50 seeded COCO val2017 images, complete hidden and pooled features, and its existing
 family E2E criteria. Accuracy and task-call P50 come from the same extraction requests.
 
 Checks for every model of a Task (`supplementary`): text-to-speech round-trip WER (corpus, bootstrap) and
-audio validity (every output finite and not silent; the median per-sentence duration ratio to the native model
+audio validity (every output finite and not silent, unless the native model is silent for the same
+request; the median per-sentence duration ratio to the native model
 within 0.5-2, as a sampling model's single utterance may run to its length limit on either side; an error
-when no sentence has audio on both sides); GenEval-style pass rate for text-to-image families that take caller latents (the same
+when no sentence is voiced on both sides, so no duration can be compared); GenEval-style pass rate for text-to-image families that take caller latents (the same
 initial noise on both sides); CLIP-T and video validity for videos; MagicBrush CLIP-I and DINO for edits;
 world-model video parity. The pixel parity under latent replay is reported only (`informational`).
 
@@ -78,6 +96,8 @@ The evidence is written to
 `artifacts/build/benchmark-capacity.json`; request truncation and accuracy tolerances do not change.
 Dataset or tokenizer failures stop capacity planning rather than falling back to the catalog size.
 Lance uses the `Lance_3B` tokenizer subfolder and reserves its image, template, and generation tokens.
+The Qwen-VL profiles reserve theirs too: once a Qwen-VL KV cache is full it slides, dropping the image while
+the OCRBench answer is still being generated.
 Its Native adapter loads the pinned upstream model once and serves the same MMStar requests at the
 public Task's 448x448 image size, with image decode before timing and preparation/generation inside it.
 
@@ -217,7 +237,14 @@ A model whose native reference needs more than the serving interpreter declares
 upstream checkout) in `config/models`; `trtmc-perf-serve reference-env` creates the environment layered on
 the serving interpreter once, caches it by digest, and creates a fresh one next to it when its recorded
 `pip freeze` changed. Bundles build in the same environment, as CI installs a family's requirements before a
-build; trtmc-bench reuses a bundle only when its build receipt matches.
+build; trtmc-bench reuses a bundle only when its build receipt matches. A `reference.prepare` without requirements
+gets an environment of its own all the same (only what the script writes). `reference.prepare_inputs` lists the
+files and directories the script reads besides itself (relative to the repository); their contents join the
+environment's digest, so a change to any of them prepares a fresh environment. A native reference that runs a
+checkpoint the prepare step writes into its environment names it with `reference.model_directory` (relative to the
+environment, as `candidate.model_directory`): the INT4-AWQ profile `nemotron-nano-4b-int4-awq` runs the bundle's
+own INT4 weights in PyTorch (`families/llama/reference/prepare_int4_awq.py`), so its comparison measures the
+implementation, not the quantization, and its benchmark keeps the unquantized margin.
 
 The Diffusers adapter ties a T5-style text encoder's `encoder.embed_tokens` back to `shared` when loading
 left it zero (Transformers 5.2 does not tie it for `UMT5EncoderModel`, Wan). A timed request that leaves
@@ -422,9 +449,20 @@ A suite with media and neither `media_root` nor `hf_datasets_cache` configured i
   reaches the serving mechanics through `host`), named by `reference.adapter`.
 - Model needing a differently built bundle: `candidate.build` (or `candidate.model_directory`) in
   `config/models/<profile>.yaml`; the report names the bundle it qualified.
+- Model whose remote-code tokenizer counts differently from its bundle's tokenizer: `candidate.tokenizer_json`
+  (`{repo, revision}` of the `tokenizer.json` the bundle carries) in `config/models/<profile>.yaml`. The problem
+  selection, the fit helpers and AIPerf then count with it, loaded as a plain fast tokenizer with the
+  checkpoint's special tokens and chat template (InternLM2: its remote-code tokenizer splits text into characters
+  on transformers 5.x).
 - New machine: a new file under `config/environments/` (paths, Python interpreters, ports, lock, model list,
   retention); Docker or bare metal only differ in these paths. A run's own inputs (its ledger and multi-host
   assignment) stay with that run's results and are passed by path (`run-all --ledger`, `--assignment`).
+- Several hosts without a frozen assignment: a coordinator hands profiles (a checkpoint's profiles together) to
+  hosts as they free up. Each attempt is a fragment, `run-all --campaign ID --fragment ID --host NAME --profile ...`
+  in an `--out-root` of its own (it resumes only as the same fragment). The coordinator's manifest
+  (`{"campaign": ID, "expected": [profiles], "accepted": [fragments]}`) decides what merges: `merge-check
+  --manifest` and `summary --manifest` require exactly one result per expected profile among the accepted
+  fragments, run with the same campaign inputs, and leave fragments the manifest did not accept out.
 
 
 ## Native endpoint group coverage

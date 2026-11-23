@@ -333,6 +333,17 @@ class FakeDetection final : public trtmc::IObjectDetection {
     }
 };
 
+class FakeLayout final : public trtmc::IDocumentLayout {
+  public:
+    trtmc::DocumentLayoutResult analyze_layout(const float*, std::int32_t height,
+                                               std::int32_t width) override {
+        return {{{{0, 0, 1, 1, 0.7F, 22}, {{0, 0}, {1, 0}, {1, 1}, {0, 1}}},
+                 {{0, 0, 1, 1, 0.9F, 6}, {{0, 0}, {1, 0}, {1, 1}, {0, 1}}}},
+                height,
+                width};
+    }
+};
+
 bool dispatch_throws(const trtmc::cli::Command& command, trtmc::ITask& task) {
     try {
         std::ostringstream output;
@@ -1042,6 +1053,20 @@ int main() {
               detection_json.at("image_height").get<std::int32_t>() == 1 &&
               detection_json.at("image_width").get<std::int32_t>() == 1,
           "object detection CLI emits the complete detection result");
+    const auto layout_command = parse({"trtmc", "layout", "model.bundle", "--runtime-root", "lib",
+                                       "--image", detect_image_path.string()});
+    FakeLayout layout_task;
+    std::ostringstream layout_output;
+    check(trtmc::cli::dispatch(layout_command, layout_task, layout_output) == 0,
+          "document layout CLI dispatch succeeds");
+    const auto layout_json = nlohmann::json::parse(layout_output.str());
+    check(layout_json.at("regions").size() == 2 &&
+              layout_json.at("regions")[0].at("class_id") == 22 &&
+              layout_json.at("regions")[1].at("class_id") == 6 &&
+              layout_json.at("regions")[0].at("polygon").size() == 4 &&
+              layout_json.at("image_height") == 1 && layout_json.at("image_width") == 1,
+          "layout JSON preserves reading order and polygons");
+    check(dispatch_throws(layout_command, detection_task), "layout rejects a box-only Task");
     std::filesystem::remove(detect_image_path);
 
     const auto throws_runtime = [](const auto& operation) {

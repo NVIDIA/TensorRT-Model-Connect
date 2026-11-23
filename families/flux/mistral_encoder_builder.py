@@ -1,9 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Mistral 3 text encoder engine builder for FLUX.2-dev.
+"""Decoder-only text encoder engine builder for FLUX.2 (Mistral 3 and Qwen3).
 
-Builds a TensorRT engine for a Mistral-3/LLaMA-style decoder architecture
+Builds a TensorRT engine for a LLaMA-style decoder architecture (Mistral 3 for
+FLUX.2-dev; Qwen3, which adds per-head query/key RMSNorm, for FLUX.2-klein)
 run as an encoder-only model (single forward pass, no KV cache, no
 autoregressive generation).  Multi-layer hidden state extraction produces
 a concatenated output suitable for conditioning diffusion models.
@@ -27,7 +28,7 @@ import tensorrt as trt
 
 from . import graph_ops
 
-# Transformers Mistral applies ``rotate_half`` (first half paired with the
+# Transformers Mistral and Qwen3 apply ``rotate_half`` (first half paired with the
 # second half), not adjacent-pair GPT-J/CodeGen RoPE.
 _MISTRAL_ROPE_INTERLEAVED = False
 
@@ -129,6 +130,12 @@ def load_mistral_encoder_weights(
             readers, _src(f"{prefix}.post_attention_layernorm.weight")
         ).astype(np.float32)
 
+        # Per-head query/key RMSNorm (Qwen3); absent in Mistral checkpoints
+        for norm in ("q_norm", "k_norm"):
+            key = f"{prefix}.self_attn.{norm}.weight"
+            if _has_tensor(readers, _src(key)):
+                layer[key] = _load_tensor(readers, _src(key)).astype(np.float32)
+
         # Self-attention projections — transpose [out, in] -> [in, out]
         for proj, out_size in [
             ("q_proj", q_size),
@@ -181,9 +188,10 @@ def build_mistral_encoder_engine(
     rope_theta: float = 1000000000.0,
     verbose: bool = False,
 ) -> bytes:
-    """Build Mistral 3 encoder TRT engine plan.
+    """Build a Mistral 3 / Qwen3 encoder TRT engine plan.
 
-    Runs all layers as a single causal forward pass. Extracts hidden states
+    Runs the layers up to the deepest extracted one as a single causal forward
+    pass; the per-head query/key RMSNorm is applied when the weights carry it. Extracts hidden states
     from specified layers and concatenates them along the feature dimension.
 
     Args:
@@ -206,6 +214,8 @@ def build_mistral_encoder_engine(
         Serialized TRT engine plan bytes.
     """
     decoder_extract_layers = _decoder_layers_for_hidden_states(extract_layers, num_layers)
+    # Layers after the deepest extracted one cannot reach the output.
+    num_built_layers = max(decoder_extract_layers) + 1
     q_size = num_heads * head_dim
     kv_size = num_kv_heads * head_dim
     concat_dim = len(extract_layers) * hidden_size
@@ -311,7 +321,7 @@ def build_mistral_encoder_engine(
     extracted = []
 
     # --- Encoder layers ---
-    for layer_idx in range(num_layers):
+    for layer_idx in range(num_built_layers):
         prefix = f"model.layers.{layer_idx}"
 
         # === Self-attention sub-layer ===
@@ -337,6 +347,30 @@ def build_mistral_encoder_engine(
         v = graph_ops.add_matmul_rhs_constant(
             network, normed, hidden_size, kv_size, w_v, dtype=work_np_dtype
         )
+
+        q_norm_gamma = weights.get(f"{prefix}.self_attn.q_norm.weight")
+        k_norm_gamma = weights.get(f"{prefix}.self_attn.k_norm.weight")
+        if q_norm_gamma is not None and k_norm_gamma is not None:
+            q = graph_ops.add_rms_norm_per_head(
+                network,
+                q,
+                num_heads,
+                head_dim,
+                q_norm_gamma,
+                eps_t,
+                dtype=work_np_dtype,
+                sequence_length=max_seq_len,
+            )
+            k = graph_ops.add_rms_norm_per_head(
+                network,
+                k,
+                num_kv_heads,
+                head_dim,
+                k_norm_gamma,
+                eps_t,
+                dtype=work_np_dtype,
+                sequence_length=max_seq_len,
+            )
 
         q = graph_ops.add_apply_rope_native(
             network,
@@ -433,12 +467,6 @@ def build_mistral_encoder_engine(
         if layer_idx in decoder_extract_layers:
             extracted.append(hidden)
 
-    # --- Final RMSNorm ---
-    final_norm_gamma = weights["model.norm.weight"]
-    hidden = graph_ops.add_rms_norm(
-        network, hidden, hidden_size, final_norm_gamma, eps_t, dtype=work_np_dtype
-    )
-
     # --- Multi-layer concatenation ---
     # Concatenate extracted hidden states along the feature dimension:
     # each is [max_seq_len, hidden_size] -> result is [max_seq_len, concat_dim]
@@ -475,5 +503,5 @@ def build_mistral_encoder_engine(
     )
     plan = builder.build_serialized_network(network, config)
     if plan is None:
-        raise RuntimeError("TRT engine serialization failed for Mistral encoder")
+        raise RuntimeError("TRT engine serialization failed for the FLUX.2 text encoder")
     return bytes(plan)

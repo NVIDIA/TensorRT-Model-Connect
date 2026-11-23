@@ -24,11 +24,14 @@ Real architecture (from NeMo model_config.yaml):
   - Output: final_proj [16192, 768] with bias (8 codebooks * 2024 each)
 
 Cross-attention design:
-  The cross_k/cross_v inputs to the decoder engine are the RAW encoder output
-  (same tensor copied to all layers). The per-layer K/V projections are baked
-  into the decoder TRT graph. Cross-attention is ASYMMETRIC: 1 head, d_head=128.
-  Two separate norms: norm_xattn_query (on decoder state) and norm_xattn_memory
-  (on encoder output) before K/V projection.
+  Cross-attention is ASYMMETRIC: 1 head, d_head=128. Two separate norms:
+  norm_xattn_query (on decoder state) and norm_xattn_memory (on encoder output)
+  before K/V projection. Single-GPU bundles carry a cross_kv.plan that applies
+  norm_xattn_memory and the per-layer K/V projections to the encoder output
+  once per request; the decoder (section decoder.cross_kv.plan) takes those
+  projected rows as its cross_k/cross_v inputs. Tensor-parallel decoders take
+  the RAW encoder output (same tensor bound to all layers) and project it in
+  every step.
 
 Encoder uses embed_input=False (token IDs), decoder uses embed_input=True
 (the C++ runtime sums 8 codebook embeddings on host, then copies to device).
@@ -558,6 +561,7 @@ class _MagpieTTSModel:
         verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
+        cross_kv_projected: bool = False,
     ) -> bytes:
         """Build MagpieTTS decoder TRT engine with dynamic seq_len.
 
@@ -565,12 +569,19 @@ class _MagpieTTSModel:
           - Autoregressive decode: seq_len=1 (profile 0, optimized)
           - Batched prefill: seq_len=ctx_len (profile 1)
         No separate prefill engine needed — saves ~400MB bundle space.
+
+        With ``cross_kv_projected`` the per-layer cross_k/cross_v inputs are
+        the projected cross-attention K and V rows that
+        ``build_cross_kv_engine`` computes once per request, instead of the
+        raw encoder output that every decoder step would normalize and project.
         """
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             parallel.validate()
             if quant_ctx is not None:
                 raise ValueError("MagpieTTS tensor-parallel builds do not support quantization")
+            if cross_kv_projected:
+                raise ValueError("MagpieTTS tensor-parallel decoders read the raw encoder output")
             from .decoder_tp_builder import build_magpie_tp_decoder_engine
 
             return build_magpie_tp_decoder_engine(
@@ -651,22 +662,28 @@ class _MagpieTTSModel:
 
         # Per-layer cross-attention inputs (fixed shape)
         # Keep the public cross-memory ABI in FP32 like the text encoder
-        # output, then cast at the compute boundary below.
-        cross_kv_dtype = trt.float32
+        # output, then cast at the compute boundary below. Projected K/V
+        # inputs already have the layer's compute dtype.
         cross_k_inputs, cross_v_inputs = [], []
         for i in range(dec_layers):
+            if cross_kv_projected:
+                cross_kv_dtype = trt.float32 if i in requested_fp32_layers else work_trt_dtype
+                cross_kv_shape = (max_source_positions, xa_n_heads * xa_d_head)
+            else:
+                cross_kv_dtype = trt.float32
+                cross_kv_shape = (max_source_positions, hidden)
             cross_k_inputs.append(
                 network.add_input(
                     graph_ops.layer_tensor_name("cross_k", i),
                     cross_kv_dtype,
-                    (max_source_positions, hidden),
+                    cross_kv_shape,
                 )
             )
             cross_v_inputs.append(
                 network.add_input(
                     graph_ops.layer_tensor_name("cross_v", i),
                     cross_kv_dtype,
-                    (max_source_positions, hidden),
+                    cross_kv_shape,
                 )
             )
 
@@ -795,6 +812,7 @@ class _MagpieTTSModel:
                 xa_d_head=xa_d_head,
                 cross_attn_prior=layer_prior,
                 dtype=layer_np_dtype,
+                cross_kv_projected=cross_kv_projected,
             )
             hidden_state = result["hidden"]
             present_k_outputs.append(result["present_k"])
@@ -1275,6 +1293,114 @@ def _add_conv1d_ffn(
 # ---------------------------------------------------------------------------
 
 
+def _add_cross_memory_norm(network, memory, weights, prefix, hidden_size, eps_tensor, dtype):
+    """LayerNorm of the encoder memory before a cross-attention K or V projection."""
+    return graph_ops.add_layer_norm(
+        network,
+        memory,
+        hidden_size,
+        weights[f"{prefix}.norm_xattn_memory"],
+        np.zeros(hidden_size, dtype=np.float32),
+        eps_tensor,
+        dtype=dtype,
+    )
+
+
+def _add_cross_memory_projection(
+    network, normed, kind, weights, prefix, hidden_size, xa_attention_size, dtype
+):
+    """Project normalized encoder memory to cross-attention K or V rows."""
+    return graph_ops.add_matmul_rhs_constant(
+        network,
+        normed,
+        hidden_size,
+        xa_attention_size,
+        weights[f"{prefix}.cross_w_{kind}"],
+        dtype=dtype,
+    )
+
+
+def build_cross_kv_engine(
+    config: ModelConfig,
+    weights: WeightDict,
+    *,
+    precision: str = "fp32",
+    verbose: bool = False,
+) -> bytes:
+    """Build the plan that projects the encoder output to per-layer cross K/V.
+
+    The decoder's cross-attention K and V depend only on the encoder output,
+    so the runtime runs this plan once per request (and once for the
+    classifier-free-guidance null text) instead of in every decoder step. Each
+    layer uses the same ops and dtypes as the in-decoder projection: cast to
+    the layer's compute dtype, LayerNorm, then the K or V matmul.
+    """
+    dec_layers = weights["_dec_layers"]
+    hidden = weights["_hidden_size"]
+    max_source_positions = weights["_max_source_positions"]
+    xa_attention_size = weights["_xa_n_heads"] * weights["_xa_d_head"]
+    if precision == "fp16":
+        work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "fp32":
+        work_np_dtype, work_trt_dtype = np.float32, trt.float32
+    else:
+        raise ValueError(f"Unsupported MagpieTTS precision {precision!r}; expected fp32 or fp16")
+    fp32_layers = (
+        {int(layer) for layer in config.raw.get("_fp32_layers", ())}
+        if precision == "fp16"
+        else set()
+    )
+
+    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    trt_config = builder.create_builder_config()
+    trt_config.builder_optimization_level = 1
+    trt_config.clear_flag(trt.BuilderFlag.TF32)
+
+    memory = network.add_input("encoder_output", trt.float32, (max_source_positions, hidden))
+    eps_tensor = graph_ops.add_constant(
+        network, (1, 1), np.array([1e-5], dtype=work_np_dtype), dtype=work_np_dtype
+    )
+    fp32_eps_tensor = (
+        graph_ops.add_constant(
+            network, (1, 1), np.array([1e-5], dtype=np.float32), dtype=np.float32
+        )
+        if fp32_layers
+        else None
+    )
+    for layer_idx in range(dec_layers):
+        prefix = f"layer.{layer_idx}"
+        use_fp32 = layer_idx in fp32_layers
+        layer_np_dtype = np.float32 if use_fp32 else work_np_dtype
+        layer_trt_dtype = trt.float32 if use_fp32 else work_trt_dtype
+        layer_memory = memory
+        if layer_memory.dtype != layer_trt_dtype:
+            layer_memory = network.add_cast(layer_memory, layer_trt_dtype).get_output(0)
+        layer_eps = fp32_eps_tensor if use_fp32 else eps_tensor
+        for kind in ("k", "v"):
+            normed = _add_cross_memory_norm(
+                network, layer_memory, weights, prefix, hidden, layer_eps, layer_np_dtype
+            )
+            projected = _add_cross_memory_projection(
+                network, normed, kind, weights, prefix, hidden, xa_attention_size, layer_np_dtype
+            )
+            projected.name = graph_ops.layer_tensor_name(f"cross_{kind}", layer_idx)
+            network.mark_output(projected)
+
+    if verbose:
+        print(
+            f"[trtmc build] Building MagpieTTS cross-attention K/V plan "
+            f"({dec_layers}L, memory={max_source_positions}x{hidden}, "
+            f"kv={xa_attention_size})",
+            file=sys.stderr,
+        )
+    plan = builder.build_serialized_network(network, trt_config)
+    if plan is None:
+        raise RuntimeError("TensorRT MagpieTTS cross-attention K/V engine build failed")
+    return bytes(plan)
+
+
 def _add_magpie_decoder_layer(
     *,
     network,
@@ -1298,6 +1424,7 @@ def _add_magpie_decoder_layer(
     xa_d_head,
     cross_attn_prior=None,
     dtype=np.float32,
+    cross_kv_projected=False,
 ):
     """Single MagpieTTS decoder layer with dynamic seq_len support.
 
@@ -1373,24 +1500,13 @@ def _add_magpie_decoder_layer(
         dtype=dtype,
     )
 
-    cn_memory_k = graph_ops.add_layer_norm(
-        network,
-        cross_k,
-        hidden_size,
-        weights[f"{prefix}.norm_xattn_memory"],
-        np.zeros(hidden_size, dtype=np.float32),
-        eps_tensor,
-        dtype=dtype,
-    )
-    cn_memory_v = graph_ops.add_layer_norm(
-        network,
-        cross_v,
-        hidden_size,
-        weights[f"{prefix}.norm_xattn_memory"],
-        np.zeros(hidden_size, dtype=np.float32),
-        eps_tensor,
-        dtype=dtype,
-    )
+    if not cross_kv_projected:
+        cn_memory_k = _add_cross_memory_norm(
+            network, cross_k, weights, prefix, hidden_size, eps_tensor, dtype
+        )
+        cn_memory_v = _add_cross_memory_norm(
+            network, cross_v, weights, prefix, hidden_size, eps_tensor, dtype
+        )
 
     cq = graph_ops.add_matmul_rhs_constant(
         network,
@@ -1400,22 +1516,15 @@ def _add_magpie_decoder_layer(
         weights[f"{prefix}.cross_w_q"],
         dtype=dtype,
     )
-    ck_proj = graph_ops.add_matmul_rhs_constant(
-        network,
-        cn_memory_k,
-        hidden_size,
-        xa_attention_size,
-        weights[f"{prefix}.cross_w_k"],
-        dtype=dtype,
-    )
-    cv_proj = graph_ops.add_matmul_rhs_constant(
-        network,
-        cn_memory_v,
-        hidden_size,
-        xa_attention_size,
-        weights[f"{prefix}.cross_w_v"],
-        dtype=dtype,
-    )
+    if cross_kv_projected:
+        ck_proj, cv_proj = cross_k, cross_v
+    else:
+        ck_proj = _add_cross_memory_projection(
+            network, cn_memory_k, "k", weights, prefix, hidden_size, xa_attention_size, dtype
+        )
+        cv_proj = _add_cross_memory_projection(
+            network, cn_memory_v, "v", weights, prefix, hidden_size, xa_attention_size, dtype
+        )
 
     # Cross-attention stays decomposed because the engine exposes attention
     # probabilities for alignment and optionally reweights them with a prior.
@@ -1587,8 +1696,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 ),
             )
     else:
+        # The decoder with projected cross K/V inputs gets its own section, so a
+        # runtime that only knows decoder.plan stops at load on this bundle.
         writer.add_bytes(
-            "decoder.plan",
+            "decoder.cross_kv.plan",
             model.build_engine(
                 config,
                 weights,
@@ -1596,6 +1707,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 precision=request.precision,
                 verbose=request.verbose,
                 parallel_config=parallel,
+                cross_kv_projected=True,
+            ),
+        )
+        writer.add_bytes(
+            "cross_kv.plan",
+            build_cross_kv_engine(
+                config, weights, precision=request.precision, verbose=request.verbose
             ),
         )
 

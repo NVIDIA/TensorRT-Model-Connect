@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The bundle builds from the NGC ONNX pair (the manifest's external files), which reference/prepare.py stages.
+candidate:
+  model_directory: trtmc-reference/foundationpose-ngc
+reference:
+  requirements: families/foundationpose/requirements.txt
+  prepare: families/foundationpose/reference/prepare.py
+  adapter: families/foundationpose/reference/adapter.py  # ONNX Runtime, as tests/official_reference.py
+  precision: fp32
+  mode: eager
+benchmarks:
+  pose_parity:
+    suite_definition:
+      suite: middlebury-q-pose-crops-30
+      version: 1
+      source:
+        kind: family_inputs
+        module: families/foundationpose/reference/inputs.py
+      selection: {method: first, count: 30}
+    gate: {max_pose_abs_error: 0.005, max_score_abs_error: 0.05}  # the family's E2E gate
