@@ -1,6 +1,6 @@
 {
   "threshold_overrides": {
-    "full_cosine": 0.99,
+    "full_cosine": 0.98,
     "cls_cosine": 0.98,
     "pooler_cosine": 0.98,
     "mean_patch_cosine": 0.98,

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  requirements: families/lerobot_pi05/tests/requirements.txt
+  prepare: families/lerobot_pi05/reference/prepare.py  # the public PaliGemma tokenizer copy
+  adapter: families/lerobot_pi05/reference/adapter.py  # LeRobot's policy, the request's flow noise
+  mode: eager  # LeRobot runs its own modules
+benchmarks:
+  action_chunk_parity:
+    suite_definition:
+      suite: libero-observations-50
+      version: 1
+      source:
+        kind: family_inputs
+        module: families/lerobot_pi05/reference/inputs.py
+      selection: {method: first, count: 50}
+    # Arm: the largest E2E bf16 tolerance (max abs against the bfloat16 policy). Gripper: by sign, the open or close
+    # command LIBERO executes; one observation may change it at one step (LeRobot's own bfloat16 policy changes it
+    # on 2.5% of frames against float32, see the family README).
+    gate: {max_abs_error: 0.064, gripper_component: -1,
+           outliers: {max_fraction: 0.02, gate: {max_gripper_sign_changes: 1}}}

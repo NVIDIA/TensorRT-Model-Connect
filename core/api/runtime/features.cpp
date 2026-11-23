@@ -10,9 +10,11 @@
 
 #include <cmath>
 #include <limits>
+#include <set>
 #include <type_traits>
 
 namespace trtmc::api {
+internal::VideoView video_input(const trtmc_video_view_v1&, std::vector<internal::ImageView>&);
 namespace {
 
 void result_require(bool condition, const char* message) {
@@ -188,6 +190,43 @@ struct ImageTokenAndPooledFeaturesStorage final : ResultStorage {
     PooledFeaturesStorage pooled;
     trtmc_image_token_and_pooled_features_view_v1 view{};
 };
+struct VideoTokenFeaturesStorage final : ResultStorage {
+    explicit VideoTokenFeaturesStorage(internal::VideoTokenFeaturesResult result)
+        : value(std::move(result)) {
+        const auto matrix = matrix_view(value.features);
+        result_require(matrix.rows == value.tokens.size() && value.source_frame_count > 0,
+                       "video token mapping or source frame count is invalid");
+        tokens.reserve(value.tokens.size());
+        for (const auto& token : value.tokens) {
+            const auto role = static_cast<uint32_t>(token.role);
+            result_require(role >= TRTMC_VIDEO_TOKEN_PATCH &&
+                               role <= TRTMC_VIDEO_TOKEN_GLOBAL_POOLED,
+                           "unknown video feature token role");
+            if (token.role == internal::VideoFeatureTokenRole::Patch) {
+                result_require(token.grid_frame < value.grid_frames &&
+                                   token.grid_row < value.grid_rows &&
+                                   token.grid_column < value.grid_columns &&
+                                   token.frame_begin < token.frame_end &&
+                                   token.frame_end <= value.source_frame_count,
+                               "video patch lies outside its grid or input frame span");
+                result_require(std::isfinite(token.x_min) && std::isfinite(token.y_min) &&
+                                   std::isfinite(token.x_max) && std::isfinite(token.y_max) &&
+                                   token.x_min >= 0 && token.y_min >= 0 && token.x_max <= 1 &&
+                                   token.y_max <= 1 && token.x_min <= token.x_max &&
+                                   token.y_min <= token.y_max,
+                               "video patch has an invalid normalized input footprint");
+            }
+            tokens.push_back({role, token.grid_frame, token.grid_row, token.grid_column,
+                              token.frame_begin, token.frame_end, token.x_min, token.y_min,
+                              token.x_max, token.y_max});
+        }
+        view = {matrix,          tokens.data(),      tokens.size(),           value.grid_frames,
+                value.grid_rows, value.grid_columns, value.source_frame_count};
+    }
+    internal::VideoTokenFeaturesResult value;
+    std::vector<trtmc_video_feature_token_v1> tokens;
+    trtmc_video_token_features_view_v1 view{};
+};
 struct SpatialFeaturesStorage final : ResultStorage {
     explicit SpatialFeaturesStorage(internal::SpatialFeaturesResult result)
         : value(std::move(result)) {
@@ -243,6 +282,44 @@ struct DocumentRelevanceStorage final : ResultStorage {
     }
     internal::DocumentRelevanceResult value;
     trtmc_document_relevance_view_v1 view{};
+};
+
+struct SpectrogramFrameFeaturesStorage final : ResultStorage {
+    explicit SpectrogramFrameFeaturesStorage(internal::SpectrogramFrameFeaturesResult result)
+        : value(std::move(result)) {
+        result_require(value.source_frame_count > 0, "spectral features have no source frames");
+        result_require(value.input_frame_indices.size() == value.features.rows,
+                       "spectral feature rows lack input frame indices");
+        for (const auto index : value.input_frame_indices)
+            result_require(index < value.source_frame_count,
+                           "spectral feature index exceeds source frames");
+        for (const float feature : value.features.values)
+            result_require(std::isfinite(feature), "spectral features contain nonfinite values");
+        view = {matrix_view(value.features),
+                {value.input_frame_indices.data(), value.input_frame_indices.size()},
+                value.source_frame_count};
+    }
+    internal::SpectrogramFrameFeaturesResult value;
+    trtmc_spectrogram_frame_features_view_v1 view{};
+};
+
+struct DocumentTokenFeaturesStorage final : ResultStorage {
+    explicit DocumentTokenFeaturesStorage(internal::DocumentTokenFeaturesResult result)
+        : value(std::move(result)) {
+        result_require(value.source_word_count > 0 && value.tokens.size() == value.features.rows,
+                       "document text rows lack source word mapping");
+        for (const auto& token : value.tokens) {
+            result_require(token.word_index >= -2 &&
+                               (token.word_index < 0 ||
+                                static_cast<uint64_t>(token.word_index) < value.source_word_count),
+                           "document token refers to an invalid input word");
+            tokens.push_back({token.token_id, token.word_index, token.token_index});
+        }
+        view = {matrix_view(value.features), tokens.data(), tokens.size(), value.source_word_count};
+    }
+    internal::DocumentTokenFeaturesResult value;
+    std::vector<trtmc_document_feature_token_v1> tokens;
+    trtmc_document_token_features_view_v1 view{};
 };
 
 template <class Storage, class View>
@@ -362,6 +439,15 @@ convert(const trtmc_image_text_to_embedding_request_v1& input) {
     return {image_input(input.image), string_view(input.text)};
 }
 
+internal::PointsToEmbeddingRequest convert(const trtmc_points_to_embedding_request_v1& input) {
+    require(input.input_dim > 0, "point-cloud input_dim must be positive");
+    require(input.num_points <= std::numeric_limits<uint32_t>::max(),
+            "point-cloud num_points exceeds the uint32 range");
+    // Both factors fit in 32 bits, so the float count cannot overflow uint64.
+    return {checked_span(input.points, input.num_points * input.input_dim),
+            static_cast<uint32_t>(input.num_points), input.input_dim};
+}
+
 internal::TextPairToRelevanceRequest convert(const trtmc_text_pair_to_relevance_request_v1& input) {
     return {string_view(input.query), string_view(input.document)};
 }
@@ -383,6 +469,75 @@ convert(const trtmc_image_to_token_and_pooled_features_request_v1& input) {
 internal::ImageToClassScoresRequest convert(const trtmc_image_to_class_scores_request_v1& input) {
     return {image_input(input.image)};
 }
+
+trtmc_status TRTMC_CALL spectral_features_run(
+    trtmc_model* model, const trtmc_spectrogram_to_frame_features_request_v1* input,
+    const trtmc_config_view_v1* config, trtmc_result** output, trtmc_error** error) noexcept {
+    if (output)
+        *output = nullptr;
+    return guarded(error, [&] {
+        require(input && output, "spectral feature request and output are required");
+        const internal::SpectrogramToFrameFeaturesRequest request{matrix_input(input->spectrogram)};
+        require(request.spectrogram.rows > 0 && request.spectrogram.columns > 0,
+                "spectral feature input must be nonempty");
+        const ConvertedConfig options(config);
+        std::lock_guard<std::mutex> lock(model_mutex(model));
+        auto& family = require_interface<internal::ISpectrogramToFrameFeatures>(
+            model, internal::ISpectrogramToFrameFeatures::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::ISpectrogramToFrameFeatures>(),
+                             options.view());
+        auto result = family.run(request, options.view());
+        result_require(result.source_frame_count == request.spectrogram.rows,
+                       "family changed the spectral source frame count");
+        *output = make_result<SpectrogramFrameFeaturesStorage>(std::move(result));
+    });
+}
+const trtmc_spectrogram_to_frame_features_api_v1 spectral_features_api{
+    {1, 0, sizeof(spectral_features_api)},
+    spectral_features_run,
+    result_view<SpectrogramFrameFeaturesStorage, trtmc_spectrogram_frame_features_view_v1>};
+
+trtmc_status TRTMC_CALL document_features_run(
+    trtmc_model* model, const trtmc_document_words_to_token_features_request_v1* input,
+    const trtmc_config_view_v1* config, trtmc_result** output, trtmc_error** error) noexcept {
+    if (output)
+        *output = nullptr;
+    return guarded(error, [&] {
+        require(input && output, "document feature request and output are required");
+        const auto image = image_input(input->image);
+        const auto supplied = checked_span(input->words, input->word_count);
+        require(!supplied.empty(), "document words must be nonempty");
+        std::vector<internal::DocumentWordView> words;
+        words.reserve(supplied.size());
+        for (const auto& word : supplied) {
+            const auto text = string_view(word.text);
+            const auto& b = word.box;
+            require(!text.empty(), "document word text must be nonempty");
+            require(std::isfinite(b.x_min) && std::isfinite(b.y_min) && std::isfinite(b.x_max) &&
+                        std::isfinite(b.y_max) && b.x_min >= 0 && b.y_min >= 0 &&
+                        b.x_max >= b.x_min && b.y_max >= b.y_min && b.x_max <= image.width &&
+                        b.y_max <= image.height,
+                    "document word box must be inside the original image");
+            words.push_back({text, {b.x_min, b.y_min, b.x_max, b.y_max}});
+        }
+        const ConvertedConfig options(config);
+        std::lock_guard<std::mutex> lock(model_mutex(model));
+        auto& family = require_interface<internal::IDocumentWordsToTokenFeatures>(
+            model, internal::IDocumentWordsToTokenFeatures::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::IDocumentWordsToTokenFeatures>(),
+                             options.view());
+        auto result = family.run({image, {words.data(), words.size()}}, options.view());
+        result_require(result.source_word_count == words.size(),
+                       "family changed the document input word count");
+        *output = make_result<DocumentTokenFeaturesStorage>(std::move(result));
+    });
+}
+const trtmc_document_words_to_token_features_api_v1 document_features_api{
+    {1, 0, sizeof(document_features_api)},
+    document_features_run,
+    result_view<DocumentTokenFeaturesStorage, trtmc_document_token_features_view_v1>};
 
 template <class Interface, class Request, class Storage>
 trtmc_status TRTMC_CALL run(trtmc_model* model, const Request* input,
@@ -408,6 +563,35 @@ trtmc_status TRTMC_CALL run(trtmc_model* model, const Request* input,
         *out = make_result<Storage>(std::move(result));
     });
 }
+
+trtmc_status TRTMC_CALL video_features_run(trtmc_model* model,
+                                           const trtmc_video_to_token_features_request_v1* input,
+                                           const trtmc_config_view_v1* config,
+                                           trtmc_result** output, trtmc_error** error) noexcept {
+    if (output)
+        *output = nullptr;
+    return guarded(error, [&] {
+        require(input && output, "video feature request and output are required");
+        std::vector<internal::ImageView> frames;
+        const internal::VideoToTokenFeaturesRequest request{video_input(input->video, frames)};
+        const ConvertedConfig options(config);
+        std::lock_guard<std::mutex> lock(model_mutex(model));
+        auto& family = require_interface<internal::IVideoToTokenFeatures>(
+            model, internal::IVideoToTokenFeatures::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::IVideoToTokenFeatures>(),
+                             options.view());
+        auto result = family.run(request, options.view());
+        result_require(result.source_frame_count == request.video.frames.size(),
+                       "video feature source count differs from the supplied clip");
+        *output = make_result<VideoTokenFeaturesStorage>(std::move(result));
+    });
+}
+const trtmc_video_to_token_features_api_v1 video_to_token_features_api = {
+    {1, 0, sizeof(trtmc_video_to_token_features_api_v1)},
+    video_features_run,
+    result_view<VideoTokenFeaturesStorage, trtmc_video_token_features_view_v1>};
+static_assert(offsetof(trtmc_video_to_token_features_api_v1, header) == 0);
 
 const trtmc_text_to_token_features_api_v1 text_to_token_features_api = {
     {1, 0, sizeof(trtmc_text_to_token_features_api_v1)},
@@ -511,6 +695,13 @@ const trtmc_image_text_to_embedding_api_v1 image_text_to_embedding_api = {
         SemanticEmbeddingStorage>,
     result_view<SemanticEmbeddingStorage, trtmc_semantic_embedding_view_v1>};
 static_assert(offsetof(trtmc_image_text_to_embedding_api_v1, header) == 0);
+
+const trtmc_points_to_embedding_api_v1 points_to_embedding_api = {
+    {1, 0, sizeof(trtmc_points_to_embedding_api_v1)},
+    run<internal::IPointsToEmbedding, trtmc_points_to_embedding_request_v1,
+        SemanticEmbeddingStorage>,
+    result_view<SemanticEmbeddingStorage, trtmc_semantic_embedding_view_v1>};
+static_assert(offsetof(trtmc_points_to_embedding_api_v1, header) == 0);
 
 const trtmc_text_pair_to_relevance_api_v1 text_pair_to_relevance_api = {
     {1, 0, sizeof(trtmc_text_pair_to_relevance_api_v1)},
@@ -724,7 +915,100 @@ const trtmc_batch_image_to_token_and_pooled_features_api_v1
                                 trtmc_image_token_and_pooled_features_view_v1>};
 static_assert(offsetof(trtmc_batch_image_to_token_and_pooled_features_api_v1, header) == 0);
 
+uint64_t spatial_count(uint64_t channels, uint64_t height, uint64_t width) {
+    constexpr auto limit =
+        static_cast<uint64_t>(std::numeric_limits<std::ptrdiff_t>::max()) / sizeof(float);
+    require(channels && height && width && channels <= limit / height &&
+                channels * height <= limit / width,
+            "spatial feature shape is empty or overflows host storage");
+    return channels * height * width;
+}
+
+struct SpatialStorage final : ResultStorage {
+    explicit SpatialStorage(internal::SpatialClassScoresResult result) : value(std::move(result)) {
+        const auto invalid = [&] {
+            throw ApiFailure{TRTMC_INTERNAL_ERROR, "family returned invalid spatial class scores"};
+        };
+        uint64_t count = 0;
+        try {
+            count = spatial_count(value.classes, value.height, value.width);
+        } catch (const ApiFailure&) {
+            invalid();
+        }
+        if (value.values.size() != count || value.class_names.size() != value.classes)
+            invalid();
+        if (value.kind != internal::ScoreKind::Logit &&
+            value.kind != internal::ScoreKind::Probability &&
+            value.kind != internal::ScoreKind::Unbounded)
+            invalid();
+        for (const auto& name : value.class_names) {
+            if (name.empty())
+                invalid();
+            names.push_back(borrowed_string(name));
+        }
+        for (float score : value.values)
+            if (!std::isfinite(score) ||
+                (value.kind == internal::ScoreKind::Probability && (score < 0 || score > 1)))
+                invalid();
+    }
+    internal::SpatialClassScoresResult value;
+    std::vector<trtmc_string_view> names;
+};
+
+trtmc_status TRTMC_CALL run(trtmc_model* model,
+                            const trtmc_spatial_features_to_class_scores_request_v1* input,
+                            const trtmc_config_view_v1* config, trtmc_result** out,
+                            trtmc_error** error) noexcept {
+    if (out)
+        *out = nullptr;
+    return guarded(error, [&] {
+        require(input && out, "spatial feature input and result output are required");
+        const auto maps = checked_span(input->inputs, input->count);
+        require(!maps.empty(), "spatial feature inputs must not be empty");
+        internal::SpatialFeaturesToClassScoresRequest request;
+        std::set<std::string_view> names;
+        for (const auto& map : maps) {
+            const auto name = string_view(map.name);
+            require(!name.empty() && names.insert(name).second,
+                    "spatial feature names must be nonempty and unique");
+            require(map.values.size == spatial_count(map.channels, map.height, map.width),
+                    "spatial feature value count differs from CHW shape");
+            request.inputs.push_back({name, checked_span(map.values.data, map.values.size),
+                                      map.channels, map.height, map.width});
+        }
+        const ConvertedConfig options(config);
+        std::lock_guard<std::mutex> lock(model_mutex(model));
+        using Interface = internal::ISpatialFeaturesToClassScores;
+        auto& family = require_interface<Interface>(model, Interface::kTask);
+        validate_task_config(model_owner(model), internal::contract_key<Interface>(),
+                             options.view());
+        *out = make_result<SpatialStorage>(family.run(request, options.view()));
+    });
+}
+
+trtmc_status TRTMC_CALL view(const trtmc_result* result, trtmc_spatial_class_scores_view_v1* out,
+                             trtmc_error** error) noexcept {
+    if (out)
+        *out = {};
+    return guarded(error, [&] {
+        require(out != nullptr, "spatial class score view is required");
+        const auto& storage = require_result<SpatialStorage>(result);
+        const auto& value = storage.value;
+        *out = {{value.values.data(), value.values.size()},
+                value.classes,
+                value.height,
+                value.width,
+                {storage.names.data(), storage.names.size()},
+                static_cast<uint32_t>(value.kind)};
+    });
+}
+const trtmc_spatial_features_to_class_scores_api_v1 spatial_features_api = {
+    {1, 0, sizeof(spatial_features_api)}, run, view};
+static_assert(offsetof(trtmc_spatial_features_to_class_scores_api_v1, header) == 0);
+
 const TaskBinding bindings[] = {
+    {internal::ISpatialFeaturesToClassScores::kTask, 1, 0, &spatial_features_api.header},
+    {internal::IVideoToTokenFeatures::kTask, 1, 0, &video_to_token_features_api.header},
     {internal::IBatchImageToTokenFeatures::kTask, 1, 0, &batch_image_to_token_features_api.header},
     {internal::IBatchImageToSpatialFeatures::kTask, 1, 0,
      &batch_image_to_spatial_features_api.header},
@@ -738,6 +1022,9 @@ const TaskBinding bindings[] = {
     {internal::IImageToTokenAndPooledFeatures::kTask, 1, 0,
      &image_to_token_and_pooled_features_api.header},
     {internal::ITextQueryDocumentsToRelevance::kTask, 1, 0, &query_documents_api.header},
+    {internal::ISpectrogramToFrameFeatures::kTask, 1, 0, &spectral_features_api.header},
+
+    {internal::IDocumentWordsToTokenFeatures::kTask, 1, 0, &document_features_api.header},
     {internal::ITextToTokenFeatures::kTask, 1, 0, &text_to_token_features_api.header},
     {internal::ITextPairToTokenFeatures::kTask, 1, 0, &text_pair_to_token_features_api.header},
     {internal::ITextToPooledFeatures::kTask, 1, 0, &text_to_pooled_features_api.header},
@@ -755,6 +1042,7 @@ const TaskBinding bindings[] = {
     {internal::IImageToPooledFeatures::kTask, 1, 0, &image_to_pooled_features_api.header},
     {internal::IImageToEmbedding::kTask, 1, 0, &image_to_embedding_api.header},
     {internal::IImageTextToEmbedding::kTask, 1, 0, &image_text_to_embedding_api.header},
+    {internal::IPointsToEmbedding::kTask, 1, 0, &points_to_embedding_api.header},
     {internal::ITextPairToRelevance::kTask, 1, 0, &text_pair_to_relevance_api.header},
     {internal::ITextImageToRelevance::kTask, 1, 0, &text_image_to_relevance_api.header},
     {internal::ITextImageTextToRelevance::kTask, 1, 0, &text_image_text_to_relevance_api.header},

@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, distribution
 import json
+import logging
 from pathlib import Path
 import shutil
 import subprocess
@@ -14,7 +16,11 @@ import sys
 
 from tensorrt_model_connect.build import cmake_prefixes, detect_local_platform
 
-EDGE_REVISION = "95515c2f87fba8982db5a519f9022277667b3cc9"
+# One C++ SDK per installation; the manifest is its build-time receipt.
+_RELEASES = {
+    "0.11.0": (1, "revision", "95515c2f87fba8982db5a519f9022277667b3cc9", "experimental.builder.cli"),
+    "0.12.0": (2, "release_revision", "513dcd18291e587c80928911a480761352f3c2d8", "tensorrt_edgellm.builder.cli"),
+}
 
 
 def local_target() -> dict:
@@ -22,13 +28,46 @@ def local_target() -> dict:
     return detect_local_platform()
 
 
+def _package_prefixes(*, report_conflict: bool = False) -> list[Path]:
+    """Use the active wheel's SDK with its native runner, or standalone prefixes."""
+    try:
+        package = distribution("tensorrt-model-connect")
+    except PackageNotFoundError:
+        return cmake_prefixes()
+    module_dir = Path(package.locate_file("tensorrt_model_connect"))
+    receipt = module_dir / "share/trtmc/edge-llm.json"
+    if (module_dir / "bin/trtmc").is_file() and (receipt.exists() or receipt.is_symlink()):
+        if report_conflict:
+            for prefix in cmake_prefixes():
+                other = prefix / "share/trtmc/edge-llm.json"
+                if other.is_file() and other.resolve() != receipt.resolve():
+                    logging.getLogger(__name__).warning(
+                        "Cannot use standalone Edge SDK at %s with the installed Model Connect runner; "
+                        "using its packaged SDK at %s. To change SDKs, install a matching Model "
+                        "Connect wheel or use the matching standalone builder and runner together.",
+                        prefix, module_dir,
+                    )
+                    break
+        return [module_dir]
+    return cmake_prefixes()
+
+
 def package_present() -> bool:
     """Absence of the optional SDK is a non-match, not a failed Edge build."""
-    for prefix in cmake_prefixes():
+    for prefix in _package_prefixes():
         manifest = prefix / "share/trtmc/edge-llm.json"
         if manifest.exists() or manifest.is_symlink():
             return True
     return False
+
+
+def selected_release() -> str | None:
+    """Identify the selected SDK; prepare validates the complete receipt before use."""
+    for prefix in _package_prefixes():
+        receipt = prefix / "share/trtmc/edge-llm.json"
+        if receipt.is_file():
+            return json.loads(receipt.read_text(encoding="utf-8")).get("version")
+    return None
 
 
 def installed_package(target: dict) -> dict:
@@ -44,14 +83,19 @@ def installed_package(target: dict) -> dict:
         FileNotFoundError: No CMake installation or required artifact exists.
         ValueError: Pin, architecture, SDK or contained-path contract differs.
     """
-    for prefix in cmake_prefixes():
+    for prefix in _package_prefixes(report_conflict=True):
         manifest = prefix / "share/trtmc/edge-llm.json"
         if not manifest.is_file():
             continue
         package = json.loads(manifest.read_text(encoding="utf-8"))
-        if package.get("schema_version") != 1 or package.get("revision") != EDGE_REVISION:
-            raise ValueError(f"Edge package has an unsupported revision/schema: {manifest}")
-        if package.get("version") != "0.11.0" or package.get("arch") != target["arch"]:
+        release = _RELEASES.get(package.get("version"))
+        if release is None or package.get("schema_version") != release[0]:
+            raise ValueError(f"Unsupported Edge package release or schema: {manifest}")
+        revision_key, pinned = release[1:3]
+        allowed = (pinned, None) if package["version"] == "0.12.0" else (pinned,)
+        if revision_key not in package or package[revision_key] not in allowed:
+            raise ValueError(f"Unsupported Edge package source revision: {manifest}")
+        if package.get("arch") != target["arch"]:
             raise ValueError("Edge package version/architecture differs from executing worker")
         if target["sm"] not in package.get("architectures", []):
             raise ValueError("Edge package was not built for this local GPU")
@@ -61,7 +105,7 @@ def installed_package(target: dict) -> dict:
             or package.get("tensorrt_version") != target["tensorrt_version"]
         ):
             raise ValueError("Edge package CUDA/TensorRT differs from executing worker")
-        for name in ("python", "plugin"):
+        for name in ("plugin", *(("python",) if package.get("version") == "0.11.0" else ())):
             relative = Path(package[name])
             path = (prefix / relative).resolve()
             if relative.is_absolute() or not path.is_relative_to(prefix.resolve()):
@@ -76,14 +120,18 @@ def installed_package(target: dict) -> dict:
     )
 
 
-def builder_python(package: dict, target: dict) -> str:
-    """Use installed 0.11.0 Python tools when compatible, otherwise the SDK Python.
+def builder_python(package: dict, target: dict, requested: Path | None = None) -> str:
+    """Select a verified builder interpreter for the chosen native SDK release.
 
     The native SDK remains required. This only discovers an interpreter; it
     never installs packages or substitutes the wheel's runtime for the C++ SDK.
     An incompatible ambient install is ignored.
     """
-    interpreter = sys.executable
+    version = package["version"]
+    module = _RELEASES[version][3]
+    interpreter = sys.executable if requested is None else str(requested)
+    pin_check = ("import transformers; assert transformers.__version__ == '5.17.0'; "
+                 if version == "0.12.0" else "")
     try:
         if not Path(interpreter).is_absolute() or not Path(interpreter).is_file():
             raise ValueError("Edge builder Python must be an existing absolute interpreter path")
@@ -93,7 +141,7 @@ def builder_python(package: dict, target: dict) -> str:
                 "-I",
                 "-c",
                 "import json, tensorrt, tensorrt_edgellm; "
-                "from experimental.builder.cli import main; "
+                f"{pin_check}from {module} import main; "
                 "print(json.dumps([tensorrt_edgellm.__version__, tensorrt.__version__]))",
             ],
             check=True,
@@ -101,12 +149,17 @@ def builder_python(package: dict, target: dict) -> str:
             text=True,
             timeout=30,
         )
-        if json.loads(probe.stdout) != ["0.11.0", target["tensorrt_version"]]:
+        if json.loads(probe.stdout) != [version, target["tensorrt_version"]]:
             raise ValueError(
-                "Edge builder Python must match Edge 0.11.0 and the native TensorRT SDK"
+                f"Edge builder Python must match Edge {version} and the native TensorRT SDK"
             )
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return package["python"]
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        if requested is None and version == "0.11.0" and package.get("python"):
+            return package["python"]
+        raise ValueError(
+            f"Pass --edge-builder-python with an interpreter matching Edge {version} and the native TensorRT SDK. "
+            "To select another Edge release, use a matching Model Connect wheel or standalone builder and runner."
+        ) from error
     return interpreter
 
 
@@ -258,30 +311,31 @@ def prepare(
     parallel = request.tensor_parallel_size
     if parallel not in (1, 2) or (parallel == 2 and variant is not None):
         raise ValueError("Qwen3.5 Edge TP2 requires non-speculative generation")
-    # TP2 embeds projection weights in the engines. Read the immutable source
-    # checkpoint directly and stream it into the bundle once, avoiding a full
-    # extra checkpoint copy in the staging directory.
-    checkpoint = (Path(request.model_dir).resolve() if parallel == 2
-                  else staging / "edge_llm/checkpoint")
+    current = package["version"] == "0.12.0"
+    # The 0.12 builder writes tokenizer artifacts to the engine directory, not
+    # the input. Pass the source directly and stream its files into the bundle
+    # once. Legacy TP1 needs a writable copy; TP2 embeds most projection weights.
+    read_source = current or parallel == 2
+    staged_checkpoint = staging / "edge_llm/checkpoint"
+    checkpoint = Path(request.model_dir).resolve() if read_source else staged_checkpoint
     checkpoint_files = {}
-    if parallel == 1:
+    if not read_source:
         checkpoint.mkdir(parents=True)
     for source in Path(request.model_dir).iterdir():
         if source.is_file() and (
             source.suffix in {".json", ".safetensors", ".model", ".jinja"}
             or source.name in {"merges.txt", "vocab.txt"}
         ):
-            if parallel == 2:
-                if source.suffix != ".safetensors":
+            if read_source:
+                if parallel == 1 or source.suffix != ".safetensors":
                     checkpoint_files[f"edge_llm/checkpoint/{source.name}"] = source.resolve()
             else:
-                # Paired writers revisit tokenizer assets; do not propagate read-only cache modes.
                 shutil.copyfile(source, checkpoint / source.name)
     if not list(checkpoint.glob("*.safetensors")):
         raise ValueError("Edge direct builder requires a safetensors checkpoint")
     if draft_dir is not None:
-        draft_checkpoint = checkpoint / "draft"
-        draft_checkpoint.mkdir()
+        draft_checkpoint = staged_checkpoint / "draft"
+        draft_checkpoint.mkdir(parents=True)
         for source in draft_dir.iterdir():
             if source.is_file() and source.suffix in {".json", ".safetensors"}:
                 if source.suffix == ".safetensors":
@@ -291,16 +345,20 @@ def prepare(
         if not list(draft_checkpoint.glob("*.safetensors")):
             raise ValueError("DFlash direct builder requires draft safetensors")
     config = raw.get("text_config", raw)
-    visual = request.task == "vision_language_generation"
+    visual = request.task in {"vision_language_generation", "images_text_to_text"}
     if visual and not isinstance(raw.get("vision_config"), dict):
         raise ValueError("Qwen3.5 vision-language generation requires vision_config")
     default_limit = 4096 if visual else 256
     limit = request.max_sequence_length or min(
         int(config["max_position_embeddings"]), default_limit
     )
-    input_limit = min(
-        limit, 4096 if visual else (2048 if parallel == 2 else (1024 if variant else limit))
-    )
+    if visual:
+        max_input = 4096
+    elif parallel == 2 or (current and variant == "mtp"):
+        max_input = 2048
+    else:
+        max_input = 1024 if variant else limit
+    input_limit = min(limit, max_input)
     engine = staging / "edge_llm/engine"
     # Preserve checkpoint quantization; fp16 explicitly dequantizes projections.
     dense_policy = (
@@ -308,10 +366,10 @@ def prepare(
     )
     # Calling upstream main preserves its complete build/artifact orchestration.
     command = [
-        builder_python(package, target),
+        builder_python(package, target, getattr(request, "edge_builder_python", None)),
         "-I",
         "-c",
-        "from experimental.builder.cli import main; main()",
+        f"from {_RELEASES[package['version']][3]} import main; main()",
         "--model-dir",
         str(checkpoint),
         "--engine-dir",
@@ -342,6 +400,8 @@ def prepare(
                 "1280",
             ]
         )
+    verify_limit = "--max-spec-verify-tokens" if current else "--max-verify-tree-size"
+    draft_limit = "--max-spec-draft-tokens" if current else "--max-draft-tree-size"
     if draft_dir is not None:
         command.extend(
             [
@@ -349,17 +409,17 @@ def prepare(
                 "dflash",
                 "--draft-model-dir",
                 str(draft_checkpoint),
-                "--max-verify-tree-size",
+                verify_limit,
                 "16",
-                "--max-draft-tree-size",
+                draft_limit,
                 "16",
             ]
         )
-        if variant == "dflash_ddtree":
+        if variant == "dflash_ddtree" and not current:
             command.append("--tree-base")
     elif variant == "mtp":
-        command.extend(["--spec-type", "mtp", "--max-verify-tree-size", "4",
-                        "--max-draft-tree-size", "4"])
+        command.extend(["--spec-type", "mtp", verify_limit, "4",
+                        draft_limit, "4"])
     if request.verbose:
         command.append("--verbose")
     with log_path.open("a", encoding="utf-8") as log:
@@ -373,7 +433,7 @@ def prepare(
         if visual and parallel == 2:
             # Edge admits tensor parallelism only for LLM; its visual encoder is TP1.
             visual_command = [
-                command[0], "-I", "-c", "from experimental.builder.cli import main; main()",
+                command[0], "-I", "-c", f"from {_RELEASES[package['version']][3]} import main; main()",
                 "--model-dir", str(checkpoint), "--engine-dir", str(engine),
                 "--components", "visual", "--tp-size", "1", "--dense", dense_policy,
                 "--plugin-path", package["plugin"], "--max-batch-size", "1",
@@ -400,7 +460,14 @@ def prepare(
             raise ValueError(f"Edge builder did not produce required artifact: {name}")
     if variant == "dflash_ddtree":
         base_config = json.loads((engine / "base_config.json").read_text())
-        if base_config.get("dflash_tree_base") is not True:
+        if current:
+            # 0.12 selects chain or tree at runtime on the same DFlash engines.
+            draft_config = json.loads((engine / "draft_config.json").read_text())
+            if (base_config.get("spec_decode_type") != "dflash"
+                    or draft_config.get("spec_decode_type") != "dflash"
+                    or draft_config.get("block_size") != 16):
+                raise ValueError("DFlash DDTree requires matching block-16 DFlash engines")
+        elif base_config.get("dflash_tree_base") is not True:
             raise ValueError("DFlash DDTree requires a tree-capable base engine")
     if parallel == 2:
         built_config = json.loads((engine / "config_world2.json").read_text())
@@ -409,7 +476,8 @@ def prepare(
             visual_config = json.loads((engine / "visual/config.json").read_text())
             checkpoint_files.update(runtime_checkpoint_files(checkpoint, visual_config))
     files = dict(checkpoint_files)
-    for directory in ((engine,) if parallel == 2 else (engine, checkpoint)):
+    outputs = (engine, staged_checkpoint) if not read_source or draft_dir is not None else (engine,)
+    for directory in outputs:
         for path in sorted(directory.rglob("*")):
             if path.is_symlink():
                 raise ValueError(f"Edge output must not contain symlinks: {path}")
@@ -417,12 +485,13 @@ def prepare(
                 files[path.relative_to(staging).as_posix()] = path
     return files, {
         "version": 1,
-        "edge_revision": EDGE_REVISION,
+        "edge_revision": package[_RELEASES[package["version"]][1]],
+        **({"edge_release": package["version"]} if current else {}),
         "target": target,
         "precision": "fp16",
         "checkpoint_quantization": checkpoint_quantization(Path(request.model_dir), raw),
         "dense_policy": dense_policy,
-        "task": request.task,
+        "task": "vision_language_generation" if visual else request.task,
         "max_sequence_length": limit,
         "max_input_length": input_limit,
         "max_batch_size": 1,
@@ -452,9 +521,11 @@ def prepare(
 
 def publish(request, writer, files: dict, marker: dict) -> None:
     """Stream complete Edge sections; publication errors must not retry native."""
-    # The public CLI selects its media interface from this owning task identity.
-    task = ("images_text_to_text" if request.task == "vision_language_generation"
-            else request.task)
+    # Preserve the 0.11 bundle convention. In 0.12 the caller explicitly chooses
+    # the legacy single-image task or the ordered-image Task SDK interface.
+    task = request.task
+    if marker.get("edge_release", "0.11.0") == "0.11.0" and task == "vision_language_generation":
+        task = "images_text_to_text"
     writer.set_header(family=request.family, task=task, backend=request.backend)
     for name, path in files.items():
         with path.open("rb") as source, writer.open_section(name) as destination:

@@ -19,6 +19,7 @@ from .checkpoint_mapper import (
     _target_np_dtype,
 )
 from .config import ModelConfig
+from .quantization import calibrate_patchtst, is_quantized_checkpoint
 from .time_series_trt import (
     LinearConstants,
     add_batch_norm_last_dim,
@@ -255,6 +256,7 @@ def _add_encoder_layer(
     layer_idx: int,
     raw: dict[str, Any],
     linear_precisions: tuple[str, str, str, str, str, str],
+    quant_ctx=None,
 ) -> trt.ITensor:
     channels = int(raw.get("num_input_channels", 1))
     hidden_size = int(raw.get("d_model", 1))
@@ -277,6 +279,29 @@ def _add_encoder_layer(
             name=name,
         )
 
+    def projections(
+        inp: trt.ITensor, module: str, names: tuple[str, ...], precisions: tuple[str, ...]
+    ) -> list[trt.ITensor]:
+        """Linears ``names`` that read ``inp``; FP8 when ``module`` is quantized.
+
+        A module is FP8 only when all its linears are fp16 (an fp32-selected linear keeps
+        its precision). Linears that read the same input share one Quantize/Dequantize pair,
+        and every channel row reuses the same FP8 weight constants.
+        """
+        module = f"layers.{layer_idx}.{module}"
+        if (
+            quant_ctx is not None
+            and quant_ctx.should_quantize(module)
+            and all(precision == "fp16" for precision in precisions)
+        ):
+            if inp.dtype != trt.float16:
+                inp = network.add_cast(inp, trt.float16).get_output(0)
+            quantized = quant_ctx.quantize_input(network, inp, module)
+            return [
+                quant_ctx.linear(network, quantized, module, part) for part in range(len(names))
+            ]
+        return [linear(inp, name, precision) for name, precision in zip(names, precisions)]
+
     channel_rows: list[trt.ITensor] = []
     for channel in range(channels):
         row_slice = network.add_slice(
@@ -298,9 +323,12 @@ def _add_encoder_layer(
             hidden_size=hidden_size,
             raw=raw,
         )
-        q = linear(normed, "self_attn.q_proj", linear_precisions[0])
-        k = linear(normed, "self_attn.k_proj", linear_precisions[1])
-        v = linear(normed, "self_attn.v_proj", linear_precisions[2])
+        q, k, v = projections(
+            normed,
+            "self_attn.qkv",
+            ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),
+            linear_precisions[:3],
+        )
         attention_dtype = trt.float32 if "fp32" in linear_precisions[:3] else trt.float16
         q = q if q.dtype == attention_dtype else network.add_cast(q, attention_dtype).get_output(0)
         k = k if k.dtype == attention_dtype else network.add_cast(k, attention_dtype).get_output(0)
@@ -331,9 +359,9 @@ def _add_encoder_layer(
             hidden_size=hidden_size,
             raw=raw,
         )
-        ff = linear(normed, "ff.0", linear_precisions[4])
+        (ff,) = projections(normed, "ff.0", ("ff.0",), linear_precisions[4:5])
         ff = add_gelu(network, ff)
-        ff = linear(ff, "ff.3", linear_precisions[5])
+        (ff,) = projections(ff, "ff.3", ("ff.3",), linear_precisions[5:6])
         if ff.dtype != row_t.dtype:
             ff = network.add_cast(ff, row_t.dtype).get_output(0)
         row_t = network.add_elementwise(row_t, ff, trt.ElementWiseOperation.SUM).get_output(0)
@@ -353,6 +381,7 @@ def _build_patchtst_network(
     *,
     precision: str,
     verbose: bool,
+    quant_ctx=None,
 ) -> bytes:
     raw = config.raw
     task_type = weights["_task_type"]
@@ -458,6 +487,7 @@ def _build_patchtst_network(
             layer_idx=layer_idx,
             raw=raw,
             linear_precisions=linear_precisions,
+            quant_ctx=quant_ctx,
         )
         if layer_is_fp32 and hidden.dtype != boundary_dtype:
             hidden = network.add_cast(hidden, boundary_dtype).get_output(0)
@@ -558,7 +588,12 @@ def _build_patchtst_network(
             add_named_output(network, cat.get_output(0), "regression_outputs")
 
     return build_serialized_network(
-        builder, network, precision=precision, verbose=verbose, tag="patchtst"
+        builder,
+        network,
+        precision=precision,
+        verbose=verbose,
+        tag="patchtst",
+        quant_ctx=quant_ctx,
     )
 
 
@@ -595,8 +630,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError("PatchTST supports only fp16 and fp32 builds")
     if request.max_sequence_length is not None:
         raise ValueError("PatchTST derives context_length from its checkpoint")
-    if request.quantization is not None:
-        raise ValueError("PatchTST does not support quantization")
+    quantization = None if request.quantization in {None, "none"} else request.quantization
+    if quantization not in {None, "fp8"}:
+        raise NotImplementedError(
+            f"PatchTST supports quantization fp8 or none; got {request.quantization!r}"
+        )
+    if quantization == "fp8" and precision != "fp16":
+        raise ValueError(f"PatchTST FP8 needs precision fp16, got {precision!r}")
     if request.tensor_parallel_size not in {1, 2, 4, 8}:
         raise ValueError("PatchTST tensor_parallel_size must be 1, 2, 4, or 8")
 
@@ -609,12 +649,23 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         depth=depth,
     )
     task_type = _normalize_task_type(config.raw)
+    quant_ctx = None
+    if quantization == "fp8":
+        # Quantize from the original fp32 weights, not from the fp16 copies of the build.
+        original = _load_all_tensors(model_dir, precision="fp32", depth=depth)
+        if is_quantized_checkpoint(config.raw, model_dir, original):
+            raise ValueError(
+                "the checkpoint is already quantized; FP8 self-quantization needs the original"
+            )
+        quant_ctx = calibrate_patchtst(config.raw, original, "fp8", precision=precision)
+        del original
     weights["_task_type"] = task_type
     plan = _build_patchtst_network(
         config,
         weights,
         precision=precision,
         verbose=request.verbose,
+        quant_ctx=quant_ctx,
     )
 
     writer.set_header(family="patchtst", task=request.task, backend=request.backend)

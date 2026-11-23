@@ -80,6 +80,9 @@ class Qwen35KvCache : public Qwen35InferenceState {
     void append_prefill_kv(const std::vector<const void*>& prefill_k,
                            const std::vector<const void*>& prefill_v, int32_t seq_len);
 
+    // Append the first `seq_len` present K/V rows a prefill context produced.
+    void append_prefill_from(const ITrtModule& module, int32_t seq_len);
+
     // Move the logical cache length without touching device memory. Stale rows
     // remain masked out by subsequent prepare_step calls.
     void set_position(int32_t position);

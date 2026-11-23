@@ -50,6 +50,9 @@ class K2HorizonUnoCacheCursor {
 // temporary draft/verify suffixes, which later enqueues overwrite.
 class K2HorizonUnoKvCache {
   public:
+    // Rows of one call: decode blocks use at most 8, prompt chunks up to 64.
+    static constexpr int32_t kMaximumCallRows = 64;
+
     K2HorizonUnoKvCache(int32_t max_length, cudaStream_t stream, K2HorizonUnoKvCacheNames names);
 
     void reset();

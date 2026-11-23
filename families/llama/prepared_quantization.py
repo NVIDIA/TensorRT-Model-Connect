@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Prepared ModelOpt linear weights lowered through standard TensorRT Q/DQ."""
+"""Prepared Llama linear weights lowered through standard TensorRT Q/DQ."""
 
 from dataclasses import dataclass, field, replace
 import json
@@ -42,12 +42,65 @@ class PreparedSafetensorsReader:
                          offset=self.data_offset + tensor["data_offsets"][0])
 
 
+def compressed_static_fp8(metadata: dict) -> bool:
+    """Recognize only the calibrated W8A8 linear scheme used by Llama 3.2."""
+    if metadata.get("quant_method") != "compressed-tensors":
+        return False
+    groups = metadata.get("config_groups")
+    if (metadata.get("format") != "float-quantized"
+            or metadata.get("quantization_status") != "compressed"
+            or metadata.get("kv_cache_scheme") is not None
+            or metadata.get("ignore") != ["lm_head"]
+            or not isinstance(groups, dict) or len(groups) != 1):
+        raise ValueError("Unsupported compressed-tensors Llama quantization contract")
+    group = next(iter(groups.values()))
+    if (not isinstance(group, dict) or group.get("targets") != ["Linear"]
+            or group.get("output_activations") is not None):
+        raise ValueError("Llama requires one FP8 group targeting Linear projections")
+    for key in ("weights", "input_activations"):
+        scheme = group.get(key)
+        if (not isinstance(scheme, dict) or scheme.get("num_bits") != 8
+                or scheme.get("type") != "float" or scheme.get("strategy") != "tensor"
+                or scheme.get("symmetric") is not True or scheme.get("dynamic") is not False
+                or scheme.get("group_size") is not None or scheme.get("block_structure") is not None):
+            raise ValueError("Llama requires static per-tensor FP8 weights and input activations")
+    return True
+
+
+def check_compressed_projections(model_dir: Path, layers: int) -> None:
+    """Check FP8 storage and scalar calibrations without reading the weight payloads."""
+    tensors = {}
+    for path in sorted(model_dir.glob("*.safetensors")):
+        reader = PreparedSafetensorsReader(path)
+        for key in reader.keys():
+            if key in tensors:
+                raise ValueError(f"Duplicate prepared Llama tensor: {key}")
+            tensors[key] = reader
+    for layer in range(layers):
+        for stem in ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
+                     "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj"):
+            prefix = f"model.layers.{layer}.{stem}"
+            weight = prefix + ".weight"
+            if weight not in tensors or tensors[weight].header[weight]["dtype"] != "F8_E4M3":
+                raise ValueError(f"{weight}: expected a serialized FP8 E4M3 projection")
+            for suffix in ("input_scale", "weight_scale"):
+                key = f"{prefix}.{suffix}"
+                if key not in tensors:
+                    raise ValueError(f"Missing calibrated Llama FP8 scale: {key}")
+                positive_scale(tensors[key].get_tensor(key), key)
+
+
 def checkpoint_format(model_dir: Path) -> str | None:
     config = model_dir / "config.json"
     raw = json.loads(config.read_text()) if config.is_file() else {}
     embedded = raw.get("quantization_config") or {}
     sidecar = model_dir / "hf_quant_config.json"
     prepared = json.loads(sidecar.read_text()) if sidecar.is_file() else {}
+    if compressed_static_fp8(embedded):
+        if sidecar.exists():
+            raise ValueError("Conflicting prepared Llama quantization metadata")
+        check_compressed_projections(model_dir, raw["num_hidden_layers"])
+        return "fp8"
     if not embedded and not prepared:
         return None
     quant = prepared.get("quantization", embedded)
@@ -168,3 +221,16 @@ def quantize_cache_value(network, value, scale):
     constant = network.add_constant((1,), trt.Weights(scale)).get_output(0)
     quantized = network.add_quantize(value, constant, trt.DataType.FP8).get_output(0)
     return network.add_dequantize(quantized, constant, value.dtype).get_output(0)
+
+
+def packed_cache_rows(network, current, past, scale):
+    """Export E4M3 bytes. Attention reads both old and new rows at compute precision."""
+    import tensorrt as trt
+
+    constant = network.add_constant((1,), trt.Weights(scale)).get_output(0)
+    packed = network.add_quantize(current, constant, trt.DataType.FP8).get_output(0)
+    return (
+        packed,
+        network.add_dequantize(past, constant, current.dtype).get_output(0),
+        network.add_dequantize(packed, constant, current.dtype).get_output(0),
+    )

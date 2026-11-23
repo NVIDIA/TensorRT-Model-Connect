@@ -74,6 +74,53 @@ def test_transform_failure_prevents_serialization_and_restores_builder(monkeypat
     assert fake_trt.Builder is _Builder
 
 
+def test_stream_transform_runs_before_serialization_with_shared_engine_indexes(monkeypatch) -> None:
+    events = []
+
+    class Builder:
+        def __init__(self, _logger):
+            pass
+
+        def build_serialized_network(self, network, config):
+            events.append(("serialize", network, config))
+            return b"engine"
+
+        def build_serialized_network_to_stream(self, network, config, writer, *, tag):
+            events.append(("stream", network, config, writer, tag))
+            return True
+
+    fake_trt = SimpleNamespace(Builder=Builder)
+    monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
+
+    def transform(network, engine_index):
+        events.append(("transform", network, engine_index))
+
+    writer = object()
+    with graph_transform(transform):
+        first = fake_trt.Builder("logger")
+        assert first.build_serialized_network("first", "config-0") == b"engine"
+        assert (
+            first.build_serialized_network_to_stream("second", "config-1", writer, tag="selected")
+            is True
+        )
+        assert (
+            fake_trt.Builder("logger").build_serialized_network_to_stream(
+                "third", "config-2", writer, tag="last"
+            )
+            is True
+        )
+
+    assert events == [
+        ("transform", "first", 0),
+        ("serialize", "first", "config-0"),
+        ("transform", "second", 1),
+        ("stream", "second", "config-1", writer, "selected"),
+        ("transform", "third", 2),
+        ("stream", "third", "config-2", writer, "last"),
+    ]
+    assert fake_trt.Builder is Builder
+
+
 def test_transform_can_replace_a_selected_region_by_rewiring_its_consumer(
     monkeypatch,
 ) -> None:
@@ -145,9 +192,7 @@ def test_transform_does_not_leak_into_an_unrelated_context(monkeypatch) -> None:
 
     with graph_transform(lambda network, engine_index: transformed.append(network)):
         plan = Context().run(
-            lambda: fake_trt.Builder("logger").build_serialized_network(
-                "other-network", "config"
-            )
+            lambda: fake_trt.Builder("logger").build_serialized_network("other-network", "config")
         )
 
     assert plan == b"engine"

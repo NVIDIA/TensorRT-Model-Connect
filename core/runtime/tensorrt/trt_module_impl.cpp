@@ -669,6 +669,9 @@ bool TrtModuleImpl::cuda_graph_captured() const {
 }
 
 bool TrtModuleImpl::begin_timing_event(TimingEvent& event) {
+    // Retain events only while their launches remain in flight, without
+    // introducing a synchronization barrier for asynchronous callers.
+    collect_timing_events(false);
     if (cudaEventCreate(&event.start) != cudaSuccess)
         return false;
     if (cudaEventCreate(&event.stop) != cudaSuccess) {
@@ -739,35 +742,53 @@ void TrtModuleImpl::record_timed_enqueue() {
         finish_timing_event(timing_event);
 }
 
-void TrtModuleImpl::flush_timing_events() {
-    if (timing_events_.empty())
-        return;
-    double total_ms = 0.0;
-    int32_t launches = 0;
-    for (auto& event : timing_events_) {
-        if (event.stop && cudaEventSynchronize(event.stop) == cudaSuccess) {
-            float elapsed_ms = 0.0F;
-            if (cudaEventElapsedTime(&elapsed_ms, event.start, event.stop) == cudaSuccess) {
-                total_ms += static_cast<double>(elapsed_ms);
-                ++launches;
-            }
+bool TrtModuleImpl::collect_timing_event(TimingEvent& event, bool wait) {
+    const auto status = wait ? cudaEventSynchronize(event.stop) : cudaEventQuery(event.stop);
+    if (status == cudaErrorNotReady)
+        return false;
+    if (status == cudaSuccess) {
+        float elapsed_ms = 0;
+        if (cudaEventElapsedTime(&elapsed_ms, event.start, event.stop) == cudaSuccess) {
+            timing_total_ms_ += static_cast<double>(elapsed_ms);
+            ++timing_launches_;
         }
-        if (event.start)
-            cudaEventDestroy(event.start);
-        if (event.stop)
-            cudaEventDestroy(event.stop);
     }
-    timing_events_.clear();
-    if (launches <= 0)
+    if (event.start)
+        cudaEventDestroy(event.start);
+    if (event.stop)
+        cudaEventDestroy(event.stop);
+    event = {};
+    return true;
+}
+
+void TrtModuleImpl::collect_timing_events(bool wait) {
+    // Launches share one stream, so an unfinished event also bounds every
+    // event behind it. Avoid scanning the rest of an asynchronous backlog.
+    while (!timing_events_.empty()) {
+        if (!collect_timing_event(timing_events_.front(), wait))
+            break;
+        timing_events_.pop_front();
+    }
+}
+
+void TrtModuleImpl::flush_timing_events() {
+    collect_timing_events(true);
+    if (timing_launches_ == 0)
         return;
     std::ostringstream line;
     line << std::fixed << std::setprecision(6) << "[trtmc.engine_timing] label=\"" << timing_label_
-         << "\" execute_ms=" << total_ms << " launches=" << launches;
+         << "\" execute_ms=" << timing_total_ms_ << " launches=" << timing_launches_;
     std::cerr << line.str() << '\n';
+    timing_total_ms_ = 0;
+    timing_launches_ = 0;
 }
 
 void TrtModuleImpl::sync() {
-    cudaStreamSynchronize(stream_);
+    const auto status = cudaStreamSynchronize(stream_);
+    collect_timing_events(false);
+    if (status != cudaSuccess)
+        throw std::runtime_error(std::string("TensorRT stream synchronization failed: ") +
+                                 cudaGetErrorString(status));
 }
 
 // --- Forward device async (GPU → GPU, no sync) ---
@@ -805,7 +826,7 @@ void TrtModuleImpl::forward_device_async(const DeviceTensorMap& inputs) {
 
 DeviceTensorMap TrtModuleImpl::forward_device(const DeviceTensorMap& inputs) {
     forward_device_async(inputs);
-    cudaStreamSynchronize(stream_);
+    sync();
 
     // Return non-owning DeviceTensor* pointers to our internal output buffers.
     // The output_device_tensors_ map is lazily populated on first call.

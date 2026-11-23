@@ -1,0 +1,22 @@
+{
+  "name": "lfm2.5-24b-a2b",
+  "hf_id": "LiquidAI/LFM2.5-24B-A2B",
+  "hf_revision": "3dc4cd09c9a2a99e1e819693e79d3aba5e9bb4f2",
+  "family": "lfm2_moe",
+  "bundle": "lfm2.5-24b-a2b.bundle",
+  "task": "text_continuation",
+  "precision": "fp32",
+  "max_sequence_length": 128,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "lfm2.5-24b-a2b",
+      "premerge": true,
+      "prompts": [
+        "The capital of France is",
+        "def fibonacci(n):\n    "
+      ],
+      "max_new_tokens": 16
+    }
+  ]
+}

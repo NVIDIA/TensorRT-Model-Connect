@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import importlib
 import importlib.util
 import json
 import re
@@ -231,7 +232,11 @@ class BundleBuilder:
         os.close(descriptor)
         temporary = Path(raw_temporary)
         temporary.unlink()
-        command = _build_command(plan.model, plan.model_dir, temporary, plan.cases)
+        model_dir = _buildable_model_dir(plan.model.family, plan.model_dir,
+                                         plan.bundle.parent / "checkpoint")
+        model_dir = _with_external_files(plan.model.manifest_path, model_dir,
+                                         plan.bundle.parent / "staged")
+        command = _build_command(plan.model, model_dir, temporary, plan.cases)
         started = time.monotonic()
         try:
             completed = subprocess.run(
@@ -339,6 +344,20 @@ def _manifest_checkpoint(model: ModelDescriptor) -> dict[str, str] | None:
     return {"hf_id": model.hf_id, "revision": model.hf_revision}
 
 
+def _builder_files(root: Path) -> list[Path]:
+    """Every file a build may read under ``root``: Python sources and the data next to them
+    (``cli.json``, FP8 / NVFP4 scale tables, ...). Tests, bytecode and documentation are left out."""
+    files = []
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if not path.is_file() or "tests" in relative.parts or "__pycache__" in relative.parts:
+            continue
+        if path.suffix in {".md", ".pyc"}:
+            continue
+        files.append(path)
+    return files
+
+
 def _source_digest(model: ModelDescriptor) -> str:
     specification = importlib.util.find_spec(f"families.{model.family}")
     if specification is None or not specification.origin:
@@ -346,16 +365,9 @@ def _source_digest(model: ModelDescriptor) -> str:
     roots = (Path(tensorrt_model_connect.__file__).parent, Path(specification.origin).parent)
     digest = hashlib.sha256()
     for index, root in enumerate(roots):
-        for path in sorted(root.rglob("*.py")):
-            relative = path.relative_to(root)
-            if "tests" in relative.parts or "__pycache__" in relative.parts:
-                continue
-            digest.update(f"{index}/{relative.as_posix()}\0".encode())
+        for path in _builder_files(root):
+            digest.update(f"{index}/{path.relative_to(root).as_posix()}\0".encode())
             digest.update(path.read_bytes())
-    declaration = roots[1] / "cli.json"
-    if declaration.is_file():
-        digest.update(b"family-cli\0")
-        digest.update(declaration.read_bytes())
     return digest.hexdigest()
 
 
@@ -437,6 +449,72 @@ def default_bundle_cache() -> Path:
     if configured:
         return Path(configured)
     return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "trtmc/bench/bundles"
+
+
+def _buildable_model_dir(family: str, model_dir: Path, destination: Path) -> Path:
+    """The checkpoint directory the family builder reads.
+
+    A family whose builder needs a converted checkpoint (an older official
+    ``pytorch_model.bin`` the builder does not read) states it with
+    ``families/<family>/convert_checkpoint.py:prepare``; the converted copy
+    lives next to the bundle, and the build identity stays the pinned source.
+    """
+    name = f"families.{family}.convert_checkpoint"
+    try:
+        module = importlib.import_module(name)
+    except ModuleNotFoundError as error:
+        if error.name not in {"families", f"families.{family}", name}:
+            raise
+        return model_dir
+    prepare = getattr(module, "prepare", None)
+    if prepare is None:
+        return model_dir
+    try:
+        return Path(prepare(model_dir, destination))
+    except Exception as error:
+        raise BenchmarkError(f"cannot prepare the {family} checkpoint {model_dir}: {error}") from error
+
+
+def _with_external_files(manifest_path: Path, model_dir: Path, destination: Path) -> Path:
+    """The checkpoint with the files its manifest stages beside it (``external_files``: ``path`` and ``url``,
+    for example a gated tokenizer's identical public copy), as catalog CI stages them. Without a missing file
+    the checkpoint is used as is; otherwise ``destination`` links every checkpoint entry and holds the
+    downloaded files, kept for the next build."""
+    import shutil
+    import urllib.request
+
+    try:
+        files = json.loads(Path(manifest_path).read_text(encoding="utf-8")).get("external_files") or []
+    except (OSError, ValueError) as error:
+        raise BenchmarkError(f"cannot read {manifest_path}: {error}") from error
+    missing = []
+    for item in files:
+        relative = Path(str(item.get("path") or ""))
+        if not item.get("url") or not relative.parts or relative.is_absolute() or ".." in relative.parts:
+            raise BenchmarkError(f"{manifest_path}: external file {item!r} needs a relative path and a url")
+        if not (model_dir / relative).exists():
+            missing.append((relative, str(item["url"])))
+    if not missing:
+        return model_dir
+    destination.mkdir(parents=True, exist_ok=True)
+    for entry in model_dir.iterdir():
+        link = destination / entry.name
+        if not link.exists() and not link.is_symlink():
+            link.symlink_to(entry.resolve())
+    for relative, url in missing:
+        target = destination / relative
+        if target.is_file():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        partial = target.with_name(target.name + ".partial")
+        try:
+            with urllib.request.urlopen(url, timeout=600) as response, open(partial, "wb") as handle:
+                shutil.copyfileobj(response, handle)
+        except OSError as error:
+            partial.unlink(missing_ok=True)
+            raise BenchmarkError(f"cannot download external file {relative} from {url}: {error}") from error
+        partial.rename(target)
+    return destination
 
 
 def _build_command(

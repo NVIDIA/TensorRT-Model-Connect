@@ -70,12 +70,13 @@ void InternvlKvCache::write_position_input(TensorMap& inputs, int32_t seq_len) {
 }
 
 void InternvlKvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
-    // Batched prefill mask: (seq_len, max_length + seq_len). Columns
-    // [0, valid) are visible cache, [valid, max_length) are stale slots,
-    // [max_length, max_length+seq_len) are the new tokens — causal so
-    // token i sees tokens 0..i.
+    // Batched prefill mask: (seq_len, cache_columns + seq_len). Columns
+    // [0, valid) are visible cache, [valid, cache_columns) are stale slots
+    // (none with valid-prefix attention), the last seq_len columns are the new
+    // tokens — causal so token i sees tokens 0..i.
     const int32_t valid = std::max(0, std::min(position_, max_length_));
-    const int32_t kv_len = max_length_ + seq_len;
+    const int32_t cache_columns = mask_cache_columns(valid);
+    const int32_t kv_len = cache_columns + seq_len;
     const std::size_t total = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(kv_len);
     mask_buf_.assign(total, kMaskedScore);
     for (int32_t i = 0; i < seq_len; ++i) {
@@ -83,7 +84,7 @@ void InternvlKvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
         for (int32_t j = 0; j < valid; ++j)
             mask_buf_[row + static_cast<std::size_t>(j)] = 0.0f;
         for (int32_t j = 0; j <= i; ++j)
-            mask_buf_[row + static_cast<std::size_t>(max_length_) + static_cast<std::size_t>(j)] =
+            mask_buf_[row + static_cast<std::size_t>(cache_columns) + static_cast<std::size_t>(j)] =
                 0.0f;
     }
     Tensor mask_t;
@@ -98,7 +99,8 @@ void InternvlKvCache::write_bidirectional_mask(TensorMap& inputs, int32_t seq_le
     // rows are hidden, and every token in the current block can see every other
     // token in the current block.
     const int32_t valid = std::max(0, std::min(position_, max_length_));
-    const int32_t kv_len = max_length_ + seq_len;
+    const int32_t cache_columns = mask_cache_columns(valid);
+    const int32_t kv_len = cache_columns + seq_len;
     const std::size_t total = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(kv_len);
     mask_buf_.assign(total, kMaskedScore);
     for (int32_t i = 0; i < seq_len; ++i) {
@@ -106,7 +108,7 @@ void InternvlKvCache::write_bidirectional_mask(TensorMap& inputs, int32_t seq_le
         for (int32_t j = 0; j < valid; ++j)
             mask_buf_[row + static_cast<std::size_t>(j)] = 0.0f;
         for (int32_t j = 0; j < seq_len; ++j)
-            mask_buf_[row + static_cast<std::size_t>(max_length_) + static_cast<std::size_t>(j)] =
+            mask_buf_[row + static_cast<std::size_t>(cache_columns) + static_cast<std::size_t>(j)] =
                 0.0f;
     }
     Tensor mask_t;
@@ -124,7 +126,7 @@ void InternvlKvCache::write_decode_mask(TensorMap& inputs) {
         throw std::runtime_error("internvl decoder has an invalid attention-mask rank");
 
     const int32_t valid = std::max(0, std::min(position_, max_length_));
-    const int32_t mask_width = max_length_ + 1;
+    const int32_t mask_width = mask_cache_columns(valid) + 1;
     if (mask_buf_.size() != static_cast<std::size_t>(mask_width))
         mask_buf_.resize(static_cast<std::size_t>(mask_width));
     std::fill(mask_buf_.begin(), mask_buf_.end(), kMaskedScore);
@@ -143,10 +145,55 @@ void InternvlKvCache::prepare_step(TensorMap& inputs, int32_t seq_len) {
     if (seq_len <= 0)
         seq_len = 1;
     write_position_input(inputs, seq_len);
-    if (seq_len > 1)
+    if (seq_len > 1) {
         write_batched_mask(inputs, seq_len);
-    else
-        write_decode_mask(inputs);
+        return;
+    }
+    write_decode_mask(inputs);
+    bind_decode_present();
+}
+
+void InternvlKvCache::bind_decode_present() {
+    // A valid-prefix decoder writes this step's K/V straight into cache row
+    // position_; otherwise (whole-cache decoder, or a full cache that
+    // advance() shifts) it writes the single-row present buffers.
+    const bool in_cache = valid_prefix_attention_ && position_ < max_length_;
+    if (!in_cache && !decode_present_in_cache_)
+        return;
+    const auto offset = in_cache ? static_cast<std::size_t>(position_) * row_bytes() : 0;
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        const auto li = static_cast<std::size_t>(i);
+        void* k =
+            in_cache ? static_cast<uint8_t*>(cache_k_[li].data()) + offset : present_k_[li].data();
+        void* v =
+            in_cache ? static_cast<uint8_t*>(cache_v_[li].data()) + offset : present_v_[li].data();
+        bound_module_->bind_external(names_.present_k[li], k);
+        bound_module_->bind_external(names_.present_v[li], v);
+    }
+    decode_present_in_cache_ = in_cache;
+}
+
+bool InternvlKvCache::bind_present_to_cache_rows(ITrtModule& module, int32_t seq_len) {
+    if (!valid_prefix_attention_ || seq_len <= 0)
+        return false;
+    // Fail before the forward: a binding left from an earlier call would let
+    // the engine write past the end of the cache.
+    if (position_ + seq_len > max_length_)
+        throw std::runtime_error(
+            "InternvlKvCache::bind_present_to_cache_rows: rows exceed max_length");
+    const auto offset = static_cast<std::size_t>(position_) * row_bytes();
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        const auto li = static_cast<std::size_t>(i);
+        module.bind_external(names_.present_k[li],
+                             static_cast<uint8_t*>(cache_k_[li].data()) + offset);
+        module.bind_external(names_.present_v[li],
+                             static_cast<uint8_t*>(cache_v_[li].data()) + offset);
+    }
+    return true;
+}
+
+void InternvlKvCache::commit_cache_rows(int32_t seq_len) {
+    position_ = std::max(0, std::min(position_ + seq_len, max_length_));
 }
 
 void InternvlKvCache::prepare_bidirectional_step(TensorMap& inputs, int32_t seq_len) {
@@ -178,6 +225,7 @@ void InternvlKvCache::bind_to(ITrtModule& module) {
         module.bind_external(names_.present_k[layer], present_k_[layer].data());
         module.bind_external(names_.present_v[layer], present_v_[layer].data());
     }
+    decode_present_in_cache_ = false;
 }
 
 void InternvlKvCache::bind_cache_inputs(ITrtModule& module) {
@@ -246,6 +294,12 @@ void InternvlKvCache::advance(int32_t n_tokens) {
     // n_tokens > 1 reserved for future batched prefill (TASK-10).
     assert(n_tokens == 1 && "InternvlKvCache::advance: only n_tokens==1 supported");
     (void)n_tokens;
+
+    // The decoder already wrote this step's K/V into cache row position_.
+    if (decode_present_in_cache_) {
+        ++position_;
+        return;
+    }
 
     // Copy present K/V (single row) into cache at current position.
     // present_k_[layer] is [1, kv_dim] → copy to cache_k_[layer][position_, :]

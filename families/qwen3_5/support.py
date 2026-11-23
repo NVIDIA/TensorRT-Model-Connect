@@ -14,7 +14,7 @@ _BASE = family_support(
 
 _MULTIMODAL = family_support(
     model_types=("qwen35", "qwen3.5", "qwen3_5"),
-    tasks=("text_generation", "vision_language_generation"),
+    tasks=("text_generation", "vision_language_generation", "images_text_to_text"),
     default_task="text_generation",
 )
 

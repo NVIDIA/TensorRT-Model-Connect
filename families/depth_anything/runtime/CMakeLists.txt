@@ -6,9 +6,6 @@ add_library(trtmc_model_depth_anything SHARED
   pipeline.cpp
   plugin.cpp
 )
-set_source_files_properties(image_preprocess_seam.cpp PROPERTIES
-  COMPILE_OPTIONS "-Wno-missing-field-initializers;-Wno-pedantic;-Wno-unused-function"
-)
 
 target_include_directories(trtmc_model_depth_anything
   PRIVATE
@@ -17,7 +14,6 @@ target_include_directories(trtmc_model_depth_anything
 )
 target_include_directories(trtmc_model_depth_anything SYSTEM PRIVATE
   ${TRTMC_CUDA_INCLUDE_DIR}
-  ${PROJECT_SOURCE_DIR}/third_party/stb
 )
 target_link_libraries(trtmc_model_depth_anything PRIVATE
   trtmc_core

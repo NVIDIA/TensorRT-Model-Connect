@@ -32,6 +32,9 @@ def parser() -> argparse.ArgumentParser:
     image = commands.add_parser("image")
     image_commands = image.add_subparsers(dest="image_command", required=True)
     image_commands.add_parser("ensure")
+    image_commands.add_parser(
+        "toolchain", help="print the TensorRT and CUDA versions of the gating image as JSON"
+    )
     container = commands.add_parser("container")
     container_commands = container.add_subparsers(dest="container_command", required=True)
     container_commands.add_parser("start")
@@ -45,6 +48,13 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     arguments = parser().parse_args()
     try:
+        if arguments.command == "image" and arguments.image_command == "toolchain":
+            import json
+
+            from .docker_image import toolchain_identity
+
+            print(json.dumps(toolchain_identity(Path.cwd()), sort_keys=True))
+            return 0
         if arguments.command == "image":
             from .docker_image import DockerImageManager
 

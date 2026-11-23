@@ -5,6 +5,7 @@
 
 #include "families/magpie_tts/runtime/kv_cache.h"
 
+#include "families/magpie_tts/runtime/magpie_decode_policy.h"
 #include "trtmc/runtime/trt_module.h"
 
 #include <algorithm>
@@ -54,7 +55,7 @@ MagpieKvCache::MagpieKvCache(int32_t num_layers, int32_t max_length, int32_t kv_
 }
 
 // Masked score constant is model-local.
-static constexpr float kMaskedScore = -1.0e4F;
+static constexpr float kMaskedScore = kMagpieMaskedScore;
 
 void MagpieKvCache::write_position_input(TensorMap& inputs, int32_t seq_len) {
     if (!has_position_input_)
@@ -123,14 +124,11 @@ void MagpieKvCache::write_decode_mask(TensorMap& inputs) {
     if (mask_rank != 2 && mask_rank != 3)
         throw std::runtime_error("magpie_tts decoder has an invalid attention-mask rank");
 
-    const int32_t valid = std::max(0, std::min(position_, max_length_));
     const int32_t mask_width = max_length_ + 1;
     if (mask_buf_.size() != static_cast<std::size_t>(mask_width))
         mask_buf_.resize(static_cast<std::size_t>(mask_width));
-    std::fill(mask_buf_.begin(), mask_buf_.end(), kMaskedScore);
-    for (int32_t i = 0; i < valid; ++i)
-        mask_buf_[static_cast<std::size_t>(i)] = 0.0F;
-    mask_buf_.back() = 0.0F;
+    for (int32_t i = 0; i < mask_width; ++i)
+        mask_buf_[static_cast<std::size_t>(i)] = magpie_decode_mask_value(i, position_, mask_width);
 
     Tensor mask_t;
     mask_t.data = mask_buf_.data();

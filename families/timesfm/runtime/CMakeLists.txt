@@ -33,9 +33,22 @@ install(TARGETS trtmc_model_timesfm
 )
 
 if(TRTMC_BUILD_TESTS)
+  foreach(_language IN ITEMS c cpp)
+    add_executable(test_timesfm_sdk_${_language}
+      ../tests/sdk_consumer.${_language}
+    )
+    target_link_libraries(test_timesfm_sdk_${_language} PRIVATE trtmc_c)
+    target_compile_options(test_timesfm_sdk_${_language} PRIVATE
+      -Wall -Wextra -Wpedantic -Werror
+    )
+    set_target_properties(test_timesfm_sdk_${_language} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
+  endforeach()
   add_executable(test_timesfm_forecast_contract
     ../tests/cpp/test_forecast_contract.cpp
   )
+  add_dependencies(test_timesfm_forecast_contract test_timesfm_sdk_c test_timesfm_sdk_cpp)
   target_include_directories(test_timesfm_forecast_contract PRIVATE
     ${PROJECT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/core/runtime/include

@@ -258,7 +258,7 @@ def build_flux2_dit_engine(
     cast_dtype: str = "fp16",
     fp8_scales: dict | None = None,
 ) -> bytes:
-    """Build FLUX.2-dev DiT denoiser TRT engine plan.
+    """Build a FLUX.2 (dev or klein) DiT denoiser TRT engine plan.
 
     Args:
         cast_dtype: Reduced precision for matmuls — "fp16" or "bf16".
@@ -305,7 +305,9 @@ def build_flux2_dit_engine(
     hidden_inp = network.add_input("hidden_states", trt.float32, (num_img_tokens, packed_channels))
     encoder_inp = network.add_input("encoder_hidden_states", trt.float32, (text_seq_len, t5_dim))
     timestep_inp = network.add_input("timestep", trt.float32, (1,))
-    guidance_inp = network.add_input("guidance", trt.float32, (1,))
+    # FLUX.2-klein has no guidance embedder; its engine takes no guidance input.
+    has_guidance = weights.get("time_text_embed.guidance_embedder.linear_1.weight") is not None
+    guidance_inp = network.add_input("guidance", trt.float32, (1,)) if has_guidance else None
     rotary_cos = network.add_input("rotary_cos", trt.float32, (total_seq, head_dim))
     rotary_sin = network.add_input("rotary_sin", trt.float32, (total_seq, head_dim))
 
@@ -415,12 +417,13 @@ def build_flux2_dit_engine(
     )
 
     # Guidance embedding: sinusoidal(g) → MLP → [1, dim], added to temb
-    g_sinusoidal = _build_sinusoidal_embedding(guidance_inp)
-    g_proj = _build_mlp_2layer(
-        g_sinusoidal,
-        "time_text_embed.guidance_embedder.linear_1",
-        "time_text_embed.guidance_embedder.linear_2",
-    )
+    g_proj = None
+    if guidance_inp is not None:
+        g_proj = _build_mlp_2layer(
+            _build_sinusoidal_embedding(guidance_inp),
+            "time_text_embed.guidance_embedder.linear_1",
+            "time_text_embed.guidance_embedder.linear_2",
+        )
     if g_proj is not None and temb_combined is not None:
         temb_combined = network.add_elementwise(
             temb_combined, g_proj, trt.ElementWiseOperation.SUM

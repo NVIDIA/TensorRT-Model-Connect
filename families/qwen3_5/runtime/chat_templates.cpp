@@ -12,8 +12,7 @@ namespace {
 
 std::string apply_chatml(const std::string& prompt, bool enable_thinking) {
     std::string r = "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
-    if (!enable_thinking)
-        r += "<think>\n\n</think>\n\n";
+    r += enable_thinking ? "<think>\n" : "<think>\n\n</think>\n\n";
     return r;
 }
 
