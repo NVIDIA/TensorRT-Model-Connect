@@ -58,7 +58,7 @@ the matching Edge Python package and configure the SDK with
 `-DTRTMC_EDGELLM_ONNX=ON`. For example:
 
 ```sh
-trtmc qwen3_5 build "$TARGET" -o model.bundle --task text_generation \
+trtmc qwen3_5 build "$TARGET" -o model.bundle --task text_generation --precision fp16 \
   --execution-variant dflash --companion "draft=$DRAFT" --max-sequence-length 2048
 ```
 
