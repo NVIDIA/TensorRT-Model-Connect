@@ -5,6 +5,7 @@
 // Host-side VibeVoice-ASR pieces: audio front end, encoder chunk plan, argmax,
 // prompt layout, transcript parsing and runtime.json validation.
 #include "families/vibevoice_asr/runtime/audio_frontend.h"
+#include "families/vibevoice_asr/runtime/engine_io.h"
 #include "families/vibevoice_asr/runtime/host_plan.h"
 #include "families/vibevoice_asr/runtime/prompt.h"
 #include "families/vibevoice_asr/runtime/runtime_config.h"
@@ -23,6 +24,7 @@
 #include <vector>
 
 using namespace trtmc::vibevoice_asr;
+using trtmc::DType;
 
 namespace {
 
@@ -43,6 +45,28 @@ void check_throws(Function&& function, const std::string& what) {
         return;
     }
     check(false, what + " should throw");
+}
+
+template <class Error, class Function>
+void check_throws_as(Function&& function, const std::string& what) {
+    try {
+        function();
+    } catch (const Error&) {
+        return;
+    } catch (const std::exception& error) {
+        check(false, what + " threw another exception type: " + error.what());
+        return;
+    }
+    check(false, what + " should throw");
+}
+
+template <class Function>
+void check_no_throw(Function&& function, const std::string& what) {
+    try {
+        function();
+    } catch (const std::exception& error) {
+        check(false, what + " threw: " + error.what());
+    }
 }
 
 std::string utf8(std::uint32_t code_point) {
@@ -223,6 +247,22 @@ void test_resample() {
     check(exact.size() == interpolated.size() && difference < 1e-6,
           "interpolated and exact taps differ by " + std::to_string(difference));
     check(resample(tone, 16000, 24000, 0).size() == out.size(), "both paths give the same length");
+
+    // resampled_length gives resample()'s length without resampling, so a request
+    // is sized before its audio work: 100000 samples at 1 Hz would be 2.4e9.
+    for (const auto& [rate, count] : cases)
+        check(resampled_length(count, rate, 24000) ==
+                  resample(std::vector<float>(count, 0.0F), rate, 24000).size(),
+              "resampled_length matches resample at " + std::to_string(rate));
+    check(resampled_length(odd.size(), odd_rate, 24000) == odd_out.size(),
+          "resampled_length matches resample at 192001 Hz");
+    check(resampled_length(24000, 24000, 24000) == 24000, "equal rates keep the length");
+    check(resampled_length(100000, 1, 24000) == 2400000000ULL, "100000 samples at 1 Hz");
+    check_throws_as<std::invalid_argument>(
+        [] { resampled_length(std::numeric_limits<std::size_t>::max(), 1, 24000); },
+        "a resampled length beyond int64");
+    check_throws_as<std::invalid_argument>([] { resampled_length(10, 0, 24000); },
+                                           "a zero sample rate");
 }
 
 void test_normalize() {
@@ -275,6 +315,15 @@ void test_chunks_and_argmax() {
     check(generated == 2, "prompt plus output stays within max_sequence_length");
     check(generation_complete(10, 3, 3, 4096), "max_new_tokens stops generation");
     check(!generation_complete(10, 2, 3, 4096), "generation continues below both limits");
+    // An explicit max_output_tokens must fit with the prompt instead of being cut
+    // short by the sequence limit without notice.
+    check_no_throw([] { check_output_budget(4000, 96, 4096); },
+                   "prompt plus max_output_tokens filling max_sequence_length");
+    check_throws_as<std::invalid_argument>([] { check_output_budget(4000, 97, 4096); },
+                                           "prompt plus max_output_tokens one past the limit");
+    check_throws_as<std::invalid_argument>(
+        [] { check_output_budget(4000, std::numeric_limits<std::int64_t>::max(), 4096); },
+        "the largest max_output_tokens");
 }
 
 void test_transcript() {
@@ -348,6 +397,31 @@ void test_runtime_config() {
     smallest["normalize_eps"] = static_cast<double>(std::numeric_limits<float>::min());
     check(parse_runtime_config(smallest.dump()).normalize_eps > 0.0,
           "the smallest normal float eps is accepted");
+    // An eps above FLT_MAX has no float value, and a target whose float amplitude
+    // underflows to zero would silence every input.
+    for (const auto& [field, value] :
+         {std::pair{"normalize_eps", 1e39}, std::pair{"normalize_target_dbfs", -1000.0}}) {
+        auto bad = runtime_json();
+        bad[field] = value;
+        check_throws_as<std::runtime_error>([&] { parse_runtime_config(bad.dump()); },
+                                            std::string(field) + " " + std::to_string(value));
+    }
+    // runtime.json defects are bundle defects, reported as std::runtime_error like
+    // the sibling families' and the core loader's.
+    auto fractional = runtime_json();
+    fractional["tokenizer_checks"][0]["ids"] = nlohmann::json::array({117.9});
+    auto parallel_bad = runtime_json();
+    parallel_bad["tensor_parallel_size"] = 2;
+    auto missing = runtime_json();
+    missing.erase("hop_length");
+    auto mistyped = runtime_json();
+    mistyped["normalize_eps"] = "small";
+    for (const auto& [bad, what] :
+         {std::pair{fractional, "a fractional probe id"},
+          std::pair{parallel_bad, "tensor parallel"}, std::pair{missing, "a missing field"},
+          std::pair{mistyped, "a string eps"}})
+        check_throws_as<std::runtime_error>([&] { parse_runtime_config(bad.dump()); },
+                                            std::string("runtime.json with ") + what);
 }
 
 void test_tokenizer() {
@@ -405,6 +479,122 @@ void test_tokenizer() {
     const auto json = byte_tokenizer_json();
     check_throws([&] { CreateBpeTokenizer(json.data(), json.size(), false, 0); },
                  "a tokenizer without a decoder vocabulary");
+    // Base-vocabulary ids are decoder rows too: the merged tokens 262 and 263 lie
+    // outside a decoder vocabulary of 262, and an id must be an integer.
+    check_throws_as<std::runtime_error>(
+        [&] { CreateBpeTokenizer(split_json.data(), split_json.size(), false, 262); },
+        "a merged token id at the decoder vocabulary");
+    auto fractional = nlohmann::json::parse(byte_tokenizer_json());
+    fractional["model"]["vocab"]["a"] = 97.5;
+    const auto fractional_text = fractional.dump();
+    check_throws_as<std::runtime_error>(
+        [&] { CreateBpeTokenizer(fractional_text.data(), fractional_text.size(), false, kVocab); },
+        "a fractional vocabulary id");
+    // A normalizer or decoder the tokenizer does not implement rejects the bundle
+    // instead of being skipped.
+    for (
+        const char* normalizer :
+        {R"({"type": "NFKC"})",
+         R"({"type": "Replace", "pattern": {"String": "\u2019"}, "content": "'"})",
+         R"({"type": "Sequence", "normalizers": [{"type": "NFC"}, {"type": "StripAccents"}]})",
+         R"({"type": "Prepend", "prepend": "\u2581"})",
+         R"({"type": "Sequence", "normalizers": [{"type": "Sequence", "normalizers": [{"type": "Prepend", "prepend": "\u2581"}]}]})"}) {
+        const auto text = byte_tokenizer_json(nlohmann::json::parse(normalizer));
+        check_throws_as<std::runtime_error>(
+            [&] { CreateBpeTokenizer(text.data(), text.size(), false, kVocab); },
+            std::string("normalizer ") + normalizer);
+    }
+    const auto sequence_nfc = byte_tokenizer_json(
+        nlohmann::json::parse(R"({"type": "Sequence", "normalizers": [{"type": "NFC"}]})"));
+    check_no_throw(
+        [&] { CreateBpeTokenizer(sequence_nfc.data(), sequence_nfc.size(), false, kVocab); },
+        "a Sequence of NFC");
+    for (
+        const char* decoder :
+        {R"({"type": "WordPiece"})",
+         R"({"type": "Sequence", "decoders": [{"type": "Strip", "content": " ", "start": 2, "stop": 0}]})",
+         R"({"type": "Sequence", "decoders": [{"type": "Replace", "pattern": {"Regex": "x"}, "content": "y"}]})"}) {
+        auto with_decoder = nlohmann::json::parse(byte_tokenizer_json());
+        with_decoder["decoder"] = nlohmann::json::parse(decoder);
+        const auto text = with_decoder.dump();
+        check_throws_as<std::runtime_error>(
+            [&] { CreateBpeTokenizer(text.data(), text.size(), false, kVocab); },
+            std::string("decoder ") + decoder);
+    }
+    // Added-token defects are bundle defects as well.
+    auto listless = nlohmann::json::parse(byte_tokenizer_json());
+    listless["added_tokens"] = nlohmann::json::object();
+    const auto listless_text = listless.dump();
+    check_throws_as<std::runtime_error>(
+        [&] { CreateBpeTokenizer(listless_text.data(), listless_text.size(), false, kVocab); },
+        "added_tokens that is not a list");
+}
+
+// The tensors of a bundle built for runtime_json(), as its modules report them at load.
+EngineTensors encoder_tensors(const RuntimeConfig& config) {
+    const std::int64_t longest =
+        (static_cast<std::int64_t>(config.encoder_chunk_frames) + config.encoder_context_frames) *
+        config.hop_length;
+    EngineTensors tensors;
+    tensors["audio"] = {true, true, DType::kFloat32, {}, {1, 1, 1, 1}, {1, 1, 1, longest}};
+    tensors["audio_features"] = {false, false, DType::kBFloat16, {508, config.hidden_size}, {}, {}};
+    return tensors;
+}
+
+EngineTensors decoder_tensors(const RuntimeConfig& config, std::int64_t rows) {
+    EngineTensors tensors;
+    tensors["input_ids"] = {true, true, DType::kInt32, {}, {1}, {rows}};
+    tensors["audio_mask"] = {true, true, DType::kInt32, {}, {1}, {rows}};
+    tensors["audio_embeds"] = {
+        true, true, DType::kBFloat16, {}, {1, config.hidden_size}, {rows, config.hidden_size}};
+    tensors["cache_write_index"] = {true, false, DType::kInt32, {1}, {}, {}};
+    tensors["logits"] = {false, false, DType::kFloat32, {1, config.vocab_size}, {}, {}};
+    return tensors;
+}
+
+void test_engine_io() {
+    const auto config = parse_runtime_config(runtime_json().dump());
+    check_no_throw([&] { check_encoder_io(encoder_tensors(config), config); },
+                   "the encoder the builder makes");
+    check_no_throw([&] { check_decoder_io(decoder_tensors(config, 256), config, 256); },
+                   "the prefill profile the builder makes");
+    check_no_throw([&] { check_decoder_io(decoder_tensors(config, 1), config, 1); },
+                   "the decode profile the builder makes");
+    // Each mismatch fails at load, not at the first request that reaches it.
+    using Change = void (*)(EngineTensors&);
+    const std::pair<const char*, Change> encoder_changes[] = {
+        {"an audio profile shorter than the longest chunk",
+         [](EngineTensors& t) { t["audio"].profile_max[3] = 1000; }},
+        {"an audio profile that starts above one sample",
+         [](EngineTensors& t) { t["audio"].profile_min[3] = 3200; }},
+        {"FP16 audio", [](EngineTensors& t) { t["audio"].dtype = DType::kFloat16; }},
+        {"audio features of another width",
+         [](EngineTensors& t) { t["audio_features"].shape[1] = 3583; }},
+        {"no audio features", [](EngineTensors& t) { t.erase("audio_features"); }},
+        {"audio as an output", [](EngineTensors& t) { t["audio"].input = false; }},
+    };
+    for (const auto& [what, change] : encoder_changes) {
+        auto tensors = encoder_tensors(config);
+        change(tensors);
+        check_throws_as<std::runtime_error>([&] { check_encoder_io(tensors, config); },
+                                            std::string("an encoder with ") + what);
+    }
+    const std::pair<const char*, Change> decoder_changes[] = {
+        {"a prefill profile below max_prefill_rows",
+         [](EngineTensors& t) { t["input_ids"].profile_max[0] = 255; }},
+        {"audio embeddings of another width",
+         [](EngineTensors& t) { t["audio_embeds"].profile_max[1] = 3583; }},
+        {"logits of another vocabulary", [](EngineTensors& t) { t["logits"].shape[1] = 261; }},
+        {"a wider cache_write_index", [](EngineTensors& t) { t["cache_write_index"].shape = {2}; }},
+        {"an audio mask profile from two rows",
+         [](EngineTensors& t) { t["audio_mask"].profile_min[0] = 2; }},
+    };
+    for (const auto& [what, change] : decoder_changes) {
+        auto tensors = decoder_tensors(config, 256);
+        change(tensors);
+        check_throws_as<std::runtime_error>([&] { check_decoder_io(tensors, config, 256); },
+                                            std::string("a decoder with ") + what);
+    }
 }
 
 void test_prompt() {
@@ -453,6 +643,11 @@ void test_prompt() {
     check(std::count(prompt.ids.begin(), prompt.ids.end(), 258) == 2, "two turns end");
     check(prompt.ids.back() == '\n', "no generation prompt after the user turn");
     check_throws([&] { build_prompt(*tokenizer, config, 0, ""); }, "an empty clip");
+    // A request is sized before its audio is resampled: 100000 samples at 1 Hz need
+    // 750,000 speech rows, refused without building them.
+    check_throws_as<std::invalid_argument>(
+        [&] { build_prompt(*tokenizer, config, resampled_length(100000, 1, 24000), ""); },
+        "a 1 Hz clip of 100000 samples");
 }
 
 } // namespace
@@ -466,6 +661,7 @@ int main() {
     test_runtime_config();
     test_prompt();
     test_tokenizer();
+    test_engine_io();
     if (failures != 0) {
         std::cerr << failures << " VibeVoice-ASR host check(s) failed\n";
         return EXIT_FAILURE;

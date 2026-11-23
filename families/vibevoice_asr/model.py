@@ -168,7 +168,20 @@ def tokenizer_checks(tokenizer_json: bytes) -> list[dict]:
     ]
 
 
+def check_tokenizer_ids(tokenizer_json: bytes, vocab_size: int) -> None:
+    """Every token id must be a row of the decoder's embedding table."""
+    raw = json.loads(tokenizer_json)
+    ids = list(raw["model"]["vocab"].values())
+    ids += [item.get("id") for item in raw.get("added_tokens", [])]
+    stray = [i for i in ids if type(i) is not int or not 0 <= i < vocab_size]
+    if stray:
+        raise ValueError(
+            f"{FAMILY} tokenizer ids {stray[:5]} are outside the decoder vocabulary of {vocab_size}"
+        )
+
+
 def runtime_contract(cfg: VibeVoiceAsrConfig, capacity: int, tokenizer_json: bytes) -> dict:
+    check_tokenizer_ids(tokenizer_json, cfg.decoder.vocab_size)
     hop = cfg.hop_length
     history = max(cfg.acoustic.history_samples(), cfg.semantic.history_samples())
     context_frames = -(-history // hop)

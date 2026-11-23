@@ -24,7 +24,7 @@ std::vector<char> require_section(const BundleReader& reader, const char* name) 
 
 void require_token(const ITokenizer& tokenizer, const char* text, std::int32_t id) {
     if (tokenizer.id_for_token(text) != id)
-        throw std::invalid_argument(std::string("VibeVoice-ASR tokenizer id mismatch for ") + text);
+        throw std::runtime_error(std::string("VibeVoice-ASR tokenizer id mismatch for ") + text);
 }
 
 } // namespace
@@ -38,7 +38,7 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const auto& info = context.reader.info();
     if (info.family != "vibevoice_asr" || info.task != "speech_transcription" ||
         info.backend != "trt" || std::string(context.backend.name()) != "trt")
-        throw std::invalid_argument("VibeVoice-ASR bundle identity does not match the runtime");
+        throw std::runtime_error("VibeVoice-ASR bundle identity does not match the runtime");
 
     const auto runtime = require_section(context.reader, "runtime.json");
     auto config = parse_runtime_config(std::string(runtime.begin(), runtime.end()));
@@ -46,7 +46,7 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     auto tokenizer =
         CreateBpeTokenizer(tokenizer_json.data(), tokenizer_json.size(), false, config.vocab_size);
     if (!tokenizer)
-        throw std::invalid_argument("VibeVoice-ASR could not load its tokenizer");
+        throw std::runtime_error("VibeVoice-ASR could not load its tokenizer");
     const auto& ids = config.token_ids;
     require_token(*tokenizer, "<|im_start|>", ids.im_start);
     require_token(*tokenizer, "<|im_end|>", ids.im_end);
@@ -56,7 +56,7 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     require_token(*tokenizer, "<|endoftext|>", ids.eos);
     for (const auto& check : config.tokenizer_checks) {
         if (tokenizer->encode(check.text) != check.ids)
-            throw std::invalid_argument(
+            throw std::runtime_error(
                 "VibeVoice-ASR native tokenizer disagrees with the build tokenizer on: " +
                 check.text);
     }

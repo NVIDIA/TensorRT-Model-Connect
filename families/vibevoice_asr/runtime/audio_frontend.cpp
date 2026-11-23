@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 
@@ -51,17 +52,30 @@ std::vector<float> downmix(const float* interleaved, std::size_t frames, std::ui
     return mono;
 }
 
-std::vector<float> resample(const std::vector<float>& input, std::int32_t from_rate,
-                            std::int32_t to_rate, std::size_t max_table_coefficients) {
+std::size_t resampled_length(std::size_t samples, std::int32_t from_rate, std::int32_t to_rate) {
     if (from_rate <= 0 || to_rate <= 0)
         throw std::invalid_argument("VibeVoice-ASR sample rates must be positive");
+    if (from_rate == to_rate)
+        return samples;
+    const std::int64_t divisor = std::gcd<std::int64_t>(from_rate, to_rate);
+    const std::int64_t up = to_rate / divisor;
+    const std::int64_t down = from_rate / divisor;
+    if (samples > static_cast<std::size_t>((std::numeric_limits<std::int64_t>::max() - down) / up))
+        throw std::invalid_argument("VibeVoice-ASR audio is too long to resample");
+    const std::int64_t count = static_cast<std::int64_t>(samples);
+    return static_cast<std::size_t>((count * up + down - 1) / down);
+}
+
+std::vector<float> resample(const std::vector<float>& input, std::int32_t from_rate,
+                            std::int32_t to_rate, std::size_t max_table_coefficients) {
+    const std::int64_t outputs =
+        static_cast<std::int64_t>(resampled_length(input.size(), from_rate, to_rate));
     if (from_rate == to_rate || input.empty())
         return input;
     const std::int64_t divisor = std::gcd<std::int64_t>(from_rate, to_rate);
     const std::int64_t up = to_rate / divisor;
     const std::int64_t down = from_rate / divisor;
     const std::int64_t count = static_cast<std::int64_t>(input.size());
-    const std::int64_t outputs = (count * up + down - 1) / down;
     // Low-pass at the lower Nyquist rate, designed on the up-sampled grid.
     const std::int64_t spacing = std::max(up, down);
     const std::int64_t half_width = kZeroCrossings * spacing;

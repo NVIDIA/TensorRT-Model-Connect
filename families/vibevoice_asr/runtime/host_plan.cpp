@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include <string>
 
 namespace trtmc::vibevoice_asr {
 
@@ -35,6 +36,16 @@ bool generation_complete(std::int64_t prompt_tokens, std::int64_t generated_toke
                          std::int64_t max_new_tokens, std::int64_t max_sequence_length) {
     return generated_tokens >= max_new_tokens ||
            prompt_tokens + generated_tokens >= max_sequence_length;
+}
+
+void check_output_budget(std::int64_t prompt_tokens, std::int64_t max_output_tokens,
+                         std::int64_t max_sequence_length) {
+    if (max_output_tokens > max_sequence_length - prompt_tokens)
+        throw std::invalid_argument(
+            "VibeVoice-ASR prompt of " + std::to_string(prompt_tokens) +
+            " tokens plus max_output_tokens " + std::to_string(max_output_tokens) +
+            " exceeds the bundle's max_sequence_length of " + std::to_string(max_sequence_length) +
+            "; use less audio, fewer output tokens or a larger max_sequence_length");
 }
 
 } // namespace trtmc::vibevoice_asr

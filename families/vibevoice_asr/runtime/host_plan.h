@@ -28,4 +28,10 @@ std::int32_t argmax(const float* logits, std::int32_t count);
 bool generation_complete(std::int64_t prompt_tokens, std::int64_t generated_tokens,
                          std::int64_t max_new_tokens, std::int64_t max_sequence_length);
 
+// A request's prompt plus an explicit max_output_tokens must fit in
+// max_sequence_length; generation_complete would otherwise end the output early
+// without telling the caller. Throws std::invalid_argument.
+void check_output_budget(std::int64_t prompt_tokens, std::int64_t max_output_tokens,
+                         std::int64_t max_sequence_length);
+
 } // namespace trtmc::vibevoice_asr

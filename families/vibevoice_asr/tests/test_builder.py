@@ -160,6 +160,31 @@ def test_special_tokens_must_be_special_added_tokens():
         model.special_token_ids(json.dumps({"added_tokens": tokens[1:]}).encode())
 
 
+def test_tokenizer_ids_must_be_decoder_rows(monkeypatch):
+    # Every id indexes the decoder's embedding table; runtime_contract refuses a
+    # tokenizer with any other before the reference tokenizer runs.
+    monkeypatch.setattr(model, "tokenizer_checks", lambda tokenizer_json: [])
+    cfg = checkpoint.parse_config(CONFIG)
+    specials = [
+        {"id": 151643 + i, "content": content, "special": True}
+        for i, content in enumerate(model.SPECIAL_TOKENS.values())
+    ]
+
+    def tokenizer(vocab, extra=()):
+        return json.dumps({"model": {"vocab": vocab}, "added_tokens": specials + list(extra)})
+
+    contract = model.runtime_contract(cfg, 4096, tokenizer({"a": 0, "b": 151642}).encode())
+    assert contract["vocab_size"] == 152064
+    for vocab, extra in (
+        ({"a": 0, "b": 152064}, ()),
+        ({"a": -1}, ()),
+        ({"a": 1.5}, ()),
+        ({"a": 0}, ({"id": 152064, "content": "<|stray|>", "special": True},)),
+    ):
+        with pytest.raises(ValueError, match="outside the decoder vocabulary"):
+            model.runtime_contract(cfg, 4096, tokenizer(vocab, extra).encode())
+
+
 def test_the_user_turn_matches_the_official_processor():
     keys = "Start time, End time, Speaker ID, Content"
     assert model.user_suffix("7.56") == (

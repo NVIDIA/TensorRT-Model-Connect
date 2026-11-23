@@ -8,6 +8,7 @@ find_package(ICU REQUIRED COMPONENTS uc)
 add_library(trtmc_model_vibevoice_asr SHARED
   audio_frontend.cpp
   bpe_tokenizer.cpp
+  engine_io.cpp
   host_plan.cpp
   pipeline.cpp
   plugin.cpp
@@ -37,11 +38,12 @@ set_target_properties(trtmc_model_vibevoice_asr PROPERTIES
 install(TARGETS trtmc_model_vibevoice_asr LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 if(TRTMC_BUILD_TESTS)
-  # Host-only front end, prompt and transcript tests: no GPU, no engines.
+  # Host-only front end, prompt, transcript and engine-contract tests: no GPU, no engines.
   add_executable(test_vibevoice_asr_host
     ${PROJECT_SOURCE_DIR}/families/vibevoice_asr/tests/cpp/test_host.cpp
     audio_frontend.cpp
     bpe_tokenizer.cpp
+    engine_io.cpp
     host_plan.cpp
     prompt.cpp
     runtime_config.cpp

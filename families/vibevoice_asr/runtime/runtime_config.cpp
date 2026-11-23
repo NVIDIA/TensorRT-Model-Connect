@@ -16,17 +16,16 @@ std::int32_t positive_int(const nlohmann::json& raw, const char* name) {
     const auto& value = raw.at(name);
     if (!value.is_number_integer() || value.get<std::int64_t>() <= 0 ||
         value.get<std::int64_t>() > std::numeric_limits<std::int32_t>::max())
-        throw std::invalid_argument(std::string("VibeVoice-ASR runtime.json needs a positive "
-                                                "int32 ") +
-                                    name);
+        throw std::runtime_error(std::string("VibeVoice-ASR runtime.json needs a positive "
+                                             "int32 ") +
+                                 name);
     return value.get<std::int32_t>();
 }
 
 std::int32_t token_id(const nlohmann::json& ids, const char* name, std::int32_t vocab) {
     const auto id = positive_int(ids, name);
     if (id >= vocab)
-        throw std::invalid_argument(std::string("VibeVoice-ASR token id out of vocabulary: ") +
-                                    name);
+        throw std::runtime_error(std::string("VibeVoice-ASR token id out of vocabulary: ") + name);
     return id;
 }
 
@@ -34,35 +33,35 @@ std::int32_t token_id(const nlohmann::json& ids, const char* name, std::int32_t 
 // not truncated to 117.
 std::vector<std::int32_t> probe_ids(const nlohmann::json& ids, std::int32_t vocab) {
     if (!ids.is_array() || ids.empty())
-        throw std::invalid_argument("VibeVoice-ASR tokenizer check needs a list of ids");
+        throw std::runtime_error("VibeVoice-ASR tokenizer check needs a list of ids");
     std::vector<std::int32_t> result;
     for (const auto& id : ids) {
         if (!id.is_number_integer() || id.get<std::int64_t>() < 0 ||
             id.get<std::int64_t>() >= vocab)
-            throw std::invalid_argument(
-                "VibeVoice-ASR tokenizer check id is not a vocabulary id: " + id.dump());
+            throw std::runtime_error("VibeVoice-ASR tokenizer check id is not a vocabulary id: " +
+                                     id.dump());
         result.push_back(id.get<std::int32_t>());
     }
     return result;
 }
 
 // normalize_loudness divides float(10^(target / 20)) by (rms + float(eps)) in
-// float. For silent input (rms 0) that gain must be finite, which needs a normal,
-// positive float eps; target and eps must be finite.
-bool finite_silence_gain(double target_dbfs, double eps) {
-    if (!std::isfinite(target_dbfs) || !std::isfinite(eps))
+// float. For silent input (rms 0) that gain must be finite and not zero, which
+// needs an eps that is a normal float (checked before the cast: a double above
+// FLT_MAX has no float value) and a target whose amplitude is a normal float.
+bool usable_silence_gain(double target_dbfs, double eps) {
+    if (!std::isfinite(target_dbfs) || !(eps >= std::numeric_limits<float>::min()) ||
+        !(eps <= std::numeric_limits<float>::max()))
         return false;
     const float eps_float = static_cast<float>(eps);
     const float amplitude = static_cast<float>(std::pow(10.0, target_dbfs / 20.0));
-    return eps_float >= std::numeric_limits<float>::min() && std::isfinite(amplitude / eps_float);
+    return amplitude >= std::numeric_limits<float>::min() && std::isfinite(amplitude / eps_float);
 }
 
-} // namespace
-
-RuntimeConfig parse_runtime_config(const std::string& json_text) {
+RuntimeConfig parse_runtime_config_json(const std::string& json_text) {
     const auto raw = nlohmann::json::parse(json_text);
     if (raw.at("tensor_parallel_size") != 1)
-        throw std::invalid_argument("VibeVoice-ASR runs on one GPU");
+        throw std::runtime_error("VibeVoice-ASR runs on one GPU");
     RuntimeConfig config;
     config.sample_rate = positive_int(raw, "sample_rate");
     config.hop_length = positive_int(raw, "hop_length");
@@ -91,15 +90,27 @@ RuntimeConfig parse_runtime_config(const std::string& json_text) {
         item.text = check.at("text").get<std::string>();
         item.ids = probe_ids(check.at("ids"), config.vocab_size);
         if (item.text.empty())
-            throw std::invalid_argument("VibeVoice-ASR tokenizer check is empty");
+            throw std::runtime_error("VibeVoice-ASR tokenizer check is empty");
         config.tokenizer_checks.push_back(std::move(item));
     }
     if (config.tokenizer_checks.empty() ||
-        !finite_silence_gain(config.normalize_target_dbfs, config.normalize_eps) ||
+        !usable_silence_gain(config.normalize_target_dbfs, config.normalize_eps) ||
         config.normalize_target_dbfs >= 0.0 || config.system_prompt.empty() ||
         config.transcription_keys.empty() || config.max_prefill_rows > config.max_sequence_length)
-        throw std::invalid_argument("VibeVoice-ASR runtime.json is inconsistent");
+        throw std::runtime_error("VibeVoice-ASR runtime.json is inconsistent");
     return config;
+}
+
+} // namespace
+
+RuntimeConfig parse_runtime_config(const std::string& json_text) {
+    try {
+        return parse_runtime_config_json(json_text);
+    } catch (const nlohmann::json::exception& error) {
+        // A missing field or a value of the wrong JSON type.
+        throw std::runtime_error(std::string("VibeVoice-ASR runtime.json is malformed: ") +
+                                 error.what());
+    }
 }
 
 } // namespace trtmc::vibevoice_asr

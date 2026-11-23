@@ -26,14 +26,15 @@ it once with
   differ.
 - Sequence budget: the bundle's `max_sequence_length` (default 65,536 tokens; a
   multiple of 512) holds the whole sequence: about 60 tokens of system and user
-  text plus `context_info`, one speech token per 3,200 samples at 24 kHz (7.5 per
-  second, 27,000 for 60 minutes), and the generated transcript. A request whose
-  prompt does not fit is rejected before encoding, with its length in tokens;
-  generation stops at the end of text, at `max_output_tokens`, or when prompt
-  and output fill the sequence. Size the bundle for the prompt plus the
-  transcript you expect: 60 minutes leave about 38,000 output tokens at the
-  default, and the LibriSpeech test clip needs about 4.3 output tokens per second
-  of speech, JSON included.
+  text plus `context_info`, one speech token per 3,200 samples at 24 kHz (7.5
+  per second, 27,000 for 60 minutes), and the generated transcript. A request
+  whose prompt does not fit, or whose prompt plus `max_output_tokens` does not,
+  is rejected before any audio processing, with the lengths in tokens.
+  Generation stops at the end of text, at `max_output_tokens`, or, without
+  `max_output_tokens`, when prompt and output fill the sequence. Size the bundle
+  for the prompt plus the transcript you expect: 60 minutes leave about 38,000
+  output tokens at the default, and the LibriSpeech test clip needs about 4.3
+  output tokens per second of speech, JSON included.
 - Output: `text` is the segment contents joined by spaces; `segments` carry the
   start and end seconds of each segment. Speaker ids have no field in the shared
   result: `raw_output=true` returns the model's JSON segment list instead. When
@@ -42,7 +43,8 @@ it once with
   decoded prefix as it is, which is not valid JSON (a character cut off at the
   end becomes U+FFFD), and the default output keeps the segments that were
   complete (with none, `text` is that prefix).
-- Config: `max_output_tokens` (default: until end of text or a full sequence),
+- Config: `max_output_tokens` (default: until end of text or a full sequence;
+  a value must fit in the sequence with the prompt),
   `context_info` (hotwords or background text, as the official `context_info`),
   `raw_output`. `source_language` and `--kv-cache-size` are rejected.
 - Tokenization follows the bundle's `tokenizer.json`, including its NFC

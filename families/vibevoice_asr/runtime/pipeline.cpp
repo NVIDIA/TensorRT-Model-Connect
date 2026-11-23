@@ -5,12 +5,14 @@
 #include "families/vibevoice_asr/runtime/pipeline.h"
 
 #include "families/vibevoice_asr/runtime/audio_frontend.h"
+#include "families/vibevoice_asr/runtime/engine_io.h"
 #include "families/vibevoice_asr/runtime/transcript.h"
 
 #include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <cuda_runtime_api.h>
+#include <initializer_list>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -39,12 +41,43 @@ std::string layer_name(const char* base, std::int32_t index) {
     return std::string(base) + "_" + std::to_string(index);
 }
 
-void require_io(const ITrtModule& module, const char* engine, const char* name, DType dtype,
-                bool input) {
-    if ((input ? !module.has_input(name) : !module.has_output(name)) ||
-        module.tensor_dtype(name) != dtype)
-        throw std::invalid_argument(std::string("VibeVoice-ASR ") + engine +
-                                    " engine lacks the expected tensor " + name);
+// The named tensors of a loaded module, with the bounds of its own profile.
+EngineTensors engine_tensors(const ITrtModule& module, std::initializer_list<const char*> names) {
+    EngineTensors tensors;
+    for (const char* name : names) {
+        const bool input = module.has_input(name);
+        if (!input && !module.has_output(name))
+            continue;
+        EngineTensor tensor;
+        tensor.input = input;
+        tensor.dtype = module.tensor_dtype(name);
+        tensor.dynamic = input && module.input_is_dynamic(name);
+        if (tensor.dynamic) {
+            tensor.profile_min =
+                module.input_profile_shape(name, module.profile_idx(), ProfileShapeSelector::kMin);
+            tensor.profile_max =
+                module.input_profile_shape(name, module.profile_idx(), ProfileShapeSelector::kMax);
+        } else {
+            tensor.shape = module.tensor_shape(name);
+        }
+        tensors.emplace(name, std::move(tensor));
+    }
+    return tensors;
+}
+
+struct AudioShape {
+    std::size_t frames{0};
+    std::int32_t rate{0};
+};
+
+AudioShape audio_shape(const internal::AudioView& audio, std::int32_t default_rate) {
+    if (audio.channels == 0 || audio.samples.empty() || audio.samples.data() == nullptr ||
+        audio.samples.size() % audio.channels != 0)
+        throw std::invalid_argument("VibeVoice-ASR requires complete nonempty interleaved PCM");
+    const auto rate = audio.sample_rate.value_or(static_cast<std::uint32_t>(default_rate));
+    if (rate == 0 || rate > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()))
+        throw std::invalid_argument("VibeVoice-ASR input sample rate is out of range");
+    return {audio.samples.size() / audio.channels, static_cast<std::int32_t>(rate)};
 }
 
 } // namespace
@@ -57,24 +90,23 @@ VibeVoiceAsrModel::VibeVoiceAsrModel(RuntimeConfig config, std::unique_ptr<IToke
       prefill_(std::move(prefill)), decode_(std::move(decode)) {
     if (!tokenizer_ || !encoder_ || !encoder_->ok() || !prefill_ || !prefill_->ok() || !decode_ ||
         !decode_->ok())
-        throw std::invalid_argument("VibeVoice-ASR needs a tokenizer and three loaded modules");
-    require_io(*encoder_, "encoder", "audio", DType::kFloat32, true);
-    require_io(*encoder_, "encoder", "audio_features", DType::kBFloat16, false);
-    for (auto* module : {prefill_.get(), decode_.get()}) {
-        require_io(*module, "decoder", "input_ids", DType::kInt32, true);
-        require_io(*module, "decoder", "audio_embeds", DType::kBFloat16, true);
-        require_io(*module, "decoder", "audio_mask", DType::kInt32, true);
-        require_io(*module, "decoder", "cache_write_index", DType::kInt32, true);
-        require_io(*module, "decoder", "logits", DType::kFloat32, false);
-    }
+        throw std::runtime_error("VibeVoice-ASR needs a tokenizer and three loaded modules");
+    check_encoder_io(engine_tensors(*encoder_, {"audio", "audio_features"}), config_);
+    check_decoder_io(engine_tensors(*prefill_, {"input_ids", "audio_embeds", "audio_mask",
+                                                "cache_write_index", "logits"}),
+                     config_, config_.max_prefill_rows);
+    check_decoder_io(engine_tensors(*decode_, {"input_ids", "audio_embeds", "audio_mask",
+                                               "cache_write_index", "logits"}),
+                     config_, 1);
     const std::vector<std::int64_t> shape{1, config_.num_kv_heads, config_.max_sequence_length,
                                           config_.head_dim};
     for (std::int32_t layer = 0; layer < config_.num_layers; ++layer) {
         for (const char* base : {"cache_k", "cache_v"}) {
             const auto name = layer_name(base, layer);
-            require_io(*prefill_, "decoder", name.c_str(), DType::kFloat32, true);
-            if (prefill_->tensor_shape(name) != shape)
-                throw std::invalid_argument("VibeVoice-ASR KV cache shape differs from runtime");
+            if (!prefill_->has_input(name) || prefill_->tensor_dtype(name) != DType::kFloat32 ||
+                prefill_->tensor_shape(name) != shape)
+                throw std::runtime_error("VibeVoice-ASR decoder engine tensor " + name +
+                                         " is not the runtime's FP32 KV cache");
             cache_.emplace_back(shape, DType::kFloat32, prefill_->stream());
             if (!cache_.back().ok())
                 throw std::runtime_error("VibeVoice-ASR could not allocate its KV cache");
@@ -90,15 +122,9 @@ std::vector<internal::TaskInstance> VibeVoiceAsrModel::task_bindings() {
 }
 
 std::vector<float> VibeVoiceAsrModel::prepare_audio(const internal::AudioView& audio) const {
-    if (audio.channels == 0 || audio.samples.empty() || audio.samples.data() == nullptr ||
-        audio.samples.size() % audio.channels != 0)
-        throw std::invalid_argument("VibeVoice-ASR requires complete nonempty interleaved PCM");
-    const auto rate = audio.sample_rate.value_or(static_cast<std::uint32_t>(config_.sample_rate));
-    if (rate == 0 || rate > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()))
-        throw std::invalid_argument("VibeVoice-ASR input sample rate is out of range");
-    auto samples =
-        downmix(audio.samples.data(), audio.samples.size() / audio.channels, audio.channels);
-    samples = resample(samples, static_cast<std::int32_t>(rate), config_.sample_rate);
+    const auto shape = audio_shape(audio, config_.sample_rate);
+    auto samples = downmix(audio.samples.data(), shape.frames, audio.channels);
+    samples = resample(samples, shape.rate, config_.sample_rate);
     normalize_loudness(samples, config_.normalize_target_dbfs, config_.normalize_eps);
     return samples;
 }
@@ -219,14 +245,23 @@ TextResult VibeVoiceAsrModel::run(const internal::SpeechTranscriptionRequest& re
     std::lock_guard<std::mutex> lock(mutex_);
     TextResult result;
     const auto setup_start = Clock::now();
-    const auto samples = prepare_audio(request.audio);
-    const auto prompt = build_prompt(*tokenizer_, config_, samples.size(), context);
-    if (static_cast<std::int64_t>(prompt.ids.size()) >= config_.max_sequence_length)
-        throw std::invalid_argument("VibeVoice-ASR prompt of " + std::to_string(prompt.ids.size()) +
-                                    " tokens (audio of " + std::to_string(samples.size()) +
+    // The prompt follows from the clip length alone, so a request that cannot fit
+    // is refused before the audio work, whose memory grows with the resampled length.
+    const auto shape = audio_shape(request.audio, config_.sample_rate);
+    const auto sample_count = resampled_length(shape.frames, shape.rate, config_.sample_rate);
+    const auto prompt = build_prompt(*tokenizer_, config_, sample_count, context);
+    const auto prompt_tokens = static_cast<std::int64_t>(prompt.ids.size());
+    if (prompt_tokens >= config_.max_sequence_length)
+        throw std::invalid_argument("VibeVoice-ASR prompt of " + std::to_string(prompt_tokens) +
+                                    " tokens (audio of " + std::to_string(sample_count) +
                                     " samples) needs a bundle max_sequence_length above " +
-                                    std::to_string(prompt.ids.size()) + "; this bundle has " +
+                                    std::to_string(prompt_tokens) + "; this bundle has " +
                                     std::to_string(config_.max_sequence_length));
+    if (limit.has_value())
+        check_output_budget(prompt_tokens, *limit, config_.max_sequence_length);
+    const auto samples = prepare_audio(request.audio);
+    if (samples.size() != sample_count)
+        throw std::logic_error("VibeVoice-ASR resampler disagrees with its own length");
     result.setup_ms = elapsed_ms(setup_start);
 
     const auto encode_start = Clock::now();

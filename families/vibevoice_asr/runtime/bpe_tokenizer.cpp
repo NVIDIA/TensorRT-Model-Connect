@@ -1160,16 +1160,23 @@ class BpeTokenizer final : public ITokenizer {
     }
 
     void parse_vocab(const nlohmann::json& j) {
-        auto& vocab_obj = j["model"]["vocab"];
-        size_t vocab_size = vocab_obj.size();
-        mVocab.resize(vocab_size);
-
-        for (auto& [token, id] : vocab_obj.items()) {
-            int32_t token_id = id.get<int32_t>();
-            if (token_id >= 0 && token_id < static_cast<int32_t>(vocab_size)) {
-                mVocab[token_id] = token;
-                mTokenToId[token] = token_id;
-            }
+        const auto& vocab_obj = j["model"]["vocab"];
+        // Every id is a row of the decoder's embedding table: an integer below the
+        // decoder vocabulary, checked before the table is sized.
+        std::int64_t highest = -1;
+        for (const auto& [token, id] : vocab_obj.items()) {
+            if (!id.is_number_integer() || id.get<std::int64_t>() < 0 ||
+                id.get<std::int64_t>() >= mVocabLimit)
+                throw std::runtime_error("tokenizer.json token " + token + " has id " + id.dump() +
+                                         ", outside the decoder vocabulary of " +
+                                         std::to_string(mVocabLimit));
+            highest = std::max(highest, id.get<std::int64_t>());
+        }
+        mVocab.resize(static_cast<size_t>(highest + 1));
+        for (const auto& [token, id] : vocab_obj.items()) {
+            const auto token_id = id.get<int32_t>();
+            mVocab[static_cast<size_t>(token_id)] = token;
+            mTokenToId[token] = token_id;
         }
     }
 
@@ -1210,7 +1217,7 @@ class BpeTokenizer final : public ITokenizer {
             return;
         const auto& tokens = j.at("added_tokens");
         if (!tokens.is_array())
-            throw std::invalid_argument("tokenizer.json added_tokens must be a list");
+            throw std::runtime_error("tokenizer.json added_tokens must be a list");
         for (const auto& tok : tokens) {
             // Checked access: a token without a string content or an integer id
             // rejects the bundle instead of reading a missing field.
@@ -1218,13 +1225,13 @@ class BpeTokenizer final : public ITokenizer {
             const auto id_field = tok.is_object() ? tok.find("id") : tok.end();
             if (content_field == tok.end() || !content_field->is_string() ||
                 id_field == tok.end() || !id_field->is_number_integer())
-                throw std::invalid_argument(
+                throw std::runtime_error(
                     "tokenizer.json added token needs a string content and an integer id");
             const std::string content = content_field->get<std::string>();
             const std::int64_t raw_id = id_field->get<std::int64_t>();
             // Bounded before the vocabulary grows: one stray id must not size it.
             if (raw_id < 0 || raw_id >= mVocabLimit)
-                throw std::invalid_argument(
+                throw std::runtime_error(
                     "tokenizer.json added token " + content + " has id " + std::to_string(raw_id) +
                     ", outside the decoder vocabulary of " + std::to_string(mVocabLimit));
             const auto id = static_cast<int32_t>(raw_id);
@@ -1446,6 +1453,10 @@ class BpeTokenizer final : public ITokenizer {
 
         mByteFallback = model.value("byte_fallback", false);
         mEndOfWordSuffix = optional_model_string(model, "end_of_word_suffix");
+        if (j.contains("normalizer") && !j["normalizer"].is_null())
+            check_normalizer(j["normalizer"]);
+        if (j.contains("decoder") && !j["decoder"].is_null())
+            check_decoder(j["decoder"]);
         parse_vocab(j);
         parse_merges(j);
         parse_added_tokens(j);
@@ -1453,6 +1464,54 @@ class BpeTokenizer final : public ITokenizer {
         detect_normalizer(j);
         detect_pre_tokenizer(j);
         detect_decoder(j);
+    }
+
+    static bool replace_is(const nlohmann::json& norm, const char* kind, const char* pattern,
+                           const char* content) {
+        return norm.contains("pattern") && norm["pattern"].is_object() &&
+               norm["pattern"].contains(kind) && norm["pattern"][kind] == pattern &&
+               norm.value("content", "") == content;
+    }
+
+    // The normalizers this tokenizer applies. Any other one would be skipped and
+    // the ids would silently differ from the reference's, so it rejects the bundle.
+    // Prepend is applied only as a child of the top-level Sequence (depth 1).
+    static void check_normalizer(const nlohmann::json& norm, int depth = 0) {
+        const std::string type = norm.is_object() ? norm.value("type", "") : "";
+        if (type == "Sequence" && norm.contains("normalizers") && norm["normalizers"].is_array()) {
+            for (const auto& child : norm["normalizers"])
+                check_normalizer(child, depth + 1);
+            return;
+        }
+        if (type == "NFC" || type == "Lowercase" ||
+            (type == "Replace" && (replace_is(norm, "Regex", "\\s+", " ") ||
+                                   replace_is(norm, "String", " ", "\xe2\x96\x81"))) ||
+            (type == "Prepend" && depth == 1 && norm.value("prepend", "") == "\xe2\x96\x81"))
+            return;
+        throw std::runtime_error("tokenizer.json normalizer is not supported: " + norm.dump());
+    }
+
+    // The decoders decode() implements, likewise.
+    static void check_decoder(const nlohmann::json& dec) {
+        const std::string type = dec.is_object() ? dec.value("type", "") : "";
+        if (type == "ByteLevel" || type == "Metaspace")
+            return;
+        if (type == "Sequence" && dec.contains("decoders") && dec["decoders"].is_array()) {
+            for (const auto& sub : dec["decoders"]) {
+                const std::string sub_type = sub.is_object() ? sub.value("type", "") : "";
+                const bool supported =
+                    sub_type == "ByteFallback" || sub_type == "Fuse" ||
+                    (sub_type == "Replace" && sub.contains("pattern") &&
+                     sub["pattern"].is_object() && sub["pattern"].contains("String")) ||
+                    (sub_type == "Strip" && sub.value("content", " ") == " " &&
+                     sub.value("start", 0) <= 1 && sub.value("stop", 0) == 0);
+                if (!supported)
+                    throw std::runtime_error("tokenizer.json decoder step is not supported: " +
+                                             sub.dump());
+            }
+            return;
+        }
+        throw std::runtime_error("tokenizer.json decoder is not supported: " + dec.dump());
     }
 
     // Detect normalizer: check for Prepend (always prepend ▁) vs none

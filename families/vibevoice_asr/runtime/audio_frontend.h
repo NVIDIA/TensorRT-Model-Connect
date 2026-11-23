@@ -16,6 +16,12 @@ std::vector<float> downmix(const float* interleaved, std::size_t frames, std::ui
 // Largest exact polyphase table the resampler precomputes, in coefficients.
 inline constexpr std::size_t kMaxResampleTable = std::size_t{1} << 20;
 
+// Length of resample()'s output for `samples` input samples,
+// ceil(samples * to_rate / from_rate), computed without resampling so a request
+// can be sized first. Throws std::invalid_argument for a rate that is not
+// positive or a length beyond the int64 range.
+std::size_t resampled_length(std::size_t samples, std::int32_t from_rate, std::int32_t to_rate);
+
 // Kaiser-windowed sinc polyphase resampler. The output holds
 // ceil(input.size() * to_rate / from_rate) samples, the length librosa.resample
 // returns, so the speech-token count and stated duration follow the reference.
