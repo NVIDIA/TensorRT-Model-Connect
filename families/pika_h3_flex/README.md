@@ -15,8 +15,9 @@ The transformer graphs preserve the checkpoint's BF16 normalization, dense,
 LoRA, activation and attention boundaries through family-owned LibTorch
 bindings on the public TVM-FFI interface. Timestep features and projections
 retain their FP32 arithmetic. The native runtime registers these bindings
-before loading transformer engines; building and running requires matching
-LibTorch CUDA libraries and the TVM-FFI bridge. The FP32 media decoders use
+before loading transformer engines and reuses a managed execution stream across
+blocks so temporary allocation caches remain bounded. Building and running
+requires matching LibTorch CUDA libraries and the TVM-FFI bridge. The FP32 media decoders use
 TensorRT operations.
 
 `seed` selects the portable CPU-generator stream, defaulting to 42. The runtime
@@ -39,12 +40,12 @@ its revision as unverified. The CPU-generator and operator comparisons use PyTor
 full generation accuracy remains unqualified. Native Torch must use the same C++
 ABI as the runtime toolchain; configuration rejects an incompatible distribution.
 The oracle keeps the complete FP32 audio VAE on CUDA because its weight-normalized
-convolutions do not support group offloading. The remaining components use
-Diffusers leaf-level CPU offloading so the complete transformer partition does
-not need to reside on the GPU. This requires sufficient host RAM for the
-checkpoint and trades transfer time for lower device memory use. The
-original model, dtypes, scheduler, prompts, seeds and comparison gates remain the
-same.
+convolutions do not support group offloading. It loads the other neural components
+one at a time and stages their weights in a temporary directory using Diffusers
+disk-backed leaf offloading. This bounds resident host weights and requires
+scratch disk space for the offloaded components. It trades transfer time for
+lower host and device memory use. The original model, dtypes, scheduler, prompts,
+seeds and comparison gates remain the same.
 
 Prepare the manifest's isolated reference environment through the repository's
 setup step; the original Diffusers and Transformers pins remain in

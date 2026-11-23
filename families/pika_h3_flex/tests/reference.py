@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """The pinned official six-step Pika pipeline, in its own CUDA process."""
 
+import gc
 import json
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -14,49 +17,48 @@ from diffusers import ModularPipeline
 from diffusers.hooks.group_offloading import apply_group_offloading
 
 
-def main():
-    directory, input_path, output_dir = map(Path, sys.argv[1:])
-    manifest, case = json.loads(input_path.read_text())
-    assert transformers.__version__ == "5.15.0"
-    assert torch.__version__.split("+")[0] == "2.12.0"
-    (output_dir / "reference-environment.json").write_text(
-        json.dumps(
-            {
-                "python": sys.executable,
-                "torch": torch.__version__,
-                "transformers": transformers.__version__,
-                "diffusers": diffusers.__version__,
-            }
+@contextmanager
+def _reference_pipeline(directory, output_dir):
+    # Load and stage one component at a time so the reference does not retain
+    # the complete text encoder, transformer and decoders in resident CPU RAM.
+    with tempfile.TemporaryDirectory(prefix="reference-offload-", dir=output_dir) as scratch:
+        pipeline = ModularPipeline.from_pretrained(
+            str(directory), workflow="t2va", local_files_only=True
         )
-    )
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    pipeline = ModularPipeline.from_pretrained(
-        str(directory), workflow="t2va", local_files_only=True
-    )
-    pipeline.load_components(
-        pretrained_model_name_or_path=str(directory),
-        local_files_only=True,
-        dtype={"vae": torch.float32, "audio_vae": torch.float32, "default": torch.bfloat16},
-    )
-    pipeline.load_lora_weights(
-        str(directory), weight_name="fl2va/adapter.safetensors", local_files_only=True
-    )
-    pipeline.text_encoder.set_attn_implementation("eager")
-    # The audio VAE opts out of group offloading: its weight_norm pre-hooks run
-    # before leaf weights are onloaded. Keep this complete FP32 component on CUDA.
-    pipeline.audio_vae.to("cuda")
-    # Keep the remaining weights on CPU and place only the active leaf on CUDA.
-    # Whole-component offload would require the full transformer on the GPU.
-    for component in pipeline.components.values():
-        if isinstance(component, torch.nn.Module) and component is not pipeline.audio_vae:
-            apply_group_offloading(
-                component,
-                onload_device=torch.device("cuda"),
-                offload_device=torch.device("cpu"),
-                offload_type="leaf_level",
-                use_stream=False,
-            )
+        options = {"pretrained_model_name_or_path": str(directory), "local_files_only": True}
+        for name in ("transformer", "text_encoder", "vae", "audio_vae"):
+            dtype = torch.float32 if name in {"vae", "audio_vae"} else torch.bfloat16
+            pipeline.load_components(names=name, dtype=dtype, **options)
+            component = getattr(pipeline, name)
+            if name == "transformer":
+                pipeline.load_lora_weights(
+                    str(directory), weight_name="fl2va/adapter.safetensors", local_files_only=True
+                )
+            if name == "text_encoder":
+                component.set_attn_implementation("eager")
+            if name == "audio_vae":
+                # weight_norm pre-hooks require this complete FP32 component
+                # on CUDA; the audio VAE opts out of group offloading.
+                component.to("cuda")
+            else:
+                apply_group_offloading(
+                    component,
+                    onload_device=torch.device("cuda"),
+                    offload_device=torch.device("cpu"),
+                    offload_type="leaf_level",
+                    use_stream=False,
+                    offload_to_disk_path=str(Path(scratch) / name),
+                )
+            gc.collect()
+        # Tokenizers, processors and schedulers do not retain neural weights.
+        pipeline.load_components(
+            dtype={"vae": torch.float32, "audio_vae": torch.float32, "default": torch.bfloat16},
+            **options,
+        )
+        yield pipeline
+
+
+def _generate(pipeline, manifest, case, output_dir):
     assert pipeline.vae.use_tiling
     assert pipeline.vae.tile_sample_min_height == pipeline.vae.tile_sample_min_width == 256
     assert pipeline.config.denoising_step_list == [1000, 750, 500, 250, 100, 40, 0]
@@ -80,6 +82,30 @@ def main():
         video.astype("<f4").tofile(output_dir / f"reference-video-{index}.f32")
         audio.astype("<f4").tofile(output_dir / f"reference-audio-{index}.f32")
         print(f"Official Pika H3 Flex completed prompt {index}", flush=True)
+        del result, video, audio
+        gc.collect()
+
+
+def main():
+    directory, input_path, output_dir = map(Path, sys.argv[1:])
+    manifest, case = json.loads(input_path.read_text())
+    assert transformers.__version__ == "5.15.0"
+    assert torch.__version__.split("+")[0] == "2.12.0"
+    (output_dir / "reference-environment.json").write_text(
+        json.dumps(
+            {
+                "python": sys.executable,
+                "torch": torch.__version__,
+                "transformers": transformers.__version__,
+                "diffusers": diffusers.__version__,
+                "weight_offload": "leaf_level_temporary_disk",
+            }
+        )
+    )
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    with _reference_pipeline(directory, output_dir) as pipeline:
+        _generate(pipeline, manifest, case, output_dir)
 
 
 if __name__ == "__main__":
