@@ -85,16 +85,12 @@ class TextAttention(nn.Module):
         query, key = rotary_positions(query, key, *position_embeddings)
         key = repeat_kv(key, module.num_key_value_groups)
         value = repeat_kv(value, module.num_key_value_groups)
-        scores = torch.matmul(query.float(), key.float().transpose(-1, -2)).to(query.dtype)
+        scores = torch.matmul(query, key.transpose(-1, -2))
         scores = (scores.float() * module.scaling).to(query.dtype)
         if attention_mask is not None:
             scores = (scores.float() + attention_mask.float()).to(query.dtype)
-        # Keep eager Qwen's separate BF16 score and scale boundaries.
-        # Express stable softmax in FP32 so fusion retains those boundaries.
-        wide = scores.float()
-        exponentials = torch.exp(wide - wide.amax(dim=-1, keepdim=True))
-        probabilities = (exponentials / exponentials.sum(dim=-1, keepdim=True)).to(query.dtype)
-        output = torch.matmul(probabilities.float(), value.float()).to(query.dtype)
+        probabilities = torch.softmax(scores.float(), dim=-1).to(query.dtype)
+        output = torch.matmul(probabilities, value)
         output = output.transpose(1, 2).reshape(*hidden_states.shape[:-1], -1)
         return module.o_proj(output), None
 
@@ -281,12 +277,32 @@ def export_silu(values):
     return op.CastLike(wide * op.Sigmoid(wide), values)
 
 
+def export_softmax(values, dim: int, dtype: int = -1):
+    """Keep FP32 probability normalization after the rounded text scores."""
+    from onnxscript import opset23 as op
+
+    exponentials = op.Exp(values - op.ReduceMax(values, [dim], keepdims=1))
+    return exponentials / op.ReduceSum(exponentials, [dim], keepdims=1)
+
+
+def export_internal_softmax(values, dim: int, half_to_float: bool = False):
+    return export_softmax(values, dim)
+
+
 def compile_engine(
     module, inputs, input_names, output_name, directory: Path, verbose=False, sequence_bounds=None
 ):
     import onnxscript.optimizer
     import tensorrt as trt
 
+    translations = {torch.ops.aten.silu.default: export_silu}
+    if isinstance(module, TextEncoder):
+        translations.update(
+            {
+                torch.ops.aten.softmax.int: export_softmax,
+                torch.ops.aten._softmax.default: export_internal_softmax,
+            }
+        )
     path = directory / "component.onnx"
     dynamic_shapes = None
     if sequence_bounds is not None and sequence_bounds[0] < sequence_bounds[1]:
@@ -302,7 +318,7 @@ def compile_engine(
             dynamo=True,
             optimize=False,
             dynamic_shapes=dynamic_shapes,
-            custom_translation_table={torch.ops.aten.silu.default: export_silu},
+            custom_translation_table=translations,
         )
     # Fold constant axes without the exporter's algebraic pattern rewrites:
     # its RMSNormalization fusion moves a BF16 cast before the affine multiply.
