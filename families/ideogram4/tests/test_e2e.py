@@ -43,7 +43,12 @@ def caption(color):
     return json.dumps(
         {
             "high_level_description": f"A {color} cup on a white table.",
-            "style_description": {"photo": "Studio product photography", "medium": "photograph"},
+            "style_description": {
+                "aesthetics": "Minimalist",
+                "lighting": "Soft studio light",
+                "photo": "Studio product photography",
+                "medium": "photograph",
+            },
             "compositional_deconstruction": {
                 "background": "White studio.",
                 "elements": [
