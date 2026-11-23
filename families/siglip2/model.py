@@ -176,7 +176,7 @@ def _named_token(config: dict, name: str) -> str:
     return str(token)
 
 
-def _tokenizer_contract(model_dir: Path) -> int:
+def _tokenizer_contract(model_dir: Path, embedding_rows: int | None = None) -> int:
     """Check the tokenizer is the one the runtime reproduces; return the pad id.
 
     The runtime tokenizer reproduces a SentencePiece-style BPE with byte fallback whose
@@ -222,6 +222,11 @@ def _tokenizer_contract(model_dir: Path) -> int:
             "siglip2 is qualified for a template that appends one end token")
     _check_bpe_options(model)
     _check_vocabulary(model["vocab"])
+    if embedding_rows is not None and len(model["vocab"]) > embedding_rows:
+        # The text engine gathers each id from the checkpoint's embedding rows without a range
+        # check, so every id the tokenizer can give must have its row.
+        raise ValueError(f"siglip2 tokenizer has {len(model['vocab'])} tokens but the text "
+                         f"embedding table has {embedding_rows} rows")
     _check_merges(model)
     _check_byte_fallback(model["vocab"])
     added_tokens = _added_tokens(tokenizer)
@@ -347,7 +352,7 @@ def build(request, writer) -> None:
                 "siglip2 prompt length is fixed at the checkpoint's window of "
                 f"{text['max_text_len']}")
 
-    pad_token_id = _tokenizer_contract(model_dir)
+    pad_token_id = _tokenizer_contract(model_dir, text["vocab_size"])
 
     # Stored the way the reference applies them: the scale in log space, used as
     # exp() of it, and the bias added after.

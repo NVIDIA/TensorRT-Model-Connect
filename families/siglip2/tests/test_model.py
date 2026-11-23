@@ -352,6 +352,16 @@ def test_the_prompt_window_is_not_a_capacity(tmp_path: Path) -> None:
         model_module.build(request, _Writer())
 
 
+def test_a_vocabulary_larger_than_the_embedding_table_is_refused(tmp_path: Path) -> None:
+    # The text engine gathers token ids from the checkpoint's embedding rows; this test
+    # vocabulary has 260 tokens and the table 100 rows.
+    model_dir = _checkpoint(tmp_path, _weights())
+    request = BuildRequest(model_dir=model_dir, output_path=tmp_path / "x.bundle", family="siglip2",
+                           task="text_to_embedding", precision="fp32")
+    with pytest.raises(ValueError, match="260 tokens but the text embedding table has 100 rows"):
+        model_module.build(request, _Writer())
+
+
 def test_a_reduced_precision_checkpoint_is_refused(tmp_path: Path) -> None:
     weights = _weights(**{"text_model.head.weight": np.zeros((_HIDDEN, _HIDDEN), np.float16)})
     model_dir = _checkpoint(tmp_path, weights)
