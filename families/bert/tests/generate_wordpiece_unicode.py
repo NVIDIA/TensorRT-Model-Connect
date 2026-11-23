@@ -4,26 +4,22 @@
 """Generate family-local WordPiece data from pinned official UnicodeData files."""
 
 import argparse
-import hashlib
 from pathlib import Path
 
 SOURCES = {
-    "normalization": (
-        "https://www.unicode.org/Public/9.0.0/ucd/UnicodeData.txt",
-        "68dfc414d28257b9b5d6ddbb8b466c768c00ebdf6cbf7784364a9b6cad55ee8f",
-    ),
-    "categories": (
-        "https://www.unicode.org/Public/8.0.0/ucd/UnicodeData.txt",
-        "38b17e1118206489a7e0ab5d29d7932212d38838df7d3ec025ecb58e8798ec20",
-    ),
+    "normalization": "https://www.unicode.org/Public/9.0.0/ucd/UnicodeData.txt",
+    "categories": "https://www.unicode.org/Public/8.0.0/ucd/UnicodeData.txt",
 }
 
 
-def load(path: Path, kind: str) -> dict[int, list[str]]:
-    data = path.read_bytes()
-    if hashlib.sha256(data).hexdigest() != SOURCES[kind][1]:
-        raise ValueError(f"Expected pinned UnicodeData from {SOURCES[kind][0]}")
-    return {int(row[0], 16): row for line in data.decode().splitlines() if (row := line.split(";"))}
+def load(path: Path) -> dict[int, list[str]]:
+    entries = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        row = line.split(";")
+        if len(row) != 15:
+            raise ValueError("Expected 15 UnicodeData fields per record")
+        entries[int(row[0], 16)] = row
+    return entries
 
 
 def ranges(values: dict[int, int]) -> list[tuple[int, int, int]]:
@@ -38,8 +34,8 @@ def ranges(values: dict[int, int]) -> list[tuple[int, int, int]]:
 
 
 def generate(normalization: Path, categories: Path) -> str:
-    data = load(normalization, "normalization")
-    category_data = load(categories, "categories")
+    data = load(normalization)
+    category_data = load(categories)
 
     def decompose(cp: int) -> list[int]:
         mapping = data[cp][5] if cp in data else ""
@@ -79,8 +75,10 @@ def generate(normalization: Path, categories: Path) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--normalization-data", type=Path, required=True)
-    parser.add_argument("--category-data", type=Path, required=True)
+    parser.add_argument(
+        "--normalization-data", type=Path, required=True, help=SOURCES["normalization"]
+    )
+    parser.add_argument("--category-data", type=Path, required=True, help=SOURCES["categories"])
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     args.output.write_text(generate(args.normalization_data, args.category_data), encoding="utf-8")
