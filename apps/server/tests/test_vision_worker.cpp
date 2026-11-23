@@ -22,6 +22,7 @@ void require(bool condition, const char* message) {
 class Vision final : public trtmc::IVisionLanguageGeneration, public trtmc::ITextGeneration {
   public:
     int calls{0};
+    int rejected{0};
     const char* task() const noexcept override { return IVisionLanguageGeneration::kTask; }
     std::int32_t default_max_new_tokens() const override { return 10; }
     trtmc::TextResult generate(const std::string&, const trtmc::TextGenerationConfig&) override {
@@ -30,6 +31,10 @@ class Vision final : public trtmc::IVisionLanguageGeneration, public trtmc::ITex
     trtmc::TextResult generate(const std::string& prompt, const float* pixels, std::int32_t height,
                                std::int32_t width,
                                const trtmc::TextGenerationConfig& config) override {
+        if (prompt == "Too long?") {
+            ++rejected;
+            throw std::invalid_argument("prompt has 9 tokens but the KV cache holds 4");
+        }
         require(prompt == "Color?" && height == 4 && width == 8 && pixels[0] == 1.0F &&
                     pixels[1] == 0.0F,
                 "original RGB geometry and question reach the Task");
@@ -61,6 +66,10 @@ void verify(const std::string& path) {
     bad_config["config"]["unknown"] = true;
     input << bad_config.dump() << '\n';
     input << Json{{"id", "text"}, {"op", "generate"}, {"prompt", "Color?"}}.dump() << '\n';
+    auto too_long = valid;
+    too_long["id"] = "too-long";
+    too_long["prompt"] = "Too long?";
+    input << too_long.dump() << '\n';
     input << valid.dump() << '\n';
     auto default_config = valid;
     default_config["id"] = "default-tokens";
@@ -72,14 +81,19 @@ void verify(const std::string& path) {
     std::istringstream stream(output.str());
     for (std::string line; std::getline(stream, line);)
         replies.push_back(Json::parse(line));
-    require(replies.size() == 7 && task.calls == 2 &&
+    require(replies.size() == 8 && task.calls == 2 && task.rejected == 1 &&
                 replies[0].at("capabilities") == Json::array({"vision_language_generation"}) &&
                 replies[0].at("default_max_new_tokens") == 10,
             "declared bundle capability prevents inherited text dispatch");
     for (std::size_t i = 1; i < 5; ++i)
         require(replies[i].at("error").at("type") == "invalid_request_error",
                 "invalid requests remain recoverable and never invoke the Task");
-    const auto result = replies[5].at("result");
+    // A request the Task rejects with std::invalid_argument, such as a prompt
+    // longer than its KV cache, is a request error; the worker keeps serving.
+    require(replies[5].at("id") == "too-long" &&
+                replies[5].at("error").at("type") == "invalid_request_error",
+            "a Task-rejected request remains recoverable");
+    const auto result = replies[6].at("result");
     require(result.at("text") == "Red. Complete answer." && result.at("completion_tokens") == 3 &&
                 result.at("image_height") == 4 && result.at("image_width") == 8 &&
                 result.at("model_call_ms").get<double>() >= 0 &&

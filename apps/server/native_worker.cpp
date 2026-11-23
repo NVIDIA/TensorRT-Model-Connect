@@ -259,6 +259,13 @@ int run_protocol(const Json& ready, const Operations& operations, std::istream& 
                 response = error_response(id, "runtime_error", "native worker operation failed");
                 fatal = true;
             }
+        } catch (const std::invalid_argument& error) {
+            // Pre-SDK Tasks run in process, so a request the model rejects,
+            // such as a prompt longer than its KV cache, arrives here instead
+            // of as TRTMC_INVALID_ARGUMENT. Answer it as the SDK path does.
+            std::cerr << "[trtmc.server.worker] " << error.what() << '\n';
+            response =
+                error_response(id, "invalid_request_error", "request is invalid for this model");
         } catch (const std::exception& error) {
             std::cerr << "[trtmc.server.worker] " << error.what() << '\n';
             response = error_response(id, "runtime_error", "native worker operation failed");
