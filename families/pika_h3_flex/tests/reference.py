@@ -43,10 +43,13 @@ def main():
         str(directory), weight_name="fl2va/adapter.safetensors", local_files_only=True
     )
     pipeline.text_encoder.set_attn_implementation("eager")
-    # Keep weights on CPU and place only the active leaf on CUDA. Whole-component
-    # offload still requires the complete transformer partition on the GPU.
+    # The audio VAE opts out of group offloading: its weight_norm pre-hooks run
+    # before leaf weights are onloaded. Keep this complete FP32 component on CUDA.
+    pipeline.audio_vae.to("cuda")
+    # Keep the remaining weights on CPU and place only the active leaf on CUDA.
+    # Whole-component offload would require the full transformer on the GPU.
     for component in pipeline.components.values():
-        if isinstance(component, torch.nn.Module):
+        if isinstance(component, torch.nn.Module) and component is not pipeline.audio_vae:
             apply_group_offloading(
                 component,
                 onload_device=torch.device("cuda"),

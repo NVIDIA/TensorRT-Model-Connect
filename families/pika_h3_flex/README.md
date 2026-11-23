@@ -30,9 +30,11 @@ manifest revision. An explicit override uses the given directory and records
 its revision as unverified. The CPU-generator and operator comparisons use PyTorch 2.12.0;
 full generation accuracy remains unqualified. Native Torch must use the same C++
 ABI as the runtime toolchain; configuration rejects an incompatible distribution.
-The oracle uses Diffusers leaf-level CPU offloading so the complete transformer
-partition does not need to reside on the GPU. This requires sufficient host RAM
-for the checkpoint and trades transfer time for lower device memory use. The
+The oracle keeps the complete FP32 audio VAE on CUDA because its weight-normalized
+convolutions do not support group offloading. The remaining components use
+Diffusers leaf-level CPU offloading so the complete transformer partition does
+not need to reside on the GPU. This requires sufficient host RAM for the
+checkpoint and trades transfer time for lower device memory use. The
 original model, dtypes, scheduler, prompts, seeds and comparison gates remain the
 same.
 
