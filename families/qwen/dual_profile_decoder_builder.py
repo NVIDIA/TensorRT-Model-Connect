@@ -59,6 +59,7 @@ from .native_kv_attention_builder import (
 
 from . import graph_ops
 from . import graph_blocks
+from .weightless import build_serialized_network
 
 # Tactic-selection point for the native-KV active key-row count (typical chat
 # and benchmark contexts); any count from 1 to the cache capacity is valid.
@@ -129,7 +130,8 @@ def _make_matmul_fn(
     if quant_ctx is None:
         def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
             return graph_ops.add_matmul_rhs_constant(
-                network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype)
+                network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype,
+                weight_name=weight_name)
         return matmul
 
     def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
@@ -815,7 +817,7 @@ def build_dual_profile_decoder_engine(
                  if isinstance(weights["w_out"], np.ndarray) else vocab)
     logits = graph_ops.add_matmul_rhs_constant(
         network, lm_input, hidden, out_vocab, weights["w_out"],
-        dtype=work_np_dtype)
+        dtype=work_np_dtype, weight_name="w_out")
     lm_bias = weights.get("lm_head_bias")
     if lm_bias is not None:
         logits = graph_ops.add_bias_sum(
@@ -852,7 +854,5 @@ def build_dual_profile_decoder_engine(
               f"precision={precision}) ...",
               file=sys.stderr)
 
-    plan = builder.build_serialized_network(network, trt_config)
-    if plan is None:
-        raise RuntimeError("dual-profile decoder engine build failed")
-    return bytes(plan)
+    return build_serialized_network(
+        builder, network, trt_config, logger)

@@ -21,6 +21,26 @@ constexpr int32_t kMagpieMinFrames = 4;
 constexpr int32_t kMagpieSpecialStart = 2016;
 constexpr int32_t kMagpieSpecialEnd = 2024; // exclusive
 
+// Additive attention-mask score for hidden columns.
+constexpr float kMagpieMaskedScore = -1.0e4F;
+
+#if defined(__CUDACC__)
+#define MAGPIE_HOST_DEVICE __host__ __device__
+#else
+#define MAGPIE_HOST_DEVICE
+#endif
+
+// Single-token decode mask over [max_length + 1] columns. Columns [0, position)
+// are the written KV-cache rows; the last column is the current token. Cache row
+// `position` is not written yet and stays hidden. Shared by the host mask
+// (MagpieKvCache::write_decode_mask) and the device mask kernel.
+MAGPIE_HOST_DEVICE inline float magpie_decode_mask_value(int32_t column, int32_t position,
+                                                         int32_t mask_len) {
+    return (column < position || column == mask_len - 1) ? 0.0F : kMagpieMaskedScore;
+}
+
+#undef MAGPIE_HOST_DEVICE
+
 // Mask forbidden special tokens in-place: set logit to -inf for all special tokens
 // except EOS (2017). If forbid_eos is true, also mask EOS.
 inline void mask_magpie_special_tokens(float* logits, int32_t cb_size, bool forbid_eos) {
@@ -110,6 +130,22 @@ inline bool should_run_magpie_periodic_check(int32_t frame, int32_t min_frames, 
 
 inline bool should_stop_magpie_on_eos(bool eos, int32_t frame, int32_t min_frames) {
     return eos && frame >= min_frames;
+}
+
+// NeMo-aligned EOS gating based on the attention prior's attended text position:
+// - unfinished (forbid EOS): attended_pos < text_len - 3
+// - finished (force EOS): attended_pos >= text_len - 2 for more than 5 frames
+struct MagpieEosGate {
+    bool forbid{false};
+    bool force{false};
+};
+
+inline MagpieEosGate magpie_eos_gate(bool has_attn_prior, int32_t attended_pos, int32_t text_len,
+                                     int32_t frames_past_text_consumed) {
+    MagpieEosGate gate;
+    gate.forbid = has_attn_prior && attended_pos < text_len - 3;
+    gate.force = has_attn_prior && attended_pos >= text_len - 2 && frames_past_text_consumed > 5;
+    return gate;
 }
 
 } // namespace trtmc

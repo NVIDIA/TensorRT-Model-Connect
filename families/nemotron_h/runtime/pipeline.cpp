@@ -32,12 +32,23 @@ RecurrentPipeline::RecurrentPipeline(std::unique_ptr<ITrtModule> decoder,
                                      RecurrentGenConfig config, cudaStream_t stream,
                                      const char* name, std::shared_ptr<ITokenizer> tokenizer,
                                      std::string model_id_str,
-                                     std::unique_ptr<NemotronHPairedDraft> paired)
+                                     std::unique_ptr<NemotronHPairedDraft> paired,
+                                     std::unique_ptr<ITrtModule> prefill)
     : decoder_(std::move(decoder)), state_(std::move(state)), config_(config), stream_(stream),
       name_(name), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
-      paired_(std::move(paired)) {
+      paired_(std::move(paired)), prefill_(std::move(prefill)) {
     if (!decoder_ || !decoder_->ok())
         throw std::runtime_error(std::string(name_) + ": invalid decoder module");
+    if (prefill_) {
+        if (!prefill_->ok() || paired_)
+            throw std::runtime_error(std::string(name_) +
+                                     ": batched prefill needs a plain text decoder");
+        const auto rows = prefill_->input_profile_shape("token_id", prefill_->profile_idx(),
+                                                        ProfileShapeSelector::kMax);
+        if (rows.size() != 1 || rows[0] < 1)
+            throw std::runtime_error(std::string(name_) + ": invalid prefill token profile");
+        prefill_rows_ = static_cast<int32_t>(std::min<int64_t>(rows[0], state_->max_length()));
+    }
 }
 
 RecurrentPipeline::~RecurrentPipeline() = default;
@@ -111,9 +122,15 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
 
     // ── Prefill phase ──
     auto t_prefill_start = SteadyClock::now();
-    for (std::size_t i = 0; i < input_ids.size(); ++i)
-        run_step(input_ids[i], logits,
-                 nemotron_h_recurrent::prefill_step_needs_logits(i, input_ids.size()));
+    // A prompt longer than the cache keeps the token loop, whose KV cache
+    // slides once full.
+    if (prefill_ && static_cast<int64_t>(input_ids.size()) <= state_->max_length()) {
+        run_prefill_chunks(input_ids, logits);
+    } else {
+        for (std::size_t i = 0; i < input_ids.size(); ++i)
+            run_step(input_ids[i], logits,
+                     nemotron_h_recurrent::prefill_step_needs_logits(i, input_ids.size()));
+    }
     auto t_prefill_end = SteadyClock::now();
 
     // ── Decode phase ──
@@ -276,6 +293,31 @@ void RecurrentPipeline::report_timing(SteadyClock::time_point t_prefill_start,
                   << host_outputs.tensor_count << " tensor/copy, " << prof_logits_copies_
                   << " copies)\n";
     }
+}
+
+void RecurrentPipeline::run_prefill_chunks(const std::vector<int32_t>& input_ids,
+                                           std::vector<float>& logits) {
+    const auto total = static_cast<int32_t>(input_ids.size());
+    state_->bind_prefill(*prefill_);
+    for (int32_t start = 0; start < total; start += prefill_rows_) {
+        const int32_t rows = std::min(prefill_rows_, total - start);
+        TensorMap inputs;
+        inputs["token_id"] =
+            Tensor{const_cast<int32_t*>(input_ids.data() + start), {rows}, DType::kInt32};
+        state_->prepare_step(inputs, rows);
+        prefill_->forward_async(inputs);
+        state_->commit_prefill(*prefill_, rows);
+    }
+    prefill_->sync();
+    const auto* device_logits = prefill_->device_ptr("logits");
+    if (device_logits == nullptr)
+        throw std::runtime_error(std::string(name_) + ": prefill context has no logits output");
+    logits.resize(static_cast<std::size_t>(config_.vocab_size));
+    const cudaError_t copied = cudaMemcpy(logits.data(), device_logits,
+                                          logits.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    if (copied != cudaSuccess)
+        throw std::runtime_error(std::string(name_) +
+                                 ": failed to copy prefill logits: " + cudaGetErrorString(copied));
 }
 
 void RecurrentPipeline::run_step(int32_t token_id, std::vector<float>& logits, bool copy_logits) {

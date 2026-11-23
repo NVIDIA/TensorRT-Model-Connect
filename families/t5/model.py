@@ -240,7 +240,7 @@ class _T5Model:
         emb = graph_ops.add_constant(
             network, (vs, h), weights["shared_embedding"], dtype=work_np_dtype
         )
-        hs = network.add_gather(emb, token_id, 0).get_output(0)
+        hs = _as_dtype(network, network.add_gather(emb, token_id, 0).get_output(0), trt.float32)
         ck_work = [
             network.add_cast(value, work_trt_dtype).get_output(0)
             if value.dtype != work_trt_dtype
@@ -310,6 +310,7 @@ class _T5Model:
             if debug_layer_outputs:
                 _mark_debug_output(network, hs, f"debug_hidden_{li}")
         hs = graph_ops.add_rms_norm(network, hs, h, weights["final_norm"], et, dtype=work_np_dtype)
+        hs = _as_dtype(network, hs, work_trt_dtype)
         logits = graph_ops.add_matmul_rhs_constant(
             network, hs, h, vs, weights["w_out"], dtype=work_np_dtype
         )
@@ -380,6 +381,13 @@ def _project(network, lhs, lhs_width, rhs_width, weights, name, dtype, quant_ctx
     )
 
 
+def _as_dtype(network, tensor, dtype):
+    """Cast only when a T5 precision boundary changes the tensor dtype."""
+    if tensor.dtype == dtype:
+        return tensor
+    return network.add_cast(tensor, dtype).get_output(0)
+
+
 def _build_t5_encoder(config, weights, *, verbose=False, precision="fp32", quant_ctx=None):
     el = weights["_enc_layers"]
     nh = weights["_num_heads"]
@@ -419,7 +427,8 @@ def _build_t5_encoder(config, weights, *, verbose=False, precision="fp32", quant
     if enc_mask_broadcast.dtype != work_trt_dtype:
         enc_mask_broadcast = network.add_cast(enc_mask_broadcast, work_trt_dtype).get_output(0)
     emb = graph_ops.add_constant(network, (vs, h), weights["shared_embedding"], dtype=work_np_dtype)
-    hs = network.add_gather(emb, ids, 0).get_output(0)
+    # T5 residuals can exceed FP16 even when all projection inputs are finite.
+    hs = _as_dtype(network, network.add_gather(emb, ids, 0).get_output(0), trt.float32)
     rpb = None
     if "enc_rel_attn_bias" in weights:
         bt = weights["enc_rel_attn_bias"]
@@ -435,6 +444,7 @@ def _build_t5_encoder(config, weights, *, verbose=False, precision="fp32", quant
         normed = graph_ops.add_rms_norm(
             network, hs, h, weights[f"{pfx}.attn_norm"], et, dtype=work_np_dtype
         )
+        normed = _as_dtype(network, normed, work_trt_dtype)
         attn = _add_t5_enc_sa(
             network,
             normed,
@@ -450,14 +460,24 @@ def _build_t5_encoder(config, weights, *, verbose=False, precision="fp32", quant
             dtype=work_np_dtype,
             quant_ctx=quant_ctx,
         )
-        hs = network.add_elementwise(hs, attn, trt.ElementWiseOperation.SUM).get_output(0)
+        hs = network.add_elementwise(
+            hs, _as_dtype(network, attn, hs.dtype), trt.ElementWiseOperation.SUM
+        ).get_output(0)
         fn = graph_ops.add_rms_norm(
             network, hs, h, weights[f"{pfx}.ffn_norm"], et, dtype=work_np_dtype
         )
+        fn = _as_dtype(network, fn, work_trt_dtype)
         f1 = _project(network, fn, h, dff, weights, f"{pfx}.w_fc1", work_np_dtype, quant_ctx)
         a = network.add_activation(f1, trt.ActivationType.RELU)
         f2 = _project(
-            network, a.get_output(0), dff, h, weights, f"{pfx}.w_fc2", work_np_dtype, quant_ctx
+            network,
+            _as_dtype(network, a.get_output(0), trt.float32),
+            dff,
+            h,
+            weights,
+            f"{pfx}.w_fc2",
+            np.float32,
+            quant_ctx,
         )
         hs = network.add_elementwise(hs, f2, trt.ElementWiseOperation.SUM).get_output(0)
     hs = graph_ops.add_rms_norm(network, hs, h, weights["enc_final_norm"], et, dtype=work_np_dtype)
@@ -549,6 +569,8 @@ def _add_t5_decoder_layer(
     normed = graph_ops.add_rms_norm(
         network, hidden, h, weights[f"{prefix}.input_norm"], eps_tensor, dtype=dtype
     )
+    work_trt_dtype = trt.float16 if dtype == np.float16 else trt.float32
+    normed = _as_dtype(network, normed, work_trt_dtype)
     q = _project(network, normed, h, asz, weights, f"{prefix}.w_q", dtype, quant_ctx)
     k = _project(network, normed, h, asz, weights, f"{prefix}.w_k", dtype, quant_ctx)
     v = _project(network, normed, h, asz, weights, f"{prefix}.w_v", dtype, quant_ctx)
@@ -589,10 +611,13 @@ def _add_t5_decoder_layer(
         scale=1.0,
     )
     sa = _project(network, cf, asz, h, weights, f"{prefix}.w_o", dtype, quant_ctx)
-    psa = network.add_elementwise(hidden, sa, trt.ElementWiseOperation.SUM).get_output(0)
+    psa = network.add_elementwise(
+        hidden, _as_dtype(network, sa, hidden.dtype), trt.ElementWiseOperation.SUM
+    ).get_output(0)
     cn = graph_ops.add_rms_norm(
         network, psa, h, weights[f"{prefix}.cross_attn_norm"], eps_tensor, dtype=dtype
     )
+    cn = _as_dtype(network, cn, work_trt_dtype)
     cq = _project(network, cn, h, asz, weights, f"{prefix}.cross_w_q", dtype, quant_ctx)
     ckp = _project(network, cross_k, h, asz, weights, f"{prefix}.cross_w_k", dtype, quant_ctx)
     cvp = _project(network, cross_v, h, asz, weights, f"{prefix}.cross_w_v", dtype, quant_ctx)
@@ -628,14 +653,24 @@ def _add_t5_decoder_layer(
         scale=1.0,
     )
     ca = _project(network, ccf, asz, h, weights, f"{prefix}.cross_w_o", dtype, quant_ctx)
-    pca = network.add_elementwise(psa, ca, trt.ElementWiseOperation.SUM).get_output(0)
+    pca = network.add_elementwise(
+        psa, _as_dtype(network, ca, psa.dtype), trt.ElementWiseOperation.SUM
+    ).get_output(0)
     fn = graph_ops.add_rms_norm(
         network, pca, h, weights[f"{prefix}.post_attn_norm"], eps_tensor, dtype=dtype
     )
+    fn = _as_dtype(network, fn, work_trt_dtype)
     f1 = _project(network, fn, h, ffn_dim, weights, f"{prefix}.w_fc1", dtype, quant_ctx)
     act = network.add_activation(f1, trt.ActivationType.RELU)
     f2 = _project(
-        network, act.get_output(0), ffn_dim, h, weights, f"{prefix}.w_fc2", dtype, quant_ctx
+        network,
+        _as_dtype(network, act.get_output(0), trt.float32),
+        ffn_dim,
+        h,
+        weights,
+        f"{prefix}.w_fc2",
+        np.float32,
+        quant_ctx,
     )
     out = network.add_elementwise(pca, f2, trt.ElementWiseOperation.SUM).get_output(0)
     return {"hidden": out, "present_k": present_k, "present_v": present_v}

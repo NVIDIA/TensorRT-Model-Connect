@@ -8,10 +8,14 @@ numpy
 pillow
 pyyaml
 soundfile
-transformers
+# Prompt building and truncation tokenize here: every host must resolve the same version (split campaigns
+# require it), so it is pinned.
+transformers==5.23.0
 # chrF++ of translations (absolute accuracy)
 sacrebleu==2.5.1
 # COCO mAP of detections (absolute accuracy)
 pycocotools==2.0.10
+# S3DIS point-cloud blocks (the PointNet authors' HDF5 release)
+h5py
 # Student-t quantiles (non-inferiority bounds, Perf speedup intervals)
 scipy

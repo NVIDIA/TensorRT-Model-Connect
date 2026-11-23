@@ -6,9 +6,11 @@ from __future__ import annotations
 import inspect
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -18,8 +20,9 @@ import pytest
 import yaml
 
 from tools.ci.context import CiContext
+from tools.ci import environment as reference
 from tools.ci.container import CiContainer
-from tools.ci.docker_image import DockerImageManager
+from tools.ci.docker_image import DockerImageManager, toolchain_identity
 from tools.ci.e2e import (
     E2ERunner,
     SDK_CONSUMER_LANGUAGES,
@@ -49,6 +52,8 @@ class RecordingContext:
         self.no_family_ctests = False
         self.no_cpu_family_tests = False
         self.missing_e2e_testcases = set()
+        self.failing_hardware = False
+        self.hardware_exit_code = 0
 
     def run(self, command, **kwargs):
         self.calls.append((list(command), kwargs))
@@ -91,7 +96,10 @@ class RecordingContext:
         if "--junitxml" in command:
             report = Path(command[command.index("--junitxml") + 1])
             empty = self.no_cpu_family_tests and "-unit-junit.xml" in report.name
+            failing = self.failing_hardware and "-hardware-junit.xml" in report.name
             testcases = "" if empty else '<testcase name="hardware" />'
+            if failing:
+                testcases = '<testcase name="hardware"><failure /></testcase>'
             if any(str(item).endswith("/test_e2e.py") for item in command):
                 family = str(command[3]).split("/")[1]
                 if "--e2e-testcase" in command:
@@ -114,6 +122,10 @@ class RecordingContext:
             )
             if empty:
                 return SimpleNamespace(stdout="", returncode=5)
+            if failing:
+                return SimpleNamespace(stdout="", returncode=1)
+            if "-hardware-junit.xml" in report.name and self.hardware_exit_code:
+                return SimpleNamespace(stdout="", returncode=self.hardware_exit_code)
         return SimpleNamespace(stdout="", returncode=0)
 
 
@@ -297,6 +309,98 @@ def test_family_with_only_hardware_tests_accepts_exact_empty_cpu_result(
     ]
 
 
+def _hardware_family(tmp_path: Path, env: dict[str, str]) -> RecordingContext:
+    family = tmp_path / "families/beta"
+    (family / "tests/manifests").mkdir(parents=True)
+    (family / "model.py").write_text("def build(request, writer): pass\n")
+    (family / "tests/test_e2e.py").write_text("def test_e2e(): pass\n")
+    (family / "tests/manifests/case.json").write_text(
+        json.dumps({"testcases": [{"name": "beta-case"}]}), encoding="utf-8"
+    )
+    (family / "tests/test_gpu.py").write_text(
+        "import pytest\n\n@pytest.mark.gpu\ndef test_gpu(): pass\n", encoding="utf-8"
+    )
+    binary = tmp_path / "trtmc"
+    binary.write_text("")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    for name in (
+        "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
+        "libtrtmc_backend_trt.so",
+        "libtrtmc_model_beta.so",
+    ):
+        (runtime / name).write_text("")
+    native_build = tmp_path / "native-build"
+    native_build.mkdir()
+    (native_build / "CTestTestfile.cmake").write_text("")
+    context = RecordingContext(
+        tmp_path,
+        {
+            "TRTMC_BINARY": str(binary),
+            "TRTMC_RUNTIME_ROOT": str(runtime),
+            "TRTMC_NATIVE_BUILD_DIR": str(native_build),
+            **env,
+        },
+    )
+    context.failing_hardware = True
+    return context
+
+
+def _pytest_calls(context: RecordingContext, marker: str) -> list[list]:
+    return [
+        command
+        for command, _ in context.calls
+        if command[:3] == ["python", "-m", "pytest"] and any(marker in str(item) for item in command)
+    ]
+
+
+def test_hardware_failure_stops_the_family_by_default(tmp_path: Path) -> None:
+    context = _hardware_family(tmp_path, {})
+
+    with pytest.raises(CiError, match="family hardware tests"):
+        E2ERunner(context)._run(("beta",))
+
+    assert _pytest_calls(context, "test_e2e.py") == []
+    assert "-x" in _pytest_calls(context, "test_gpu.py")[-1]
+
+
+def test_stop_after_sweep_reports_a_hardware_exit_code_behind_passing_junit(
+    tmp_path: Path,
+) -> None:
+    context = _hardware_family(tmp_path, {"TRTMC_E2E_STOP_AFTER": "loaded"})
+    context.failing_hardware = False
+    context.hardware_exit_code = 2
+
+    with pytest.raises(CiError, match="exited with code 2 after a passing JUnit report"):
+        E2ERunner(context)._run(("beta",))
+
+    assert len(_pytest_calls(context, "test_e2e.py")) == 1
+
+
+def test_stop_after_sweep_runs_every_case_and_still_reports_hardware_failure(
+    tmp_path: Path,
+) -> None:
+    context = _hardware_family(tmp_path, {"TRTMC_E2E_STOP_AFTER": "loaded"})
+
+    with pytest.raises(CiError, match="family hardware tests"):
+        E2ERunner(context)._run(("beta",))
+
+    hardware = [
+        (command, options)
+        for command, options in context.calls
+        if "-hardware-junit.xml" in str(command[-1])
+    ]
+    assert len(hardware) == 1
+    assert "-x" not in hardware[0][0]
+    assert hardware[0][1]["check"] is False
+    e2e = _pytest_calls(context, "test_e2e.py")
+    assert len(e2e) == 1
+    assert "-x" not in e2e[0]
+
+
 def test_family_cpp_skip_fails_closed(tmp_path: Path) -> None:
     family = tmp_path / "families/beta"
     family.mkdir(parents=True)
@@ -459,6 +563,47 @@ def test_e2e_junit_fails_closed_for_invalid_result_cardinality_or_skip(
 
     with pytest.raises(CiError, match=message):
         _require_e2e_junit(report, "family", requested)
+
+
+def test_e2e_junit_accepts_a_testcase_stopped_after_the_requested_stage(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report = tmp_path / "e2e.xml"
+    report.write_text(
+        '<testsuites><testsuite><testcase name="test_e2e[alpha]">'
+        '<skipped message="trtmc-e2e-stopped-after:loaded" />'
+        '</testcase><testcase name="test_e2e[beta]" /></testsuite></testsuites>',
+        encoding="utf-8",
+    )
+
+    _require_e2e_junit(report, "family", ("alpha", "beta"), stop_after="loaded")
+
+    assert (
+        "family E2E results: requested=2 executed=1 passed=1 failed=0 skipped=0 "
+        "stopped_after_loaded=1" in capsys.readouterr().out
+    )
+
+
+@pytest.mark.parametrize(
+    ("message", "stop_after"),
+    (
+        ("trtmc-e2e-stopped-after:loaded", ""),
+        ("trtmc-e2e-stopped-after:native", "loaded"),
+        ("real family E2E requires TRTMC_E2E=1", "loaded"),
+    ),
+)
+def test_e2e_junit_rejects_other_skips_in_a_stopped_run(
+    tmp_path: Path, message: str, stop_after: str
+) -> None:
+    report = tmp_path / "e2e.xml"
+    report.write_text(
+        '<testsuites><testsuite><testcase name="test_e2e[alpha]">'
+        f'<skipped message="{message}" /></testcase></testsuite></testsuites>',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CiError, match="requested E2E testcase skipped: alpha"):
+        _require_e2e_junit(report, "family", ("alpha",), stop_after=stop_after)
 
 
 @pytest.mark.parametrize(
@@ -746,12 +891,83 @@ def test_internal_bridge_waits_for_the_exact_run_until_the_job_timeout() -> None
         "\n  publish:", 1
     )[0]
     assert "while true; do" in wait
-    assert "sleep 15" in wait
+    assert "poll_seconds=120" in wait and 'sleep "$poll_seconds"' in wait
     assert "seq " not in wait
     assert "gh run download" not in source
     assert "tools.public_failure" not in source
     assert "policy_sha" not in source
     assert "Protected failure details are not transferred to the public repository." in source
+
+
+def _run_bridge_wait(
+    tmp_path: Path, responses: list[str]
+) -> tuple[subprocess.CompletedProcess, list[str], Path]:
+    """Run the bridge wait step against a fake gh that answers the run polls with ``responses``."""
+    path = Path(__file__).resolve().parents[2] / ".github/workflows/internal-ci-bridge.yml"
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    script = next(
+        step["run"]
+        for step in workflow["jobs"]["dispatch"]["steps"]
+        if step["name"] == "Wait for the exact Internal CI result"
+    )
+    queue, calls, output = tmp_path / "responses", tmp_path / "calls", tmp_path / "output"
+    queue.write_text("".join(f"{response}\n" for response in responses), encoding="utf-8")
+    (tmp_path / "gh").write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "gh $*" >> "$CALLS"\n'
+        'if [[ "$*" == *" /rate_limit "* ]]; then echo $(( $(date +%s) + 300 )); exit 0; fi\n'
+        'next=$(head -n 1 "$RESPONSES")\n'
+        'tail -n +2 "$RESPONSES" > "$RESPONSES.rest" && mv "$RESPONSES.rest" "$RESPONSES"\n'
+        'case "$next" in\n'
+        '  rate) echo "gh: API rate limit exceeded for user ID 1." >&2; exit 1 ;;\n'
+        '  missing) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;\n'
+        '  *) echo "$next" ;;\n'
+        "esac\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "sleep").write_text(
+        '#!/usr/bin/env bash\necho "sleep $*" >> "$CALLS"\n', encoding="utf-8"
+    )
+    for fake in ("gh", "sleep"):
+        (tmp_path / fake).chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            "CALLS": str(calls),
+            "RESPONSES": str(queue),
+            "RUN_ID": "7",
+            "PRIVATE_CI_OWNER": "owner",
+            "PRIVATE_CI_REPOSITORY": "repo",
+            "GITHUB_OUTPUT": str(output),
+            "RUNNER_TEMP": str(tmp_path),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return result, calls.read_text(encoding="utf-8").splitlines(), output
+
+
+def test_internal_bridge_waits_out_a_rate_limit_instead_of_failing_the_gate(tmp_path: Path) -> None:
+    result, calls, output = _run_bridge_wait(
+        tmp_path,
+        ["rate", '{"status": "queued"}', '{"status": "completed", "conclusion": "success"}'],
+    )
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == "conclusion=success\n"
+    assert "rate limit reached" in result.stdout
+    sleeps = [int(call.split()[1]) for call in calls if call.startswith("sleep ")]
+    # The first wait lasts until the token's reset instead of failing the gate.
+    assert len(sleeps) == 2 and 290 <= sleeps[0] <= 305
+    assert sleeps[1] == 120  # an ordinary poll
+
+
+def test_internal_bridge_still_fails_on_other_api_errors(tmp_path: Path) -> None:
+    result, calls, output = _run_bridge_wait(tmp_path, ["missing"])
+    assert result.returncode != 0 and "Not Found" in result.stderr
+    assert not output.exists() and not [call for call in calls if call.startswith("sleep ")]
 
 
 def test_internal_bridge_remains_a_one_shot_maintainer_label_trigger() -> None:
@@ -1009,6 +1225,68 @@ def test_docker_ensure_builds_the_current_dockerfile(
     assert manager.ensure() == "trtmc:test"
     assert commands == [["docker", "build", "--file", "Dockerfile", "--tag", "trtmc:test", "."]]
     assert github_env.read_text() == "TRTMC_CI_IMAGE=trtmc:test\n"
+
+
+def test_docker_ensure_defaults_to_the_tag_of_the_pinned_tensorrt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "pyproject.toml").write_text('dependencies = ["tensorrt==12.0.1.5"]\n')
+    (tmp_path / "Dockerfile").write_text('RUN pip install "tensorrt==12.0.1.5"\n')
+    manager = DockerImageManager(tmp_path, {"GITHUB_ENV": str(tmp_path / "github-env")})
+    commands = []
+    monkeypatch.setattr(
+        manager.commands,
+        "run",
+        lambda command, **_kwargs: commands.append(command) or SimpleNamespace(returncode=0),
+    )
+
+    assert manager.ensure() == "trtmc-ci:trt12.0"
+    assert commands[0][-2] == "trtmc-ci:trt12.0"
+
+
+def test_toolchain_identity_reads_the_pin_and_the_gating_dockerfile(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text('dependencies = ["tensorrt==11.4.0.106"]\n')
+    dockerfile = (
+        "FROM nvidia/cuda:13.4.3-devel-ubuntu24.04@sha256:abc AS base\n"
+        'RUN apt-get install "libnvinfer11=11.4.0.106-1+cuda13.4" '
+        '"libnvinfer-dev=11.4.0.106-1+cuda13.4" "libnvonnxparsers-dev=11.4.0.106-1+cuda13.4"\n'
+        'RUN pip install "tensorrt==11.4.0.106"\n'
+        "RUN python -c \"import tensorrt; assert tensorrt.__version__ == '11.4.0.106'\"\n"
+    )
+    (tmp_path / "Dockerfile").write_text(dockerfile)
+
+    assert toolchain_identity(tmp_path) == {
+        "tensorrt": "11.4.0.106",
+        "dockerfile_tensorrt": ["11.4.0.106"],
+        "cuda": ["13.4"],
+        "base_images": ["nvidia/cuda:13.4.3-devel-ubuntu24.04@sha256:abc"],
+        "image": "trtmc-ci:trt11.4",
+    }
+    for old, new in (
+        ("13.4.3-devel", "13.4.4-devel"),
+        ('"libnvinfer-dev=11.4.0.106', '"libnvinfer-dev=11.4.1.1'),
+    ):
+        (tmp_path / "Dockerfile").write_text(dockerfile.replace(old, new))
+        assert toolchain_identity(tmp_path) != {
+            "tensorrt": "11.4.0.106",
+            "dockerfile_tensorrt": ["11.4.0.106"],
+            "cuda": ["13.4"],
+            "base_images": ["nvidia/cuda:13.4.3-devel-ubuntu24.04@sha256:abc"],
+            "image": "trtmc-ci:trt11.4",
+        }
+
+
+def test_toolchain_identity_requires_a_tensorrt_pin(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("dependencies = []\n")
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+
+    with pytest.raises(CiError, match="does not pin tensorrt"):
+        toolchain_identity(tmp_path)
+
+
+def test_toolchain_identity_reports_missing_files_as_ci_errors(tmp_path: Path) -> None:
+    with pytest.raises(CiError, match="cannot read the toolchain files"):
+        toolchain_identity(tmp_path)
 
 
 def test_container_does_not_chmod_the_shared_workspace() -> None:
@@ -1463,3 +1741,124 @@ def test_wheel_validation_rejects_a_leaked_test_reference(tmp_path: Path) -> Non
     validator = WheelArchiveValidator(SimpleNamespace(repository=tmp_path))
     with pytest.raises(CiError, match="isolated test references are packaged"):
         validator.validate([wheel])
+
+
+def _reference_declaration(repository, value="isolated"):
+    tests = repository / "families/alpha/tests"
+    (tests / "manifests").mkdir(parents=True)
+    (tests / "manifests/case.json").write_text(json.dumps({"reference_environment": value}))
+    (tests / "requirements.txt").write_text("reference-probe==1.0\n")
+    return tests
+
+
+def _reference_wheel(directory):
+    directory.mkdir()
+    destination = directory / "reference_probe-1.0-py3-none-any.whl"
+    prefix = "reference_probe-1.0.dist-info/"
+    entries = {
+        "reference_probe.py": 'VALUE = "reference"\n',
+        prefix + "METADATA": "Metadata-Version: 2.1\nName: reference-probe\nVersion: 1.0\n",
+        prefix
+        + "WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    }
+    entries[prefix + "RECORD"] = "".join(name + ",,\n" for name in [*entries, prefix + "RECORD"])
+    with zipfile.ZipFile(destination, "w") as archive:
+        for name, contents in entries.items():
+            archive.writestr(name, contents)
+
+
+def test_reference_overrides_stay_local_and_base_packages_are_reused_offline(tmp_path, monkeypatch):
+    _reference_declaration(tmp_path)
+    base = tmp_path / "base-packages"
+    base.mkdir()
+    (base / "reference_probe.py").write_text('VALUE = "builder"\n')
+    (base / "shared_tensor_stack.py").write_text('VALUE = "reused"\n')
+    monkeypatch.setattr(reference, "_base_site_packages", lambda: [str(base)])
+    wheelhouse = tmp_path / "wheels"
+    _reference_wheel(wheelhouse)
+    environment = dict(os.environ, MODEL="alpha", PIP_NO_INDEX="1", PIP_FIND_LINKS=str(wheelhouse))
+    environment.pop("TRTMC_CI_STATE_DIR", None)
+    context = CiContext(tmp_path, environment)
+    reference.ReferenceEnvironment(context).prepare_selected()
+    python = reference.prepared_python(tmp_path, "alpha", environment)
+    output = subprocess.check_output(
+        [
+            str(python),
+            "-c",
+            "import reference_probe, shared_tensor_stack; print(reference_probe.VALUE, shared_tensor_stack.VALUE)",
+        ],
+        text=True,
+        env=dict(environment, HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", PIP_NO_INDEX="1"),
+    )
+    assert output.strip() == "reference reused"
+    builder = subprocess.check_output(
+        [sys.executable, "-c", "import reference_probe; print(reference_probe.VALUE)"],
+        text=True,
+        env=dict(environment, PYTHONPATH=str(base)),
+    )
+    assert builder.strip() == "builder"
+    assert python.parent.parent == tmp_path / ".ci/reference/alpha"
+    (tmp_path / "families/alpha/tests/requirements.txt").write_text("reference-probe==2.0\n")
+    with pytest.raises(CiError, match="stale"):
+        reference.prepared_python(tmp_path, "alpha", environment)
+
+
+def test_setup_prepares_only_the_selected_opted_in_family(tmp_path, monkeypatch):
+    _reference_declaration(tmp_path)
+    commands = []
+    context = CiContext(tmp_path, {"MODEL": "beta"})
+    monkeypatch.setattr(context, "run", lambda *args, **kwargs: commands.append(args))
+    reference.ReferenceEnvironment(context).prepare_selected()
+    context.env.pop("MODEL")
+    reference.ReferenceEnvironment(context).prepare_selected()
+    context.env["MODEL"] = "alpha"
+    (tmp_path / "families/alpha/tests/manifests/case.json").write_text("{}")
+    reference.ReferenceEnvironment(context).prepare_selected()
+    assert not commands
+
+
+@pytest.mark.parametrize("family", ["../alpha", "alpha/beta", "ALPHA", "alpha;true"])
+def test_invalid_family_is_rejected_before_running_commands(tmp_path, family):
+    with pytest.raises(CiError, match="Invalid reference family"):
+        reference.ReferenceEnvironment(CiContext(tmp_path, {"MODEL": family})).prepare_selected()
+
+
+def test_missing_requirements_fail_before_environment_creation(tmp_path):
+    tests = _reference_declaration(tmp_path)
+    (tests / "requirements.txt").unlink()
+    with pytest.raises(CiError, match="requirements are missing"):
+        reference.ReferenceEnvironment(CiContext(tmp_path, {"MODEL": "alpha"})).prepare_selected()
+    assert not (tmp_path / ".ci").exists()
+
+
+def test_failed_install_does_not_leave_a_ready_environment(tmp_path):
+    _reference_declaration(tmp_path)
+    directory = tmp_path / ".ci/reference/alpha"
+    directory.mkdir(parents=True)
+    (directory / "ready.json").write_text('{"requirements":"old"}')
+    context = CiContext(tmp_path, dict(os.environ, MODEL="alpha", PIP_NO_INDEX="1"))
+    with pytest.raises(CiError, match="Command failed"):
+        reference.ReferenceEnvironment(context).prepare_selected()
+    assert not (directory / "ready.json").exists()
+    with pytest.raises(CiError, match="not prepared"):
+        reference.prepared_python(tmp_path, "alpha", context.env)
+
+
+def test_family_selector_reaches_only_trusted_container_setup(tmp_path):
+    environment = {"TRTMC_CI_WORKSPACE": str(tmp_path), "TRTMC_CI_IMAGE": "base", "MODEL": "alpha"}
+    assert "MODEL=alpha" in CiContainer(environment)._environment_arguments()
+    assert (
+        "MODEL=alpha"
+        not in CiContainer(dict(environment, TRTMC_CI_HARDENED="true"))._environment_arguments()
+    )
+    pipeline = CiPipeline(CiContext(tmp_path, environment))
+    assert [name for name, _ in pipeline.stages["setup"]] == [
+        "Install and verify native wheel",
+        "Prepare isolated family reference",
+    ]
+
+
+def test_blank_state_override_keeps_reference_environment_under_ci(tmp_path):
+    assert reference.environment_directory(tmp_path, "alpha", {"TRTMC_CI_STATE_DIR": ""}) == (
+        tmp_path / ".ci/reference/alpha"
+    )

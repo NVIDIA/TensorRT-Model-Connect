@@ -139,3 +139,22 @@ def test_registry_accepts_embedding_capability_and_rejects_unknown_only():
     with pytest.raises(WorkerProtocolError):
         ModelRegistry._validate_ready({"event": "ready", "protocol_version": 2,
                                        "capabilities": ["not-a-serving-task"]})
+
+
+@pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
+@pytest.mark.parametrize("as_list", [False, True])
+def test_surrogate_input_is_rejected_before_worker_acquisition(surrogate, as_list):
+    registry = Registry()
+    registry.saturated = True
+    value = [surrogate] if as_list else surrogate
+    with client_for(registry) as client:
+        response = client.post("/v1/embeddings", content=json.dumps({
+            "model": "encoder", "input": value,
+        }), headers={"content-type": "application/json"})
+        assert response.status_code == 400
+        assert response.json()["error"]["param"] == "input"
+        assert not registry.calls
+        registry.saturated = False
+        valid = client.post("/v1/embeddings", json={"model": "encoder", "input": ["\U0001f600"]})
+        assert valid.status_code == 200
+        assert registry.calls == [("embed", {"input": "\U0001f600"})]

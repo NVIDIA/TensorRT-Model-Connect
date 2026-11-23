@@ -56,6 +56,13 @@ K2HorizonUnoTextGenerationPipeline::K2HorizonUnoTextGenerationPipeline(
     : lora_decoder_(std::move(lora_decoder)), base_decoder_(std::move(base_decoder)),
       cache_(std::move(cache)), tokenizer_(std::move(tokenizer)) {
     validate_pipeline_components(lora_decoder_, base_decoder_, cache_);
+    const auto maximum = base_decoder_->input_profile_shape(
+        "token_id", base_decoder_->profile_idx(), ProfileShapeSelector::kMax);
+    if (maximum.size() != 1 || maximum.front() < 1)
+        throw std::runtime_error("K2HorizonUnoTextGenerationPipeline: invalid base token profile");
+    // A larger base profile is fine, but one cache call takes at most kMaximumCallRows rows.
+    prompt_rows_ = static_cast<int32_t>(
+        std::min<int64_t>(maximum.front(), K2HorizonUnoKvCache::kMaximumCallRows));
     // The engine has no data-dependent shapes or host reads, so a call is a
     // fixed kernel sequence for its row count and a context can replay it as
     // a CUDA graph; a context keeps one graph and recaptures when its row
@@ -236,17 +243,28 @@ void K2HorizonUnoTextGenerationPipeline::reset_generation_context() {
 
 void K2HorizonUnoTextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
                                                      std::vector<float>& logits) {
-    const std::size_t chunk = kMaximumBlockLength;
+    // Every prompt row but the last only fills the KV cache, in chunks of up to
+    // the base profile's maximum rows.
+    const std::size_t chunk = static_cast<std::size_t>(prompt_rows_);
     std::size_t offset = 0;
     while (input_ids.size() - offset > 1) {
         const std::size_t rows = std::min(chunk, input_ids.size() - offset - 1);
-        const auto begin = input_ids.begin() + static_cast<std::ptrdiff_t>(offset);
-        const std::vector<int32_t> tokens(begin, begin + static_cast<std::ptrdiff_t>(rows));
-        run_block(tokens, std::vector<float>(rows, 0.0F), logits);
+        run_prompt_rows(input_ids.data() + offset, static_cast<int32_t>(rows));
         offset += rows;
     }
     // Keep the final row isolated because seed selection consumes logits row zero.
     run_block({input_ids[offset]}, {0.0F}, logits);
+}
+
+void K2HorizonUnoTextGenerationPipeline::run_prompt_rows(const int32_t* token_ids, int32_t rows) {
+    TensorMap inputs;
+    inputs["token_id"] = Tensor{const_cast<int32_t*>(token_ids), {rows}, DType::kInt32};
+    float empty_mask = 0.0F;
+    inputs["lora_mask"] = Tensor{&empty_mask, {int64_t{0}}, DType::kFloat32};
+    cache_->prepare_block(inputs, rows);
+    base_decoder_->forward_async(inputs);
+    base_decoder_->sync();
+    cache_->advance(rows);
 }
 
 void K2HorizonUnoTextGenerationPipeline::run_block(const std::vector<int32_t>& token_ids,

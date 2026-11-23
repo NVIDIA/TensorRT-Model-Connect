@@ -42,6 +42,11 @@ struct SemanticAcousticHistoryView {
     Span<const std::int32_t> semantic_tokens;
     AudioCodebookTokensView coarse_tokens, fine_tokens;
 };
+// Nonempty codebook-major integer codec tokens; the loaded family owns the
+// vocabulary, codebook count, frame profile and token-to-PCM interpretation.
+struct AudioCodebookTokensToAudioRequest {
+    AudioCodebookTokensView codes;
+};
 struct TextAudioTokenHistoryToAudioRequest {
     std::string_view prompt;
     SemanticAcousticHistoryView history;
@@ -84,6 +89,13 @@ class ITextAudioTokenHistoryToAudio {
     // Required history borrows caller storage through synchronous return.
     // Family owns vocabulary/count/length/alignment rules and never mutates it.
     virtual AudioResult run(const TextAudioTokenHistoryToAudioRequest&, ConfigView) = 0;
+};
+class IAudioCodebookTokensToAudio {
+  public:
+    using TaskInterface = IAudioCodebookTokensToAudio;
+    static constexpr std::string_view kTask = "audio_codebook_tokens_to_audio";
+    virtual ~IAudioCodebookTokensToAudio() = default;
+    virtual AudioResult run(const AudioCodebookTokensToAudioRequest&, ConfigView) = 0;
 };
 class ITextToSpeech {
   public:

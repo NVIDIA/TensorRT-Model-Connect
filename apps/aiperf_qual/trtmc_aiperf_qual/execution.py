@@ -309,8 +309,12 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
         reasons.append(f"actual work differs or is unknown on {len(pairs) - matched} paired responses")
     # The native mode that answered (torch.compile, or eager in its place; eager in records written before),
     # none when the native side recorded nothing.
-    modes = sorted({str(item.get("mode") or "eager") for item in identities[1]})
-    fallbacks = sorted({str(item["compile_fallback"]) for item in identities[1] if item.get("compile_fallback")})
+    # Only a native batch with a valid timed request names a mode (an eager floor batch that answered nothing
+    # does not).
+    answered = [batch["identity"] for batch in reference
+                if any(row.get("valid") and str(row["sample_id"]) not in excluded for row in batch["records"])]
+    modes = sorted({str(item.get("mode") or "eager") for item in answered})
+    fallbacks = sorted({str(item["compile_fallback"]) for item in answered if item.get("compile_fallback")})
     result: dict[str, Any] = {"request": name, "reference_mode": "+".join(modes), "kind": "natural_dataset", "gate": False,
                               "timing_contract": TIMING_CONTRACT, "pairs": len(pairs), "matched_pairs": matched,
                               "different_work_pairs": len(pairs) - matched - unknown, "unknown_work_pairs": unknown,
@@ -322,7 +326,9 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
                                   "Interval across evaluation units, not repeated-run timing stability.",
                                   *(f"Native torch.compile failed; eager answered in its place: {reason[:300]}"
                                     for reason in fallbacks)],
-                              "candidate": {}, "reference": {}}
+                              "candidate": {}, "reference": {},
+                              # Structured as well as noted, so a summary can name the replaced compile.
+                              **({"compile_fallback": fallbacks[0][:300]} if fallbacks else {})}
     # Report each side's entire valid workload, including unpaired responses.
     # Pair filtering is only for comparability, never for the displayed timings.
     for side, values, original, precision in zip(("candidate", "reference"), rows, all_rows, precisions):

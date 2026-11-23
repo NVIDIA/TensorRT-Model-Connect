@@ -13,10 +13,15 @@ import numpy as np
 def _cosine(left, right) -> float:
     a = np.asarray(left, dtype=np.float64).reshape(-1)
     b = np.asarray(right, dtype=np.float64).reshape(-1)
-    assert a.shape == b.shape and a.size > 0
+    assert a.shape == b.shape and a.size > 0, f"cosine of shapes {a.shape} and {b.shape}"
     denominator = float(np.linalg.norm(a) * np.linalg.norm(b))
-    assert denominator > 0.0
+    assert denominator > 0.0, "cosine of an all-zero feature"
     return float(np.dot(a, b) / denominator)
+
+
+def _assert_at_least(name: str, value: float, thresholds: dict, key: str) -> None:
+    limit = float(thresholds[key])
+    assert value >= limit, f"{name} {value!r} < {limit!r}"
 
 
 def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
@@ -29,32 +34,51 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
         actual["pooler_output_shape"]
     )
     expected_pooler = np.asarray(expected["pooler_output"], dtype=np.float64)
-    assert actual_hidden.shape == expected_hidden.shape
-    assert actual_pooler.shape == expected_pooler.shape
-    assert np.isfinite(actual_hidden).all() and np.isfinite(actual_pooler).all()
-    assert np.isfinite(expected_hidden).all() and np.isfinite(expected_pooler).all()
-    assert np.array_equal(actual_pooler, actual_hidden[:, 0, :])
-    assert np.array_equal(expected_pooler, expected_hidden[:, 0, :])
-    assert _cosine(actual_hidden, expected_hidden) >= float(thresholds["full_cosine"])
-    assert _cosine(actual_hidden[:, 0, :], expected_hidden[:, 0, :]) >= float(
-        thresholds["cls_cosine"]
+    assert actual_hidden.shape == expected_hidden.shape, (
+        f"hidden-state shape {actual_hidden.shape} != reference {expected_hidden.shape}"
     )
-    assert _cosine(actual_pooler, expected_pooler) >= float(thresholds["pooler_cosine"])
+    assert actual_pooler.shape == expected_pooler.shape, (
+        f"pooler shape {actual_pooler.shape} != reference {expected_pooler.shape}"
+    )
+    for side, hidden, pooler in (("candidate", actual_hidden, actual_pooler),
+                                 ("reference", expected_hidden, expected_pooler)):
+        bad = int(np.size(hidden) - np.count_nonzero(np.isfinite(hidden)))
+        bad += int(np.size(pooler) - np.count_nonzero(np.isfinite(pooler)))
+        assert bad == 0, f"{side} features have {bad} non-finite values"
+        assert np.array_equal(pooler, hidden[:, 0, :]), f"{side} pooler output is not its CLS token"
+    _assert_at_least("full cosine", _cosine(actual_hidden, expected_hidden), thresholds, "full_cosine")
+    _assert_at_least(
+        "CLS cosine",
+        _cosine(actual_hidden[:, 0, :], expected_hidden[:, 0, :]),
+        thresholds,
+        "cls_cosine",
+    )
+    _assert_at_least("pooler cosine", _cosine(actual_pooler, expected_pooler), thresholds, "pooler_cosine")
     relative_frobenius = np.linalg.norm(actual_hidden - expected_hidden) / max(
         float(np.linalg.norm(expected_hidden)), 1e-12
     )
-    assert float(relative_frobenius) <= float(thresholds["relative_frobenius"])
+    limit = float(thresholds["relative_frobenius"])
+    assert float(relative_frobenius) <= limit, (
+        f"relative Frobenius error {float(relative_frobenius)!r} > {limit!r}"
+    )
     register_count = int(expected["num_register_tokens"])
-    assert register_count == int(case["num_register_tokens"])
+    assert register_count == int(case["num_register_tokens"]), (
+        f"reference has {register_count} register tokens, the case expects {case['num_register_tokens']}"
+    )
     patch_start = 1 + register_count
-    assert 0 <= register_count and patch_start < actual_hidden.shape[1]
+    assert 0 <= register_count and patch_start < actual_hidden.shape[1], (
+        f"{register_count} register tokens leave no patch tokens in {actual_hidden.shape[1]}"
+    )
     if register_count:
-        assert _cosine(
-            actual_hidden[:, 1:patch_start, :], expected_hidden[:, 1:patch_start, :]
-        ) >= float(thresholds["register_cosine"])
+        _assert_at_least(
+            "register cosine",
+            _cosine(actual_hidden[:, 1:patch_start, :], expected_hidden[:, 1:patch_start, :]),
+            thresholds,
+            "register_cosine",
+        )
     actual_patches = actual_hidden[:, patch_start:, :].reshape(-1, actual_hidden.shape[-1])
     expected_patches = expected_hidden[:, patch_start:, :].reshape(-1, expected_hidden.shape[-1])
-    assert actual_patches.shape[0] > 0 and expected_patches.shape[0] > 0
+    assert actual_patches.shape[0] > 0 and expected_patches.shape[0] > 0, "no patch tokens"
     denominators = np.linalg.norm(actual_patches, axis=1) * np.linalg.norm(expected_patches, axis=1)
     patch_cosines = np.divide(
         np.sum(actual_patches * expected_patches, axis=1),
@@ -62,8 +86,21 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
         out=np.zeros_like(denominators),
         where=denominators != 0.0,
     )
-    assert float(np.mean(patch_cosines)) >= float(thresholds["mean_patch_cosine"])
-    assert float(np.percentile(patch_cosines, 1.0)) >= float(thresholds["p01_patch_cosine"])
+    _assert_at_least("mean patch cosine", float(np.mean(patch_cosines)), thresholds, "mean_patch_cosine")
+    _assert_at_least(
+        "1st-percentile patch cosine",
+        float(np.percentile(patch_cosines, 1.0)),
+        thresholds,
+        "p01_patch_cosine",
+    )
+
+
+def _scaled(thresholds: dict, scale: float) -> dict:
+    """The criteria with ``scale`` times their error budget: a cosine floor's distance to 1 and the relative
+    Frobenius error limit scale; other entries stay."""
+    return {key: (1.0 - scale * (1.0 - float(value)) if key.endswith("cosine")
+                  else float(value) * scale if key == "relative_frobenius" else value)
+            for key, value in thresholds.items()}
 
 
 @lru_cache(maxsize=None)
@@ -90,6 +127,8 @@ def compare(candidate: dict | None, native: dict | None, gate: dict) -> tuple[bo
     if any(not side or not required <= side.keys() for side in (candidate, native)):
         return None, "complete hidden and pooled feature outputs are required"
     manifest, case, thresholds = _contract(str(gate["profile"]))
+    if gate.get("threshold_scale") is not None:  # the qualification's outlier gate
+        thresholds = _scaled(thresholds, float(gate["threshold_scale"]))
     try:
         expected = {
             "last_hidden_state": np.asarray(native["last_hidden_state"], dtype=np.float64).reshape(

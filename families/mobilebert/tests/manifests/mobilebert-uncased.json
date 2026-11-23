@@ -1,0 +1,44 @@
+{
+  "name": "mobilebert-uncased",
+  "hf_id": "google/mobilebert-uncased",
+  "hf_revision": "1f90a6c24c7879273a291d34a849033eba2dbc0f",
+  "bundle": "mobilebert-uncased.bundle",
+  "family": "mobilebert",
+  "task": "masked_text_to_token_scores",
+  "precision": "fp32",
+  "max_sequence_length": 512,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "mobilebert-uncased-fill-mask",
+      "premerge": true,
+      "text": "HuggingFace is creating a [MASK] that the community uses to solve NLP tasks."
+    },
+    {
+      "name": "mobilebert-uncased-two-masks",
+      "text": "The capital of France is [MASK], and the [MASK] of Japan is Tokyo."
+    },
+    {
+      "name": "mobilebert-uncased-unicode-every-position",
+      "text": "Café naïve Ångström façade — Zürich, Kraków, Москва, Αθήνα, 東京 and 한국어!"
+    },
+    {
+      "name": "mobilebert-uncased-window-edge",
+      "fill_window": "A small dog crossed the old stone bridge before sunrise."
+    },
+    {
+      "name": "mobilebert-uncased-token-ids",
+      "token_ids": [101, 1996, 3007, 1997, 2605, 2003, 103, 1012, 102]
+    },
+    {
+      "name": "mobilebert-uncased-next-sentence",
+      "first": "The cat sat on the warm windowsill all afternoon.",
+      "second": "When the sun went down, it moved to the sofa."
+    },
+    {
+      "name": "mobilebert-uncased-unrelated-pair",
+      "first": "The cat sat on the warm windowsill all afternoon.",
+      "second": "Quantum chromodynamics describes the strong interaction between quarks."
+    }
+  ]
+}

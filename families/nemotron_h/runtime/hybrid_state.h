@@ -22,6 +22,8 @@ class NemotronHHybridState final : public NemotronHInferenceState {
     void bind_to(ITrtModule& module) override;
     void prepare_step(TensorMap& inputs, int32_t seq_len = 1) override;
     void advance(int32_t n_tokens = 1) override;
+    void bind_prefill(ITrtModule& module) override;
+    void commit_prefill(ITrtModule& module, int32_t rows) override;
     int32_t position() const override;
     int32_t max_length() const override;
     int32_t num_layers() const override;

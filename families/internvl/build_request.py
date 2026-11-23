@@ -39,6 +39,7 @@ class BuildRequest:
     dynamic_kv_cache: ClassVar[bool] = False
     mtp_seq_len: ClassVar[int | None] = None
     int4_gemm_plugin_version: int | None = None
+    edge_builder_python: Path | None = None
     quantization: str | None = None
     verbose: bool = False
     graph_transform: GraphTransform | None = None
@@ -100,6 +101,7 @@ def coerce_request(request: object) -> BuildRequest:
     names = {field.name for field in fields(BuildRequest)}
     if unknown := set(vars(request)) - names - set(unsupported):
         raise ValueError(f"unknown internvl build inputs: {sorted(unknown)}")
-    values = {name: getattr(request, name) for name in names - {"int4_gemm_plugin_version"}}
+    values = {name: getattr(request, name) for name in names - {"int4_gemm_plugin_version", "edge_builder_python"}}
     values["int4_gemm_plugin_version"] = getattr(request, "int4_gemm_plugin_version", None)
+    values["edge_builder_python"] = getattr(request, "edge_builder_python", None)
     return BuildRequest(**values)

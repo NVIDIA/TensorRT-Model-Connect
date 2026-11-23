@@ -36,7 +36,8 @@
           "type": "string",
           "choices": [
             "text_generation",
-            "vision_language_generation"
+            "vision_language_generation",
+            "images_text_to_text"
           ],
           "default": "text_generation"
         },
@@ -131,6 +132,14 @@
             "mtp"
           ],
           "help": "Explicit speculative decoding mode; MTP uses embedded draft layers"
+        },
+        {
+          "name": "edge_builder_python",
+          "flags": [
+            "--edge-builder-python"
+          ],
+          "type": "path",
+          "help": "Absolute Python interpreter for the optional Edge builder"
         },
         {
           "name": "companion",

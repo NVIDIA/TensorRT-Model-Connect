@@ -265,8 +265,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task != "text_generation":
-        raise ValueError("gpt_neo supports only task=text_generation")
+    if request.task != "text_continuation":
+        raise ValueError("gpt_neo supports only task=text_continuation")
 
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)

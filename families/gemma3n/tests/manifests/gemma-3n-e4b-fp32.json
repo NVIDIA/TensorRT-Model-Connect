@@ -1,0 +1,21 @@
+{
+  "name": "gemma-3n-e4b-fp32",
+  "hf_id": "unsloth/gemma-3n-E4B-it",
+  "hf_revision": "45e9fb1dd0e34db5ff9db1f43a49ac5d8e8b8778",
+  "bundle": "gemma-3n-e4b-fp32.bundle",
+  "family": "gemma3n",
+  "task": "images_text_to_text",
+  "precision": "fp32",
+  "max_sequence_length": 1024,
+  "tensor_parallel_size": 1,
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "gemma-3n-e4b-fp32",
+      "premerge": false,
+      "reference_precision": "fp32",
+      "reference_backend": "hf_transformers",
+      "max_new_tokens": 32
+    }
+  ]
+}

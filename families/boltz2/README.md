@@ -5,9 +5,35 @@ multi-plan TensorRT bundle with one static profile (117 tokens, 928 padded
 atoms, MSA depth 8), run by the native runtime (`trtmc predict-structure`).
 The trunk (input embedder, MSA module, 64 Pairformer blocks) is bf16-mixed. The
 diffusion score model keeps an fp32 state, norms and attention, as upstream
-Boltz-2 does; under the bf16 bundle precision the projection matmuls of its
-token transformer run in bf16 (`--diffusion-token-precision fp32` builds the
-upstream fp32 projections). The family has no quantized build.
+Boltz-2 does; the projection matmuls of its token transformer run in fp16
+(`--diffusion-token-precision bf16` keeps the earlier bf16 cast, `fp32` builds
+the upstream fp32 projections). The family has no quantized build.
+
+## Diffusion token projection precision
+
+The token transformer runs 200 times per diffusion sample, so the rounding of
+its projections accumulates along the trajectory. fp16 runs as fast as bf16 and
+its three extra mantissa bits keep the trajectory close to the fp32 reference;
+bf16 drifts on some inputs.
+
+TensorRT 11.4, GB300:
+
+| Projections | Token transformer, 24 layers | Update error vs strict fp32 | Structure parity, 20 inputs | lDDT median / min | p50 per request |
+|---|---|---|---|---|---|
+| fp32 (TF32; upstream policy) | 2.18 ms | 0.26% | 20 / 20 | 0.983 / 0.580 | 756 ms |
+| bf16 (earlier default) | 1.40 ms | 1.99% | 17 / 20 | 0.848 / 0.480 | 590 ms |
+| fp16 (default) | 1.45 ms | 0.54% | 20 / 20 | 0.984 / 0.583 | 593 ms |
+
+- Token transformer: all 24 layers in one plan, median of 7 x 50 runs; error is
+  the relative L2 of the layer stack's update (`a_out - a`) against a strict
+  fp32 plan (TF32 off), median over 10 inputs captured from the eager reference
+  (2 proteins, sampling steps 0, 50, 100, 150 and 199).
+- Structure parity: the 20 single-sequence UniRef50 inputs of the AIPerf
+  qualification profile `boltz2-protein-monomer` against the seeded eager
+  reference (same noise); p50 is the native runtime's request latency.
+- fp16 range: over the same inputs the largest projection input is 1011 (the
+  raw single conditioning into the output gates) and the largest output 368, at
+  least 65x below the fp16 limit; every other projection has 234x or more.
 
 ## FP8 quantization study (not shipped)
 
@@ -15,8 +41,8 @@ FP8 (W8A8, static per-tensor scales) was built and measured on TensorRT 11.4
 (B200, B300) and 11.1 (B200) for the Pairformer pair stack and the diffusion
 token transformer. It is not shipped: FP8 makes one diffusion sample 1.16x to
 1.17x faster, but it moves the predicted structures, and a bf16 cast of the same
-token projections (the default build) is faster and keeps the quality. The FP8
-code was not merged.
+token projections (the default of that time) is faster and keeps the quality.
+The FP8 code was not merged.
 
 ### Summary and decision
 
@@ -30,7 +56,7 @@ on the four stable inputs below:
 | FP8 pair stack + token transformer | 1.16x / 1.17x | 1165 (-39%) | 0.87 to 0.98 | 0.41 to 1.65 |
 | FP8 token transformer only | 1.17x / 1.20x | 1162 | 0.90 to 0.98 | - |
 | FP8 pair stack only | 0.98x / 1.00x | 1923 | 0.99 to 1.00 | - |
-| bf16 token projections (default) | 1.34x / 1.27x | 1407 | 0.988 to 1.000 | 0.02 to 0.34 |
+| bf16 token projections | 1.34x / 1.27x | 1407 | 0.988 to 1.000 | 0.02 to 0.34 |
 
 Decision: do not ship FP8 for Boltz-2.
 

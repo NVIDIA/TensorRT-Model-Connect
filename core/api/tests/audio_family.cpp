@@ -41,6 +41,7 @@ class AudioFixture final : public IModel,
                            public ITextAudioTokenHistoryToAudio,
                            public IBatchTextAudioTokenHistoryToAudio,
                            public ITextToSpeech,
+                           public IAudioCodebookTokensToAudio,
                            public ISpeechTranscription,
                            public ISpeechTranslation,
                            public IAudioLanguageIdentification,
@@ -67,6 +68,8 @@ class AudioFixture final : public IModel,
             return {bind<IBatchTextToAudio>(*this, fields_for(IBatchTextToAudio::kTask))};
         if (mode_ == "batch_speech_only")
             return {bind<IBatchTextToSpeech>(*this, fields_for(IBatchTextToSpeech::kTask))};
+        if (mode_ == "codec_only")
+            return {bind<IAudioCodebookTokensToAudio>(*this)};
         return {
             bind<ITextToAudio>(*this, fields_for(ITextToAudio::kTask)),
             bind<ITextAudioTokenHistoryToAudio>(*this,
@@ -160,6 +163,21 @@ class AudioFixture final : public IModel,
                           options.normalize ? 0.25F : 0.0F},
                          options);
     }
+    AudioResult run(const AudioCodebookTokensToAudioRequest& input, ConfigView config) override {
+        validate_config({}, config);
+        for (const auto token : input.codes.tokens)
+            if (token < 0 || token > 255)
+                throw std::invalid_argument("fixture codec token out of range");
+        AudioResult result;
+        result.samples.assign(input.codes.tokens.begin(), input.codes.tokens.end());
+        // Expose both dimensions separately so the codec fixture detects a transpose.
+        result.setup_ms = static_cast<double>(input.codes.codebooks);
+        result.inference_ms = static_cast<double>(input.codes.frames);
+        result.sample_rate = 24000;
+        result.channels = 1;
+        return result;
+    }
+
     AudioResult run(const TextAudioTokenHistoryToAudioRequest& input, ConfigView config) override {
         validate_history(input.history);
         const auto options = history_options(config, ITextAudioTokenHistoryToAudio::kTask);

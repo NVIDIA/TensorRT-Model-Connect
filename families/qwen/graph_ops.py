@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import numpy as np
 import tensorrt as trt
+
+from .weightless import add_placeholder
 from .native_kv_attention_builder import (
     NativeKvMasks,
     add_explicit_masked_grouped_query_attention,
@@ -50,15 +52,17 @@ def add_matmul_rhs_constant(
     rhs_width: int,
     rhs_weights: np.ndarray,
     dtype: np.dtype = np.float32,
+    *,
+    weight_name: str | None = None,
 ) -> trt.ITensor:
     """Matrix multiply: lhs @ rhs_constant.  rhs is [lhs_width, rhs_width]."""
     rank = len(tuple(lhs.shape))
     rhs_shape = (lhs_width, rhs_width) if rank <= 2 else (1,) * (rank - 2) + (lhs_width, rhs_width)
-    rhs = add_constant(
-        network,
-        rhs_shape,
-        np.asarray(rhs_weights).reshape(rhs_shape),
-        dtype=dtype,
+    values = np.ascontiguousarray(np.asarray(rhs_weights).reshape(rhs_shape), dtype=dtype)
+    placeholder = add_placeholder(network, rhs_shape, values, weight_name)
+    rhs = (
+        add_constant(network, rhs_shape, values, dtype=dtype)
+        if placeholder is None else placeholder.get_output(0)
     )
     rhs = _cast_back_to_trt_dtype(network, rhs, lhs.dtype)
     mm = network.add_matrix_multiply(

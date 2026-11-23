@@ -6,7 +6,11 @@
 
 #include <algorithm>
 #include <array>
+#ifdef TRTMC_HUNYUAN_EDGE_012
+#include <tensorrt_edgellm/tokenizer/tokenizerUtils.h>
+#else
 #include <edgellm/cpp/tokenizer/tokenizerUtils.h>
+#endif
 #include <fstream>
 #include <stdexcept>
 

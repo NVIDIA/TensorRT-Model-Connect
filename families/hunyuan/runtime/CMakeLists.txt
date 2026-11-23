@@ -48,10 +48,13 @@ if(TRTMC_BUILD_TESTS)
     ${PROJECT_SOURCE_DIR}/families/hunyuan/tests/cpp/test_hunyuan_contract.cpp)
   target_include_directories(test_hunyuan_contract PRIVATE
     ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include)
-  if(TARGET EdgeLLM::Core)
+  if(DEFINED _hunyuan_sdk)
+    if(TARGET TensorRTEdgeLLM::Core)
+      target_compile_definitions(test_hunyuan_contract PRIVATE TRTMC_HUNYUAN_EDGE_012=1)
+    endif()
     target_compile_definitions(test_hunyuan_contract PRIVATE TRTMC_HAS_EDGE_LLM=1)
     target_include_directories(test_hunyuan_contract PRIVATE
-      $<TARGET_PROPERTY:EdgeLLM::Core,INTERFACE_INCLUDE_DIRECTORIES>)
+      $<TARGET_PROPERTY:${_hunyuan_sdk}::Core,INTERFACE_INCLUDE_DIRECTORIES>)
   endif()
   target_link_libraries(test_hunyuan_contract PRIVATE
     trtmc_model_hunyuan trtmc_core nlohmann_json::nlohmann_json ${TRTMC_CUDART_LIBRARY})

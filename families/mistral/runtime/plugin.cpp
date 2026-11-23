@@ -4,6 +4,9 @@
  */
 
 #include "families/mistral/runtime/chat_templates.h"
+#ifdef TRTMC_MISTRAL_EDGE_012
+#include "families/mistral/runtime/edge_llm/adapter.h"
+#endif
 #include "families/mistral/runtime/kv_cache.h"
 #include "families/mistral/runtime/pipeline.h"
 #include "families/mistral/runtime/plugin_helpers.h"
@@ -57,7 +60,11 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     }
     if (!json.is_object())
         throw std::runtime_error("mistral runtime.json must be an object");
-    if (json.size() != 12)
+    const bool prepared = json.contains("weight_format");
+    if (prepared && (require_value<std::string>(json, "weight_format") != "gptq_w8a16" ||
+                     require_value<std::string>(json, "precision") != "fp16"))
+        throw std::runtime_error("mistral runtime.json has an invalid prepared weight format");
+    if (json.size() != (prepared ? 13U : 12U))
         throw std::runtime_error("mistral runtime.json has an unexpected field set");
 
     RuntimeConfig config{
@@ -110,10 +117,18 @@ MistralKvCacheNames make_kv_names(std::int32_t num_layers) {
 
 std::string chat_template(const BundleReader& bundle) {
     const auto* section = bundle.find_section("chat_template.jinja");
-    if (section == nullptr || section->length == 0)
+    if (section != nullptr && section->length > 0) {
+        const auto data = bundle.read_section("chat_template.jinja");
+        return {data.begin(), data.end()};
+    }
+    // Older HF snapshots store the same template inline rather than as a file.
+    const auto* metadata = bundle.find_section("tokenizer_config.json");
+    if (!metadata || metadata->length == 0)
         return {};
-    const auto data = bundle.read_section("chat_template.jinja");
-    return {data.begin(), data.end()};
+    const auto bytes = bundle.read_section("tokenizer_config.json");
+    const auto config = nlohmann::json::parse(bytes.begin(), bytes.end());
+    const auto templ = config.find("chat_template");
+    return templ != config.end() && templ->is_string() ? templ->get<std::string>() : "";
 }
 
 struct DecoderModules {
@@ -145,6 +160,13 @@ DecoderModules load_modules(const FamilyContext& context, const RuntimeConfig& c
 } // namespace
 
 ITask* create(const FamilyContext& context) {
+    if (context.reader.find_section("edge_llm.json")) {
+#ifdef TRTMC_MISTRAL_EDGE_012
+        return edge_llm::create(context.reader);
+#else
+        throw std::runtime_error("Mistral Edge bundle requires a runtime built with the 0.12 SDK");
+#endif
+    }
     const RuntimeConfig config = parse_runtime_config(context.reader);
     DecoderModules modules = load_modules(context, config);
     const cudaStream_t stream = modules.decode->stream();

@@ -80,6 +80,17 @@ static void test_detect_llama3() {
                       "}}<|end_header_id|>\n{{ message.content }}<|eot_id|>{% endfor %}";
     auto fmt = trtmc::llama_detect_chat_template_format(tpl);
     check(fmt == "llama3", "llama3 detection");
+    tpl += "Cutting Knowledge Date: December 2023\nToday Date: {{ strftime_now(\"%d %b %Y\") }}";
+    auto dated = trtmc::llama_detect_chat_template_format(tpl);
+    check(dated == "llama3_dated", "dated Llama checkpoint detection");
+    auto rendered = trtmc::llama_apply_chat_template(dated, "\u2003 café \u3000", false);
+    check(rendered.find("Cutting Knowledge Date: December 2023\nToday Date: ") != std::string::npos,
+          "dated Llama system turn");
+    check(rendered.find("<|start_header_id|>user<|end_header_id|>\n\ncafé<|eot_id|>") !=
+              std::string::npos,
+          "dated Llama trims Unicode whitespace");
+    check(rendered == trtmc::llama_apply_chat_template(dated, "café", true),
+          "dated Llama has no thinking switch");
 }
 
 static void test_apply_nemotron_h_no_thinking() {

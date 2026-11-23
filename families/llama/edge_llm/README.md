@@ -1,34 +1,55 @@
 # Llama Edge-LLM execution
 
-This family owns complete-network offload to the official GitHub Edge-LLM
-0.11.0 snapshot, revision `95515c2f87fba8982db5a519f9022277667b3cc9`.
-CMake provisions the optional native SDK separately. Builds use its experimental
-Python builder; inference uses its persistent C++ `LLMInferenceRuntime` API.
-There is no implicit installation, download, cross-compilation or cross-family
-model dispatch.
+When the installed Model Connect wheel includes a native runner and Edge SDK,
+the family uses that SDK. A different SDK on `CMAKE_PREFIX_PATH` cannot
+override the wheel's native runner. To select another release, install a
+Model Connect wheel built for it, or use a matching standalone Model Connect
+builder and runner in an environment without the wheel. For standalone
+installations, `CMAKE_PREFIX_PATH` selects the SDK as usual.
+
+This family owns complete-network offload. The C++ adapter links one native
+Edge SDK at build time, and reads bundles for that release. Model builds do
+not download dependencies or select a second runtime. Native TensorRT remains
+the family-owned fallback.
 
 ## Installed Python builder discovery
 
-The native CMake SDK is still required for the C++ adapter. The family uses the
-current Python interpreter when it can import Edge 0.11.0's builder and the same
-TensorRT release as that SDK, including a normal pip installation of the edgellm
-extra. Otherwise it uses the SDK's isolated source-installed Python.
-Use the interpreter containing the pip or source installation to run the
-Model Connect Python build command. No family environment override is needed.
+- **Default 0.11.0** (official revision `95515c2f87fba8982db5a519f9022277667b3cc9`):
+  the experimental builder can run in the current Python installation if Edge
+  and TensorRT match the SDK; otherwise use the SDK's bundled interpreter.
+- **Opt-in 0.12.0** (official revision `513dcd18291e587c80928911a480761352f3c2d8`):
+  configure MC with `TRTMC_ENABLE_EDGELLM=ON` and
+  `TRTMC_EDGELLM_RELEASE=0.12.0`. Pass
+  `--edge-builder-python /absolute/path/to/python` to `trtmc llama build`.
+  The interpreter needs the release's builder (PyPI or from source),
+  Transformers 5.17.0 and matching TensorRT bindings. If omitted, the
+  family checks the current interpreter. For a PyTorch
+  `.bin` draft, the Edge builder and the native Python graph builder also need
+  Torch. Edge externalizes the draft weights, so its interpreter must expose
+  checkpoint byte offsets as well. For the documented EAGLE3 draft, the
+  official reader returned valid offsets with CPU Torch 2.15.0 but not
+  2.10.0. MC checks this capability rather than imposing a Torch version
+  on all Llama builds. Native only needs to read the tensors; safetensors
+  inputs do not need Torch for this purpose.
 
-The 0.11.0 wheel does not contain the C++ headers and static SDK archives; it
-cannot replace native CMake provisioning. No provider DSO, worker protocol,
-version dispatch, registration file or automatic model-time installation is
-introduced. Only 0.11.0 is accepted by this adapter.
+Both paths require the matching native CMake SDK, not just Python modules.
+The family finds the SDK receipt in the installed MC package or CMake prefix;
+the 0.12 receipt contains no machine-specific path to a build interpreter.
+A provisioned source SDK records its checked revision. An external native SDK
+records its package version and a null source revision; the family carries
+that distinction into the bundle.
+See [native provisioning](../../../cmake/edge_llm/README.md). Historical
+0.11 validation below is not evidence of 0.12 qualification.
 
 ## Adapter scope
 
 The ordinary route accepts matching dense Llama configuration shapes,
 text generation, FP16 compute, original unquantized source weights, TP1 and
 batch1. Ordinary execution is mapped to native Linux x86_64 SM80; the explicit
-EAGLE3 pair is mapped to SM120. The local packed-format extension admits ModelOpt FP8/NVFP4 8B sources on
-SM120 using upstream --dense auto to preserve source format.
-Its exact profiles pass both build-tree and installed-wheel checks below.
+EAGLE3 pair is mapped to SM120. The packed-format
+route admits ModelOpt FP8/NVFP4 8B sources on SM120 and, with 0.12, the
+static compressed-tensors 1B FP8 source. It requests upstream `--dense auto`
+to preserve the source format.
 Other platforms are not admitted for Edge offload. A matching shape is not qualification for
 every checkpoint, generation policy or capacity.
 
@@ -114,15 +135,12 @@ NumPy and ml_dtypes dependencies preserve the exact source packed weights and
 calibrated activation, block and global scales.
 
 Projection Q/DQ preserves source quantized arithmetic rather than silently
-turning NVFP4 into ordinary FP16 inference. Source FP8 K/V scales round cached
-values through Q/DQ; existing native cache buffers remain FP16, so this does
-**not** provide packed FP8 cache memory savings. One engine supplies the existing
-prefill/decode contexts. The automatic fallback detects the prepared source
-format when the quantization option is omitted. The existing explicit
-`--quantization fp8` / `--quantization nvfp4` path remains available; both routes
-read prepared checkpoints rather than calibrating new ones. Keep the admitted
-FP16 compute request. Automatic prepared-source reading does not require Torch;
-the existing explicit path retains its own dependency contract.
+turning NVFP4 into ordinary FP16 inference. New ordinary prepared-model builds with calibrated FP8 K/V use linear
+E4M3 past/present bindings and one-byte native cache storage. TensorRT uses
+the trained scale of each layer's K and V to dequantize for attention. Older
+compute-type cache bundles retain their own storage layout. Explicit matching
+FP8/NVFP4 requests and automatic requests consume the prepared checkpoint;
+neither recalibrates those weights.
 
 ```bash
 python -m tensorrt_model_connect llama build /path/to/prepared-checkpoint \
@@ -154,6 +172,40 @@ oracle with a different chat template.
 
 These exact local results do not qualify other contexts, source revisions,
 sampling policies, CPU architectures or operating systems.
+
+## Opt-in Edge 0.12.0 validation
+
+With TensorRT 11.4, batch one and FP16 compute, the
+ordinary configurations below were built and run through MC. Each route was
+scored on the existing capital, arithmetic and raw-continuation cases against
+an independent FP32 reference with that checkpoint's prompt tokens. A quality
+miss does not prevent building or running the model.
+
+| Source checkpoint | Edge route | Native TensorRT route |
+| --- | --- | --- |
+| Meta Llama 3.2 1B Instruct | 2/3; arithmetic miss | 2/3; arithmetic miss |
+| RedHatAI Llama 3.2 1B Instruct FP8 | 2/3; arithmetic miss | 2/3; arithmetic miss |
+| Meta Llama 3.2 3B Instruct | 3/3, NED 0 with both wheel and source tools | 3/3, NED 0 after warned fallback |
+| Meta Llama 3.1 8B Instruct | 3/3, NED 0 | 3/3, NED 0 |
+| NVIDIA Llama 3.1 8B Instruct FP8 | 3/3, NED 0 | 3/3, NED 0 |
+| NVIDIA Llama 3.1 8B Instruct NVFP4 | 3/3, NED 0 | 3/3, NED 0 |
+
+The documented Llama 3.1 8B Instruct + EAGLE3 pair also ran on SM120 at
+capacity 256. Both the Edge C++ runtime and the warned native speculative
+fallback matched the base-model FP32 reference on all three cases (NED 0).
+The Edge bundle contained both speculative engines. In the existing native
+verifier, a 96-token input produced 32 identical greedy tokens for tree,
+chain and ordinary target decoding. Reset, capacity and all 16 sampling
+checks passed, with 228 accepted draft tokens across the sampled checks.
+These checks establish correctness for this pair, not a speedup.
+
+The two NVIDIA prepared configurations preserve the trained weight format
+and FP8 KV cache. On SM120, the Edge engine configuration declares FP8 KV;
+the native TensorRT plans expose 128 linear E4M3 past/present bindings. No
+additional calibration was performed. The RedHatAI checkpoint instead uses
+static per-tensor FP8 weights and input scales with a compute-precision
+cache. The ordinary original-weight Edge runs used SM80, not SM120. These
+results do not qualify other checkpoints, hardware or context lengths.
 
 ## Fresh Edge 0.11.0 qualification
 

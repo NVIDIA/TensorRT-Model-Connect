@@ -260,6 +260,11 @@ def _box_iou(left: list[float], right: list[float]) -> float:
 
 
 _IOU_FLOOR = 0.5
+# The fp16 engines accumulate in fp32 (graph._widen_accumulation): the worst score
+# delta against the fp32 reference is about 0.008 on this case in every build, as
+# for PyTorch fp16 on the GPU. Builds that accumulated in fp16 measured 0.02 to
+# 0.105, and at 0.105 a neighbouring patch replaced a detection with a score delta
+# of 0.063, which this bound still catches.
 _SCORE_TOLERANCE = 0.05
 
 
