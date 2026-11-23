@@ -17,13 +17,15 @@ def _validate_tokenizer(tokenizer):
         or len(parts) != 2
         or parts[0].get("type") != "Split"
         or not isinstance(parts[0].get("pattern", {}).get("Regex"), str)
+        or parts[0].get("behavior") != "Isolated"
+        or parts[0].get("invert", False)
         or parts[1].get("type") != "ByteLevel"
         or parts[1].get("use_regex", True)
         or parts[1].get("add_prefix_space", True)
     ):
         raise ValueError(
             "Nemotron embedding tokenizer requires Sequence[Split(Regex), ByteLevel] "
-            "with use_regex=false and add_prefix_space=false; "
+            "with behavior=Isolated, invert=false, use_regex=false and add_prefix_space=false; "
             f"got {pretokenizer!r}"
         )
 

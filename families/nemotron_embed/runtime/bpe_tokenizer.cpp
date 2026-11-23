@@ -1425,17 +1425,18 @@ class BpeTokenizer final : public ITokenizer {
         if (pretokenizer.value("type", "") != "Sequence" ||
             !pretokenizer.contains("pretokenizers") || !pretokenizer.at("pretokenizers").is_array())
             throw std::runtime_error("Nemotron tokenizer requires Sequence[Split, ByteLevel]");
-        for (const auto& part : pretokenizer.at("pretokenizers")) {
-            if (part.value("type", "") == "Split") {
-                const auto pattern = part.at("pattern").at("Regex").get<std::string>();
-                UErrorCode status = U_ZERO_ERROR;
-                mRegex.reset(
-                    icu::RegexPattern::compile(icu::UnicodeString::fromUTF8(pattern), 0, status));
-                if (U_FAILURE(status))
-                    throw std::runtime_error("embedding tokenizer regex compilation failed");
-                break;
-            }
-        }
+        const auto& parts = pretokenizer.at("pretokenizers");
+        if (parts.size() != 2 || parts[0].value("type", "") != "Split" ||
+            parts[0].value("behavior", "") != "Isolated" || parts[0].value("invert", false) ||
+            parts[1].value("type", "") != "ByteLevel" || parts[1].value("use_regex", true) ||
+            parts[1].value("add_prefix_space", true))
+            throw std::runtime_error("Nemotron tokenizer requires an isolated regex Split followed "
+                                     "by ByteLevel without prefix space or regex");
+        const auto pattern = parts[0].at("pattern").at("Regex").get<std::string>();
+        UErrorCode status = U_ZERO_ERROR;
+        mRegex.reset(icu::RegexPattern::compile(icu::UnicodeString::fromUTF8(pattern), 0, status));
+        if (U_FAILURE(status))
+            throw std::runtime_error("embedding tokenizer regex compilation failed");
         detect_decoder(j);
     }
 
