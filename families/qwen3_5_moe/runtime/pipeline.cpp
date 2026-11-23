@@ -31,14 +31,26 @@ RecurrentPipeline::RecurrentPipeline(std::unique_ptr<ITrtModule> decoder,
                                      const char* name, std::shared_ptr<ITokenizer> tokenizer,
                                      std::string model_id_str,
                                      std::unique_ptr<Qwen35MoeMtpScheduler> mtp_scheduler,
-                                     std::unique_ptr<Qwen35MoePairedDraft> paired_draft)
+                                     std::unique_ptr<Qwen35MoePairedDraft> paired_draft,
+                                     std::unique_ptr<ITrtModule> prefill)
     : decoder_(std::move(decoder)), state_(std::move(state)), config_(config), stream_(stream),
       name_(name), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
-      mtp_scheduler_(std::move(mtp_scheduler)), paired_draft_(std::move(paired_draft)) {
+      mtp_scheduler_(std::move(mtp_scheduler)), paired_draft_(std::move(paired_draft)),
+      prefill_(std::move(prefill)) {
     if (mtp_scheduler_ && paired_draft_)
         throw std::runtime_error("Qwen3.5-MoE cannot combine MTP and external draft schedulers");
     if (!decoder_ || !decoder_->ok())
         throw std::runtime_error(std::string(name_) + ": invalid decoder module");
+    if (prefill_) {
+        if (!prefill_->ok() || mtp_scheduler_ || paired_draft_)
+            throw std::runtime_error(std::string(name_) +
+                                     ": batched prefill needs a plain decoder");
+        const auto rows = prefill_->input_profile_shape("token_id", prefill_->profile_idx(),
+                                                        ProfileShapeSelector::kMax);
+        if (rows.size() != 1 || rows[0] < 1)
+            throw std::runtime_error(std::string(name_) + ": invalid prefill token profile");
+        prefill_rows_ = static_cast<int32_t>(std::min<int64_t>(rows[0], state_->max_length()));
+    }
     // Inspect declared inputs rather than optional Edge metadata. Older text
     // bundles remain loadable and never receive media-only bindings.
     int media_bindings = 0;
@@ -74,6 +86,12 @@ RecurrentPipeline::RecurrentPipeline(std::unique_ptr<ITrtModule> decoder,
          (media_inputs_ && (mtp_scheduler_->media_dtype() != media_dtype_ ||
                             mtp_scheduler_->hidden_size() != media_hidden_size_))))
         throw std::runtime_error("Qwen3.5-MoE MTP and target media inputs disagree");
+    // A media decoder's prefill engine takes the same media inputs per row.
+    if (prefill_ && media_inputs_ != (prefill_->has_input("visual_embedding") &&
+                                      prefill_->has_input("use_visual_embedding") &&
+                                      prefill_->has_input("rotary_position_offsets")))
+        throw std::runtime_error(std::string(name_) +
+                                 ": prefill and decoder engines disagree on media inputs");
 }
 
 static std::vector<int32_t> encode_prompt(const ITokenizer& tokenizer,
@@ -215,10 +233,14 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
 
     // ── Prefill phase ──
     auto t_prefill_start = SteadyClock::now();
-    for (std::size_t i = 0; i + 1 < input_ids.size(); ++i)
-        run_step(input_ids[i], logits);
-
-    run_step(input_ids.back(), logits);
+    // A prompt longer than the cache keeps the token loop, whose KV cache
+    // slides once full.
+    if (prefill_ && static_cast<int64_t>(input_ids.size()) <= state_->max_length()) {
+        run_prefill_chunks(input_ids, logits);
+    } else {
+        for (const auto token : input_ids)
+            run_step(token, logits);
+    }
     auto t_prefill_end = SteadyClock::now();
 
     // ── Decode phase ──
@@ -456,6 +478,85 @@ void RecurrentPipeline::report_timing(SteadyClock::time_point t_prefill_start,
                   << (output_bytes / (1024.0 * 1024.0)) << " MB (" << decoder_->output_info().size()
                   << " tensors)\n";
     }
+}
+
+void RecurrentPipeline::run_prefill_chunks(const std::vector<int32_t>& input_ids,
+                                           std::vector<float>& logits) {
+    const auto total = static_cast<int32_t>(input_ids.size());
+    state_->bind_prefill(*prefill_);
+    // Per-row media inputs of one chunk (forward_async copies them before it returns).
+    std::vector<uint8_t> visual;
+    std::vector<int32_t> use_visual;
+    std::vector<int32_t> offsets;
+    try {
+        for (int32_t start = 0; start < total; start += prefill_rows_) {
+            const int32_t rows = std::min(prefill_rows_, total - start);
+            TensorMap inputs;
+            inputs["token_id"] =
+                Tensor{const_cast<int32_t*>(input_ids.data() + start), {rows}, DType::kInt32};
+            state_->prepare_step(inputs, rows);
+            if (media_inputs_)
+                prepare_prefill_media(inputs, start, rows, visual, use_visual, offsets);
+            prefill_->forward_async(inputs);
+            state_->commit_prefill(*prefill_, rows);
+        }
+    } catch (...) {
+        // Queued chunks may still read the request's tokens: drain them before the error
+        // releases the request. A failure of the drain must not replace the original error.
+        try {
+            prefill_->sync();
+        } catch (...) {
+        }
+        throw;
+    }
+    prefill_->sync();
+    const auto* device_logits = prefill_->device_ptr("logits");
+    if (device_logits == nullptr)
+        throw std::runtime_error(std::string(name_) + ": prefill context has no logits output");
+    logits.resize(static_cast<std::size_t>(config_.vocab_size));
+    const cudaError_t copied = cudaMemcpy(logits.data(), device_logits,
+                                          logits.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    if (copied != cudaSuccess)
+        throw std::runtime_error(std::string(name_) +
+                                 ": failed to copy prefill logits: " + cudaGetErrorString(copied));
+}
+
+void RecurrentPipeline::prepare_prefill_media(TensorMap& inputs, int32_t start, int32_t rows,
+                                              std::vector<uint8_t>& visual,
+                                              std::vector<int32_t>& use_visual,
+                                              std::vector<int32_t>& offsets) const {
+    // Row i of the chunk is prompt position start + i: the same inputs run_step() gives that token.
+    const std::size_t row_bytes = zero_visual_.size();
+    visual.assign(static_cast<std::size_t>(rows) * row_bytes, 0);
+    use_visual.assign(static_cast<std::size_t>(rows), 0);
+    offsets.assign(static_cast<std::size_t>(rows) * 3, 0);
+    for (int32_t i = 0; i < rows; ++i) {
+        const auto position = static_cast<std::size_t>(start + i);
+        const auto row = static_cast<std::size_t>(i);
+        if (media_prompt_ == nullptr)
+            continue;
+        const auto& prompt = *media_prompt_;
+        if (position < prompt.positions.size()) {
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                offsets[row * 3 + axis] =
+                    prompt.positions[position][axis] - static_cast<int32_t>(position);
+            const auto feature = prompt.feature_rows[position];
+            if (feature >= 0) {
+                use_visual[row] = 1;
+                std::memcpy(visual.data() + row * row_bytes,
+                            prompt.features.data() + static_cast<std::size_t>(feature) * row_bytes,
+                            row_bytes);
+            }
+        } else {
+            const auto shift =
+                prompt.decode_position - static_cast<int32_t>(prompt.positions.size());
+            for (std::size_t axis = 0; axis < 3; ++axis)
+                offsets[row * 3 + axis] = shift;
+        }
+    }
+    inputs["visual_embedding"] = Tensor{visual.data(), {rows, media_hidden_size_}, media_dtype_};
+    inputs["use_visual_embedding"] = Tensor{use_visual.data(), {rows, 1}, DType::kInt32};
+    inputs["rotary_position_offsets"] = Tensor{offsets.data(), {rows, 3}, DType::kInt32};
 }
 
 void RecurrentPipeline::run_step(int32_t token_id, std::vector<float>& logits,

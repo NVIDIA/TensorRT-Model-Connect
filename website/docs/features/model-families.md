@@ -341,6 +341,10 @@ owns native TensorRT Python graph construction and Model Connect C++ execution,
 including prepared routed experts and media inputs. Publication errors,
 cancellation and runtime errors do not trigger this fallback. Native execution
 needs neither Edge nor ONNX.
+A native single-GPU GPTQ bundle without MTP or a draft also ships `prefill.plan`
+when two copies of the checkpoint weights fit in 80% of the GPU memory. The
+runtime then prefills text and media prompts up to 64 rows per call and decodes
+with `engine.plan`; other bundles prefill one token at a time, as before.
 The existing validation checks seed rejection on Edge and seeded request-local
 repeatability on native, retaining capacity recovery, the independent checkpoint
 reference and the unchanged accuracy gate. Native speculative mappings and
