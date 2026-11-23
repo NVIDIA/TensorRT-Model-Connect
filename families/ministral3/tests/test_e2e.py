@@ -177,8 +177,10 @@ def _run_json(program: Path, arguments: list[str], runtime_root: Path, timeout: 
     env["LD_LIBRARY_PATH"] = ":".join(
         value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value
     )
+    # Absolute, so that a relative TRTMC_BINARY such as ./trtmc runs the checked
+    # file instead of a same-named program found on PATH.
     completed = subprocess.run(
-        [str(program), *arguments],
+        [str(Path(program).absolute()), *arguments],
         check=True,
         capture_output=True,
         text=True,
@@ -268,21 +270,24 @@ def _native(binary, runtime_root, native_build, bundle, case) -> dict:
 
 @contextmanager
 def _tf32_disabled(torch):
-    """Run the reference without TF32, then restore the two process-wide flags.
+    """Run the reference without TF32, then restore the process-wide settings.
 
-    The flags are global to the process, which may run other families' tests
-    next; they are restored whether the reference succeeds or fails. Only these
-    flags are touched: setting the matmul precision through the newer API as
-    well would make ``torch.get_float32_matmul_precision`` raise later.
+    The settings are global to the process, which may run other families' tests
+    next; they are restored whether the reference succeeds or fails. The matmul
+    precision goes through ``torch.set_float32_matmul_precision``, which keeps a
+    prior "medium"; the legacy matmul ``allow_tf32`` flag would make
+    ``torch.get_float32_matmul_precision`` raise in a process that set the
+    precision before. cuDNN goes through its flag.
     """
-    saved = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
+    saved = (torch.get_float32_matmul_precision(), torch.backends.cudnn.allow_tf32)
     try:
-        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.set_float32_matmul_precision("highest")
         torch.backends.cudnn.allow_tf32 = False
-        assert torch.get_float32_matmul_precision() == "highest"
+        assert not torch.backends.cuda.matmul.allow_tf32
         yield
     finally:
-        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = saved
+        torch.set_float32_matmul_precision(saved[0])
+        torch.backends.cudnn.allow_tf32 = saved[1]
 
 
 def _official_reference(model_dir: Path, case: dict, precision: str) -> dict:
@@ -295,13 +300,15 @@ def _official_reference(model_dir: Path, case: dict, precision: str) -> dict:
         prompts = json.loads((model_dir / "config_sentence_transformers.json").read_text())[
             "prompts"
         ]
+        rope = json.loads((model_dir / "config.json").read_text())["rope_parameters"]
         tokenizer = AutoTokenizer.from_pretrained(model_dir)
         model = AutoModel.from_pretrained(model_dir, dtype=dtype, attn_implementation="sdpa")
         model = model.to("cuda").eval()
-        embeddings, tokens = [], []
+        embeddings, tokens, prompted_tokens = [], [], []
         with torch.inference_mode():
             for role, text in _texts(case):
                 encoded = tokenizer(prompts[role] + text, return_tensors="pt", truncation=False)
+                prompted_tokens.append(int(encoded["input_ids"].shape[1]))
                 hidden = model(**encoded.to("cuda")).last_hidden_state
                 pooled = hidden.sum(dim=1) / hidden.shape[1]
                 embeddings.append(
@@ -315,7 +322,12 @@ def _official_reference(model_dir: Path, case: dict, precision: str) -> dict:
                 )
         del model
         torch.cuda.empty_cache()
-        return {"embeddings": np.stack(embeddings), "tokens": tokens}
+        return {
+            "embeddings": np.stack(embeddings),
+            "tokens": tokens,
+            "prompted_tokens": prompted_tokens,
+            "query_scale_start": int(rope["original_max_position_embeddings"]),
+        }
 
 
 def _thresholds(case_name: str) -> dict:
@@ -538,6 +550,50 @@ def _parity_checks(
             f"native token-feature shape differs: {misshaped[:1]!r}",
         )
     )
+    output_shapes = {
+        "embeddings": (list(np.shape(native["embeddings"])), list(np.shape(truth["embeddings"]))),
+        "pooled": (
+            list(np.shape(native["pooled"])),
+            list(np.shape(truth["tokens"][queries]["hidden"])[-1:]),
+        ),
+    }
+    misshaped_outputs = {
+        name: shapes for name, shapes in output_shapes.items() if shapes[0] != shapes[1]
+    }
+    checks.append(
+        (
+            _check(
+                "output_shapes_mismatched",
+                "Native embeddings or pooled feature not shaped like the reference",
+                "contract",
+                len(misshaped_outputs),
+                "==",
+                0,
+            ),
+            f"native output shape differs (native, reference): {misshaped_outputs!r}",
+        )
+    )
+    if misshaped_outputs:
+        # Every later comparison would broadcast these arrays; this check is the verdict.
+        return {"output_shapes": output_shapes}, checks
+    if case.get("repeated_documents"):
+        long_tokens = truth["prompted_tokens"][len(texts) :]
+        start = truth["query_scale_start"]
+        checks.append(
+            (
+                _check(
+                    "long_document_tokens_min",
+                    f"Fewest prompted tokens of a long document (the query scale acts from "
+                    f"position {start})",
+                    "contract",
+                    min(long_tokens, default=0),
+                    ">=",
+                    start + 1,
+                ),
+                f"a long document does not reach position {start}, where the query scale "
+                f"starts: {long_tokens}",
+            )
+        )
     norm_deviation = _largest(
         np.abs(np.linalg.norm(np.asarray(native["embeddings"], dtype=np.float64), axis=-1) - 1.0)
     )
@@ -555,7 +611,8 @@ def _parity_checks(
         )
     )
     drift = _drifts(native, truth, queries, keep=shaped)
-    reference_drift = None if official is None else _drifts(official, truth, queries)
+    # The official baseline covers the same texts as the native drift.
+    reference_drift = None if official is None else _drifts(official, truth, queries, keep=shaped)
     summary = {
         "embedding_cosine_min": 1 - _largest(drift["embedding"]),
         "score_abs_diff_max": _largest(drift["score"]) if drift["score"].size else 0.0,
@@ -566,6 +623,8 @@ def _parity_checks(
         "embedding_norm_deviation_max": norm_deviation,
         "tokens": int(drift["token"].size),
     }
+    if case.get("repeated_documents"):
+        summary["long_document_prompted_tokens"] = long_tokens
     if drift["score"].size:
         native_scores = _scores(native["embeddings"], queries)
         truth_scores = _scores(truth["embeddings"], queries)

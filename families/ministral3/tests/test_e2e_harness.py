@@ -4,6 +4,7 @@
 """CPU checks of the E2E harness: native call plan and the parity oracle."""
 
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -63,24 +64,26 @@ def native_calls(tmp_path, monkeypatch):
 
 def test_native_runs_cli_consumers_and_feature_tasks(tmp_path, monkeypatch):
     calls, native = native_calls(tmp_path, monkeypatch)
-    embedded = [
-        (arguments[arguments.index("--role") + 1], arguments[arguments.index("--text") + 1])
-        for _, arguments in calls
-        if arguments[0] == "embed"
+    bundle, root = str(tmp_path / "b.bundle"), str(tmp_path)
+
+    def embed(role, text):
+        return ("trtmc", ["embed", bundle, "--runtime-root", root, "--role", role, "--text", text])
+
+    def encode(text, task):
+        return ("trtmc", ["encode", bundle, "--runtime-root", root, "--text", text, "--task", task])
+
+    consumer = [bundle, root, "query", "q1"]
+    # The full argv of every launch, in order: a wrong subcommand, role, text or task fails.
+    assert calls == [
+        embed("query", "q1"),
+        embed("query", "q2"),
+        embed("document", "d1"),
+        embed("document", "d2"),
+        ("test_ministral3_sdk_c", consumer),
+        ("test_ministral3_sdk_cpp", consumer),
+        *(encode(text, "text_to_token_features") for text in ("q1", "q2", "d1", "d2")),
+        encode("d1", "text_to_pooled_features"),
     ]
-    assert embedded == [("query", "q1"), ("query", "q2"), ("document", "d1"), ("document", "d2")]
-    consumer_arguments = [str(tmp_path / "b.bundle"), str(tmp_path), "query", "q1"]
-    assert calls[4:6] == [
-        ("test_ministral3_sdk_c", consumer_arguments),
-        ("test_ministral3_sdk_cpp", consumer_arguments),
-    ]
-    token_texts = [
-        arguments[arguments.index("--text") + 1]
-        for _, arguments in calls
-        if "text_to_token_features" in arguments
-    ]
-    assert token_texts == ["q1", "q2", "d1", "d2"]
-    assert "text_to_pooled_features" in calls[-1][1] and "d1" in calls[-1][1]
     np.testing.assert_allclose(
         native["embeddings"], [EMBEDDINGS[text] for text in ("q1", "q2", "d1", "d2")], rtol=1e-7
     )
@@ -155,6 +158,7 @@ def test_bf16_long_documents_are_checked_one_by_one():
     rng = np.random.default_rng(4)
     _, truth = parity_inputs(rng, 0.0, texts=("q1", "q2", "d1", "d2", "long"), rows=30)
     truth["tokens"] = truth["tokens"][:4]
+    truth.update(prompted_tokens=[5, 5, 5, 5, 20000], query_scale_start=16384)
 
     def noisy(values, scales):
         result = values + np.asarray(scales)[:, None] * rng.standard_normal(values.shape)
@@ -421,27 +425,103 @@ def test_an_exact_bf16_match_passes_despite_cosine_round_off():
     assert summary["drift_statistics"]["token"]["native_max"] == 0.0
 
 
-def test_reference_restores_the_process_wide_tf32_settings(tmp_path):
+@pytest.mark.parametrize("precision, cudnn", [("medium", True), ("high", False)])
+def test_reference_restores_the_process_wide_tf32_settings(tmp_path, precision, cudnn):
     torch = pytest.importorskip("torch")
     pytest.importorskip("transformers")
 
     def settings():
-        return (
-            torch.backends.cuda.matmul.allow_tf32,
-            torch.backends.cudnn.allow_tf32,
-            torch.get_float32_matmul_precision(),
-        )
+        return torch.get_float32_matmul_precision(), torch.backends.cudnn.allow_tf32
 
-    saved = settings()[:2]
+    saved = settings()
     try:
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
-        before = settings()
-        # The checkpoint directory is empty, so the reference fails after disabling
-        # TF32. A case runs it twice in one process (FP32 truth, official BF16 run).
-        for precision in ("fp32", "bf16"):
+        torch.set_float32_matmul_precision(precision)
+        torch.backends.cudnn.allow_tf32 = cudnn
+        # The checkpoint directory is empty, so each reference fails after disabling
+        # TF32; a case runs it twice in one process (FP32 truth, official BF16 run).
+        for reference in ("fp32", "bf16"):
             with pytest.raises(FileNotFoundError):
-                test_e2e._official_reference(tmp_path, CASE, precision)
-            assert settings() == before
+                test_e2e._official_reference(tmp_path, CASE, reference)
+            assert settings() == (precision, cudnn)
     finally:
-        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = saved
+        torch.set_float32_matmul_precision(saved[0])
+        torch.backends.cudnn.allow_tf32 = saved[1]
+
+
+def test_cli_runs_the_checked_executable_not_one_on_path(tmp_path, monkeypatch):
+    """A relative TRTMC_BINARY such as ./trtmc must not resolve through PATH."""
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    for directory, name in ((tmp_path, "checked"), (decoy, "decoy")):
+        program = directory / "trtmc"
+        program.write_text(f'#!/bin/sh\necho \'{{"binary": "{name}"}}\'\n')
+        program.chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", f"{decoy}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setattr(test_e2e, "record_evidence", lambda *args: None)
+    assert test_e2e._run_json(Path("./trtmc"), [], tmp_path, 30) == {"binary": "checked"}
+
+
+def test_long_documents_must_reach_the_query_scale():
+    """A long document below the query-scale start does not exercise the scale."""
+    case = dict(CASE, repeated_documents=[{"text": "long", "count": 2}])
+    texts = ("q1", "q2", "d1", "d2", "long")
+    native, truth = parity_inputs(np.random.default_rng(10), 0.0, texts=texts)
+    native["tokens"], truth["tokens"] = native["tokens"][:4], truth["tokens"][:4]
+    truth["query_scale_start"] = 16384
+    reached = dict(truth, prompted_tokens=[5, 5, 5, 5, 16385])
+    test_e2e._assert_parity(native, reached, None, case, test_e2e.DEFAULT_THRESHOLDS)
+    short = dict(truth, prompted_tokens=[5, 5, 5, 5, 16384])
+    with pytest.raises(AssertionError, match="does not reach position 16384"):
+        test_e2e._assert_parity(native, short, None, case, test_e2e.DEFAULT_THRESHOLDS)
+
+
+def test_bf16_token_baseline_covers_the_same_texts():
+    """A text left out of the native token drift is left out of the official baseline too."""
+    rng = np.random.default_rng(11)
+    native, truth = parity_inputs(rng, 0.0, rows=30)
+
+    def disturbed(scale, first):
+        return [
+            dict(
+                item,
+                hidden=item["hidden"]
+                + (first if index == 0 else scale) * rng.standard_normal(item["hidden"].shape),
+            )
+            for index, item in enumerate(truth["tokens"])
+        ]
+
+    official = dict(truth, tokens=disturbed(1e-3, 1.0), embeddings=native["embeddings"].copy())
+    native = dict(native, tokens=disturbed(5e-3, 5e-3))
+    native["tokens"][0] = dict(native["tokens"][0], hidden=native["tokens"][0]["hidden"][:1])
+    recorded = []
+    with pytest.raises(AssertionError, match="token-feature shape"):
+        test_e2e._assert_parity(
+            native,
+            truth,
+            official,
+            case_of(30),
+            test_e2e.DEFAULT_THRESHOLDS,
+            record=recorded.append,
+        )
+    (rows,) = recorded
+    # 5x the official drift on the same three texts; text 0's large official error no longer hides it.
+    assert "bf16_token_max" in {row["name"] for row in rows if not row["passed"]}
+
+
+def test_output_shapes_are_checked_before_any_comparison():
+    """Misshaped embeddings or pooled feature fail their own check instead of broadcasting."""
+    native, truth = parity_inputs(np.random.default_rng(12), 0.0)
+    for wrong in (
+        dict(native, embeddings=native["embeddings"][:, :4]),
+        dict(native, embeddings=native["embeddings"][:1]),
+        dict(native, pooled=native["pooled"][:1]),
+    ):
+        recorded = []
+        with pytest.raises(AssertionError, match="native output shape differs"):
+            test_e2e._assert_parity(
+                wrong, truth, None, CASE, test_e2e.DEFAULT_THRESHOLDS, record=recorded.append
+            )
+        (rows,) = recorded
+        for row in rows:
+            valid_row(row)
