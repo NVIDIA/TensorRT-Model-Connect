@@ -94,8 +94,11 @@ Timestamp timestamp(const nlohmann::json& segment, const char* key, const char* 
 
 ParsedTranscript parse_transcript(const std::string& decoded) {
     std::string text = strip(decoded);
+    // The role header the chat template puts before the reply: "assistant" followed by
+    // whitespace (or nothing), not the start of a word such as "assistantship".
     constexpr std::string_view role = "assistant";
-    if (text.compare(0, role.size(), role) == 0)
+    if (text.compare(0, role.size(), role) == 0 &&
+        (text.size() == role.size() || is_space(text[role.size()])))
         text = strip(std::string_view(text).substr(role.size()));
     ParsedTranscript result;
     result.text = text;

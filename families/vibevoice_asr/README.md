@@ -47,10 +47,13 @@ it once with
   a value must fit in the sequence with the prompt),
   `context_info` (hotwords or background text, as the official `context_info`),
   `raw_output`. `source_language` and `--kv-cache-size` are rejected.
-- Tokenization follows the bundle's `tokenizer.json`, including its NFC
-  normalizer and the Unicode letter and number classes of its Split pattern,
-  which the runtime takes from the installed ICU library; text that is not
-  valid UTF-8 is rejected.
+- Tokenization reproduces Qwen2.5's `tokenizer.json` layout: NFC, its Split
+  pattern with the Unicode letter and number classes of the installed ICU
+  library, and byte-level BPE. The build rejects a tokenizer with any other
+  layout or with a setting that changes the ids (for example truncation, a
+  post-processor that adds tokens, or `split_special_tokens` in
+  `tokenizer_config.json`), and the runtime rejects such a `tokenizer.json` at
+  load. Text that is not valid UTF-8 is rejected.
 - The acoustic latent is the sigma-VAE mean. The official model adds random
   noise to it on every call, and so does the transformers implementation; the
   E2E reference removes the noise with `vae_std = 0`.

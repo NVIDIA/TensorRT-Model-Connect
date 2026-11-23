@@ -22,12 +22,22 @@ inline constexpr std::size_t kMaxResampleTable = std::size_t{1} << 20;
 // positive or a length beyond the int64 range.
 std::size_t resampled_length(std::size_t samples, std::int32_t from_rate, std::int32_t to_rate);
 
+// The taps [begin, end) of an output sample's tap list, whose first tap reads input
+// sample `first`, that fall on the input samples [0, count). The resampler visits only
+// these, so its work per output stays within the input even when the kernel is wider.
+struct TapSpan {
+    std::int64_t begin{0};
+    std::int64_t end{0};
+};
+TapSpan input_taps(std::int64_t first, std::int64_t taps, std::int64_t count);
+
 // Kaiser-windowed sinc polyphase resampler. The output holds
 // ceil(input.size() * to_rate / from_rate) samples, the length librosa.resample
 // returns, so the speech-token count and stated duration follow the reference.
 // Rate pairs whose exact phase table (one row per output phase) would exceed
 // `max_table_coefficients` interpolate a kernel table instead, so memory and
-// setup stay bounded for any pair of rates (for example 192001 Hz).
+// setup stay bounded for any pair of rates (for example 192001 Hz). A resampled
+// sample beyond the float range throws std::invalid_argument.
 std::vector<float> resample(const std::vector<float>& input, std::int32_t from_rate,
                             std::int32_t to_rate,
                             std::size_t max_table_coefficients = kMaxResampleTable);

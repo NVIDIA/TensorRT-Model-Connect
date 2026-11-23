@@ -46,16 +46,19 @@ std::vector<std::int32_t> probe_ids(const nlohmann::json& ids, std::int32_t voca
 }
 
 // normalize_loudness divides float(10^(target / 20)) by (rms + float(eps)) in
-// float. For silent input (rms 0) that gain must be finite and not zero, which
-// needs an eps that is a normal float (checked before the cast: a double above
-// FLT_MAX has no float value) and a target whose amplitude is a normal float.
+// float. For silent input (rms 0) that gain must be a normal float, neither infinite
+// nor rounded to zero (which would silence every input), which needs an eps that is
+// a normal float (checked before the cast: a double above FLT_MAX has no float value)
+// and a target whose amplitude is a normal float.
 bool usable_silence_gain(double target_dbfs, double eps) {
     if (!std::isfinite(target_dbfs) || !(eps >= std::numeric_limits<float>::min()) ||
         !(eps <= std::numeric_limits<float>::max()))
         return false;
     const float eps_float = static_cast<float>(eps);
     const float amplitude = static_cast<float>(std::pow(10.0, target_dbfs / 20.0));
-    return amplitude >= std::numeric_limits<float>::min() && std::isfinite(amplitude / eps_float);
+    const float gain = amplitude / eps_float;
+    return amplitude >= std::numeric_limits<float>::min() && std::isfinite(gain) &&
+           gain >= std::numeric_limits<float>::min();
 }
 
 RuntimeConfig parse_runtime_config_json(const std::string& json_text) {

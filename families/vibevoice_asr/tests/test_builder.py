@@ -158,6 +158,44 @@ def test_special_tokens_must_be_special_added_tokens():
         model.special_token_ids(json.dumps({"added_tokens": tokens}).encode())
     with pytest.raises(ValueError):
         model.special_token_ids(json.dumps({"added_tokens": tokens[1:]}).encode())
+    with pytest.raises(ValueError, match="lacks the special token"):
+        model.special_token_ids(b"{}")
+
+
+def _qwen_tokenizer(vocab, added):
+    """A tokenizer.json with Qwen2.5's layout around the given vocabulary."""
+    return {
+        "version": "1.0",
+        "truncation": None,
+        "padding": None,
+        "added_tokens": added,
+        "normalizer": {"type": "NFC"},
+        "pre_tokenizer": {
+            "type": "Sequence",
+            "pretokenizers": [
+                {
+                    "type": "Split",
+                    "pattern": {"Regex": model.QWEN_SPLIT_PATTERN},
+                    "behavior": "Isolated",
+                    "invert": False,
+                },
+                {"type": "ByteLevel", "add_prefix_space": False, "trim_offsets": False, "use_regex": False},
+            ],
+        },
+        "post_processor": {"type": "ByteLevel", "add_prefix_space": False, "trim_offsets": False, "use_regex": False},
+        "decoder": {"type": "ByteLevel", "add_prefix_space": False, "trim_offsets": False, "use_regex": False},
+        "model": {
+            "type": "BPE",
+            "dropout": None,
+            "unk_token": None,
+            "continuing_subword_prefix": "",
+            "end_of_word_suffix": "",
+            "fuse_unk": False,
+            "byte_fallback": False,
+            "vocab": vocab,
+            "merges": [],
+        },
+    }
 
 
 def test_tokenizer_ids_must_be_decoder_rows(monkeypatch):
@@ -171,7 +209,7 @@ def test_tokenizer_ids_must_be_decoder_rows(monkeypatch):
     ]
 
     def tokenizer(vocab, extra=()):
-        return json.dumps({"model": {"vocab": vocab}, "added_tokens": specials + list(extra)})
+        return json.dumps(_qwen_tokenizer(vocab, specials + list(extra)))
 
     contract = model.runtime_contract(cfg, 4096, tokenizer({"a": 0, "b": 151642}).encode())
     assert contract["vocab_size"] == 152064
@@ -183,6 +221,107 @@ def test_tokenizer_ids_must_be_decoder_rows(monkeypatch):
     ):
         with pytest.raises(ValueError, match="outside the decoder vocabulary"):
             model.runtime_contract(cfg, 4096, tokenizer(vocab, extra).encode())
+
+
+def test_only_the_qwen_tokenizer_layout_builds():
+    # The runtime tokenizer reproduces Qwen2.5's layout only; the build refuses any other.
+    base = _qwen_tokenizer({"a": 0}, [{"id": 1, "content": "<|endoftext|>", "special": True}])
+    model.check_tokenizer_layout(json.dumps(base).encode())
+
+    def changed(path, value):
+        raw = copy.deepcopy(base)
+        target = raw
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+        return json.dumps(raw).encode()
+
+    for path, value in (
+        (("normalizer",), {"type": "Lowercase"}),
+        (("pre_tokenizer",), {"type": "ByteLevel", "add_prefix_space": False, "use_regex": False}),
+        (("pre_tokenizer", "pretokenizers", 1, "use_regex"), True),
+        (("pre_tokenizer", "pretokenizers", 0, "pattern", "Regex"), r"\s+"),
+        (("decoder",), {"type": "Metaspace"}),
+        (("model", "byte_fallback"), True),
+        (("model", "ignore_merges"), True),
+        (("added_tokens", 0, "lstrip"), True),
+        (("added_tokens", 0, "normalized"), True),
+        (("pre_tokenizer", "pretokenizers", 0, "pattern"), "not an object"),
+        (("model",), None),
+        # Settings with which the reference would change the ids.
+        (("truncation",), {"direction": "Right", "max_length": 4, "strategy": "LongestFirst", "stride": 0}),
+        (("padding",), {"strategy": "BatchLongest", "direction": "Right", "pad_id": 1, "pad_token": "x"}),
+        (("post_processor",), _TEMPLATE_POST_PROCESSOR),
+        (("model", "unk_token"), "<|endoftext|>"),
+        # Options are booleans, as the runtime requires: 0 or "" is not false.
+        (("pre_tokenizer", "pretokenizers", 0, "invert"), 0),
+        (("model", "byte_fallback"), 0),
+        (("added_tokens", 0, "lstrip"), ""),
+        (("added_tokens",), None),
+    ):
+        with pytest.raises(ValueError, match="is not supported"):
+            model.check_tokenizer_layout(changed(path, value))
+    for path, value in ((("added_tokens", 0, "content"), None), (("added_tokens", 0, "id"), 1.0)):
+        with pytest.raises(ValueError, match="needs a string content and an integer id"):
+            model.check_tokenizer_layout(changed(path, value))
+    # A null option is its default, as for the runtime.
+    model.check_tokenizer_layout(changed(("model", "byte_fallback"), None))
+
+
+_TEMPLATE_POST_PROCESSOR = {
+    "type": "TemplateProcessing",
+    "single": [
+        {"SpecialToken": {"id": "<|endoftext|>", "type_id": 0}},
+        {"Sequence": {"id": "A", "type_id": 0}},
+    ],
+    "pair": [{"Sequence": {"id": "A", "type_id": 0}}, {"Sequence": {"id": "B", "type_id": 1}}],
+    "special_tokens": {"<|endoftext|>": {"id": "<|endoftext|>", "ids": [1], "tokens": ["<|endoftext|>"]}},
+}
+
+
+def test_the_build_applies_the_layout_check(monkeypatch):
+    # runtime_contract refuses a layout the runtime would refuse at load.
+    monkeypatch.setattr(model, "tokenizer_checks", lambda tokenizer_json: [])
+    cfg = checkpoint.parse_config(CONFIG)
+    added = [
+        {"id": 151643 + i, "content": content, "special": True}
+        for i, content in enumerate(model.SPECIAL_TOKENS.values())
+    ]
+    raw = _qwen_tokenizer({"a": 0}, added)
+    raw["post_processor"] = _TEMPLATE_POST_PROCESSOR
+    with pytest.raises(ValueError, match="post_processor is not supported"):
+        model.runtime_contract(cfg, 4096, json.dumps(raw).encode())
+
+
+def test_added_token_ids_are_the_ids_the_reference_assigns():
+    # The reference re-adds tokens by content after the vocabulary: with one vocabulary
+    # entry, a token listed as id 5 gets id 1, which the runtime would not use.
+    pytest.importorskip("tokenizers")
+    options = {"single_word": False, "lstrip": False, "rstrip": False, "normalized": False}
+    token = {"id": 5, "content": "<|endoftext|>", "special": True, **options}
+    raw = _qwen_tokenizer({"a": 0}, [token])
+    model.tokenizer_checks(json.dumps(_qwen_tokenizer({"a": 0}, [dict(token, id=1)])).encode())
+    with pytest.raises(ValueError, match="the reference tokenizer assigns it 1"):
+        model.tokenizer_checks(json.dumps(raw).encode())
+
+
+def test_tokenizer_config_switches_must_be_off(tmp_path):
+    # transformers reads these from tokenizer_config.json; the runtime reads only tokenizer.json.
+    (tmp_path / "tokenizer.json").write_text("{}", encoding="utf-8")
+    config = tmp_path / "tokenizer_config.json"
+    qwen = {
+        "add_bos_token": False,
+        "add_prefix_space": False,
+        "clean_up_tokenization_spaces": False,
+        "split_special_tokens": False,
+        "tokenizer_class": "Qwen2Tokenizer",
+    }
+    config.write_text(json.dumps(qwen), encoding="utf-8")
+    assert set(model._tokenizer_files(tmp_path)) == set(model.TOKENIZER_FILES)
+    for switch in model.TOKENIZER_CONFIG_SWITCHES:
+        config.write_text(json.dumps(dict(qwen, **{switch: True})), encoding="utf-8")
+        with pytest.raises(ValueError, match=f"{switch} is not supported"):
+            model._tokenizer_files(tmp_path)
 
 
 def test_the_user_turn_matches_the_official_processor():

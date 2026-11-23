@@ -114,12 +114,37 @@ def _tokenizer_files(model_dir: Path) -> dict[str, bytes]:
             hint = f"; fetch it with: {TOKENIZER_FETCH_COMMAND}" if cached else ""
             raise FileNotFoundError(f"{FAMILY} tokenizer file is missing: {path}{hint}")
         files[name] = path.read_bytes()
+    check_tokenizer_config(files["tokenizer_config.json"])
     return files
+
+
+# tokenizer_config.json switches with which transformers would encode or decode
+# differently from the runtime, which reads only tokenizer.json.
+TOKENIZER_CONFIG_SWITCHES = (
+    "add_bos_token",
+    "add_eos_token",
+    "add_prefix_space",
+    "clean_up_tokenization_spaces",
+    "split_special_tokens",
+)
+
+
+def check_tokenizer_config(tokenizer_config_json: bytes) -> None:
+    """Each switch must be off (false or absent), as in Qwen2.5's tokenizer_config.json."""
+    raw = json.loads(tokenizer_config_json)
+    if not isinstance(raw, dict):
+        raise ValueError(f"{FAMILY} tokenizer_config.json must be a JSON object")
+    for key in TOKENIZER_CONFIG_SWITCHES:
+        value = raw.get(key)
+        if value is not None and value is not False:
+            raise ValueError(
+                f"{FAMILY} tokenizer_config.json {key} is not supported: {json.dumps(value)}"
+            )
 
 
 def special_token_ids(tokenizer_json: bytes) -> dict[str, int]:
     """Ids of the prompt and stop tokens, which must be special added tokens."""
-    added = {item["content"]: item for item in json.loads(tokenizer_json)["added_tokens"]}
+    added = {item["content"]: item for item in json.loads(tokenizer_json).get("added_tokens", [])}
     ids = {}
     for role, content in SPECIAL_TOKENS.items():
         item = added.get(content)
@@ -148,10 +173,19 @@ def tokenizer_checks(tokenizer_json: bytes) -> list[dict]:
 
     The native tokenizer must reproduce every one before the runtime loads, so a
     pre-tokenizer or merge difference fails at load instead of shifting the prompt.
+    Each added token must already have the id the reference assigns it: the reference
+    re-adds them by content, while the runtime and runtime.json take the listed ids.
     """
     from tokenizers import Tokenizer
 
     tokenizer = Tokenizer.from_str(tokenizer_json.decode("utf-8"))
+    for item in json.loads(tokenizer_json).get("added_tokens", []):
+        assigned = tokenizer.token_to_id(item["content"])
+        if assigned != item["id"]:
+            raise ValueError(
+                f"{FAMILY} tokenizer.json lists the added token {item['content']} with id "
+                f"{item['id']}, but the reference tokenizer assigns it {assigned}"
+            )
     im_start, im_end = SPECIAL_TOKENS["im_start"], SPECIAL_TOKENS["im_end"]
     texts = (
         f"{im_start}system\n{SYSTEM_PROMPT}{im_end}\n",
@@ -180,7 +214,105 @@ def check_tokenizer_ids(tokenizer_json: bytes, vocab_size: int) -> None:
         )
 
 
+# The Split pattern of Qwen2.5's tokenizer.json, the one the runtime's tokenizer implements.
+QWEN_SPLIT_PATTERN = (
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*"
+    r"|\s*[\r\n]+|\s+(?!\S)|\s+"
+)
+
+
+def check_tokenizer_layout(tokenizer_json: bytes) -> None:
+    """The bundle's tokenizer must have Qwen2.5's layout, the one the runtime reproduces.
+
+    The runtime rejects any other at load; the build rejects it first, with the same rules.
+    """
+    raw = json.loads(tokenizer_json)
+
+    def unsupported(part, value):
+        return ValueError(f"{FAMILY} tokenizer.json {part} is not supported: {json.dumps(value)}")
+
+    def flag(item, key, fallback=False):
+        """A boolean option: absent or null is `fallback`, anything but a boolean is refused."""
+        value = item.get(key)
+        if value is None:
+            return fallback
+        if not isinstance(value, bool):
+            raise unsupported(key, value)
+        return value
+
+    if not isinstance(raw, dict):
+        raise unsupported("document", raw)
+
+    def is_nfc(norm):
+        if not isinstance(norm, dict):
+            return False
+        if norm.get("type") == "NFC":
+            return True
+        children = norm.get("normalizers")
+        return norm.get("type") == "Sequence" and isinstance(children, list) and all(map(is_nfc, children))
+
+    normalizer = raw.get("normalizer")
+    if normalizer is not None and not is_nfc(normalizer):
+        raise unsupported("normalizer", normalizer)
+    for field in ("truncation", "padding"):
+        if raw.get(field) is not None:
+            raise unsupported(field, raw[field])
+    post = raw.get("post_processor")
+    if post is not None and not (isinstance(post, dict) and post.get("type") == "ByteLevel"):
+        raise unsupported("post_processor", post)
+    pre = raw.get("pre_tokenizer")
+    steps = pre.get("pretokenizers") if isinstance(pre, dict) and pre.get("type") == "Sequence" else None
+    split, byte_level = steps if isinstance(steps, list) and len(steps) == 2 else ({}, {})
+    pattern = split.get("pattern") if isinstance(split, dict) else None
+    if not (
+        isinstance(split, dict)
+        and isinstance(byte_level, dict)
+        and split.get("type") == "Split"
+        and isinstance(pattern, dict)
+        and pattern.get("Regex") == QWEN_SPLIT_PATTERN
+        and split.get("behavior") == "Isolated"
+        and not flag(split, "invert")
+        and byte_level.get("type") == "ByteLevel"
+        and not flag(byte_level, "add_prefix_space", True)
+        and not flag(byte_level, "use_regex", True)
+    ):
+        raise unsupported("pre_tokenizer", pre)
+    decoder = raw.get("decoder")
+    if not isinstance(decoder, dict) or decoder.get("type") != "ByteLevel":
+        raise unsupported("decoder", decoder)
+    bpe = raw.get("model")
+    if not isinstance(bpe, dict) or not isinstance(bpe.get("vocab"), dict):
+        raise unsupported("model", bpe if not isinstance(bpe, dict) else "without a vocab object")
+    model_section = {k: v for k, v in bpe.items() if k not in ("vocab", "merges")}
+    if (
+        model_section.get("type", "BPE") != "BPE"
+        or flag(model_section, "byte_fallback")
+        or flag(model_section, "ignore_merges")
+        or model_section.get("dropout") is not None
+        or model_section.get("unk_token") is not None
+        or model_section.get("continuing_subword_prefix") not in (None, "")
+        or model_section.get("end_of_word_suffix") not in (None, "")
+    ):
+        raise unsupported("model", model_section)
+    added = raw.get("added_tokens", [])
+    if not isinstance(added, list):
+        raise unsupported("added_tokens", added)
+    for token in added:
+        if (
+            not isinstance(token, dict)
+            or not isinstance(token.get("content"), str)
+            or type(token.get("id")) is not int
+        ):
+            raise ValueError(
+                f"{FAMILY} tokenizer.json added token needs a string content and an integer id: "
+                f"{json.dumps(token)}"
+            )
+        if any(flag(token, option) for option in ("lstrip", "rstrip", "single_word", "normalized")):
+            raise unsupported("added token option", token)
+
+
 def runtime_contract(cfg: VibeVoiceAsrConfig, capacity: int, tokenizer_json: bytes) -> dict:
+    check_tokenizer_layout(tokenizer_json)
     check_tokenizer_ids(tokenizer_json, cfg.decoder.vocab_size)
     hop = cfg.hop_length
     history = max(cfg.acoustic.history_samples(), cfg.semantic.history_samples())

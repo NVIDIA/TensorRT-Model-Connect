@@ -20,6 +20,15 @@ constexpr double kKaiserBeta = 8.6;
 // per phase; the linear interpolation error is about 6e-9 of the kernel peak.
 constexpr std::int64_t kKernelOversampling = 8192;
 
+// A resampled sample outside the float range would reach the encoder as infinity
+// (and as NaN after normalization), so such input is rejected before narrowing.
+float narrow_sample(double sum) {
+    if (!(std::fabs(sum) <= static_cast<double>(std::numeric_limits<float>::max())))
+        throw std::invalid_argument("VibeVoice-ASR audio is too loud to resample: a resampled "
+                                    "sample exceeds the float range");
+    return static_cast<float>(sum);
+}
+
 double bessel_i0(double x) {
     double sum = 1.0;
     double term = 1.0;
@@ -64,6 +73,11 @@ std::size_t resampled_length(std::size_t samples, std::int32_t from_rate, std::i
         throw std::invalid_argument("VibeVoice-ASR audio is too long to resample");
     const std::int64_t count = static_cast<std::int64_t>(samples);
     return static_cast<std::size_t>((count * up + down - 1) / down);
+}
+
+TapSpan input_taps(std::int64_t first, std::int64_t taps, std::int64_t count) {
+    const std::int64_t begin = std::clamp<std::int64_t>(-first, 0, taps);
+    return {begin, std::clamp<std::int64_t>(count - first, begin, taps)};
 }
 
 std::vector<float> resample(const std::vector<float>& input, std::int32_t from_rate,
@@ -116,10 +130,11 @@ std::vector<float> resample(const std::vector<float>& input, std::int32_t from_r
             const std::int64_t phase = centre % up;
             const std::int64_t lowest = -((half_width - phase) / up);
             double sum = 0.0;
-            for (std::int64_t t = 0; t < taps; ++t) {
+            const auto span = input_taps(base + lowest, taps, count);
+            for (std::int64_t t = span.begin; t < span.end; ++t) {
                 const std::int64_t j = base + lowest + t;
                 const std::int64_t offset = phase - up * (lowest + t);
-                if (j < 0 || j >= count || offset < -half_width || offset > half_width)
+                if (offset < -half_width || offset > half_width)
                     continue;
                 const double position = static_cast<double>(offset < 0 ? -offset : offset) * step;
                 const auto index = static_cast<std::size_t>(position);
@@ -128,7 +143,7 @@ std::vector<float> resample(const std::vector<float>& input, std::int32_t from_r
                     kernel[index] + fraction * (kernel[index + 1] - kernel[index]);
                 sum += weight * input[static_cast<std::size_t>(j)];
             }
-            output[static_cast<std::size_t>(k)] = static_cast<float>(sum);
+            output[static_cast<std::size_t>(k)] = narrow_sample(sum);
         }
         return output;
     }
@@ -152,12 +167,10 @@ std::vector<float> resample(const std::vector<float>& input, std::int32_t from_r
         const double* weights = &table[static_cast<std::size_t>(phase * taps)];
         const std::int64_t start = base + first[static_cast<std::size_t>(phase)];
         double sum = 0.0;
-        for (std::int64_t t = 0; t < taps; ++t) {
-            const std::int64_t j = start + t;
-            if (j >= 0 && j < count)
-                sum += weights[t] * input[static_cast<std::size_t>(j)];
-        }
-        output[static_cast<std::size_t>(k)] = static_cast<float>(sum);
+        const auto span = input_taps(start, taps, count);
+        for (std::int64_t t = span.begin; t < span.end; ++t)
+            sum += weights[t] * input[static_cast<std::size_t>(start + t)];
+        output[static_cast<std::size_t>(k)] = narrow_sample(sum);
     }
     return output;
 }

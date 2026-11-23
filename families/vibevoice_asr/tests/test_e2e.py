@@ -30,6 +30,7 @@ timestamps. Oracles:
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -304,8 +305,9 @@ def _reference(case: dict, audio: Path, directory: Path) -> dict:
 
 
 def _segments(raw: str) -> list[dict] | None:
+    # The runtime's rule: "assistant" is the role header only when whitespace or the end follows.
     text = raw.strip()
-    if text.startswith("assistant"):
+    if re.match(r"assistant(\s|$)", text):
         text = text[len("assistant") :].strip()
     try:
         segments = json.loads(text)
@@ -365,6 +367,12 @@ def _tie_distance(native_ids: list[int], reference: dict, step: int) -> int:
     if (best >= 0) != (value >= 0):
         return 65536
     return abs(_bf16_bits(best) - _bf16_bits(value))
+
+
+def _largest_gap(differences) -> float:
+    """The largest |difference|; infinite when one is not finite, which max() would skip."""
+    gaps = [abs(value) for value in differences]
+    return max(gaps, default=0.0) if all(math.isfinite(gap) for gap in gaps) else math.inf
 
 
 def _check(name: str, label: str, scope: str, actual, operator: str, expected) -> dict:
@@ -540,13 +548,10 @@ def _comparison_checks(
                     "max_timestamp_difference_seconds",
                     "Largest start or end time difference to the reference, seconds",
                     independent,
-                    max(
-                        (
-                            abs(float(ours[key]) - float(theirs[key]))
-                            for ours, theirs in pairs
-                            for key in ("Start", "End")
-                        ),
-                        default=0.0,
+                    _largest_gap(
+                        float(ours[key]) - float(theirs[key])
+                        for ours, theirs in pairs
+                        for key in ("Start", "End")
                     ),
                     "<=",
                     FRAME_SECONDS,
@@ -742,6 +747,15 @@ _PARITY_SCENARIOS = {
         False,
     ),
     "native_output_not_json": ({"raw_text": "not json"}, False),
+    # Like the runtime, the oracle strips "assistant" only as a role header.
+    "role_header_with_space": (
+        {"oracle": "transcript_words", "raw_text": "assistant " + json.dumps([_SEGMENT])},
+        True,
+    ),
+    "role_header_without_whitespace": (
+        {"oracle": "transcript_words", "raw_text": "assistant" + json.dumps([_SEGMENT])},
+        False,
+    ),
     "transcript_not_raw_contents": ({"transcript": "Hello."}, False),
     "native_runs_differ": ({"default_ids": (5, 9, 2)}, False),
     "words_equal": ({"oracle": "transcript_words", "reference_ids": (5, 9, 9, 2)}, True),
@@ -803,6 +817,14 @@ def test_comparison_checks_agree_with_the_assertions(scenario: str) -> None:
     checks = _comparison_checks(default, raw, reference, case)
     assert asserted is expected
     assert all(check["passed"] for check in checks) is expected
+
+
+def test_a_timestamp_that_is_not_a_number_fails_its_check() -> None:
+    # After a near-tie the segments are compared; a NaN time must fail the largest-gap row.
+    nan_end = ({**_SEGMENT, "End": math.nan},)
+    inputs = _parity_inputs(native_ids=(5, 7, 2), top=_TIE, native_segments=nan_end)
+    rows = {row["name"]: row for row in _comparison_checks(*inputs)}
+    assert rows["max_timestamp_difference_seconds"]["passed"] is False
 
 
 @pytest.fixture(scope="session")

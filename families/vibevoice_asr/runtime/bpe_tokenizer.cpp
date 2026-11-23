@@ -587,7 +587,12 @@ class BpeTokenizer final : public ITokenizer {
         auto tokenizer = std::unique_ptr<BpeTokenizer>(new BpeTokenizer());
         tokenizer->mAddSpecialTokens = add_special_tokens;
         tokenizer->mVocabLimit = vocab_limit;
-        tokenizer->parse_tokenizer_json(tokenizer_json_data, tokenizer_json_size);
+        try {
+            tokenizer->parse_tokenizer_json(tokenizer_json_data, tokenizer_json_size);
+        } catch (const nlohmann::json::exception& error) {
+            // A field of the wrong JSON type is a defect of the bundle, like the others.
+            throw std::runtime_error(std::string("tokenizer.json is malformed: ") + error.what());
+        }
         return tokenizer;
     }
 
@@ -634,16 +639,15 @@ class BpeTokenizer final : public ITokenizer {
     }
 
     std::string decode(const std::vector<int32_t>& ids) const override {
-        std::string joined = join_vocab_tokens(ids);
         switch (mDecoderType) {
         case DecoderType::kByteLevel:
-            return utf8_lossy(byte_decode(joined));
+            return utf8_lossy(byte_level_bytes(ids));
         case DecoderType::kMetaspace:
-            return decode_metaspace(joined);
+            return decode_metaspace(join_vocab_tokens(ids));
         case DecoderType::kSequence:
-            return decode_sequence(joined);
+            return decode_sequence(join_vocab_tokens(ids));
         }
-        return utf8_lossy(byte_decode(joined));
+        return utf8_lossy(byte_level_bytes(ids));
     }
 
     int32_t id_for_token(std::string_view token) const override {
@@ -874,6 +878,31 @@ class BpeTokenizer final : public ITokenizer {
     }
 
     // ─── Decoding helpers ───
+
+    // The ByteLevel decoder maps each token on its own: a token with a character outside
+    // the byte-level alphabet (an added token such as "é猫") keeps its own UTF-8 bytes.
+    // UTF-8 is repaired once, over all the bytes, so a character split across byte
+    // tokens still decodes.
+    std::string byte_level_bytes(const std::vector<int32_t>& ids) const {
+        const auto& tables = byte_tables();
+        std::string bytes;
+        for (int32_t id : ids) {
+            if (mSpecialIds.count(id) || id < 0 || static_cast<size_t>(id) >= mVocab.size())
+                continue;
+            const std::string& token = mVocab[id];
+            std::string mapped;
+            bool every_character_mapped = true;
+            for (size_t pos = 0; pos < token.size() && every_character_mapped;) {
+                const auto it = tables.cp_to_byte.find(utf8_to_char32(token, pos));
+                if (it == tables.cp_to_byte.end())
+                    every_character_mapped = false;
+                else
+                    mapped.push_back(static_cast<char>(it->second));
+            }
+            bytes += every_character_mapped ? mapped : token;
+        }
+        return bytes;
+    }
 
     std::string join_vocab_tokens(const std::vector<int32_t>& ids) const {
         std::string joined;
@@ -1227,6 +1256,12 @@ class BpeTokenizer final : public ITokenizer {
                 id_field == tok.end() || !id_field->is_number_integer())
                 throw std::runtime_error(
                     "tokenizer.json added token needs a string content and an integer id");
+            // Added tokens are matched on the raw text, as written: stripping, word
+            // boundaries and matching on normalized text are not implemented.
+            for (const char* option : {"lstrip", "rstrip", "single_word", "normalized"}) {
+                if (flag(tok, option, false))
+                    unsupported("added token option", tok);
+            }
             const std::string content = content_field->get<std::string>();
             const std::int64_t raw_id = id_field->get<std::int64_t>();
             // Bounded before the vocabulary grows: one stray id must not size it.
@@ -1451,12 +1486,9 @@ class BpeTokenizer final : public ITokenizer {
         if (!model.contains("merges") || !model["merges"].is_array())
             throw std::runtime_error("Invalid tokenizer.json: model.merges must be an array");
 
-        mByteFallback = model.value("byte_fallback", false);
+        check_supported_layout(j);
+        mByteFallback = flag(model, "byte_fallback", false);
         mEndOfWordSuffix = optional_model_string(model, "end_of_word_suffix");
-        if (j.contains("normalizer") && !j["normalizer"].is_null())
-            check_normalizer(j["normalizer"]);
-        if (j.contains("decoder") && !j["decoder"].is_null())
-            check_decoder(j["decoder"]);
         parse_vocab(j);
         parse_merges(j);
         parse_added_tokens(j);
@@ -1466,52 +1498,91 @@ class BpeTokenizer final : public ITokenizer {
         detect_decoder(j);
     }
 
-    static bool replace_is(const nlohmann::json& norm, const char* kind, const char* pattern,
-                           const char* content) {
-        return norm.contains("pattern") && norm["pattern"].is_object() &&
-               norm["pattern"].contains(kind) && norm["pattern"][kind] == pattern &&
-               norm.value("content", "") == content;
+    // The Split pattern of Qwen2.5's tokenizer.json, which pretok::Variant::kQwen3 implements.
+    static constexpr const char* kQwenSplitPattern =
+        R"re((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)re";
+
+    [[noreturn]] static void unsupported(const char* part, const nlohmann::json& value) {
+        throw std::runtime_error(std::string("tokenizer.json ") + part +
+                                 " is not supported: " + value.dump());
     }
 
-    // The normalizers this tokenizer applies. Any other one would be skipped and
-    // the ids would silently differ from the reference's, so it rejects the bundle.
-    // Prepend is applied only as a child of the top-level Sequence (depth 1).
-    static void check_normalizer(const nlohmann::json& norm, int depth = 0) {
-        const std::string type = norm.is_object() ? norm.value("type", "") : "";
-        if (type == "Sequence" && norm.contains("normalizers") && norm["normalizers"].is_array()) {
-            for (const auto& child : norm["normalizers"])
-                check_normalizer(child, depth + 1);
-            return;
-        }
-        if (type == "NFC" || type == "Lowercase" ||
-            (type == "Replace" && (replace_is(norm, "Regex", "\\s+", " ") ||
-                                   replace_is(norm, "String", " ", "\xe2\x96\x81"))) ||
-            (type == "Prepend" && depth == 1 && norm.value("prepend", "") == "\xe2\x96\x81"))
-            return;
-        throw std::runtime_error("tokenizer.json normalizer is not supported: " + norm.dump());
+    // A boolean field: absent or null counts as `fallback`.
+    static bool flag(const nlohmann::json& object, const char* key, bool fallback) {
+        const auto it = object.find(key);
+        if (it == object.end() || it->is_null())
+            return fallback;
+        if (!it->is_boolean())
+            unsupported(key, *it);
+        return it->get<bool>();
     }
 
-    // The decoders decode() implements, likewise.
-    static void check_decoder(const nlohmann::json& dec) {
-        const std::string type = dec.is_object() ? dec.value("type", "") : "";
-        if (type == "ByteLevel" || type == "Metaspace")
-            return;
-        if (type == "Sequence" && dec.contains("decoders") && dec["decoders"].is_array()) {
-            for (const auto& sub : dec["decoders"]) {
-                const std::string sub_type = sub.is_object() ? sub.value("type", "") : "";
-                const bool supported =
-                    sub_type == "ByteFallback" || sub_type == "Fuse" ||
-                    (sub_type == "Replace" && sub.contains("pattern") &&
-                     sub["pattern"].is_object() && sub["pattern"].contains("String")) ||
-                    (sub_type == "Strip" && sub.value("content", " ") == " " &&
-                     sub.value("start", 0) <= 1 && sub.value("stop", 0) == 0);
-                if (!supported)
-                    throw std::runtime_error("tokenizer.json decoder step is not supported: " +
-                                             sub.dump());
-            }
-            return;
+    static bool empty_string(const nlohmann::json& object, const char* key) {
+        const auto it = object.find(key);
+        return it == object.end() || it->is_null() ||
+               (it->is_string() && it->get<std::string>().empty());
+    }
+
+    static bool is_nfc(const nlohmann::json& norm) {
+        if (!norm.is_object())
+            return false;
+        const std::string type = norm.value("type", "");
+        if (type == "NFC")
+            return true;
+        if (type != "Sequence" || !norm.contains("normalizers") || !norm["normalizers"].is_array())
+            return false;
+        for (const auto& child : norm["normalizers"]) {
+            if (!is_nfc(child))
+                return false;
         }
-        throw std::runtime_error("tokenizer.json decoder is not supported: " + dec.dump());
+        return true;
+    }
+
+    // The layout this tokenizer reproduces exactly: Qwen2.5's, which
+    // VibeVoiceASRProcessor loads. NFC; the Qwen Split pattern, then ByteLevel without
+    // its own regex or prefix space; a ByteLevel decoder; no truncation, padding or
+    // post-processor that adds tokens; BPE without byte fallback, ignore_merges,
+    // dropout, an unknown token or subword affixes. Any other layout would be tokenized
+    // differently from the reference without notice, so it rejects the bundle.
+    static void check_supported_layout(const nlohmann::json& j) {
+        if (j.contains("normalizer") && !j["normalizer"].is_null() && !is_nfc(j["normalizer"]))
+            unsupported("normalizer", j["normalizer"]);
+        for (const char* field : {"truncation", "padding"}) {
+            if (j.contains(field) && !j[field].is_null())
+                unsupported(field, j[field]);
+        }
+        const auto post = j.value("post_processor", nlohmann::json());
+        if (!post.is_null() && !(post.is_object() && post.value("type", "") == "ByteLevel"))
+            unsupported("post_processor", post);
+        const auto pre = j.value("pre_tokenizer", nlohmann::json());
+        const auto steps = pre.is_object() && pre.value("type", "") == "Sequence"
+                               ? pre.value("pretokenizers", nlohmann::json())
+                               : nlohmann::json();
+        const bool qwen =
+            steps.is_array() && steps.size() == 2 && steps[0].is_object() && steps[1].is_object() &&
+            steps[0].value("type", "") == "Split" && steps[0].contains("pattern") &&
+            steps[0]["pattern"].is_object() &&
+            steps[0]["pattern"].value("Regex", "") == kQwenSplitPattern &&
+            steps[0].value("behavior", "") == "Isolated" && !flag(steps[0], "invert", false) &&
+            steps[1].value("type", "") == "ByteLevel" &&
+            !flag(steps[1], "add_prefix_space", true) && !flag(steps[1], "use_regex", true);
+        if (!qwen)
+            unsupported("pre_tokenizer", pre);
+        const auto decoder = j.value("decoder", nlohmann::json());
+        if (!decoder.is_object() || decoder.value("type", "") != "ByteLevel")
+            unsupported("decoder", decoder);
+        const auto& model = j["model"];
+        if (model.value("type", "BPE") != "BPE" || flag(model, "byte_fallback", false) ||
+            flag(model, "ignore_merges", false) ||
+            !model.value("dropout", nlohmann::json()).is_null() ||
+            !model.value("unk_token", nlohmann::json()).is_null() ||
+            !empty_string(model, "continuing_subword_prefix") ||
+            !empty_string(model, "end_of_word_suffix")) {
+            auto settings = model;
+            settings.erase("vocab");
+            settings.erase("merges");
+            unsupported("model", settings);
+        }
     }
 
     // Detect normalizer: check for Prepend (always prepend ▁) vs none

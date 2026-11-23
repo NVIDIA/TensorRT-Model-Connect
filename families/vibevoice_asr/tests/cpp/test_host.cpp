@@ -37,21 +37,13 @@ void check(bool condition, const std::string& what) {
     }
 }
 
-template <class Function>
-void check_throws(Function&& function, const std::string& what) {
-    try {
-        function();
-    } catch (const std::exception&) {
-        return;
-    }
-    check(false, what + " should throw");
-}
-
 template <class Error, class Function>
-void check_throws_as(Function&& function, const std::string& what) {
+void check_throws_as(Function&& function, const std::string& what, const char* message = nullptr) {
     try {
         function();
-    } catch (const Error&) {
+    } catch (const Error& error) {
+        if (message != nullptr && std::string(error.what()).find(message) == std::string::npos)
+            check(false, what + " threw another error: " + error.what());
         return;
     } catch (const std::exception& error) {
         check(false, what + " threw another exception type: " + error.what());
@@ -67,6 +59,21 @@ void check_no_throw(Function&& function, const std::string& what) {
     } catch (const std::exception& error) {
         check(false, what + " threw: " + error.what());
     }
+}
+
+// The largest |values[i] - reference(i)| over [begin, end); infinite when either side
+// is not finite, which std::max would otherwise skip.
+template <class Reference>
+double max_error(const std::vector<float>& values, std::size_t begin, std::size_t end,
+                 Reference reference) {
+    double worst = 0.0;
+    for (std::size_t i = begin; i < end; ++i) {
+        const double expected = reference(i);
+        if (!std::isfinite(values[i]) || !std::isfinite(expected))
+            return std::numeric_limits<double>::infinity();
+        worst = std::max(worst, std::fabs(values[i] - expected));
+    }
+    return worst;
 }
 
 std::string utf8(std::uint32_t code_point) {
@@ -187,7 +194,8 @@ void test_downmix() {
     const auto mono = downmix(stereo.data(), 2, 2);
     check(mono == std::vector<float>({2.0F, 0.0F}), "downmix averages the channels");
     const std::vector<float> bad{0.0F, std::numeric_limits<float>::quiet_NaN()};
-    check_throws([&] { downmix(bad.data(), 2, 1); }, "downmix of a NaN sample");
+    check_throws_as<std::invalid_argument>([&] { downmix(bad.data(), 2, 1); },
+                                           "downmix of a NaN sample", "only finite samples");
 }
 
 void test_resample() {
@@ -206,9 +214,9 @@ void test_resample() {
     for (std::size_t i = 0; i < tone.size(); ++i)
         tone[i] = static_cast<float>(0.5 * std::sin(2.0 * pi * 440.0 * i / 16000.0));
     const auto out = resample(tone, 16000, 24000);
-    double worst = 0.0;
-    for (std::size_t i = 2400; i + 2400 < out.size(); ++i)
-        worst = std::max(worst, std::fabs(out[i] - 0.5 * std::sin(2.0 * pi * 440.0 * i / 24000.0)));
+    const double worst = max_error(out, 2400, out.size() - 2400, [&](std::size_t i) {
+        return 0.5 * std::sin(2.0 * pi * 440.0 * i / 24000.0);
+    });
     check(worst < 1e-3, "16 kHz to 24 kHz tone error " + std::to_string(worst));
 
     // Common rates keep the exact phase table: the default equals an unbounded table.
@@ -225,10 +233,9 @@ void test_resample() {
     check(odd_out == resample(odd, odd_rate, 24000, 0), "192001 Hz takes the bounded path");
     check(odd_out.size() == (odd.size() * 24000 + odd_rate - 1) / odd_rate,
           "resampled length is ceil(n * 24000 / 192001)");
-    double odd_worst = 0.0;
-    for (std::size_t i = 600; i + 600 < odd_out.size(); ++i)
-        odd_worst = std::max(
-            odd_worst, std::fabs(odd_out[i] - 0.5 * std::sin(2.0 * pi * 440.0 * i / 24000.0)));
+    const double odd_worst = max_error(odd_out, 600, odd_out.size() - 600, [&](std::size_t i) {
+        return 0.5 * std::sin(2.0 * pi * 440.0 * i / 24000.0);
+    });
     check(odd_worst < 1e-3, "192001 Hz to 24 kHz tone error " + std::to_string(odd_worst));
     // A larger coprime rate: an exact phase table would hold 128 million coefficients.
     const std::vector<float> extreme(4000, 0.25F);
@@ -240,13 +247,37 @@ void test_resample() {
         signal[i] = static_cast<float>(0.4 * std::sin(0.37 * i) + 0.3 * std::cos(0.011 * i * i));
     const auto exact = resample(signal, 44101, 24000, std::numeric_limits<std::size_t>::max());
     const auto interpolated = resample(signal, 44101, 24000, 0);
-    double difference = 0.0;
-    for (std::size_t i = 0; i < exact.size(); ++i)
-        difference =
-            std::max(difference, static_cast<double>(std::fabs(exact[i] - interpolated[i])));
-    check(exact.size() == interpolated.size() && difference < 1e-6,
-          "interpolated and exact taps differ by " + std::to_string(difference));
+    const double difference =
+        exact.size() == interpolated.size()
+            ? max_error(interpolated, 0, interpolated.size(),
+                        [&](std::size_t i) { return static_cast<double>(exact[i]); })
+            : std::numeric_limits<double>::infinity();
+    check(difference < 1e-6, "interpolated and exact taps differ by " + std::to_string(difference));
     check(resample(tone, 16000, 24000, 0).size() == out.size(), "both paths give the same length");
+    check(!(max_error({std::numeric_limits<float>::quiet_NaN()}, 0, 1,
+                      [](std::size_t) { return 0.0; }) < 1.0),
+          "a NaN sample counts as an error");
+
+    // A resampled sample beyond the float range is rejected, not passed on as infinity:
+    // between two FLT_MAX samples at 12 kHz the 24 kHz output overshoots, on both paths.
+    const std::vector<float> loud(2, std::numeric_limits<float>::max());
+    check_throws_as<std::invalid_argument>([&] { resample(loud, 12000, 24000); },
+                                           "FLT_MAX samples at 12 kHz");
+    check_throws_as<std::invalid_argument>([&] { resample(loud, 12000, 24000, 0); },
+                                           "FLT_MAX samples at 12 kHz, interpolated");
+
+    // Only the taps on the input are visited: at 2,147,483,647 Hz an output's kernel
+    // spans 5,726,624 taps, one of which falls on a one-sample clip.
+    const auto one = input_taps(-2863311, 5726624, 1);
+    check(one.begin == 2863311 && one.end == 2863312, "one tap of a one-sample clip");
+    const auto inside = input_taps(10, 5, 100);
+    check(inside.begin == 0 && inside.end == 5, "taps inside the input");
+    const auto ahead = input_taps(-10, 5, 100);
+    check(ahead.begin == ahead.end, "taps before the input");
+    const auto behind = input_taps(200, 5, 100);
+    check(behind.begin == behind.end, "taps after the input");
+    const auto high = resample(std::vector<float>{0.5F}, 2147483647, 24000);
+    check(high.size() == 1 && std::isfinite(high[0]), "a one-sample clip at 2147483647 Hz");
 
     // resampled_length gives resample()'s length without resampling, so a request
     // is sized before its audio work: 100000 samples at 1 Hz would be 2.4e9.
@@ -280,8 +311,10 @@ void test_normalize() {
     std::vector<float> impulse(10000, 0.0F);
     impulse[50] = 1.0F;
     normalize_loudness(impulse, -25.0, 1e-6);
+    const bool finite = std::all_of(impulse.begin(), impulse.end(),
+                                    [](float value) { return std::isfinite(value); });
     const float peak = *std::max_element(impulse.begin(), impulse.end());
-    check(peak <= 1.0F && peak > 0.999F, "the clipping guard divides by the peak");
+    check(finite && peak <= 1.0F && peak > 0.999F, "the clipping guard divides by the peak");
     // Silence stays finite zeros for the bundle's eps and the smallest eps runtime.json accepts.
     for (const double eps : {1e-6, static_cast<double>(std::numeric_limits<float>::min())}) {
         std::vector<float> silence(64, 0.0F);
@@ -303,7 +336,8 @@ void test_chunks_and_argmax() {
           "the last chunk ends at the last frame");
     const auto single = plan_encoder_chunks(3, 450, 60);
     check(single.size() == 1 && single[0].frames == 3, "a short clip is one chunk");
-    check_throws([] { plan_encoder_chunks(0, 450, 60); }, "an empty chunk plan");
+    check_throws_as<std::invalid_argument>([] { plan_encoder_chunks(0, 450, 60); },
+                                           "an empty chunk plan", "positive sizes");
     const float tied[] = {0.5F, 2.0F, 1.0F, 2.0F};
     check(argmax(tied, 4) == 1, "argmax keeps the lowest index of a tie");
     // A prompt of max_sequence_length - 2 tokens leaves room for two output tokens.
@@ -349,6 +383,17 @@ void test_transcript() {
     check(!bad_time.structured && bad_time.segments.empty(), "non-numeric timestamps are rejected");
     const auto plain = parse_transcript("  assistant\n just words \n");
     check(!plain.structured && plain.text == "just words", "plain output is stripped");
+    const auto word = parse_transcript("assistantship is demanding");
+    check(!word.structured && word.text == "assistantship is demanding",
+          "a word that starts like the role header is kept");
+    check(parse_transcript("assistant").text.empty(), "a bare role header");
+    // Any whitespace ends the role header, as a line break does.
+    for (const char* separator : {" ", "\t", "\r\n"}) {
+        const auto spaced = parse_transcript(std::string("assistant") + separator +
+                                             "[{\"Start\":0,\"End\":1,\"Content\":\"a\"}]");
+        check(spaced.structured && spaced.segments.size() == 1 && spaced.text == "a",
+              std::string("a role header followed by ") + nlohmann::json(separator).dump());
+    }
     const auto fenced =
         parse_transcript("assistant\n```json\n[{\"Start\":0,\"End\":1,\"Content\":\"a\"}]\n```\n");
     check(fenced.structured && fenced.segments.size() == 1 && fenced.text == "a",
@@ -370,33 +415,43 @@ void test_runtime_config() {
           "runtime.json parses");
     auto parallel = runtime_json();
     parallel["tensor_parallel_size"] = 2;
-    check_throws([&] { parse_runtime_config(parallel.dump()); }, "tensor parallel runtime.json");
+    check_throws_as<std::runtime_error>([&] { parse_runtime_config(parallel.dump()); },
+                                        "tensor parallel runtime.json", "runs on one GPU");
     auto outside = runtime_json();
     outside["token_ids"]["eos"] = 262;
-    check_throws([&] { parse_runtime_config(outside.dump()); }, "an out-of-vocabulary token");
+    check_throws_as<std::runtime_error>([&] { parse_runtime_config(outside.dump()); },
+                                        "an out-of-vocabulary token", "out of vocabulary");
     auto unchecked = runtime_json();
     unchecked["tokenizer_checks"] = nlohmann::json::array();
-    check_throws([&] { parse_runtime_config(unchecked.dump()); }, "missing tokenizer checks");
+    check_throws_as<std::runtime_error>([&] { parse_runtime_config(unchecked.dump()); },
+                                        "missing tokenizer checks", "is inconsistent");
     // Probe ids are integers in [0, vocab_size): no truncation of 117.9 to 117.
     for (const auto& ids :
          {nlohmann::json{117.9}, nlohmann::json{-1}, nlohmann::json{262}, nlohmann::json{"117"}}) {
         auto probe = runtime_json();
         probe["tokenizer_checks"][0]["ids"] = ids;
-        check_throws([&] { parse_runtime_config(probe.dump()); },
-                     "a tokenizer check id of " + ids.dump());
+        check_throws_as<std::runtime_error>([&] { parse_runtime_config(probe.dump()); },
+                                            "a tokenizer check id of " + ids.dump(),
+                                            "is not a vocabulary id");
     }
     // eps must keep the float gain of silent input finite: 1e-300 is 0 as a float,
     // 1e-40 is subnormal and overflows the gain.
     for (const char* eps : {"1e-300", "1e-40"}) {
         auto tiny = runtime_json();
         tiny["normalize_eps"] = std::strtod(eps, nullptr);
-        check_throws([&] { parse_runtime_config(tiny.dump()); },
-                     std::string("normalize_eps ") + eps);
+        check_throws_as<std::runtime_error>([&] { parse_runtime_config(tiny.dump()); },
+                                            std::string("normalize_eps ") + eps, "is inconsistent");
     }
     auto smallest = runtime_json();
     smallest["normalize_eps"] = static_cast<double>(std::numeric_limits<float>::min());
     check(parse_runtime_config(smallest.dump()).normalize_eps > 0.0,
           "the smallest normal float eps is accepted");
+    // A silence gain that rounds to zero as a float would silence every input.
+    auto zero_gain = runtime_json();
+    zero_gain["normalize_target_dbfs"] = -750.0;
+    zero_gain["normalize_eps"] = 3e38;
+    check_throws_as<std::runtime_error>([&] { parse_runtime_config(zero_gain.dump()); },
+                                        "a silence gain of -750 dBFS over eps 3e38");
     // An eps above FLT_MAX has no float value, and a target whose float amplitude
     // underflows to zero would silence every input.
     for (const auto& [field, value] :
@@ -449,8 +504,10 @@ void test_tokenizer() {
                              "b",
                              "a\xFF"
                              "b e\xCC\x81"}) {
-        check_throws([&] { split->encode(text); }, "encoding invalid UTF-8");
-        check_throws([&] { nfc->encode(text); }, "encoding invalid UTF-8 with NFC");
+        check_throws_as<std::invalid_argument>([&] { split->encode(text); },
+                                               "encoding invalid UTF-8", "valid UTF-8");
+        check_throws_as<std::invalid_argument>([&] { nfc->encode(text); },
+                                               "encoding invalid UTF-8 with NFC", "valid UTF-8");
     }
     // ByteLevel decoding joins all bytes, then replaces what is not UTF-8 (U+FFFD).
     const std::string replacement = "\xEF\xBF\xBD";
@@ -459,13 +516,16 @@ void test_tokenizer() {
     check(split->decode({0xE4, 0xB8}) == replacement, "one replacement per maximal subpart");
     check(split->decode({0x61, 0xFF, 0x62}) == "a" + replacement + "b", "an invalid byte");
     check(split->decode({0xC0, 0x80}) == replacement + replacement, "an overlong encoding");
-    // An added token without an integer id or a string content is rejected, not read.
+    // An added token without an integer id or a string content is rejected with the
+    // parser's own error before any read.
     for (const char* field : {"id", "content"}) {
         auto broken = nlohmann::json::parse(byte_tokenizer_json());
         broken["added_tokens"][0].erase(field);
         const auto text = broken.dump();
-        check_throws([&] { CreateBpeTokenizer(text.data(), text.size(), false, kVocab); },
-                     std::string("an added token without ") + field);
+        check_throws_as<std::runtime_error>(
+            [&] { CreateBpeTokenizer(text.data(), text.size(), false, kVocab); },
+            std::string("an added token without ") + field,
+            "needs a string content and an integer id");
     }
     // Added-token ids are bounded by the decoder vocabulary before the vocabulary grows.
     for (const std::int64_t id :
@@ -473,12 +533,14 @@ void test_tokenizer() {
         auto stray = nlohmann::json::parse(byte_tokenizer_json());
         stray["added_tokens"][0]["id"] = id;
         const auto text = stray.dump();
-        check_throws([&] { CreateBpeTokenizer(text.data(), text.size(), false, kVocab); },
-                     "an added token id of " + std::to_string(id));
+        check_throws_as<std::runtime_error>(
+            [&] { CreateBpeTokenizer(text.data(), text.size(), false, kVocab); },
+            "an added token id of " + std::to_string(id), "outside the decoder vocabulary");
     }
     const auto json = byte_tokenizer_json();
-    check_throws([&] { CreateBpeTokenizer(json.data(), json.size(), false, 0); },
-                 "a tokenizer without a decoder vocabulary");
+    check_throws_as<std::invalid_argument>(
+        [&] { CreateBpeTokenizer(json.data(), json.size(), false, 0); },
+        "a tokenizer without a decoder vocabulary", "decoder vocabulary size");
     // Base-vocabulary ids are decoder rows too: the merged tokens 262 and 263 lie
     // outside a decoder vocabulary of 262, and an id must be an integer.
     check_throws_as<std::runtime_error>(
@@ -521,6 +583,93 @@ void test_tokenizer() {
             [&] { CreateBpeTokenizer(text.data(), text.size(), false, kVocab); },
             std::string("decoder ") + decoder);
     }
+    // A token with a character outside the byte-level alphabet decodes as written, as the
+    // reference's ByteLevel decoder does: here a non-special added token, "e-acute cat".
+    const std::string written = "\xC3\xA9\xE7\x8C\xAB";
+    auto with_added = nlohmann::json::parse(byte_tokenizer_json());
+    with_added["added_tokens"].push_back({{"id", 262},
+                                          {"content", written},
+                                          {"special", false},
+                                          {"single_word", false},
+                                          {"lstrip", false},
+                                          {"rstrip", false},
+                                          {"normalized", false}});
+    const auto added_text = with_added.dump();
+    const auto added = CreateBpeTokenizer(added_text.data(), added_text.size(), false, kVocab);
+    check(added->decode({262}) == written, "an added token outside the byte alphabet");
+    check(added->decode({0x61, 262, 0xC3, 0xA9}) == "a" + written + "\xC3\xA9",
+          "an added token between byte tokens");
+    // Only Qwen2.5's layout is accepted: another pre-tokenizer, normalizer, BPE option or
+    // added-token option would be tokenized differently from the reference without notice.
+    auto own_regex = nlohmann::json::parse(byte_tokenizer_json());
+    own_regex["pre_tokenizer"]["pretokenizers"][1]["use_regex"] = true;
+    auto other_split = nlohmann::json::parse(byte_tokenizer_json());
+    other_split["pre_tokenizer"]["pretokenizers"][0]["pattern"]["Regex"] = "\\s+";
+    auto direct = nlohmann::json::parse(byte_tokenizer_json());
+    direct["pre_tokenizer"] = nlohmann::json::parse(
+        R"({"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": false, "use_regex": false})");
+    auto metaspace = nlohmann::json::parse(byte_tokenizer_json());
+    metaspace["pre_tokenizer"] =
+        nlohmann::json::parse(R"({"type": "Metaspace", "replacement": "\u2581"})");
+    auto lowercase = nlohmann::json::parse(byte_tokenizer_json());
+    lowercase["normalizer"] = nlohmann::json::parse(R"({"type": "Lowercase"})");
+    auto byte_fallback = nlohmann::json::parse(byte_tokenizer_json());
+    byte_fallback["model"]["byte_fallback"] = true;
+    auto ignore_merges = nlohmann::json::parse(byte_tokenizer_json());
+    ignore_merges["model"]["ignore_merges"] = true;
+    auto lstrip = nlohmann::json::parse(byte_tokenizer_json());
+    lstrip["added_tokens"][0]["lstrip"] = true;
+    auto normalized = nlohmann::json::parse(byte_tokenizer_json());
+    normalized["added_tokens"][0]["normalized"] = true;
+    // Settings with which the reference would change the ids: truncation, padding, a
+    // post-processor that adds tokens, an unknown token for bytes missing from the vocabulary.
+    auto truncation = nlohmann::json::parse(byte_tokenizer_json());
+    truncation["truncation"] = nlohmann::json::parse(
+        R"({"direction": "Right", "max_length": 4, "strategy": "LongestFirst", "stride": 0})");
+    auto padding = nlohmann::json::parse(byte_tokenizer_json());
+    padding["padding"] = nlohmann::json::parse(
+        R"({"strategy": {"Fixed": 8}, "direction": "Right", "pad_to_multiple_of": null, "pad_id": 256, "pad_type_id": 0, "pad_token": "<|endoftext|>"})");
+    auto template_post = nlohmann::json::parse(byte_tokenizer_json());
+    template_post["post_processor"] = nlohmann::json::parse(
+        R"({"type": "TemplateProcessing", "single": [{"SpecialToken": {"id": "<|endoftext|>", "type_id": 0}}, {"Sequence": {"id": "A", "type_id": 0}}], "pair": [{"Sequence": {"id": "A", "type_id": 0}}, {"Sequence": {"id": "B", "type_id": 1}}], "special_tokens": {"<|endoftext|>": {"id": "<|endoftext|>", "ids": [256], "tokens": ["<|endoftext|>"]}}})");
+    auto unknown = nlohmann::json::parse(byte_tokenizer_json());
+    unknown["model"]["unk_token"] = "<|endoftext|>";
+    for (const auto& [layout, what] :
+         {std::pair{own_regex, "ByteLevel with its own regex"},
+          std::pair{other_split, "another Split pattern"},
+          std::pair{direct, "a direct ByteLevel pre-tokenizer"},
+          std::pair{metaspace, "a Metaspace pre-tokenizer"},
+          std::pair{lowercase, "a Lowercase normalizer"},
+          std::pair{byte_fallback, "BPE byte_fallback"},
+          std::pair{ignore_merges, "BPE ignore_merges"}, std::pair{lstrip, "an lstrip added token"},
+          std::pair{normalized, "a normalized added token"}, std::pair{truncation, "truncation"},
+          std::pair{padding, "padding"},
+          std::pair{template_post, "a post-processor that adds tokens"},
+          std::pair{unknown, "an unknown token"}}) {
+        const auto text = layout.dump();
+        check_throws_as<std::runtime_error>(
+            [&] { CreateBpeTokenizer(text.data(), text.size(), false, kVocab); },
+            std::string("a tokenizer with ") + what, "is not supported");
+    }
+    // Qwen2.5's own ByteLevel post-processor adds no token, and a null option is its default.
+    auto byte_level_post = nlohmann::json::parse(byte_tokenizer_json());
+    byte_level_post["post_processor"] = nlohmann::json::parse(
+        R"({"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": false, "use_regex": false})");
+    auto null_option = nlohmann::json::parse(byte_tokenizer_json());
+    null_option["model"]["byte_fallback"] = nullptr;
+    for (const auto& [layout, what] : {std::pair{byte_level_post, "a ByteLevel post-processor"},
+                                       std::pair{null_option, "a null byte_fallback"}}) {
+        const auto text = layout.dump();
+        check_no_throw([&] { CreateBpeTokenizer(text.data(), text.size(), false, kVocab); },
+                       std::string("a tokenizer with ") + what);
+    }
+    // A field of the wrong JSON type is a bundle defect too, not a JSON library error.
+    auto mistyped = nlohmann::json::parse(byte_tokenizer_json());
+    mistyped["decoder"]["type"] = 7;
+    const auto mistyped_text = mistyped.dump();
+    check_throws_as<std::runtime_error>(
+        [&] { CreateBpeTokenizer(mistyped_text.data(), mistyped_text.size(), false, kVocab); },
+        "a decoder type that is not a string", "malformed");
     // Added-token defects are bundle defects as well.
     auto listless = nlohmann::json::parse(byte_tokenizer_json());
     listless["added_tokens"] = nlohmann::json::object();
@@ -642,7 +791,8 @@ void test_prompt() {
           "speech end follows the placeholders");
     check(std::count(prompt.ids.begin(), prompt.ids.end(), 258) == 2, "two turns end");
     check(prompt.ids.back() == '\n', "no generation prompt after the user turn");
-    check_throws([&] { build_prompt(*tokenizer, config, 0, ""); }, "an empty clip");
+    check_throws_as<std::invalid_argument>([&] { build_prompt(*tokenizer, config, 0, ""); },
+                                           "an empty clip", "at least one audio sample");
     // A request is sized before its audio is resampled: 100000 samples at 1 Hz need
     // 750,000 speech rows, refused without building them.
     check_throws_as<std::invalid_argument>(
