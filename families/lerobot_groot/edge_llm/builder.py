@@ -152,7 +152,8 @@ def try_build(request, writer, source: Path) -> bool:
             checkpoint = _checkpoint(source, staging)
             cmd = [str(python), "-I", "-c", "from tensorrt_edgellm.builder.cli import main; main()",
                    "--model-dir", str(checkpoint), "--engine-dir", str(engine), "--components", "all",
-                   "--plugin-path", str(plugin), "--max-input-len", "1024", "--max-batch-size", "1"]
+                   "--plugin-path", str(plugin), "--max-input-len", "1024", "--max-batch-size", "1",
+                   "--gr00t-embodiment-id", "2"]
             if request.verbose:
                 cmd.append("--verbose")
             with tempfile.NamedTemporaryFile(mode="w", prefix=".groot-edge-", suffix=".log",
