@@ -50,7 +50,59 @@ def text_encoder(directory: Path):
     load_fp8_state_dict(
         model, weights, device=torch.device("cpu"), dtype=torch.bfloat16, assign=True
     )
-    return TextEncoder(materialize_fp8(model.language_model).eval())
+    return TextEncoder(preserve_text_attention(materialize_fp8(model.language_model)).eval())
+
+
+def rotary_positions(query, key, cos, sin):
+    """Round both BF16 products before the rotary addition, as in PyTorch."""
+    cos, sin = cos.unsqueeze(1).float(), sin.unsqueeze(1).float()
+
+    def rotate(values):
+        half = values.shape[-1] // 2
+        shifted = torch.cat((-values[..., half:], values[..., :half]), dim=-1)
+        left = (values.float() * cos).to(values.dtype).float()
+        right = (shifted.float() * sin).to(values.dtype).float()
+        return (left + right).to(values.dtype)
+
+    return rotate(query), rotate(key)
+
+
+class TextAttention(nn.Module):
+    """Preserve Qwen's BF16 score rounding and FP32 probability normalization."""
+
+    def __init__(self, module):
+        super().__init__()
+        self.module = module
+
+    def forward(self, hidden_states, position_embeddings, attention_mask=None, **kwargs):
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import repeat_kv
+
+        module = self.module
+        shape = (*hidden_states.shape[:-1], -1, module.head_dim)
+        query = module.q_norm(module.q_proj(hidden_states).view(shape)).transpose(1, 2)
+        key = module.k_norm(module.k_proj(hidden_states).view(shape)).transpose(1, 2)
+        value = module.v_proj(hidden_states).view(shape).transpose(1, 2)
+        query, key = rotary_positions(query, key, *position_embeddings)
+        key = repeat_kv(key, module.num_key_value_groups)
+        value = repeat_kv(value, module.num_key_value_groups)
+        scores = torch.matmul(query.float(), key.float().transpose(-1, -2)).to(query.dtype)
+        scores = (scores.float() * module.scaling).to(query.dtype)
+        if attention_mask is not None:
+            scores = (scores.float() + attention_mask.float()).to(query.dtype)
+        # Keep eager Qwen's separate BF16 score and scale boundaries.
+        # Express stable softmax in FP32 so fusion retains those boundaries.
+        wide = scores.float()
+        exponentials = torch.exp(wide - wide.amax(dim=-1, keepdim=True))
+        probabilities = (exponentials / exponentials.sum(dim=-1, keepdim=True)).to(query.dtype)
+        output = torch.matmul(probabilities.float(), value.float()).to(query.dtype)
+        output = output.transpose(1, 2).reshape(*hidden_states.shape[:-1], -1)
+        return module.o_proj(output), None
+
+
+def preserve_text_attention(module):
+    for layer in module.layers:
+        layer.self_attn = TextAttention(layer.self_attn)
+    return module
 
 
 class TextEncoder(nn.Module):
