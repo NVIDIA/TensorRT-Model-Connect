@@ -41,8 +41,8 @@ def _sdk_prefix() -> Path | None:
     else:
         installed = Path(package.locate_file("tensorrt_model_connect"))
         receipt = installed / "share/trtmc/edge-llm.json"
-        if (installed / "bin/trtmc").is_file() and (receipt.exists() or receipt.is_symlink()):
-            # Even a damaged packaged receipt belongs to the installed runner.
+        if (installed / "bin/trtmc").is_file():
+            # A native-only installed runner cannot consume a standalone Edge bundle.
             for prefix in cmake_prefixes():
                 other = prefix / "share/trtmc/edge-llm.json"
                 if other.is_file() and other.resolve() != receipt.resolve():
@@ -102,7 +102,7 @@ def _checkpoint(source: Path, staging: Path) -> Path:
     """Supply the three documented tokenizer assets without copying weight shards or mutating the snapshot."""
     names = ("tokenizer.json", "tokenizer_config.json", "preprocessor_config.json")
     if all((source / "tokenizer" / name).is_file() for name in names):
-        return source
+        return source.resolve()
     from huggingface_hub import hf_hub_download
 
     overlay = staging / "checkpoint"
@@ -132,7 +132,7 @@ def try_build(request, writer, source: Path) -> bool:
     receipt_path = prefix / "share/trtmc/edge-llm.json"
     log_path: Path | None = None
     with tempfile.TemporaryDirectory(prefix=".groot-edge-", dir=request.output_path.parent) as name:
-        staging = Path(name)
+        staging = Path(name).resolve()
         engine = staging / "engine"
         try:
             capability = json.loads((prefix / "share/trtmc/lerobot_groot/edge-0.12.json").read_text())

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 
 namespace trtmc::lerobot_groot {
 namespace {
@@ -120,15 +121,19 @@ void validate_state(Span<const float> state, std::size_t width) {
 }
 
 std::vector<std::int32_t> instruction_tokens(std::string_view text, bool formalize,
-                                             const ITokenizer& tokenizer, std::int32_t limit) {
+                                             const ITokenizer& tokenizer, std::int32_t limit,
+                                             std::string* effective_text) {
     const auto max_bytes = static_cast<std::size_t>(limit) * kInstructionBytesPerToken;
     if (text.size() > max_bytes)
         throw std::invalid_argument("lerobot_groot instruction exceeds " +
                                     std::to_string(max_bytes) + " bytes");
-    const auto instruction = tokenizer.encode(formalize_instruction(text, formalize));
+    auto effective = formalize_instruction(text, formalize);
+    const auto instruction = tokenizer.encode(effective);
     if (instruction.size() > static_cast<std::size_t>(limit))
         throw std::invalid_argument("lerobot_groot instruction exceeds " + std::to_string(limit) +
                                     " tokens");
+    if (effective_text)
+        *effective_text = std::move(effective);
     return instruction;
 }
 

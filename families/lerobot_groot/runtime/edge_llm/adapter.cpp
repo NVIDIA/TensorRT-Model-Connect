@@ -112,7 +112,19 @@ class Artifacts {
                 const auto destination = root_ / name;
                 fs::create_directories(destination.parent_path());
                 std::ofstream output(destination, std::ios::binary);
-                bundle.copy_section("edge_llm/engine/" + name, output);
+                if (name == "action/policy.json") {
+                    // MC validates and formalizes the instruction. A second pass in Edge
+                    // would lowercase the verbatim default for punctuation-only prompts.
+                    const auto raw = bundle.read_section("edge_llm/engine/" + name);
+                    auto policy = nlohmann::json::parse(raw.begin(), raw.end());
+                    auto& vision = policy.at("vision");
+                    if (!vision.value("formalize_language", true))
+                        throw std::runtime_error("GR00T LIBERO expects language formalization");
+                    vision["formalize_language"] = false;
+                    output << policy;
+                } else {
+                    bundle.copy_section("edge_llm/engine/" + name, output);
+                }
                 output.close();
                 if (!output)
                     throw std::runtime_error("Cannot extract GR00T Edge artifact: " + name);
@@ -202,9 +214,8 @@ class EdgeTask final : public internal::IModel, public internal::IImagesStateTex
         const auto options = parse_noise(config, 40 * 132);
         const auto frames = ordered_rgb(observation, cameras_, 256);
         validate_state(observation.state, 8);
-        instruction_tokens(observation.text, true, *tokenizer_, 256);
         trt_edgellm::gr00t::Gr00tObservation input;
-        input.task.assign(observation.text);
+        instruction_tokens(observation.text, true, *tokenizer_, 256, &input.task);
         input.state.assign(observation.state.begin(), observation.state.end());
         for (std::size_t i = 0; i < frames.size(); ++i)
             input.cameras.push_back({cameras_[i], "", frames[i].data(), 256, 256});

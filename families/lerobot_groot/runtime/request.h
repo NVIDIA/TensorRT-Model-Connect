@@ -33,6 +33,7 @@ std::vector<RgbFrame> ordered_rgb(const internal::ImagesStateTextObservation& ob
                                   const std::vector<std::string>& cameras, std::uint32_t size);
 void validate_state(Span<const float> state, std::size_t width);
 std::vector<std::int32_t> instruction_tokens(std::string_view text, bool formalize,
-                                             const ITokenizer& tokenizer, std::int32_t limit);
+                                             const ITokenizer& tokenizer, std::int32_t limit,
+                                             std::string* effective_text = nullptr);
 
 } // namespace trtmc::lerobot_groot

@@ -623,6 +623,42 @@ def test_time_embedding_frequencies_match_the_reference_formulas() -> None:
                                np.exp(-math.log(10000.0) * np.arange(half) / (half - 1)), rtol=1e-6)
 
 
+def test_packaged_runner_without_edge_receipt_stays_native(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from families.lerobot_groot.edge_llm import builder
+
+    package = tmp_path / "wheel/tensorrt_model_connect"
+    runner = package / "bin/trtmc"
+    runner.parent.mkdir(parents=True)
+    runner.touch()
+    external = tmp_path / "external"
+    receipt = external / "share/trtmc/edge-llm.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text("{}")
+    monkeypatch.setattr(builder, "distribution", lambda _: SimpleNamespace(locate_file=lambda _: package))
+    monkeypatch.setattr(builder, "cmake_prefixes", lambda: [external])
+    assert builder._sdk_prefix() == package
+    # A standalone/source installation without a packaged runner may use its own prefix.
+    runner.unlink()
+    assert builder._sdk_prefix() == external
+
+
+def test_edge_builder_can_find_complete_relative_checkpoint_from_staging(tmp_path, monkeypatch):
+    from pathlib import Path
+    from families.lerobot_groot.edge_llm.builder import _checkpoint
+
+    monkeypatch.chdir(tmp_path)
+    source = Path("checkpoints/libero_10")
+    (source / "tokenizer").mkdir(parents=True)
+    for name in ("tokenizer.json", "tokenizer_config.json", "preprocessor_config.json"):
+        (source / "tokenizer" / name).write_text("{}")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    model_dir = _checkpoint(source, staging)
+    monkeypatch.chdir(staging)
+    assert model_dir.samefile(tmp_path / source)
+
+
 def test_family_build_preserves_native_and_isaac_inputs(tmp_path, monkeypatch):
     from families.lerobot_groot.edge_llm import cli
 
