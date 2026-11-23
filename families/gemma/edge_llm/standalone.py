@@ -43,6 +43,20 @@ def _nvfp4_moe_target(sm: int, release: str) -> str:
     raise ValueError(f"Gemma4 NVFP4 MoE: unsupported Edge {release} plugin target SM{sm}")
 
 
+def _has_fused_experts(source: Path) -> bool:
+    """Inspect the tensor names only: no shard data or conversion is needed."""
+    index = source / "model.safetensors.index.json"
+    if index.is_file():
+        names = json.loads(index.read_text(encoding="utf-8"))["weight_map"]
+    else:
+        from safetensors import safe_open
+
+        with safe_open(str(source / "model.safetensors"), framework="numpy") as weights:
+            names = set(weights.keys())
+    return any(name.endswith(".experts.gate_up_proj")
+               and name.removesuffix("gate_up_proj") + "down_proj" in names for name in names)
+
+
 def checkpoint_quantization(raw: dict, source: Path, target: dict | None,
                             release: str = "0.11.0") -> str | None:
     """Admit original weights or the published Gemma4 dense/MoE NVFP4 layouts.
@@ -56,6 +70,10 @@ def checkpoint_quantization(raw: dict, source: Path, target: dict | None,
     if any((source / name).exists() for name in ("quantize_config.json", "quant_config.json")):
         raise ValueError("Gemma4 Edge does not map this checkpoint quantization format")
     if not quant and not sidecar.exists():
+        if (release == "0.12.0" and raw.get("model_type") == "gemma4"
+                and text.get("enable_moe_block") is True and _has_fused_experts(source)):
+            raise ValueError("Edge-LLM 0.12 cannot load Gemma4 fused floating-point experts "
+                             "without requantizing the checkpoint")
         return None
     if not isinstance(quant, dict) or not sidecar.is_file():
         raise ValueError("Gemma4 NVFP4 requires matching ModelOpt config and hf_quant_config.json")

@@ -598,7 +598,7 @@ def test_standalone_packed_export_preserves_quantization_and_native_target(tmp_p
     ("gemma4", False, "dflash"), ("gemma4", True, "dflash"),
     ("gemma4_unified", False, "dflash"), ("gemma4", True, "jetspec"),
 ])
-def test_original_and_unified_gemma_pair_geometry(tmp_path, model_type, moe, variant):
+def test_original_and_unified_gemma_pair_geometry(tmp_path, monkeypatch, model_type, moe, variant):
     """Original dense/MoE targets retain explicit, geometry-matched companions."""
     from dataclasses import replace
     from types import SimpleNamespace
@@ -633,6 +633,30 @@ def test_original_and_unified_gemma_pair_geometry(tmp_path, model_type, moe, var
     limit = 256 if variant == "jetspec" else 64
     request = replace(execution_request(target), max_sequence_length=limit)
     assert validate_pair(request, execution) == (raw, draft, limit)
+    if moe:
+        from families.gemma.edge_llm import builder, standalone
+
+        # Original Gemma4 packs each layer's floating-point experts into two tensors.
+        prefix = "model.language_model.layers.0.experts."
+        names = [prefix + key for key in ("gate_up_proj", "down_proj")]
+        if variant == "dflash":
+            import numpy as np
+            from safetensors.numpy import save_file
+
+            save_file({key: np.ones((2, 4, 2), dtype=np.float16) for key in names},
+                      target / "model.safetensors")
+        else:
+            (target / "model.safetensors.index.json").write_text(json.dumps({
+                "weight_map": dict.fromkeys(names, "model-00001-of-00002.safetensors")}))
+        sdk_target = {"os": "linux", "arch": "x86_64", "sm": 100}
+        sdk = {"version": "0.12.0", "onnx": True, "plugin": "/unused/plugin"}
+        monkeypatch.setattr(builder, "installed_package", lambda *_: sdk)
+        assert standalone.checkpoint_quantization(raw, target, sdk_target, "0.11.0") is None
+        with pytest.raises(ValueError, match="fused floating-point experts"):
+            standalone.checkpoint_quantization(raw, target, sdk_target, "0.12.0")
+        with pytest.raises(ValueError, match="fused floating-point experts"):
+            builder.prepare(request, raw, draft, limit, sdk_target, tmp_path / "stage",
+                            tmp_path / "unused.log", variant)
     if variant == "jetspec":
         noncausal = {**companion, "dflash_config": {**companion["dflash_config"], "causal_head": False}}
         (draft / "config.json").write_text(json.dumps(noncausal))

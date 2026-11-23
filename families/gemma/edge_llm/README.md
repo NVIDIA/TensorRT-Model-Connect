@@ -33,8 +33,17 @@ trtmc gemma build /path/to/gemma-4-E2B-it --precision fp16 \
 
 Requesting the combined task gives the native fallback both encoders.
 A native bundle requested as text-only does not provide image or audio tasks.
-With the Edge-enabled Model Connect wheel, run `trtmc run` from the same
-installation. The packaged runner finds its family library and Edge plugin;
+Use the runtime from the same Model Connect installation. For a text prompt
+on a combined media bundle, explicitly select its text task; the generic
+`run` verb does not accept `image_audio_text_to_text` as its default task:
+
+```sh
+trtmc run gemma-media.bundle --task text_continuation --prompt "What is the capital of France?" \
+  --set use_chat_template=true --set enable_thinking=false --set max_new_tokens=8 --set top_k=1
+```
+
+Use the public typed Task API for image or audio requests.
+The packaged runner finds its family library and Edge plugin;
 it does not need `--runtime-root`, the exporter environment or the original
 checkpoints. For a standalone runner, use `--runtime-root` to select the
 matching library directory when it is not found automatically.
@@ -169,6 +178,11 @@ Edge CLI produced exactly the same image text using the same engines and RGB
 input. The image route remains executable but unqualified on this case; this
 comparison does not establish a TensorRT compiler defect.
 
+Native TRT on SM100 built the same original FP16 configuration and ran with
+the source weights unavailable. Both the text response and the image
+description matched the independent CPU FP32 token IDs exactly (NED 0).
+This qualifies the two tested native requests, not every 31B prompt.
+
 ## Original 26B-A4B development results
 
 These measurements used an earlier Gemma adapter snapshot during the 0.12
@@ -183,6 +197,14 @@ A separate released base-builder run on the saved export reached its four-hour
 limit without returning an engine. Neither timeout tested Edge inference or
 establishes a builder defect. None of
 these results covers the QAT-unquantized or NVFP4 checkpoints.
+
+The subsequent native FP16 replay on SM103 matched FP32 on the standalone
+text request and passed the image request (NED 0.1115, limit 0.15). On the
+named greedy text request, original MTP and JetSpec also matched FP32 and
+each accepted one token in one verification; JetSpec proposed 127 tokens.
+The original and QAT-unquantized indexes both contain fused experts. The
+[0.12 exporter limitation](#original-floating-point-26b-a4b-experts-on-edge-012)
+explains why Model Connect now selects native for these layouts.
 
 ## Standalone validation on 0.12: QAT, Bolt and prepared NVFP4
 
@@ -771,6 +793,18 @@ This closes sampled validation only for the four listed 12B pairs. E2B now
 has its own standalone and runnable MTP-accuracy-failure evidence above.
 The larger original-checkpoint results are recorded separately above and below;
 these 12B comparisons do not qualify another target, capacity or platform.
+
+### Original floating-point 26B-A4B experts on Edge 0.12
+
+The original checkpoint stores each layer's experts in fused `gate_up_proj`
+and `down_proj` tensors. With these weights, the released DFlash target export
+fails to materialize individual experts. The MTP exporter can return success:
+twelve inspected expert matrices in its ONNX graph were zero despite nonzero
+source values, while two router matrices matched exactly. No inference result
+from that export is valid. Gemma detects this layout before invoking Edge
+0.12 and falls back to native TRT, preserving precision and the requested
+draft. It does not requantize the checkpoint. This is an exporter limitation,
+not a GPU restriction or a rejection of the published prepared NVFP4 layout.
 
 ### Native original 26B-A4B companions
 

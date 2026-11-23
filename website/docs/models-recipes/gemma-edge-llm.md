@@ -14,6 +14,8 @@ trtmc gemma build /path/to/gemma-4-12B-it --precision fp16 \
 ```
 
 Provision the optional native Edge SDK with ONNX tools and all native kernels.
+The full kernel set still targets the GPU architectures chosen when the SDK was
+built. If that SDK does not include the local GPU, Gemma tries native TensorRT.
 Python installation alone does not provide the native SDK. All selection and
 media mapping stay inside Gemma; earlier generations retain native behavior.
 
@@ -72,7 +74,13 @@ for the tested devices, inputs and outcomes.
 
 The [original FP16 31B standalone](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/gemma/edge_llm/README.md#original-31b-standalone-on-012)
 matched FP32 on the Edge text request. Its image description missed the 0.15
-limit (NED 0.198), with identical output from the released Edge CLI.
+limit (NED 0.198), with identical output from the released Edge CLI. Native TRT
+matched FP32 tokens on both requests on SM100.
+
+Original Gemma4 targets that store floating-point experts in fused tensors use
+native TRT on 0.12 because the exporter cannot load those weights faithfully.
+This does not affect prepared NVFP4 targets. See the
+[26B-A4B exporter diagnosis](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/gemma/edge_llm/README.md#original-floating-point-26b-a4b-experts-on-edge-012).
 
 The original 31B [DFlash](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/gemma/edge_llm/README.md#native-original-31b-dflash)
 and [MTP](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/gemma/edge_llm/README.md#gemma4-mtp-on-012)

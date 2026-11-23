@@ -293,18 +293,19 @@ def prepare(request, raw, draft: Path, limit: int, target: dict, staging: Path, 
     if variant == "jetspec" and package["version"] != "0.12.0":
         raise ValueError("Gemma JetSpec offload requires Edge-LLM 0.12.0")
     source = Path(request.model_dir).resolve()
+    additions = {"EDGELLM_PLUGIN_PATH": package["plugin"]}
+    if package["version"] == "0.12.0":
+        from .standalone import _nvfp4_moe_target, checkpoint_quantization
+
+        quantization = checkpoint_quantization(raw, source, target, package["version"])
+        if quantization and variant == "jetspec":
+            additions["EDGELLM_NVFP4_MOE_TARGET"] = _nvfp4_moe_target(target["sm"], package["version"])
     engine, onnx = staging / "edge_llm/engine", staging / "onnx"
     checkpoint = staging / "edge_llm/checkpoint"
     checkpoint.mkdir(parents=True)
     shutil.copy2(source / "config.json", checkpoint / "config.json")
     (checkpoint / "draft").mkdir()
     shutil.copy2(draft / "config.json", checkpoint / "draft/config.json")
-    additions = {"EDGELLM_PLUGIN_PATH": package["plugin"]}
-    if variant == "jetspec":
-        from .standalone import _nvfp4_moe_target, checkpoint_quantization
-
-        if checkpoint_quantization(raw, source, target, package["version"]):
-            additions["EDGELLM_NVFP4_MOE_TARGET"] = _nvfp4_moe_target(target["sm"], package["version"])
     env = subprocess_environment(
         additions,
         prepend_paths={"LD_LIBRARY_PATH": str(Path(package["plugin"]).parent)},
