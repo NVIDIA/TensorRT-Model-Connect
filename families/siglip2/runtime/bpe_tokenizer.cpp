@@ -20,7 +20,7 @@
 #include <utility>
 #include <vector>
 
-namespace trtmc {
+namespace trtmc::siglip2 {
 namespace {
 
 // ─── UTF-8 helpers ───
@@ -1440,4 +1440,4 @@ std::unique_ptr<ITokenizer> CreateSiglip2Tokenizer(const char* tokenizer_json_da
     return BpeTokenizer::Create(tokenizer_json_data, tokenizer_json_size, add_special_tokens);
 }
 
-} // namespace trtmc
+} // namespace trtmc::siglip2

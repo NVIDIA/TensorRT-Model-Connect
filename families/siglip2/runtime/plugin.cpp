@@ -85,13 +85,15 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
 
     auto config = trtmc::siglip2::parse_config(config_data);
     auto primary_task = trtmc::siglip2::require_task(context.reader);
-    auto tokenizer = trtmc::CreateSiglip2Tokenizer(tokenizer_data.data(), tokenizer_data.size(),
-                                                   /*add_special_tokens=*/true);
+    auto tokenizer =
+        trtmc::siglip2::CreateSiglip2Tokenizer(tokenizer_data.data(), tokenizer_data.size(),
+                                               /*add_special_tokens=*/true);
     if (!tokenizer)
         throw std::runtime_error("siglip2 tokenizer failed to load");
     auto vision = trtmc::siglip2::load_engine(context.backend, vision_plan, "vision");
     auto text = trtmc::siglip2::load_engine(context.backend, text_plan, "text");
-    return new trtmc::Siglip2Pipeline(std::move(vision), std::move(text),
-                                      std::shared_ptr<trtmc::ITokenizer>(std::move(tokenizer)),
-                                      std::move(config), std::move(primary_task));
+    return new trtmc::Siglip2Pipeline(
+        std::move(vision), std::move(text),
+        std::shared_ptr<trtmc::siglip2::ITokenizer>(std::move(tokenizer)), std::move(config),
+        std::move(primary_task));
 }

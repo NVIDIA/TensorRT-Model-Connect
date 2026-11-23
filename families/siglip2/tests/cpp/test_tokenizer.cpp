@@ -77,9 +77,9 @@ void rename_token(Json& tokenizer, const std::string& from, const std::string& t
     vocab.erase(from);
 }
 
-std::unique_ptr<trtmc::ITokenizer> load(const Json& tokenizer) {
+std::unique_ptr<trtmc::siglip2::ITokenizer> load(const Json& tokenizer) {
     const std::string text = tokenizer.dump();
-    return trtmc::CreateSiglip2Tokenizer(text.data(), text.size(), true);
+    return trtmc::siglip2::CreateSiglip2Tokenizer(text.data(), text.size(), true);
 }
 
 struct Refusal {

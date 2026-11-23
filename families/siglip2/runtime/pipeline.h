@@ -36,7 +36,7 @@ class Siglip2Pipeline final : public internal::IModel,
                               public internal::ITextImageToRelevance {
   public:
     Siglip2Pipeline(std::unique_ptr<ITrtModule> vision, std::unique_ptr<ITrtModule> text,
-                    std::shared_ptr<ITokenizer> tokenizer, Siglip2RuntimeConfig config,
+                    std::shared_ptr<siglip2::ITokenizer> tokenizer, Siglip2RuntimeConfig config,
                     std::string primary_task);
 
     const char* task() const noexcept override { return primary_task_.c_str(); }
@@ -58,7 +58,7 @@ class Siglip2Pipeline final : public internal::IModel,
 
     std::unique_ptr<ITrtModule> vision_;
     std::unique_ptr<ITrtModule> text_;
-    std::shared_ptr<ITokenizer> tokenizer_;
+    std::shared_ptr<siglip2::ITokenizer> tokenizer_;
     Siglip2RuntimeConfig config_;
     std::string primary_task_;
 };

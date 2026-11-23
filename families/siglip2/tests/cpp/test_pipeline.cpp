@@ -80,7 +80,7 @@ class FixtureModule final : public trtmc::ITrtModule {
     std::string output_;
 };
 
-class FixtureTokenizer final : public trtmc::ITokenizer {
+class FixtureTokenizer final : public trtmc::siglip2::ITokenizer {
   public:
     std::vector<std::int32_t> ids{7, 8, 1};
     std::vector<std::int32_t> encode(const std::string&) const override { return ids; }

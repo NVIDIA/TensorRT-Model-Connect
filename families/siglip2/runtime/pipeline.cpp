@@ -69,8 +69,8 @@ void validate_image(const internal::ImageView& image) {
 
 Siglip2Pipeline::Siglip2Pipeline(std::unique_ptr<ITrtModule> vision,
                                  std::unique_ptr<ITrtModule> text,
-                                 std::shared_ptr<ITokenizer> tokenizer, Siglip2RuntimeConfig config,
-                                 std::string primary_task)
+                                 std::shared_ptr<siglip2::ITokenizer> tokenizer,
+                                 Siglip2RuntimeConfig config, std::string primary_task)
     : vision_(std::move(vision)), text_(std::move(text)), tokenizer_(std::move(tokenizer)),
       config_(std::move(config)), primary_task_(std::move(primary_task)) {
     if (!vision_ || !vision_->ok() || !text_ || !text_->ok())

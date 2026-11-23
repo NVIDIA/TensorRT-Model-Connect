@@ -11,7 +11,7 @@
 #include <string_view>
 #include <vector>
 
-namespace trtmc {
+namespace trtmc::siglip2 {
 
 class ITokenizer {
   public:
@@ -25,4 +25,4 @@ std::unique_ptr<ITokenizer> CreateSiglip2Tokenizer(const char* tokenizer_json_da
                                                    std::size_t tokenizer_json_size,
                                                    bool add_special_tokens = false);
 
-} // namespace trtmc
+} // namespace trtmc::siglip2
