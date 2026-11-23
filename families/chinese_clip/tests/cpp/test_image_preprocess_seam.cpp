@@ -22,7 +22,8 @@ void check(bool condition, const char* name) {
 }
 
 void check_close(float actual, float expected, float tolerance, const char* name) {
-    if (std::fabs(actual - expected) > tolerance) {
+    if (!std::isfinite(actual) || !std::isfinite(expected) ||
+        !(std::fabs(actual - expected) <= tolerance)) {
         std::cerr << "FAIL: " << name << " actual=" << actual << " expected=" << expected << '\n';
         ++g_failures;
     }
@@ -58,6 +59,8 @@ void test_resize_matches_pillow_bicubic_pixels() {
                                        18, 57, 96, 86, 125, 164, 154, 193, 232};
     const auto result = trtmc::preprocess_chinese_clip_image(source.data(), 2, 4, config);
     check(result.size() == expected.size(), "Pillow golden output shape");
+    if (result.size() != expected.size())
+        return;
     for (std::size_t index = 0; index < expected.size(); ++index)
         check_close(result[index], static_cast<float>(expected[index]) / 255.0F, 1e-7F,
                     "direct bicubic resize matches Pillow");
@@ -79,6 +82,9 @@ void test_normalisation_is_per_channel() {
     }
     const auto values = trtmc::preprocess_chinese_clip_image(pixels.data(), 224, 224, config);
     const std::size_t plane = 224U * 224U;
+    check(values.size() == 3 * plane, "normalization output shape");
+    if (values.size() != 3 * plane)
+        return;
     check_close(values[0], (0.6F - 0.1F) / 0.5F, 2e-2F, "red channel normalised");
     check_close(values[plane], (0.4F - 0.2F) / 0.25F, 2e-2F, "green channel normalised");
     check_close(values[2 * plane], (0.8F - 0.3F) / 0.125F, 2e-2F, "blue channel normalised");

@@ -14,8 +14,8 @@ not 1 - and the runtime is where L2 normalisation and the ``logit_scale``
 belong, so that what the engine returns stays the thing the reference returns.
 
 This family requires torch in the build environment: the published
-``openai/chinese_clip-vit-base-patch32`` repository ships ``pytorch_model.bin`` and no
-safetensors file.
+``OFA-Sys/chinese-clip-vit-base-patch16`` checkpoint supplies
+``pytorch_model.bin`` weights and a ``vocab.txt`` WordPiece vocabulary.
 """
 
 from __future__ import annotations
@@ -45,9 +45,6 @@ def _open_torch_checkpoint(model_dir: Path) -> dict:
     return {key: value.numpy() for key, value in state.items()}
 
 
-_DUAL_GEMM_KNOB = "peep:match_dual_gemm"
-
-
 def _builder(precision, verbose, quant_ctx=None):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -61,10 +58,6 @@ def _builder(precision, verbose, quant_ctx=None):
     if quant_ctx is not None:
         # Keep layer names so the plan inspector shows which kernels run.
         config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
-        if quant_ctx.has_fp8_weights and _DUAL_GEMM_KNOB in getattr(config, "all_build_routes", ""):
-            # TensorRT's fused dual-GEMM kernel fails to compile with scalar-scale FP8.
-            # The route is set only when this TensorRT build lists the knob.
-            config.build_route = f"-{_DUAL_GEMM_KNOB}=off"
     return builder, network, config
 
 
@@ -204,6 +197,9 @@ def build(request, writer):
     if length < 2 or length > cfg["text"]["max_position_embeddings"]:
         raise ValueError("Chinese-CLIP text profile exceeds its position table")
     weights = _open_torch_checkpoint(directory)
+    for name in ("visual_projection.weight", "text_projection.weight"):
+        if weights[name].shape[0] != cfg["projection_dim"]:
+            raise ValueError(f"Chinese-CLIP {name} rows must match projection_dim")
     from tokenizers import BertWordPieceTokenizer
 
     tokenizer = BertWordPieceTokenizer(str(directory / "vocab.txt"), lowercase=True)

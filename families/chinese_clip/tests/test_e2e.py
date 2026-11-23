@@ -99,10 +99,30 @@ def _required_path(value: str | None, label: str) -> Path:
     return path
 
 
+def _checkpoint_source(manifest: dict, path: Path, *, override: bool) -> Path:
+    """An arbitrary local directory does not establish the manifest's pinned identity."""
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": None if override else manifest["hf_id"],
+            "revision": None if override else manifest["hf_revision"],
+            "source": "local_override" if override else "pinned_snapshot",
+            "path": str(path.resolve()),
+            "revision_verified": not override,
+            "expected_repo_id": manifest["hf_id"],
+            "expected_revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    return path
+
+
 def _model_dir(manifest: dict) -> Path:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
-        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+        return _checkpoint_source(
+            manifest, _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR"), override=True
+        )
     from huggingface_hub import snapshot_download
 
     try:
@@ -113,7 +133,7 @@ def _model_dir(manifest: dict) -> Path:
         raise AssertionError(
             f"selected {FAMILY} E2E requires the exact cached checkpoint {manifest['hf_id']}"
         ) from error
-    return Path(snapshot)
+    return _checkpoint_source(manifest, Path(snapshot), override=False)
 
 
 def _runtime() -> tuple[Path, Path]:
@@ -218,7 +238,7 @@ def _native_embedding(
     values = [float(value) for value in payload["values"]]
     assert values, f"native {FAMILY} returned an empty embedding"
     assert payload["normalization"] == "l2"
-    assert payload["embedding_space"] == "chinese_clip"
+    assert payload["embedding_space"] == ""
     norm = math.sqrt(sum(value * value for value in values))
     assert abs(norm - 1.0) <= 1e-3, f"native {FAMILY} embedding is not unit length: {norm}"
     return values
@@ -271,13 +291,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
     record_evidence(
-        "checkpoint",
-        {
-            "repo_id": manifest["hf_id"],
-            "revision": manifest["hf_revision"],
-            "precision": manifest["precision"],
-        },
+        "thresholds", {"embedding_cosine_min": _COSINE_FLOOR, "score_atol": _SCORE_TOLERANCE}
     )
+
     record_evidence(
         "thresholds",
         {
@@ -298,16 +314,14 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
         model_dir = _model_dir(manifest)
-    binary, runtime_root = _runtime()
+    with evidence_stage("runtime_setup"):
+        binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
         _build(model_dir, bundle, manifest)
     record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
 
     reference_image, reference_texts, scale = _reference(model_dir, case)
-    record_evidence(
-        "thresholds", {"embedding_cosine_min": _COSINE_FLOOR, "score_atol": _SCORE_TOLERANCE}
-    )
 
     native_image = _native_embedding(
         binary,

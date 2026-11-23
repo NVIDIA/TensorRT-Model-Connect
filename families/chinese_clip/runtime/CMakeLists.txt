@@ -1,6 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+find_package(ICU COMPONENTS uc QUIET)
+if(NOT ICU_FOUND)
+  message(STATUS "Skipping chinese_clip: install ICU development packages for Unicode tokenization")
+  return()
+endif()
 add_library(trtmc_model_chinese_clip SHARED
   wordpiece_tokenizer.cpp
   image_preprocess_seam.cpp
@@ -18,6 +23,7 @@ target_include_directories(trtmc_model_chinese_clip SYSTEM PRIVATE
 )
 target_link_libraries(trtmc_model_chinese_clip PRIVATE
   trtmc_core
+  ICU::uc
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
 )

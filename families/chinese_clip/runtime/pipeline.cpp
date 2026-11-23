@@ -20,7 +20,6 @@ namespace {
 // Both towers project into one space, which is the only reason a dot product
 // between them means anything. Naming it lets a caller see that two results
 // are comparable; it does not claim compatibility with any other checkpoint.
-constexpr const char* kEmbeddingSpace = "chinese_clip";
 
 const Tensor& require_output(const TensorMap& outputs, const char* name,
                              std::int32_t expected_width) {
@@ -126,7 +125,6 @@ ChineseClipPipeline::run(const internal::ImageToEmbeddingRequest& request,
         throw internal::ConfigError("chinese_clip has no runtime configuration");
     internal::SemanticEmbeddingResult result;
     result.values = embed_image(request.image);
-    result.embedding_space = kEmbeddingSpace;
     result.pooling = "class_token";
     result.normalization = "l2";
     return result;
@@ -145,7 +143,6 @@ ChineseClipPipeline::run(const internal::TextToEmbeddingRequest& request,
     }
     internal::SemanticEmbeddingResult result;
     result.values = embed_text(request.text);
-    result.embedding_space = kEmbeddingSpace;
     result.pooling = "class_token";
     result.normalization = "l2";
     return result;

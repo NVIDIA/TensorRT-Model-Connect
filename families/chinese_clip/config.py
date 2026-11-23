@@ -26,7 +26,7 @@ def _tower(config, name):
     heads = int(_require(tower, "num_attention_heads", name))
     if hidden % heads:
         raise ValueError(f"chinese_clip {name} width {hidden} is not divisible by {heads} heads")
-    activation = tower.get("hidden_act", "quick_gelu")
+    activation = tower.get("hidden_act", "gelu" if name == "text_config" else "quick_gelu")
     if activation != ("gelu" if name == "text_config" else "quick_gelu"):
         raise NotImplementedError(f"chinese_clip {name} uses unsupported activation: {activation}")
     return {
@@ -35,7 +35,7 @@ def _tower(config, name):
         "head_dim": hidden // heads,
         "intermediate_size": int(_require(tower, "intermediate_size", name)),
         "num_layers": int(_require(tower, "num_hidden_layers", name)),
-        "eps": float(tower.get("layer_norm_eps", 1e-5)),
+        "eps": float(tower.get("layer_norm_eps", 1e-12 if name == "text_config" else 1e-5)),
     }
 
 
@@ -51,7 +51,8 @@ def resolve(model_dir: Path) -> dict:
 
     text["vocab_size"] = int(_require(text_config, "vocab_size", "text_config"))
     text["max_position_embeddings"] = int(
-        _require(text_config, "max_position_embeddings", "text_config"))
+        _require(text_config, "max_position_embeddings", "text_config")
+    )
     vision["image_size"] = int(_require(vision_config, "image_size", "vision_config"))
     vision["patch_size"] = int(_require(vision_config, "patch_size", "vision_config"))
     if vision["image_size"] % vision["patch_size"]:
@@ -64,10 +65,18 @@ def resolve(model_dir: Path) -> dict:
     image_mean, image_std = _FALLBACK_IMAGE_MEAN, _FALLBACK_IMAGE_STD
     if preprocessor.is_file():
         loaded = json.loads(preprocessor.read_text())
-        if (loaded.get("do_center_crop", False) or not loaded.get("do_resize", True)
-                or loaded.get("resample", 3) != 3
-                or loaded.get("size") != {"height": vision["image_size"], "width": vision["image_size"]}):
-            raise NotImplementedError("Chinese-CLIP requires direct bicubic resize to its vision size")
+        if (
+            loaded.get("do_center_crop", True)
+            or not loaded.get("do_resize", True)
+            or not loaded.get("do_normalize", True)
+            or not loaded.get("do_rescale", True)
+            or loaded.get("rescale_factor", 1 / 255) != 1 / 255
+            or loaded.get("resample", 3) != 3
+            or loaded.get("size") != {"height": vision["image_size"], "width": vision["image_size"]}
+        ):
+            raise NotImplementedError(
+                "Chinese-CLIP requires direct bicubic resize to its vision size"
+            )
         image_mean = [float(v) for v in loaded.get("image_mean", image_mean)]
         image_std = [float(v) for v in loaded.get("image_std", image_std)]
     if len(image_mean) != 3 or len(image_std) != 3:

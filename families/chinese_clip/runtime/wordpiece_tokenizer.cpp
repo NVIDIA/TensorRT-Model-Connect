@@ -11,6 +11,9 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <unicode/normalizer2.h>
+#include <unicode/uchar.h>
+#include <unicode/unistr.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -178,128 +181,6 @@ inline bool is_cjk_char(char32_t cp) {
     return in_ranges(cp, kCjkRanges, sizeof(kCjkRanges) / sizeof(kCjkRanges[0]));
 }
 
-constexpr UnicodeRange kMnRanges[] = {
-    {0x0300, 0x036F}, // Combining Diacritical Marks
-    {0x1AB0, 0x1AFF}, // Extended
-    {0x1DC0, 0x1DFF}, // Supplement
-    {0x20D0, 0x20FF}, // For Symbols
-    {0xFE20, 0xFE2F}, // Combining Half Marks
-};
-
-inline bool is_mn_category(char32_t cp) {
-    return in_ranges(cp, kMnRanges, sizeof(kMnRanges) / sizeof(kMnRanges[0]));
-}
-
-// Simple NFD decomposition for common accented Latin characters
-inline void nfd_decompose(char32_t cp, std::vector<char32_t>& out) {
-    if (cp == 0x0374)
-        cp = 0x02B9;
-    else if (cp == 0x037E)
-        cp = 0x003B;
-    else if (cp == 0x0387)
-        cp = 0x00B7;
-    if (cp < 0x00C0) {
-        out.push_back(cp);
-        return;
-    }
-    // Pre-composed Latin letters → base + combining mark
-    // This covers the most common accented characters
-    struct Decomposition {
-        char32_t composed;
-        char32_t base;
-        char32_t mark;
-    };
-    static const Decomposition kDecomps[] = {
-        {0xC0, 'A', 0x0300},      {0xC1, 'A', 0x0301},      {0xC2, 'A', 0x0302},
-        {0xC3, 'A', 0x0303},      {0xC4, 'A', 0x0308},      {0xC5, 'A', 0x030A},
-        {0xC7, 'C', 0x0327},      {0xC8, 'E', 0x0300},      {0xC9, 'E', 0x0301},
-        {0xCA, 'E', 0x0302},      {0xCB, 'E', 0x0308},      {0xCC, 'I', 0x0300},
-        {0xCD, 'I', 0x0301},      {0xCE, 'I', 0x0302},      {0xCF, 'I', 0x0308},
-        {0xD1, 'N', 0x0303},      {0xD2, 'O', 0x0300},      {0xD3, 'O', 0x0301},
-        {0xD4, 'O', 0x0302},      {0xD5, 'O', 0x0303},      {0xD6, 'O', 0x0308},
-        {0xD9, 'U', 0x0300},      {0xDA, 'U', 0x0301},      {0xDB, 'U', 0x0302},
-        {0xDC, 'U', 0x0308},      {0xDD, 'Y', 0x0301},      {0xE0, 'a', 0x0300},
-        {0xE1, 'a', 0x0301},      {0xE2, 'a', 0x0302},      {0xE3, 'a', 0x0303},
-        {0xE4, 'a', 0x0308},      {0xE5, 'a', 0x030A},      {0xE7, 'c', 0x0327},
-        {0xE8, 'e', 0x0300},      {0xE9, 'e', 0x0301},      {0xEA, 'e', 0x0302},
-        {0xEB, 'e', 0x0308},      {0xEC, 'i', 0x0300},      {0xED, 'i', 0x0301},
-        {0xEE, 'i', 0x0302},      {0xEF, 'i', 0x0308},      {0xF1, 'n', 0x0303},
-        {0xF2, 'o', 0x0300},      {0xF3, 'o', 0x0301},      {0xF4, 'o', 0x0302},
-        {0xF5, 'o', 0x0303},      {0xF6, 'o', 0x0308},      {0xF9, 'u', 0x0300},
-        {0xFA, 'u', 0x0301},      {0xFB, 'u', 0x0302},      {0xFC, 'u', 0x0308},
-        {0xFD, 'y', 0x0301},      {0xFF, 'y', 0x0308},      {0x0100, 'A', 0x0304},
-        {0x0101, 'a', 0x0304},    {0x0102, 'A', 0x0306},    {0x0103, 'a', 0x0306},
-        {0x0104, 'A', 0x0328},    {0x0105, 'a', 0x0328},    {0x0106, 'C', 0x0301},
-        {0x0107, 'c', 0x0301},    {0x0108, 'C', 0x0302},    {0x0109, 'c', 0x0302},
-        {0x010A, 'C', 0x0307},    {0x010B, 'c', 0x0307},    {0x010C, 'C', 0x030C},
-        {0x010D, 'c', 0x030C},    {0x010E, 'D', 0x030C},    {0x010F, 'd', 0x030C},
-        {0x0112, 'E', 0x0304},    {0x0113, 'e', 0x0304},    {0x0114, 'E', 0x0306},
-        {0x0115, 'e', 0x0306},    {0x0116, 'E', 0x0307},    {0x0117, 'e', 0x0307},
-        {0x0118, 'E', 0x0328},    {0x0119, 'e', 0x0328},    {0x011A, 'E', 0x030C},
-        {0x011B, 'e', 0x030C},    {0x011C, 'G', 0x0302},    {0x011D, 'g', 0x0302},
-        {0x011E, 'G', 0x0306},    {0x011F, 'g', 0x0306},    {0x0120, 'G', 0x0307},
-        {0x0121, 'g', 0x0307},    {0x0122, 'G', 0x0327},    {0x0123, 'g', 0x0327},
-        {0x0124, 'H', 0x0302},    {0x0125, 'h', 0x0302},    {0x0128, 'I', 0x0303},
-        {0x0129, 'i', 0x0303},    {0x012A, 'I', 0x0304},    {0x012B, 'i', 0x0304},
-        {0x012C, 'I', 0x0306},    {0x012D, 'i', 0x0306},    {0x012E, 'I', 0x0328},
-        {0x012F, 'i', 0x0328},    {0x0130, 'I', 0x0307},    {0x0134, 'J', 0x0302},
-        {0x0135, 'j', 0x0302},    {0x0136, 'K', 0x0327},    {0x0137, 'k', 0x0327},
-        {0x0139, 'L', 0x0301},    {0x013A, 'l', 0x0301},    {0x013B, 'L', 0x0327},
-        {0x013C, 'l', 0x0327},    {0x013D, 'L', 0x030C},    {0x013E, 'l', 0x030C},
-        {0x0143, 'N', 0x0301},    {0x0144, 'n', 0x0301},    {0x0145, 'N', 0x0327},
-        {0x0146, 'n', 0x0327},    {0x0147, 'N', 0x030C},    {0x0148, 'n', 0x030C},
-        {0x014C, 'O', 0x0304},    {0x014D, 'o', 0x0304},    {0x014E, 'O', 0x0306},
-        {0x014F, 'o', 0x0306},    {0x0150, 'O', 0x030B},    {0x0151, 'o', 0x030B},
-        {0x0154, 'R', 0x0301},    {0x0155, 'r', 0x0301},    {0x0156, 'R', 0x0327},
-        {0x0157, 'r', 0x0327},    {0x0158, 'R', 0x030C},    {0x0159, 'r', 0x030C},
-        {0x015A, 'S', 0x0301},    {0x015B, 's', 0x0301},    {0x015C, 'S', 0x0302},
-        {0x015D, 's', 0x0302},    {0x015E, 'S', 0x0327},    {0x015F, 's', 0x0327},
-        {0x0160, 'S', 0x030C},    {0x0161, 's', 0x030C},    {0x0162, 'T', 0x0327},
-        {0x0163, 't', 0x0327},    {0x0164, 'T', 0x030C},    {0x0165, 't', 0x030C},
-        {0x0168, 'U', 0x0303},    {0x0169, 'u', 0x0303},    {0x016A, 'U', 0x0304},
-        {0x016B, 'u', 0x0304},    {0x016C, 'U', 0x0306},    {0x016D, 'u', 0x0306},
-        {0x016E, 'U', 0x030A},    {0x016F, 'u', 0x030A},    {0x0170, 'U', 0x030B},
-        {0x0171, 'u', 0x030B},    {0x0172, 'U', 0x0328},    {0x0173, 'u', 0x0328},
-        {0x0174, 'W', 0x0302},    {0x0175, 'w', 0x0302},    {0x0176, 'Y', 0x0302},
-        {0x0177, 'y', 0x0302},    {0x0178, 'Y', 0x0308},    {0x0179, 'Z', 0x0301},
-        {0x017A, 'z', 0x0301},    {0x017B, 'Z', 0x0307},    {0x017C, 'z', 0x0307},
-        {0x017D, 'Z', 0x030C},    {0x017E, 'z', 0x030C},    {0x0344, 0x0308, 0x0301},
-        {0x0385, 0x00A8, 0x0301}, {0x0386, 0x0391, 0x0301}, {0x0388, 0x0395, 0x0301},
-        {0x0389, 0x0397, 0x0301}, {0x038A, 0x0399, 0x0301}, {0x038C, 0x039F, 0x0301},
-        {0x038E, 0x03A5, 0x0301}, {0x038F, 0x03A9, 0x0301}, {0x0390, 0x03CA, 0x0301},
-        {0x03AA, 0x0399, 0x0308}, {0x03AB, 0x03A5, 0x0308}, {0x03AC, 0x03B1, 0x0301},
-        {0x03AD, 0x03B5, 0x0301}, {0x03AE, 0x03B7, 0x0301}, {0x03AF, 0x03B9, 0x0301},
-        {0x03B0, 0x03CB, 0x0301}, {0x03CA, 0x03B9, 0x0308}, {0x03CB, 0x03C5, 0x0308},
-        {0x03CC, 0x03BF, 0x0301}, {0x03CD, 0x03C5, 0x0301}, {0x03CE, 0x03C9, 0x0301},
-        {0x03D3, 0x03D2, 0x0301}, {0x03D4, 0x03D2, 0x0308}, {0x0400, 0x0415, 0x0300},
-        {0x0401, 0x0415, 0x0308}, {0x0403, 0x0413, 0x0301}, {0x0407, 0x0406, 0x0308},
-        {0x040C, 0x041A, 0x0301}, {0x040D, 0x0418, 0x0300}, {0x040E, 0x0423, 0x0306},
-        {0x0419, 0x0418, 0x0306}, {0x0439, 0x0438, 0x0306}, {0x0450, 0x0435, 0x0300},
-        {0x0451, 0x0435, 0x0308}, {0x0453, 0x0433, 0x0301}, {0x0457, 0x0456, 0x0308},
-        {0x045C, 0x043A, 0x0301}, {0x045D, 0x0438, 0x0300}, {0x045E, 0x0443, 0x0306},
-        {0x0476, 0x0474, 0x030F}, {0x0477, 0x0475, 0x030F}, {0x04C1, 0x0416, 0x0306},
-        {0x04C2, 0x0436, 0x0306}, {0x04D0, 0x0410, 0x0306}, {0x04D1, 0x0430, 0x0306},
-        {0x04D2, 0x0410, 0x0308}, {0x04D3, 0x0430, 0x0308}, {0x04D6, 0x0415, 0x0306},
-        {0x04D7, 0x0435, 0x0306}, {0x04DA, 0x04D8, 0x0308}, {0x04DB, 0x04D9, 0x0308},
-        {0x04DC, 0x0416, 0x0308}, {0x04DD, 0x0436, 0x0308}, {0x04DE, 0x0417, 0x0308},
-        {0x04DF, 0x0437, 0x0308}, {0x04E2, 0x0418, 0x0304}, {0x04E3, 0x0438, 0x0304},
-        {0x04E4, 0x0418, 0x0308}, {0x04E5, 0x0438, 0x0308}, {0x04E6, 0x041E, 0x0308},
-        {0x04E7, 0x043E, 0x0308}, {0x04EA, 0x04E8, 0x0308}, {0x04EB, 0x04E9, 0x0308},
-        {0x04EC, 0x042D, 0x0308}, {0x04ED, 0x044D, 0x0308}, {0x04EE, 0x0423, 0x0304},
-        {0x04EF, 0x0443, 0x0304}, {0x04F0, 0x0423, 0x0308}, {0x04F1, 0x0443, 0x0308},
-        {0x04F2, 0x0423, 0x030B}, {0x04F3, 0x0443, 0x030B}, {0x04F4, 0x0427, 0x0308},
-        {0x04F5, 0x0447, 0x0308}, {0x04F8, 0x042B, 0x0308}, {0x04F9, 0x044B, 0x0308},
-    };
-    for (const auto& d : kDecomps) {
-        if (cp == d.composed) {
-            nfd_decompose(d.base, out);
-            out.push_back(d.mark);
-            return;
-        }
-    }
-    out.push_back(cp);
-}
-
 // Simple ASCII lowercase (handles A-Z only; full Unicode tolower is complex)
 inline char32_t to_lower(char32_t cp) {
     if (cp >= 'A' && cp <= 'Z')
@@ -430,18 +311,19 @@ std::string chinese_clip_lowercase(const std::string& text) {
 }
 
 std::string chinese_clip_strip_accents(const std::string& text) {
-    // NFD decompose, then remove Mn category characters
+    UErrorCode status = U_ZERO_ERROR;
+    const auto* nfd = icu::Normalizer2::getNFDInstance(status);
+    icu::UnicodeString decomposed;
+    if (U_SUCCESS(status))
+        nfd->normalize(icu::UnicodeString::fromUTF8(text), decomposed, status);
+    if (U_FAILURE(status))
+        throw std::runtime_error("Chinese-CLIP tokenizer NFD normalization failed");
     std::string result;
-    size_t pos = 0;
-    while (pos < text.size()) {
-        char32_t cp = utf8_to_char32(text, pos);
-        std::vector<char32_t> decomposed;
-        nfd_decompose(cp, decomposed);
-        for (char32_t dcp : decomposed) {
-            if (!is_mn_category(dcp)) {
-                result += char32_to_utf8(dcp);
-            }
-        }
+    for (int32_t pos = 0; pos < decomposed.length();) {
+        const auto cp = decomposed.char32At(pos);
+        pos = decomposed.moveIndex32(pos, 1);
+        if (u_charType(cp) != U_NON_SPACING_MARK)
+            result += char32_to_utf8(static_cast<char32_t>(cp));
     }
     return result;
 }
@@ -521,13 +403,17 @@ class WordPieceTokenizer final : public ITokenizer {
 
         std::vector<int32_t> ids;
         size_t start = 0;
+        std::vector<std::size_t> matches(mRawSpecialIds.size(), 0);
         while (start < text.size()) {
             size_t next = std::string::npos;
             int32_t special_id = -1;
             size_t special_size = 0;
-            for (int32_t id : mRawSpecialIds) {
+            for (std::size_t index = 0; index < mRawSpecialIds.size(); ++index) {
+                const auto id = mRawSpecialIds[index];
                 const auto& token = mIdToToken[id];
-                const auto pos = text.find(token, start);
+                auto& pos = matches[index];
+                if (start == 0 || pos < start)
+                    pos = text.find(token, start);
                 if (pos < next || (pos == next && token.size() > special_size)) {
                     next = pos;
                     special_id = id;
@@ -793,10 +679,18 @@ class WordPieceTokenizer final : public ITokenizer {
     }
 
     // Extract ID from a post_processor cls/sep array: ["<token>", id]
-    static int32_t extract_pp_id(const nlohmann::json& pp, const char* key) {
-        if (pp.contains(key) && pp[key].is_array() && pp[key].size() >= 2)
-            return pp[key][1].get<int32_t>();
-        return -1;
+    int32_t extract_pp_id(const nlohmann::json& pp, const char* key) const {
+        if (!pp.contains(key))
+            return -1;
+        const auto& pair = pp.at(key);
+        const auto token = pair.at(0).get<std::string>();
+        const auto id = pair.at(1).get<int32_t>();
+        const auto expected = mTokenToId.find(token);
+        if (token != (std::string(key) == "cls" ? "[CLS]" : "[SEP]") ||
+            expected == mTokenToId.end() || expected->second != id)
+            throw std::runtime_error(
+                "Chinese-CLIP post-processor special token disagrees with vocabulary");
+        return id;
     }
 
     // Try to find CLS/SEP from post_processor (BERT, RoBERTa, Template styles)
