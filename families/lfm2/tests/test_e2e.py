@@ -348,6 +348,18 @@ def _hf_reference(
     return reference_ids, reference_text, actual_decoded
 
 
+def _assert_reference_free(payload: dict, case: dict) -> None:
+    """Check a generation that has no reference model: shape, length and expected answer."""
+    expected_answers = case.get("expected_answers")
+    assert expected_answers, "a case with reference=none must set expected_answers"
+    token_ids = payload["token_ids"]
+    assert isinstance(token_ids, list) and token_ids
+    assert all(isinstance(token_id, int) for token_id in token_ids)
+    assert len(token_ids) <= int(case["max_new_tokens"])
+    text = str(payload["text"]).strip()
+    assert any(answer.casefold() in text.casefold() for answer in expected_answers), text
+
+
 def _assert_correctness(
     payload: dict,
     case: dict,
@@ -446,6 +458,14 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
             assert repeated["token_ids"] == payload["token_ids"]
         with evidence_stage("compare"):
             assert repeated["text"] == payload["text"]
+
+    if case.get("reference") == "none":
+        # A self-quantized INT4 engine does not reproduce the 16-bit model token for
+        # token, so the generation is checked against the expected answer instead.
+        record_evidence("reference", {"mode": "none", "oracle": "expected_answers"})
+        with evidence_stage("compare"):
+            _assert_reference_free(payload, case)
+        return
 
     with evidence_stage("reference"):
         reference = _hf_reference(

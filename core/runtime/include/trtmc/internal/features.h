@@ -7,8 +7,10 @@
 
 #include "trtmc/internal/image.h"
 #include "trtmc/internal/matrix.h"
+#include "trtmc/internal/perception.h"
 #include "trtmc/internal/scores.h"
 #include "trtmc/internal/text.h"
+#include "trtmc/internal/video.h"
 
 namespace trtmc::internal {
 
@@ -81,6 +83,35 @@ struct ImageTokenFeaturesResult {
     FloatMatrix features; // [token, feature], retaining class/register rows.
     std::vector<ImageFeatureToken> tokens;
     uint64_t grid_rows{0}, grid_columns{0};
+};
+enum class VideoFeatureTokenRole : uint32_t {
+    Patch = 1,
+    Class = 2,
+    Register = 3,
+    GlobalPooled = 4
+};
+struct VideoFeatureToken {
+    VideoFeatureTokenRole role{VideoFeatureTokenRole::Patch};
+    uint64_t grid_frame{0}, grid_row{0}, grid_column{0};
+    // Patch support is [begin,end) in the supplied ordered input frames.
+    // It does not invent a frame rate or imply a temporal receptive field.
+    uint64_t frame_begin{0}, frame_end{0};
+    float x_min{0}, y_min{0}, x_max{0}, y_max{0};
+};
+struct VideoTokenFeaturesResult {
+    FloatMatrix features;
+    std::vector<VideoFeatureToken> tokens;
+    uint64_t grid_frames{0}, grid_rows{0}, grid_columns{0}, source_frame_count{0};
+};
+struct VideoToTokenFeaturesRequest {
+    VideoView video;
+};
+class IVideoToTokenFeatures {
+  public:
+    using TaskInterface = IVideoToTokenFeatures;
+    static constexpr std::string_view kTask = "video_to_token_features";
+    virtual ~IVideoToTokenFeatures() = default;
+    virtual VideoTokenFeaturesResult run(const VideoToTokenFeaturesRequest&, ConfigView) = 0;
 };
 struct ImageTokenAndPooledFeaturesResult {
     ImageTokenFeaturesResult tokens;
@@ -565,6 +596,34 @@ class ISpectrogramToFrameFeatures {
     virtual ~ISpectrogramToFrameFeatures() = default;
     virtual SpectrogramFrameFeaturesResult run(const SpectrogramToFrameFeaturesRequest&,
                                                ConfigView) = 0;
+};
+
+// Ordered caller-supplied document words and original-image pixel boxes.
+// OCR, tokenization and checkpoint coordinate normalization are family-owned.
+struct DocumentWordView {
+    std::string_view text;
+    PixelBox box;
+};
+struct DocumentWordsToTokenFeaturesRequest {
+    ImageView image;
+    Span<const DocumentWordView> words;
+};
+struct DocumentFeatureToken {
+    int64_t token_id{0}, word_index{-1}; // -1 special, -2 padding; otherwise input word index.
+    uint64_t token_index{0};
+};
+struct DocumentTokenFeaturesResult {
+    FloatMatrix features; // Returned text rows only; included padding remains explicitly mapped.
+    std::vector<DocumentFeatureToken> tokens;
+    uint64_t source_word_count{0};
+};
+class IDocumentWordsToTokenFeatures {
+  public:
+    using TaskInterface = IDocumentWordsToTokenFeatures;
+    static constexpr std::string_view kTask = "document_words_to_token_features";
+    virtual ~IDocumentWordsToTokenFeatures() = default;
+    virtual DocumentTokenFeaturesResult run(const DocumentWordsToTokenFeaturesRequest&,
+                                            ConfigView) = 0;
 };
 
 } // namespace trtmc::internal

@@ -19,10 +19,8 @@ calibration) over the first ``--calib-texts`` calibration texts, framed the way 
 family's runtime frames them (``text <sep> <cls>``, at most 512 tokens, one text per batch
 so no padding is seen, every token in segment 0 as in the engine), and stores
 ``amax / 448`` of every projection input under the key of the checkpoint (see
-``quantization.scale_key``). The two feed-forward projections are ``nn.Linear`` modules and
-take ``input_quantizer.amax`` from ModelOpt; the attention output projection is an einsum over
-an ``nn.Parameter`` tensor, which ModelOpt does not wrap, so its input is recorded by a hook
-with the same statistic (the largest absolute input value over all texts).
+``quantization.scale_key``). The two quantized projections, the feed-forward ones, are
+``nn.Linear`` modules and take ``input_quantizer.amax`` from ModelOpt.
 A projection whose scale is more than ``OUTLIER_RATIO`` times the median of its kind is
 stored as ``null`` and stays unquantized. ``fetch`` needs network access; ``calibrate``
 needs a GPU.
@@ -49,18 +47,11 @@ _WIKITEXT = ("Salesforce/wikitext", "wikitext-2-raw-v1/{split}-00000-of-00001.pa
 _SST2 = ("nyu-mll/glue", "sst2/{split}-00000-of-00001.parquet")
 _MAX_TOKENS = 512
 _LINEAR_NAME = re.compile(r"^layer\.(\d+)\.ff\.(layer_1|layer_2)$")
-_ATTENTION_NAME = re.compile(r"^layer\.(\d+)\.rel_attn$")
 
 
 def projection_name(module_name: str) -> str | None:
     """Table name of an HF ``XLNetModel`` ``nn.Linear`` path, or None when it is not quantized."""
     return module_name if _LINEAR_NAME.match(module_name) else None
-
-
-def attention_name(module_name: str) -> str | None:
-    """Table name of the output projection of an HF attention module path, or None."""
-    match = _ATTENTION_NAME.match(module_name)
-    return None if match is None else f"layer.{match.group(1)}.rel_attn.o"
 
 
 def _columns(path: str, names: list[str]) -> dict[str, list]:
@@ -152,24 +143,6 @@ def calibrate(model_dir: Path, texts: Path, calib_texts: int) -> None:
         raise RuntimeError(f"no calibration texts in {texts}; run the fetch command first")
     batches = [frame_ids(tokenizer, sample["text"]) for sample in samples]
 
-    # The output projection is an einsum over a parameter: record its input directly.
-    amax: dict[str, float] = {}
-
-    def record(name: str, tensor) -> None:
-        amax[name] = max(amax.get(name, 0.0), float(tensor.detach().abs().max()))
-
-    for module_name, module in model.named_modules():
-        out = attention_name(module_name)
-        if out is None:
-            continue
-        post_attention = module.post_attention
-
-        def recording_post_attention(h, attn_vec, residual=True, out=out, inner=post_attention):
-            record(out, attn_vec)
-            return inner(h, attn_vec, residual=residual)
-
-        module.post_attention = recording_post_attention
-
     def forward_loop(calibration_model) -> None:
         """Run every calibration text through the model once, one text per batch."""
         with torch.no_grad():
@@ -183,9 +156,7 @@ def calibrate(model_dir: Path, texts: Path, calib_texts: int) -> None:
 
     model = mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop)
 
-    scales: dict[str, float] = {
-        name: value / FP8_E4M3_MAX for name, value in amax.items() if value > 0
-    }
+    scales: dict[str, float] = {}
     for name, module in model.named_modules():
         internal = projection_name(name)
         if internal is None or not hasattr(module, "input_quantizer"):

@@ -117,6 +117,14 @@
           "type": "bool",
           "action": "store_true",
           "default": false
+        },
+        {
+          "name": "edge_builder_python",
+          "flags": [
+            "--edge-builder-python"
+          ],
+          "type": "path",
+          "help": "Absolute Python interpreter for the optional Edge builder"
         }
       ]
     }

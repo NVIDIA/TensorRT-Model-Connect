@@ -180,6 +180,17 @@
       "architecture_source": "model_index._class_name"
     },
     {
+      "hf_id": "RedHatAI/Mistral-7B-Instruct-v0.3-quantized.w8a16",
+      "revision": "5079e6662632d88ac726516beccf202c925402a0",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "mistral",
+      "architectures": [
+        "MistralForCausalLM"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "gradium/phonon-31m-en",
       "revision": "92741c5b07d085ff840e26fea8ce43110b87852f",
       "revision_source": "resolved",
@@ -1381,6 +1392,17 @@
       "model_type": "wavlm",
       "architectures": [
         "WavLMForCTC"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "openbmb/MiniCPM5-1B",
+      "revision": "87179e5c1f455ef22e6223592d2d61351b525bfc",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "llama",
+      "architectures": [
+        "LlamaForCausalLM"
       ],
       "architecture_source": "config.architectures"
     },

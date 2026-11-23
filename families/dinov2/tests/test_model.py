@@ -233,3 +233,80 @@ def test_fp16_engine_keeps_float32_io_and_tracks_fp32() -> None:
     assert torch.isfinite(half).all()
     cosine = torch.nn.functional.cosine_similarity(full.flatten(), half.flatten(), dim=0)
     assert cosine.item() > 0.999, cosine.item()
+
+
+
+class _Tensor:
+    def __init__(self, dtype, origin):
+        self.dtype = dtype
+        self.origin = origin
+
+
+class _Layer:
+    def __init__(self, output):
+        self.output = output
+
+    def get_output(self, index):
+        assert index == 0
+        return self.output
+
+
+class _StronglyTypedNetwork:
+    """Records each layer's output dtype; refuses mixed-dtype elementwise inputs as a strongly typed network."""
+
+    def __init__(self):
+        self.layers = []
+
+    def _add(self, kind, dtype, origin):
+        self.layers.append((kind, dtype))
+        return _Layer(_Tensor(dtype, origin))
+
+    def add_convolution_nd(self, tensor, channels, kernel, weights, bias):
+        self.convolution = {"input": tensor, "kernel": weights, "bias": bias}
+        return self._add("conv", tensor.dtype, "conv")
+
+    def add_shuffle(self, tensor):
+        return self._add("shuffle", tensor.dtype, tensor.origin)
+
+    def add_constant(self, shape, values):
+        return self._add("constant", "float32" if values.dtype == np.float32 else "float16", "constant")
+
+    def add_concatenation(self, tensors):
+        assert len({tensor.dtype for tensor in tensors}) == 1
+        return self._add("concat", tensors[0].dtype, "concat")
+
+    def add_elementwise(self, left, right, operation):
+        assert left.dtype == right.dtype, (left.dtype, right.dtype)
+        return self._add("sum", left.dtype, "sum")
+
+    def add_cast(self, tensor, dtype):
+        return self._add("cast", dtype, ("cast", tensor.origin))
+
+
+def test_the_fp16_embeddings_stay_float32_until_the_encoder(monkeypatch: pytest.MonkeyPatch) -> None:
+    import types
+
+    from families.dinov2 import graph as graph_module
+
+    fake_trt = types.SimpleNamespace(Weights=lambda value: value, float16="float16", float32="float32",
+                                     ElementWiseOperation=types.SimpleNamespace(SUM="sum"))
+    monkeypatch.setattr(model_module, "trt", fake_trt)
+    monkeypatch.setattr(graph_module, "trt", fake_trt)
+    width, patch, grid = 4, 2, 2
+    weight = np.full((width, 3, patch, patch), 0.1, dtype=np.float32)  # 0.1 is not an FP16 value
+    weights = {"embeddings.patch_embeddings.projection.weight": weight,
+               "embeddings.patch_embeddings.projection.bias": np.full(width, 0.3, dtype=np.float32),
+               "embeddings.cls_token": np.zeros((1, 1, width), dtype=np.float32),
+               "embeddings.position_embeddings": np.zeros((1, grid * grid + 1, width), dtype=np.float32)}
+    cfg = {"hidden_size": width, "patch_size": patch, "grid": grid, "trained_grid": grid}
+
+    network = _StronglyTypedNetwork()
+    hidden = model_module._add_embeddings(network, _Tensor("float32", "pixel_values"), weights, cfg, np.float16)
+    assert network.convolution["input"].origin == "pixel_values"  # the float32 pixels, not rounded
+    np.testing.assert_array_equal(network.convolution["kernel"], weight)  # the checkpoint's weights, not rounded
+    assert [dtype for kind, dtype in network.layers[:-1]] == ["float32"] * (len(network.layers) - 1)
+    assert network.layers[-1] == ("cast", "float16") and hidden.dtype == "float16"  # rounded once, at the encoder
+
+    network = _StronglyTypedNetwork()  # an FP32 build is unchanged: no cast
+    hidden = model_module._add_embeddings(network, _Tensor("float32", "pixel_values"), weights, cfg, np.float32)
+    assert hidden.dtype == "float32" and all(kind != "cast" for kind, _ in network.layers)

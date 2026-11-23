@@ -117,7 +117,8 @@ def run_key(environment: Environment, model: Mapping[str, Any]) -> str:
     reference interpreters. A finished result counts only under the same key."""
     mode = "smoke" if environment.values.get("smoke") else "formal"
     pythons = {str(environment.values.get("serve_python") or ""), sys.executable}
-    if (model.get("reference") or {}).get("requirements") and environment.values.get("reference_env_root"):
+    reference = model.get("reference") or {}
+    if (reference.get("requirements") or reference.get("prepare")) and environment.values.get("reference_env_root"):
         try:
             pythons.add(reference_python(environment, dict(model)))
         except Exception:  # noqa: BLE001 - the run itself reports the environment failure
@@ -598,9 +599,12 @@ def signal_reason(profile: str, row: Mapping[str, Any]) -> str:
 
 def run_context(roots: Sequence[Path]) -> str:
     """Which run the roots hold: each root's host, the assignment and campaign inputs it ran under (``plan.json``),
-    and when its first and last results started."""
+    and when its first and last results started. The campaign inputs' digest covers the part hosts must share, so
+    hosts that may merge show the same one (each host's own runtime build and dependency set are informational)."""
     import datetime
     import hashlib
+
+    from .split import required_inputs
 
     def day(stamp: float) -> str:
         return datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -610,7 +614,8 @@ def run_context(roots: Sequence[Path]) -> str:
         plan = json.loads((root / PLAN).read_text()) if (root / PLAN).is_file() else {}
         times = [row["time"] for row in (_row(path) for path in root.iterdir() if path.is_dir()) if row]
         inputs = plan.get("inputs")
-        digest = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:12] if inputs else ""
+        digest = (hashlib.sha256(json.dumps(required_inputs(inputs), sort_keys=True).encode()).hexdigest()[:12]
+                  if inputs else "")
         parts.append(f"{root.name}: host {plan.get('host') or '-'}"
                      + (f", assignment {str(plan['assignment'])[:12]}" if plan.get("assignment") else "")
                      + (f", fragment {plan['fragment']}" if plan.get("fragment") else "")

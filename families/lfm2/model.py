@@ -22,7 +22,12 @@ from .native_kv_attention_builder import (
 
 from .checkpoint_mapper import WeightDict, load_lfm2_weights
 from .config import DenseLfm2Config, validate_dense_lfm2_config
-from .quantization import Lfm2QuantContext, calibrate_lfm2_fp8, configure_fp8_build
+from .quantization import (
+    Lfm2QuantContext,
+    calibrate_lfm2_awq,
+    calibrate_lfm2_fp8,
+    configure_quantized_build,
+)
 
 
 # Tactic-selection point for the active key-row count (typical chat and
@@ -749,7 +754,7 @@ def build_lfm2_engine(
     # Match the qualified native-KV builder ceiling. This is build-time tactic
     # scratch, not an eager runtime allocation.
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
-    configure_fp8_build(builder_config, quant_ctx)
+    configure_quantized_build(builder_config, quant_ctx)
 
     token_id = network.add_input("token_id", trt.int32, (-1,))
     position_id = network.add_input("position_id", trt.int32, (-1,))
@@ -963,6 +968,8 @@ def build_lfm2_engine(
                 storage_dtype=storage_dtype,
                 work_dtype=work_dtype,
                 name=f"{prefix}.self_attn.out_proj",
+                quant_ctx=quant_ctx,
+                weight_name=f"{prefix}.w_o",
             )
             present_k_outputs.append(native["present_k"])
             present_v_outputs.append(native["present_v"])
@@ -1055,7 +1062,7 @@ def build_lfm2_engine(
             f"(layers={cfg.num_hidden_layers}, conv={cfg.num_conv_layers}, "
             f"attention={cfg.num_attention_layers}, hidden={cfg.hidden_size}, "
             f"cache={max_cache_length}, prefill_chunk={prefill_chunk}, precision={precision}, "
-            f"fp8_projections={0 if quant_ctx is None else len(quant_ctx.scales)}) ...",
+            f"quantized_projections={0 if quant_ctx is None else len(quant_ctx.scales)}) ...",
             file=sys.stderr,
         )
     plan = builder.build_serialized_network(network, builder_config)
@@ -1163,7 +1170,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         )
     if request.tensor_parallel_size != 1:
         raise NotImplementedError("dense LFM2 does not support tensor-parallel builds")
-    if request.quantization not in {None, "none", "fp8"}:
+    if request.quantization not in {None, "none", "fp8", "int4_awq"}:
         raise NotImplementedError(
             f"dense LFM2 does not support quantization={request.quantization!r}"
         )
@@ -1173,7 +1180,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("dense LFM2 does not support MTP speculative decoding")
 
     weights = load_lfm2_weights(str(model_dir), config, precision=precision)
-    quant_ctx = calibrate_lfm2_fp8(resolved, weights) if request.quantization == "fp8" else None
+    quant_ctx = None
+    if request.quantization == "fp8":
+        quant_ctx = calibrate_lfm2_fp8(resolved, weights)
+    elif request.quantization == "int4_awq":
+        quant_ctx = calibrate_lfm2_awq(resolved, weights, model_dir)
     plan = build_lfm2_engine(
         config,
         weights,

@@ -58,10 +58,14 @@ def add_sparse_moe(network, hidden, weights: MoEWeights):
         original = all(isinstance(matrix, np.ndarray) for matrix in matrices)
         packed = all(
             isinstance(matrix, PackedLinear)
-            and matrix.format in {"gptq", "nvfp4_a16"}
+            and matrix.format in {"gptq", "nvfp4_a16", "nvfp4_a4"}
             and matrix.format == matrices[0].format
             for matrix in matrices
         )
+        if packed and matrices[0].format == "nvfp4_a4":
+            # A single Q/DQ across routed rows is equivalent only for the same scale.
+            # Otherwise each expert must retain its own calibrated input scale.
+            packed = all(matrix.input_scale == matrices[0].input_scale for matrix in matrices)
         if not (original or packed):
             return _add_sparse_moe_individual(network, hidden, weights)
     return _add_sparse_moe_selected(network, hidden, weights)
@@ -146,12 +150,14 @@ def _add_sparse_moe_selected(network, hidden, weights: MoEWeights):
             rhs = network.add_gather(rhs, selected, 0).get_output(0)
         else:
             fmt = matrices[0].format
-            if fmt not in ("gptq", "nvfp4_a16") or any(
+            if fmt not in ("gptq", "nvfp4_a16", "nvfp4_a4") or any(
                 m.format != fmt or m.shape != (k, n) for m in matrices
             ):
                 raise ValueError(
                     "Selected experts require matching packed precision and geometry"
                 )
+            if fmt == "nvfp4_a4":
+                value = matrices[0].round_nvfp4_input(network, value)
             # Integer words retain the exact compact bytes without claiming an
             # INT8 quantized floating-point tensor (which TRT restricts to DQ).
             packed = np.stack([m.packed for m in matrices]).view("<i4")
