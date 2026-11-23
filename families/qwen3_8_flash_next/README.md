@@ -51,11 +51,12 @@ primes, the species in a still image, and the first and last species in a video.
 Each response must match the reference after case folding and trimming outer
 whitespace. The evidence records which route was actually built.
 
-Resident Edge and native execution matched all three answers in a full-model
-run. Row-cached Edge ran successfully but answered “red panda, panda” rather
-than “red panda, giant panda” for the ordered video. It remains executable;
-the cached policy is not qualified for this case. These observations do not
-establish model-wide accuracy or validate speculative decoding.
+An earlier resident Edge run matched all three references. In the latest native
+run, text and image matched, but the ordered-video answer was “red panda, panda”
+instead of “red panda, giant panda”. An earlier native run matched all three.
+Row-cached Edge also missed the second species name; the shared symptom does
+not establish a common cause. Native and row-cached Edge remain executable,
+but neither is qualified for ordered video.
 
 The native lexical-stage check exercises the production packed-table graph
 against an independent E4M3FN reference with one and three token rows.

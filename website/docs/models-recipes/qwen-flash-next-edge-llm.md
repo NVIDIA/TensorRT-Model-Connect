@@ -33,7 +33,9 @@ context does not increase this visual limit. If provider-sized media would
 exceed it, the runtime reports the limit rather than silently resizing or
 dropping content.
 
-The resident policy and native fallback passed the family’s three focused text,
-image, and ordered-video checks. The cached policy built and ran but missed the
-last animal’s full name in the video check. Do not interpret successful cached
-execution as equivalent accuracy.
+An earlier resident Edge run matched the text, image, and ordered-video
+references. The latest native run matched text and image, but answered
+“red panda, panda” instead of “red panda, giant panda” for the video. An
+earlier native run matched all three. Row-cached Edge also missed the last
+animal’s full name. Both routes remain executable; neither is qualified for
+ordered video.
