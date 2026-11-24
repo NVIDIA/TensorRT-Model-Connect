@@ -258,16 +258,23 @@ def _official(model_dir: Path, manifest: dict, case: dict, image: Path,
 
 def _quantize(frames: np.ndarray) -> np.ndarray:
     """The CLI's PNG rounding: clamp to [0, 1], scale by 255 in float32, add 0.5, truncate."""
+    # Clamping would turn an infinity into a valid pixel, and the cast a NaN into one.
+    assert np.isfinite(frames).all(), "frames must be finite before quantization"
     values = np.clip(frames.astype(np.float32), np.float32(0.0), np.float32(1.0))
     return (values * np.float32(255.0) + np.float32(0.5)).astype(np.uint8)
 
 
 def _psnr(left: np.ndarray, right: np.ndarray) -> float:
+    # Broadcasting would compare images of different shapes.
+    assert left.shape == right.shape, f"image shapes differ: {left.shape} vs {right.shape}"
     mse = float(np.mean((left.astype(np.float64) - right.astype(np.float64)) ** 2))
     return 99.0 if mse == 0.0 else 10.0 * float(np.log10(255.0 ** 2 / mse))
 
 
 def _frame_psnrs(native: np.ndarray, reference: np.ndarray) -> list[float]:
+    # zip would stop at the shorter clip and compare only its frames.
+    assert native.shape == reference.shape, (
+        f"clip shapes differ: {native.shape} vs {reference.shape}")
     return [_psnr(left, right) for left, right in zip(native, reference)]
 
 

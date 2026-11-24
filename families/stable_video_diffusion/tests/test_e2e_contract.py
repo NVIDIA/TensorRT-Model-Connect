@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""CPU checks of the E2E module's case selection."""
+"""CPU checks of the E2E module's case selection and frame comparisons."""
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from . import test_e2e as e2e
@@ -54,3 +55,22 @@ def test_an_explicit_selection_fails_when_no_testcase_matches(tmp_path):
     # A selection of another family still skips this module.
     assert _generate(**{"--e2e-model": ["wavlm"],
                         "--e2e-testcase": ["wavlm-libri-clean-100h-large"]}) == [("case_name", [])]
+
+
+def test_frame_comparisons_refuse_clips_of_different_shapes():
+    clip = np.zeros((3, 4, 4, 3), dtype=np.uint8)
+    # A truncated reference would be compared on its frames only.
+    with pytest.raises(AssertionError, match="clip shapes differ"):
+        e2e._frame_psnrs(clip, clip[:2])
+    # One row would be broadcast over the whole image.
+    with pytest.raises(AssertionError, match="image shapes differ"):
+        e2e._psnr(clip[0], clip[0, :1])
+    assert e2e._frame_psnrs(clip, clip.copy()) == [99.0, 99.0, 99.0]
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_quantization_refuses_nonfinite_frames(value):
+    frames = np.full((1, 2, 2, 3), 0.5, dtype=np.float32)
+    frames[0, 0, 0, 0] = value
+    with pytest.raises(AssertionError, match="finite"):
+        e2e._quantize(frames)
