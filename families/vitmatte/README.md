@@ -31,3 +31,7 @@ Explicit selection with `-DTRTMC_BUILD_FAMILIES=vitmatte` checks the family
 prerequisites at configuration time. Default builds may skip the family when
 BYOK is disabled or Torch is unavailable; explicitly building
 `trtmc_model_vitmatte` then reports the missing prerequisite.
+
+Kernel registration retries reuse each completed binding and retry only the
+failed binding. The shared backend propagates device-to-host transfer errors
+before returning tensors backed by reusable staging storage.

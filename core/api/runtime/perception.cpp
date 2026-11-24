@@ -730,7 +730,9 @@ trtmc_status TRTMC_CALL object_pose_result_view(const trtmc_result* result,
 }
 Span<const TaskBinding> perception_task_bindings() noexcept {
 #define B(Interface, Table)                                                                        \
-    { internal::Interface::kTask, 1, 0, &Table.header }
+    {                                                                                              \
+        internal::Interface::kTask, 1, 0, &Table.header                                            \
+    }
     static const TaskBinding bindings[] = {B(IBatchImageTextToBoxes, boxes_batch_api),
                                            B(IImageToSemanticSegmentation, semantic_api),
                                            B(IImagePointsToMasks, points_api),

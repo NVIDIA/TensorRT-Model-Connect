@@ -85,16 +85,19 @@ TVM_FFI_DLL_EXPORT_TYPED_FUNC(vitmatte_fp32_mlp_output_v1, mlp_output);
 TVM_FFI_DLL_EXPORT_TYPED_FUNC(vitmatte_fp32_gelu_v1, gelu);
 
 extern "C" const char* trtmc_vitmatte_register_kernels() noexcept {
-    static std::once_flag once;
+    static std::once_flag projection_once, gelu_once;
     static thread_local std::string error;
     try {
-        std::call_once(once, [] {
-            Dl_info location{};
-            if (!dladdr(reinterpret_cast<void*>(&trtmc_vitmatte_register_kernels), &location) ||
-                !location.dli_fname)
-                throw std::runtime_error("Cannot locate the ViTMatte native kernel library");
+        Dl_info location{};
+        if (!dladdr(reinterpret_cast<void*>(&trtmc_vitmatte_register_kernels), &location) ||
+            !location.dli_fname)
+            throw std::runtime_error("Cannot locate the ViTMatte native kernel library");
+        // A failed second registration must not reload the first on every retry.
+        std::call_once(projection_once, [&] {
             trtmc::load_byok_kernel(location.dli_fname, "vitmatte_fp32_mlp_output_v1",
                                     "vitmatte.fp32_mlp_output_v1");
+        });
+        std::call_once(gelu_once, [&] {
             trtmc::load_byok_kernel(location.dli_fname, "vitmatte_fp32_gelu_v1",
                                     "vitmatte.fp32_gelu_v1");
         });
