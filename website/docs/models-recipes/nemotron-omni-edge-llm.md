@@ -33,12 +33,10 @@ stay native. See the family recipe below for the full command.
 
 ## Evidence boundaries
 
-The native build and all six public task modes execute. The current owning
-fixture uses independently verified factual grounding/transcription questions;
-all six pass the unchanged 0.15 edit-distance gate in a replay with the corrected
-native decoder and retained media plans. This replay is not a fresh full-builder
-run of every source change; the declared premerge case still builds and executes
-the complete model. Original free-form image, video and image/audio accuracy
+The native build and all six public task modes execute. A replay with the
+corrected native decoder and retained media plans passed all six questions in
+the earlier fixture. That replay is not a fresh build or a result for a later
+prompt. The native premerge case builds and executes the complete model. Original free-form image, video and image/audio accuracy
 failures remain recorded and runnable, not reclassified as captioning passes.
 
 The 0.11 public Model Connect Edge build and original text/image executions also
@@ -51,9 +49,11 @@ at TensorRT enqueue; a released-runner control changing only the acoustic
 engine to an ONNX-built one matched the audio and image/audio references
 exactly. The public Model Connect hybrid bundle then matched the independent
 reference tokens for all four tested modes: text, image, audio, and
-image/audio. Typed video failed Edge placeholder validation and stays native. A fresh native SM103 build ran
-all six modes. Five passed the unchanged gate; aligned audio/video missed it
-(NED 0.1887 against 0.15) and remains executable. Component tests and scoped
+image/audio. Typed video failed Edge placeholder validation and stays native. A
+fresh native SM103 build ran all six modes. Five passed; aligned audio/video
+missed the gate on the old free-form prompt (NED 0.1887 against 0.15). The
+[current native fixture](https://github.com/NVIDIA/TensorRT-Model-Connect/pull/2633)
+asks for the road direction and verbatim speech with the same threshold. Component tests and scoped
 factual answers are not catalog-wide qualification.
 
 Small native FP8 and NVFP4 projections execute correctly on Ada; lack of FP4

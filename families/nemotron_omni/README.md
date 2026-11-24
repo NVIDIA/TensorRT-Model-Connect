@@ -108,13 +108,12 @@ Mamba gating precision, their distances were approximately 0.445, 0.825 and
 0.517. Those accuracy-only failures remain runnable and recorded; they are not
 reclassified as passing descriptions.
 
-The owning E2E now uses human-reviewed factual questions for those three cases:
+The first revision of the owning E2E used factual questions for those three cases:
 vase colors in image order, road direction, and vase colors plus verbatim speech.
 Their golden answers were regenerated with the same pinned independent vLLM
 reference before executing Model Connect, and checked against the unchanged
-fixtures. Text, audio and audio/video questions and goldens are unchanged, as
-are all six modality routes, decoding settings and the 0.15 threshold. A replay
-using the corrected native decoder and retained media plans passes all six:
+fixtures. That revision left the text, audio and audio/video questions unchanged.
+A replay using the corrected native decoder and retained media plans passed all six:
 text/image/audio/video match exactly, image/audio has distance 0.0137, and
 audio/video 0.0566. This is scoped grounding/transcription evidence, not proof of
 free-form caption equivalence or a fresh full-builder run of every source change.
@@ -165,10 +164,12 @@ bundle also passed the seeded nucleus-sampling check.
 A separate, complete native TensorRT build ran all six tasks. Text,
 image, audio and video matched the independent token IDs. Image/audio passed
 (NED 0.0137); aligned audio/video generated a response but missed the 0.15
-gate (NED 0.1887). That last native task remains executable, not qualified by
-this run. A fresh single-request replay and the unmodified native runtime on
-the same bundle returned the same tokens. This miss is distinct from the Edge
-acoustic command failure.
+gate (NED 0.1887) on the original free-form description and transcription prompt.
+A single-request replay and the unmodified native runtime on the same bundle
+returned the same tokens. [The updated native fixture](https://github.com/NVIDIA/TensorRT-Model-Connect/pull/2633)
+asks for the road direction and verbatim speech on two lines. It uses the same
+media, decoding settings and 0.15 gate. The earlier result does not score that
+new question; neither result measures the Edge acoustic engine.
 
 The **0.11** direct official Edge builder completed language, visual and audio engines.
 Against the independent provider-documented vLLM 0.20.0 reference, text matched
