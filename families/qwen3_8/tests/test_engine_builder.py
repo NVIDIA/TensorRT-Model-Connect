@@ -515,21 +515,42 @@ def test_native_tp_broadcast_requires_none_enum_and_root_zero() -> None:
     assert network.add_dist_collective.return_value.num_ranks == 2
 
 
-def test_default_prefill_engine_is_dropped_only_when_two_weight_copies_do_not_fit(tmp_path) -> None:
-    from dataclasses import replace
+def test_a_checkpoint_that_fits_once_ships_only_the_prefill_engine() -> None:
+    from families.qwen3_8 import model
+
+    gib = 1024**3
+    # A 27B FP16 checkpoint (about 54 GiB) on a 121 GiB unified-memory GPU: one engine, the chunked one.
+    assert model._decoder_engine_layout(128, 54 * gib, 121 * gib, has_mtp=False) == "chunked"
+    # An 8B checkpoint fits twice, as does the 27B checkpoint on a large discrete GPU.
+    assert model._decoder_engine_layout(128, 16 * gib, 121 * gib, has_mtp=False) == "single"
+    assert model._decoder_engine_layout(128, 54 * gib, 275 * gib, has_mtp=False) == "single"
+    # No device to query, no chunked graph (media, drafts, FP8 KV) or MTP: the decode engine stays.
+    assert model._decoder_engine_layout(128, 54 * gib, None, has_mtp=False) == "single"
+    assert model._decoder_engine_layout(0, 54 * gib, 121 * gib, has_mtp=False) == "single"
+    assert model._decoder_engine_layout(128, 54 * gib, 121 * gib, has_mtp=True) == "single"
+
+
+def test_a_chunked_bundle_builds_no_decode_engine(monkeypatch, tmp_path) -> None:
+    from unittest.mock import Mock
 
     from families.qwen3_8 import model
     from families.qwen3_8.build_request import BuildRequest
 
-    request = BuildRequest(tmp_path, tmp_path / "out", "qwen3_8", "text_generation", "fp16")
-    gib = 1024**3
-    # A 27B FP16 checkpoint (about 54 GiB) on a 121 GiB unified-memory GPU: decode engine only.
-    assert model._fit_prefill_engine(request, 128, 54 * gib, 121 * gib) == 0
-    # An 8B checkpoint fits twice, as does the 27B checkpoint on a large discrete GPU.
-    assert model._fit_prefill_engine(request, 128, 16 * gib, 121 * gib) == 128
-    assert model._fit_prefill_engine(request, 128, 54 * gib, 275 * gib) == 128
-    # No device to query, a single-token build, or an explicit chunk length is kept as is.
-    assert model._fit_prefill_engine(request, 128, 54 * gib, None) == 128
-    assert model._fit_prefill_engine(request, 0, 54 * gib, 121 * gib) == 0
-    explicit = replace(request, prefill_chunk_len=128)
-    assert model._fit_prefill_engine(explicit, 128, 54 * gib, 121 * gib) == 128
+    config = _tiny_load_weights_config()
+    config.raw["text_config"]["output_gate_type"] = "swish"
+    monkeypatch.setattr(model.ModelConfig, "from_dir", lambda _: config)
+    monkeypatch.setattr(model.Qwen38Model, "load_weights", lambda *_args, **_kwargs: {})
+    decode = Mock(return_value=b"target")
+    prefill = Mock(return_value=b"prefill")
+    monkeypatch.setattr(model.Qwen38Model, "build_engine", decode)
+    monkeypatch.setattr(model.Qwen38Model, "build_engine_prefill", prefill)
+    monkeypatch.setattr(model, "_runtime_config", lambda *_args, **kwargs: kwargs)
+    monkeypatch.setattr(model, "_decoder_engine_layout", lambda *_args, **_kwargs: "chunked")
+    writer = Mock()
+    model._build_native(
+        BuildRequest(tmp_path, tmp_path / "out", "qwen3_8", "text_generation", "fp16"), writer)
+    decode.assert_not_called()
+    assert [call.args for call in writer.add_bytes.call_args_list] == [("prefill_engine.plan", b"prefill")]
+    runtime = writer.add_json.call_args.args[1]
+    assert runtime["decoder_engine_layout"] == "chunked"
+    assert runtime["prefill_chunk_len"] == prefill.call_args.args[3] >= 2

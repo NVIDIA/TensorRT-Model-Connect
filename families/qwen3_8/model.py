@@ -186,22 +186,25 @@ def _native_prefill_chunk_len(request, capacity, *, visual=False, external_draft
 _TWO_ENGINE_MEMORY_FRACTION = 0.8
 
 
-def _fit_prefill_engine(request, chunk: int, weight_bytes: int, gpu_bytes: int | None) -> int:
-    """Drop the default prefill engine when a second copy of the weights does not fit on the GPU.
+def _decoder_engine_layout(chunk: int, weight_bytes: int, gpu_bytes: int | None, *, has_mtp: bool) -> str:
+    """Which decoder engines a single-GPU bundle ships.
 
-    The prefill engine carries its own copy of every weight. A 27B FP16 checkpoint needs about 108 GB
-    for both engines, more than a 128 GB unified-memory GPU leaves after the runtime; prompts then run
-    through the decode engine one token at a time. An explicit prefill_chunk_len is always kept.
+    ``"single"``: ``engine.plan`` decodes and, when ``chunk`` >= 2, ``prefill_engine.plan`` takes the prompt
+    ``chunk`` rows per call. Each engine carries its own copy of the weights: a 27B FP16 checkpoint needs about
+    108 GB for both, more than a 128 GB unified-memory GPU leaves after the runtime. Such a bundle is
+    ``"chunked"``: it ships only ``prefill_engine.plan``, which also decodes, one row per call, so a prompt
+    still reads the weights once per chunk instead of once per token. MTP verification reads the decode
+    engine's hidden states, so an MTP bundle keeps both engines.
     """
-    if chunk == 0 or request.prefill_chunk_len is not None or gpu_bytes is None:
-        return chunk
+    if chunk < 2 or has_mtp or gpu_bytes is None:
+        return "single"
     needed = 2 * weight_bytes
     if needed <= gpu_bytes * _TWO_ENGINE_MEMORY_FRACTION:
-        return chunk
-    print(f"Skipping the prefill engine: the decode and prefill engines need about {needed / 1024**3:.0f} GiB "
-          f"of weights and the GPU has {gpu_bytes / 1024**3:.0f} GiB; prompts run through the decode engine",
-          file=sys.stderr)
-    return 0
+        return "single"
+    print(f"Building the prefill engine only: the decode and prefill engines need about "
+          f"{needed / 1024**3:.0f} GiB of weights and the GPU has {gpu_bytes / 1024**3:.0f} GiB; "
+          "the prefill engine also decodes", file=sys.stderr)
+    return "chunked"
 
 
 def _gpu_memory_bytes() -> int | None:
@@ -330,9 +333,10 @@ def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path
         fp8_cache=bool(weights.get("_fp8_kv_cache", False)),
         prepared_mtp=has_mtp and _owned(quant_ctx, "mtp_layer.fc"),
     )
+    layout = "single"
     if request.tensor_parallel_size == 1 and quant_ctx is None:  # host bytes size an unquantized engine only
-        prefill_chunk_len = _fit_prefill_engine(
-            request, prefill_chunk_len, host_weight_bytes(weights), _gpu_memory_bytes())
+        layout = _decoder_engine_layout(
+            prefill_chunk_len, host_weight_bytes(weights), _gpu_memory_bytes(), has_mtp=has_mtp)
     if request.tensor_parallel_size == 2:
         _build_tensor_parallel(request, writer, model_dir, config, model, weights,
                                max_sequence_length, visual_config, visual_metadata, readers)
@@ -340,17 +344,18 @@ def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path
     # Every plan embeds the full weight set: write each one to the bundle as soon as it is built, so a
     # 27B build never holds two serialized plans (plus the host weights) in memory at once.
     _publish_native_header(request, writer)
-    writer.add_bytes("engine.plan", model.build_engine(
-        config,
-        weights,
-        max_sequence_length,
-        precision=precision,
-        quant_ctx=quant_ctx,
-        verbose=bool(request.verbose),
-        debug_layer_outputs=False,
-        **({"target_feature_layers": draft_config.feature_layers} if draft_config else {}),
-        **({"media_inputs": True} if visual else {}),
-    ))
+    if layout == "single":
+        writer.add_bytes("engine.plan", model.build_engine(
+            config,
+            weights,
+            max_sequence_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
+            verbose=bool(request.verbose),
+            debug_layer_outputs=False,
+            **({"target_feature_layers": draft_config.feature_layers} if draft_config else {}),
+            **({"media_inputs": True} if visual else {}),
+        ))
 
     if prefill_chunk_len >= 2:
         writer.add_bytes("prefill_engine.plan", model.build_engine_prefill(
@@ -402,7 +407,7 @@ def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path
             model,
             precision=precision,
             max_cache_length=max_sequence_length,
-            decoder_engine_layout="single",
+            decoder_engine_layout=layout,
             has_mtp=has_mtp,
             mtp_num_draft_tokens=(mtp_seq_len - 1) if has_mtp else 0,
             prefill_chunk_len=prefill_chunk_len,
