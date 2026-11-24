@@ -45,10 +45,17 @@ DEFAULT_THRESHOLDS = {
     "fp32_min_frame_snr_db": 60.0,
     # bfloat16: rounding moves the sampler onto another trajectory after a few
     # frames, in the official pipeline too (its bfloat16 and float32 runs part
-    # after 4-13 frames, and their lengths differ by up to 12 %). Measured: the
-    # first 4 frames agree with the official bfloat16 synthesis at 26-33 dB. The
-    # native output also may not stray from the float32 reference much further
-    # than the official bfloat16 synthesis does.
+    # after 4-13 frames). Measured: the first 4 frames agree with the official
+    # bfloat16 synthesis at 26-33 dB. The native output also may not stray from
+    # the float32 reference much further than the official bfloat16 synthesis
+    # does.
+    # Length: the official bfloat16 length moves with the GPU's rounding as well
+    # (dialogue: 52 and 43 frames on two GPU models, against 58 in float32; all
+    # say the whole script), so the native length is compared with the span of
+    # the official bfloat16 and float32 lengths. Measured on 7 healthy runs on
+    # two GPU models: at most 1.07 (dialogue 61 against [43, 58]: 1.05, where
+    # native against official bfloat16 alone gives 1.42); a synthesis cut to half
+    # its length: 1.43.
     "bf16_prefix_frames": 4,
     "bf16_min_prefix_snr_db": 20.0,
     "bf16_max_drift_excess_db": 6.0,
@@ -74,7 +81,7 @@ def _case_index() -> dict[str, tuple[Path, dict, dict]]:
 CASES = _case_index()
 
 
-def _selected_cases(config) -> tuple[list[str], bool]:
+def _filters(config) -> tuple[set[str], set[str]]:
     model_filters = set()
     for raw in config.getoption("--e2e-model") or []:
         model_filters.update(item.strip() for item in str(raw).split(",") if item.strip())
@@ -88,6 +95,11 @@ def _selected_cases(config) -> tuple[list[str], bool]:
     testcase_filters = set()
     for raw in config.getoption("--e2e-testcase") or []:
         testcase_filters.update(item.strip() for item in str(raw).split(",") if item.strip())
+    return model_filters, testcase_filters
+
+
+def _selected_cases(config) -> tuple[list[str], bool]:
+    model_filters, testcase_filters = _filters(config)
     if not model_filters and not testcase_filters:
         return sorted(CASES), False
     selected = []
@@ -100,7 +112,20 @@ def _selected_cases(config) -> tuple[list[str], bool]:
         )
         if model_match and (not testcase_filters or name in testcase_filters):
             selected.append(name)
+    named = {FAMILY, *CASES, *(manifest["name"] for _, manifest, _ in CASES.values())}
+    if not selected and model_filters & named:
+        # Pytest skips an empty parametrization, so an explicit selection of this
+        # family that names no case would test nothing and still pass.
+        raise pytest.UsageError(
+            f"the {FAMILY} E2E selection matches no testcase: "
+            f"--e2e-model {sorted(model_filters)}, --e2e-testcase {sorted(testcase_filters)}"
+        )
     return sorted(selected), True
+
+
+def _testcase_selection_matches(testcase_filters: set[str], collected: set[str]) -> bool:
+    """A testcase-only selection must name an E2E case collected in the session (any family)."""
+    return not testcase_filters or bool(testcase_filters & collected)
 
 
 def pytest_generate_tests(metafunc) -> None:
@@ -442,6 +467,16 @@ def _frame_snr_db(actual: np.ndarray, expected: np.ndarray, frames: int) -> list
 _SNR_RECORD_CAP_DB = 300.0
 
 
+def _length_span_ratio(native_frames: int, official_frames: tuple[int, int]) -> float:
+    """How far the native length lies outside the span of the official lengths.
+
+    ``official_frames`` are the lengths of the official bfloat16 and float32
+    syntheses; 1.0 or less means the native length lies inside their span.
+    """
+    low, high = min(official_frames), max(official_frames)
+    return max(native_frames / high, low / native_frames)
+
+
 def _recorded_db(value: float) -> float:
     return min(float(value), _SNR_RECORD_CAP_DB)
 
@@ -516,8 +551,10 @@ def _assert_contract(
     else:
         frames = int(thresholds["bf16_prefix_frames"])
         prefix = min(native.size, expected.size, references["fp32"].size, frames * 3200)
-        report["frame_count_ratio"] = max(native.size, expected.size) / min(
-            native.size, expected.size
+        report["fp32_reference_frames"] = references["fp32"].size // 3200
+        report["frame_count_ratio"] = _length_span_ratio(
+            report["native_frames"],
+            (report["reference_frames"], report["fp32_reference_frames"]),
         )
         report["prefix_snr_db"] = _snr_db(native[:prefix], expected[:prefix])
         report["native_vs_fp32_prefix_snr_db"] = _snr_db(
@@ -532,7 +569,7 @@ def _assert_contract(
         checks += [
             _check(
                 "frame_count_ratio",
-                "Frame-count ratio, native against Transformers bf16",
+                "Native length outside the span of the Transformers bf16 and fp32 lengths",
                 "independent_reference",
                 report["frame_count_ratio"],
                 "<=",
@@ -650,6 +687,63 @@ def test_noise_injection_follows_the_family_draw_order() -> None:
         assert float(torch.randn(1)[0]) == scale
         assert np.array_equal(torch.randn_like(torch.zeros(1, 5, 4))[0, :3].numpy(), voice)
         assert np.array_equal(torch.randn(2, 4)[0].numpy(), frame)
+
+
+def test_bf16_length_is_judged_against_the_official_length_span() -> None:
+    limit = DEFAULT_THRESHOLDS["bf16_max_frame_count_ratio"]
+
+    def against_official_bf16_only(native: int, official_bf16: int) -> float:
+        return max(native, official_bf16) / min(native, official_bf16)
+
+    # Dialogue: native 61 frames, official bfloat16 43 and float32 58, all three
+    # saying the whole script. The official bfloat16 run alone rejects it.
+    assert against_official_bf16_only(61, 43) > limit
+    assert _length_span_ratio(61, (43, 58)) <= limit
+    assert _length_span_ratio(45, (45, 47)) == 1.0
+    # A synthesis cut to half its length fails either way.
+    assert against_official_bf16_only(30, 43) > limit
+    assert _length_span_ratio(30, (43, 58)) > limit
+    assert _length_span_ratio(150, (43, 58)) > limit
+
+
+class _Options:
+    def __init__(self, model=None, testcase=None) -> None:
+        self.values = {"--e2e-model": model, "--e2e-models-file": None, "--e2e-testcase": testcase}
+
+    def getoption(self, name: str):
+        return self.values[name]
+
+
+def test_an_explicit_selection_that_matches_nothing_fails() -> None:
+    with pytest.raises(pytest.UsageError, match="matches no testcase"):
+        _selected_cases(_Options(model=[FAMILY], testcase=["vibevoice-1.5b-singel"]))
+    with pytest.raises(pytest.UsageError, match="matches no testcase"):
+        _selected_cases(
+            _Options(model=["vibevoice-1.5b-single"], testcase=["vibevoice-1.5b-dialogue"])
+        )
+    # A selection of another family still skips this file.
+    assert _selected_cases(_Options(model=["qwen"])) == ([], True)
+    assert _selected_cases(_Options(testcase=["qwen-case"])) == ([], True)
+    assert _selected_cases(_Options(model=[FAMILY], testcase=["vibevoice-1.5b-single"])) == (
+        ["vibevoice-1.5b-single"],
+        True,
+    )
+
+
+def test_a_testcase_selection_names_a_collected_case(request) -> None:
+    model_filters, testcase_filters = _filters(request.config)
+    if not model_filters:
+        collected = {
+            item.callspec.params["case_name"]
+            for item in request.session.items
+            if getattr(item, "callspec", None) is not None and "case_name" in item.callspec.params
+        }
+        assert _testcase_selection_matches(testcase_filters, collected), (
+            f"--e2e-testcase {sorted(testcase_filters)} matches no collected E2E case"
+        )
+    assert not _testcase_selection_matches({"vibevoice-1.5b-singel"}, {"vibevoice-1.5b-single"})
+    assert _testcase_selection_matches({"vibevoice-1.5b-single"}, {"vibevoice-1.5b-single"})
+    assert _testcase_selection_matches(set(), set())
 
 
 def test_word_edit_distance_is_case_and_punctuation_blind() -> None:

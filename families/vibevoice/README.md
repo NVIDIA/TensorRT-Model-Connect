@@ -78,9 +78,14 @@ synthesize from the same bundle. The voice-cloning case clones a voice the famil
 third-party recording is needed. The float32 long-prompt case (582 prompt tokens, two prefill chunks) stops at
 `max_new_tokens` before its script ends, so its transcript is compared with the reference's.
 
-## Responsible use
+## Intended use
 
-The model card limits VibeVoice to research use and lists out-of-scope uses (voice impersonation without
-consent, disinformation, live voice conversion). It also states that Microsoft embeds an audible disclaimer and
-an imperceptible watermark in synthesized audio; neither is part of the checkpoint or of the Transformers
-generation this family follows, and the family returns the model's audio unchanged.
+The [model card](https://huggingface.co/microsoft/VibeVoice-1.5B) releases VibeVoice-1.5B for research use and
+lists out-of-scope uses: voice impersonation without the speaker's consent, disinformation or impersonation, and
+real-time voice conversion. This family follows that scope; voice cloning (`voice_prompts`) is meant for voices
+whose owners agreed to it.
+
+The model card also states that Microsoft's own releases add an audible disclaimer and an imperceptible watermark
+to synthesized audio. Neither is part of the checkpoint or of the Transformers generation this family follows:
+the family adds no disclaimer and no watermark, and returns the model's audio unchanged. Applications that publish
+generated speech are responsible for disclosing it.
