@@ -1,2 +1,2 @@
-Pillow>=10,<14
+Pillow>=13,<14
 torch>=2.2

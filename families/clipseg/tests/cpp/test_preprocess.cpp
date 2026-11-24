@@ -6,11 +6,37 @@
 #include "families/clipseg/runtime/image_preprocess_seam.h"
 #include "families/clipseg/runtime/tokenizer.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
+#include <new>
 #include <stdexcept>
 #include <vector>
+
+namespace {
+std::size_t allocation_limit = std::numeric_limits<std::size_t>::max();
+struct AllocationBound {
+    explicit AllocationBound(std::size_t limit) { allocation_limit = limit; }
+    ~AllocationBound() { allocation_limit = std::numeric_limits<std::size_t>::max(); }
+};
+} // namespace
+
+void* operator new(std::size_t bytes) {
+    if (bytes > allocation_limit)
+        throw std::bad_alloc();
+    if (void* pointer = std::malloc(bytes ? bytes : 1))
+        return pointer;
+    throw std::bad_alloc();
+}
+void operator delete(void* pointer) noexcept {
+    std::free(pointer);
+}
+void operator delete(void* pointer, std::size_t) noexcept {
+    std::free(pointer);
+}
 
 namespace {
 
@@ -126,9 +152,61 @@ void test_unicode_tokenizer_normalization() {
           "Unicode normalization matches reference token IDs");
 }
 
+void test_resize_pass_order_matches_pillow13() {
+    struct Case {
+        int height, width, output;
+        std::vector<int> expected;
+    };
+    // Independent Pillow 13 RGB goldens for ((index * 29 + 7) % 256) bytes.
+    const std::vector<Case> cases{
+        {513, 257, 2, {128, 128, 127, 127, 128, 128, 127, 127, 128, 128, 127, 127}},
+        {17, 5, 3, {114, 122, 119, 131, 122, 139, 115, 121, 121, 138, 138, 144, 120, 117,
+                    127, 144, 133, 150, 134, 128, 114, 133, 132, 130, 129, 117, 115}},
+        {5, 17, 3, {107, 119, 123, 138, 140, 114, 111, 122, 131, 136, 148, 135, 119, 125,
+                    124, 140, 151, 132, 125, 141, 117, 127, 134, 126, 125, 127, 113}},
+    };
+    for (const auto& item : cases) {
+        auto config = base_config();
+        config.input_image_h = config.input_image_w = item.output;
+        config.image_mean = {0, 0, 0};
+        config.image_std = {1, 1, 1};
+        std::vector<float> pixels(static_cast<std::size_t>(item.height) * item.width * 3);
+        for (std::size_t index = 0; index < pixels.size(); ++index)
+            pixels[index] = static_cast<float>((index * 29 + 7) % 256) / 255.0F;
+        const auto result =
+            trtmc::preprocess_clipseg_image(pixels.data(), item.height, item.width, config);
+        check(result.size() == item.expected.size(), "Pillow 13 resize shape");
+        if (result.size() != item.expected.size())
+            continue;
+        for (std::size_t index = 0; index < result.size(); ++index)
+            check_close(result[index], static_cast<float>(item.expected[index]) / 255.0F, 1e-7F,
+                        "Pillow 13 resize pass order and rounding");
+    }
+}
+
+void test_tall_image_has_bounded_resize_allocations() {
+    auto config = base_config();
+    config.image_mean = {0, 0, 0};
+    config.image_std = {1, 1, 1};
+    std::vector<float> pixels(65536U * 3U, 0.25F);
+    try {
+        AllocationBound bound(16U * 1024U * 1024U);
+        const auto result = trtmc::preprocess_clipseg_image(pixels.data(), 65536, 1, config);
+        check(result.size() ==
+                  static_cast<std::size_t>(config.input_image_h) * config.input_image_w * 3,
+              "tall image output shape");
+        for (float value : result)
+            check_close(value, 64.0F / 255.0F, 1e-7F, "tall constant image value");
+    } catch (const std::bad_alloc&) {
+        check(false, "resize must not allocate a source-height by output-width intermediate");
+    }
+}
+
 } // namespace
 
 int main() {
+    test_resize_pass_order_matches_pillow13();
+    test_tall_image_has_bounded_resize_allocations();
     test_resize_preserves_the_full_rectangular_source();
     test_resize_matches_pillow_bilinear_pixels();
     test_normalisation_is_per_channel();

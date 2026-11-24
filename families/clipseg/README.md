@@ -16,3 +16,11 @@ Native Unicode tokenization requires ICU `uc` development libraries. Explicit
 selection with `-DTRTMC_BUILD_FAMILIES=clipseg` fails at configuration time when
 ICU is absent. Default builds may skip the optional family; explicitly building
 `trtmc_model_clipseg` then reports the missing prerequisite.
+
+Reference preprocessing requires Pillow 13.x. Native resizing follows its
+shape-dependent pass order, including vertical-first filtering for strongly
+anisotropic downsampling, with byte rounding between passes. The native tests
+include independent Pillow 13 pixel goldens and a tall-image allocation bound.
+
+Concurrent calls on one loaded pipeline serialize tokenization, both engines
+and the final mask copy. Separately loaded pipelines keep independent locks.

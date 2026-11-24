@@ -8,6 +8,7 @@
 #include "trtmc/runtime/trt_backend.h"
 
 #include <algorithm>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 
@@ -36,6 +37,7 @@ class Pipeline final : public ITextPromptedSegmentation {
     PromptedSegmentationResult segment_prompted_text(const float* image, int32_t height,
                                                      int32_t width,
                                                      const std::string& prompt) override {
+        std::lock_guard<std::mutex> lock(execution_mutex_);
         if (prompt.empty())
             throw std::invalid_argument("CLIPSeg requires a text prompt");
         auto ids = tokenizer_->encode(prompt);
@@ -65,6 +67,7 @@ class Pipeline final : public ITextPromptedSegmentation {
     }
 
   private:
+    std::mutex execution_mutex_;
     std::unique_ptr<ITrtModule> text_, mask_;
     std::unique_ptr<ITokenizer> tokenizer_;
     ClipsegPreprocessConfig prep_;
