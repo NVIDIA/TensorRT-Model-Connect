@@ -26,8 +26,13 @@ std::string_view trim(std::string_view text) {
     return text;
 }
 
+struct SpokenLine {
+    std::int32_t speaker;
+    std::string_view text;
+};
+
 // ``Speaker <digits> : <text>`` with case-insensitive "Speaker" and optional spaces.
-std::optional<Turn> speaker_line(std::string_view line) {
+std::optional<SpokenLine> speaker_line(std::string_view line) {
     constexpr std::string_view kWord = "speaker";
     if (line.size() < kWord.size())
         return std::nullopt;
@@ -54,45 +59,66 @@ std::optional<Turn> speaker_line(std::string_view line) {
         ++cursor;
     if (cursor >= line.size() || line[cursor] != ':')
         return std::nullopt;
-    return Turn{static_cast<std::int32_t>(speaker), std::string(trim(line.substr(cursor + 1)))};
+    return SpokenLine{static_cast<std::int32_t>(speaker), trim(line.substr(cursor + 1))};
+}
+
+[[noreturn]] void too_long(std::size_t max_text_bytes) {
+    throw std::length_error("vibevoice text holds more than " + std::to_string(max_text_bytes) +
+                            " bytes to speak");
 }
 
 } // namespace
 
-std::vector<Turn> parse_script(std::string_view text) {
-    std::vector<std::string_view> lines;
+std::vector<Turn> parse_script(std::string_view text, std::size_t max_text_bytes,
+                               std::size_t max_turns) {
+    const auto whole = trim(text);
+    if (whole.empty())
+        throw std::invalid_argument("vibevoice requires non-empty text");
+    // One pass over the lines: only views of the spoken text are kept, and the text a script
+    // keeps is counted as it is found, so a text that cannot fit is refused before any copy.
+    std::vector<SpokenLine> spoken;
+    bool plain = false;
+    std::size_t kept = 0;
     std::size_t start = 0;
     while (start <= text.size()) {
         const auto end = std::min(text.find('\n', start), text.size());
         const auto line = trim(text.substr(start, end - start));
-        if (!line.empty())
-            lines.push_back(line);
         start = end + 1;
+        if (line.empty())
+            continue;
+        if (auto parsed = speaker_line(line)) {
+            if (parsed->text.empty())
+                throw std::invalid_argument("vibevoice script has a speaker line without text");
+            kept += parsed->text.size();
+            if (kept > max_text_bytes)
+                too_long(max_text_bytes);
+            if (spoken.size() == max_turns)
+                throw std::length_error("vibevoice script has more than " +
+                                        std::to_string(max_turns) + " turns");
+            spoken.push_back(*parsed);
+        } else {
+            plain = true;
+        }
+        if (plain && !spoken.empty())
+            throw std::invalid_argument(
+                "vibevoice scripts need every non-empty line to read 'Speaker <id>: <text>'");
     }
-    if (lines.empty())
-        throw std::invalid_argument("vibevoice requires non-empty text");
+    if (spoken.empty()) {
+        if (whole.size() > max_text_bytes)
+            too_long(max_text_bytes);
+        return {Turn{0, std::string(whole)}};
+    }
+    const auto lowest = std::min_element(spoken.begin(), spoken.end(),
+                                         [](const SpokenLine& a, const SpokenLine& b) {
+                                             return a.speaker < b.speaker;
+                                         })
+                            ->speaker;
+    // Ids written from 1 are renumbered from 0.
+    const std::int32_t shift = lowest > 0 ? 1 : 0;
     std::vector<Turn> turns;
-    for (const auto line : lines) {
-        if (auto turn = speaker_line(line))
-            turns.push_back(std::move(*turn));
-    }
-    if (turns.empty())
-        return {Turn{0, std::string(trim(text))}};
-    if (turns.size() != lines.size())
-        throw std::invalid_argument(
-            "vibevoice scripts need every non-empty line to read 'Speaker <id>: <text>'");
-    for (const auto& turn : turns) {
-        if (turn.text.empty())
-            throw std::invalid_argument("vibevoice script has a speaker line without text");
-    }
-    const auto lowest =
-        std::min_element(turns.begin(), turns.end(), [](const Turn& a, const Turn& b) {
-            return a.speaker < b.speaker;
-        })->speaker;
-    if (lowest > 0) {
-        for (auto& turn : turns)
-            turn.speaker -= 1;
-    }
+    turns.reserve(spoken.size());
+    for (const auto& line : spoken)
+        turns.push_back(Turn{line.speaker - shift, std::string(line.text)});
     return turns;
 }
 

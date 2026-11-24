@@ -6,3 +6,4 @@ Licensed under Apache License 2.0.
 tests/reference.py restates its checkpoint key mapping and config rewrite and embeds its chat template
 verbatim. The script publishes that template as chat_template.jinja of
 https://huggingface.co/vibevoice/VibeVoice-1.5B-hf (revision d4cd82eb, MIT License).
+config.py and runtime/script.cpp reproduce the prompt that template renders: its fixed text and layout.

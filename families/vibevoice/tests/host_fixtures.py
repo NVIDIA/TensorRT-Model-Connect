@@ -6,8 +6,8 @@
 The DPM-Solver cases come from diffusers' DPMSolverMultistepScheduler with the
 reference's settings, in float32 and with bfloat16 samples; the noise case from
 the Python mirror of the family's noise stream; the prompt cases from the
-reference chat template. ``tests/data/host_fixtures.json`` holds the output and
-``test_host_fixtures.py`` checks that it is current.
+reference chat template and its tokenizer. ``tests/data/host_fixtures.json`` holds
+the output and ``test_host_fixtures.py`` checks that it is current.
 """
 
 from __future__ import annotations
@@ -22,6 +22,13 @@ SCRIPTS = {
     "plain": "Hello, nice to meet you. How are you?",
     "one_based": "Speaker 1: Hi there!\nSpeaker 2: Hello, how are you doing today?\nspeaker 1 :Great, thanks.",
     "zero_based": "Speaker 0: 你好，欢迎收听今天的节目。\n\nSpeaker 1: Thank you.",
+}
+# Texts whose ids depend on the tokenizer's normalizer and Split pattern: upper-case
+# contractions, an apostrophe before letters, decomposed accents (NFC).
+TOKENIZER_PROBES = {
+    "contractions": "WE'RE HERE. IT'S FINE. DON'T GO. I'M SURE YOU'LL SEE, HE'D KNOW.",
+    "apostrophes": "rock'n'roll, y'all, 'Tis IT'SELF.",
+    "nfc": "Cafe\u0301 and Ame\u0301lie, n\u0303.",
 }
 
 
@@ -73,11 +80,17 @@ def build_host_fixtures(tokenizer_dir=None) -> dict:
         "timesteps": {
             str(steps): [int(t) for t in _linspace(steps)] for steps in (1, 5, 10, 20, 50)
         },
-        "scripts": {},
     }
+    fixtures.update(script_fixtures(tokenizer_dir))
+    return fixtures
+
+
+def script_fixtures(tokenizer_dir=None) -> dict:
+    """The script and tokenizer cases; they need the tokenizer, not a GPU."""
     processor = (
         reference.reference_processor(tokenizer_dir, 3200) if tokenizer_dir is not None else None
     )
+    fixtures = {"scripts": {}}
     for name, text in SCRIPTS.items():
         turns = _turns(text)
         entry = {"text": text, "turns": turns}
@@ -91,6 +104,11 @@ def build_host_fixtures(tokenizer_dir=None) -> dict:
             )
             entry["ids"] = processor.tokenizer(entry["prompt"])["input_ids"]
         fixtures["scripts"][name] = entry
+    if processor is not None:
+        fixtures["tokenizer_probes"] = {
+            name: {"text": text, "ids": processor.tokenizer(text)["input_ids"]}
+            for name, text in TOKENIZER_PROBES.items()
+        }
     return fixtures
 
 

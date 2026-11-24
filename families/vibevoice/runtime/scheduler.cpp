@@ -44,9 +44,27 @@ std::vector<std::int64_t> linspace_timesteps(std::int32_t train_steps, std::int3
     return timesteps;
 }
 
+void check_schedule(const std::vector<float>& train_sigmas, std::int32_t steps) {
+    const auto timesteps =
+        linspace_timesteps(static_cast<std::int32_t>(train_sigmas.size()), steps);
+    // step() divides by the log-SNR difference of neighbouring steps (h, and r0 =
+    // h_previous / h), so the log-SNR must rise strictly along the descending timesteps.
+    float previous = 0.0F;
+    for (std::size_t index = 0; index < timesteps.size(); ++index) {
+        const float lambda =
+            alpha_sigma(train_sigmas.at(static_cast<std::size_t>(timesteps[index]))).lambda;
+        if (!std::isfinite(lambda) || (index > 0 && !(lambda > previous)))
+            throw std::invalid_argument("vibevoice diffusion_steps=" + std::to_string(steps) +
+                                        " repeats a noise level of the " +
+                                        std::to_string(train_sigmas.size()) + "-step schedule");
+        previous = lambda;
+    }
+}
+
 DpmSolver::DpmSolver(const std::vector<float>& train_sigmas, std::int32_t steps, bool bfloat16)
     : timesteps_(linspace_timesteps(static_cast<std::int32_t>(train_sigmas.size()), steps)),
       bfloat16_(bfloat16) {
+    check_schedule(train_sigmas, steps);
     sigmas_.reserve(timesteps_.size() + 1);
     for (const auto timestep : timesteps_)
         sigmas_.push_back(train_sigmas.at(static_cast<std::size_t>(timestep)));

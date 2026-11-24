@@ -6,6 +6,7 @@
 #pragma once
 
 #include "families/vibevoice/runtime/noise.h"
+#include "families/vibevoice/runtime/runtime_config.h"
 #include "families/vibevoice/runtime/scheduler.h"
 #include "families/vibevoice/runtime/script.h"
 #include "families/vibevoice/runtime/tokenizer.h"
@@ -16,40 +17,10 @@
 
 #include <cstdint>
 #include <memory>
-#include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 
 namespace trtmc::vibevoice {
-
-struct RuntimeConfig {
-    bool bfloat16{true};
-    std::int32_t hidden_size{0};
-    std::int32_t num_layers{0};
-    std::int32_t num_kv_heads{0};
-    std::int32_t head_dim{0};
-    std::int32_t capacity{0};
-    std::int32_t prefill_chunk{0};
-    std::vector<float> rope_inv_freq;
-    std::vector<std::int32_t> control_token_ids; // ascending: ties resolve to the lowest id
-    std::int32_t eos_token_id{0};
-    std::int32_t audio_bos_token_id{0};
-    std::int32_t audio_eos_token_id{0};
-    std::int32_t audio_token_id{0};
-    PromptFrame frame;
-    std::int32_t sample_rate{0};
-    std::int64_t hop_length{0};
-    std::int32_t latent_size{0};
-    float target_dbfs{0.0F};
-    float normalize_eps{0.0F};
-    std::int64_t max_voice_samples{0};
-    std::int64_t stream_state_size{0};
-    std::vector<float> train_sigmas;
-    double default_guidance_scale{1.0};
-    std::int64_t default_diffusion_steps{10};
-};
-
-RuntimeConfig parse_runtime_config(const nlohmann::json& json);
 
 struct Engines {
     std::unique_ptr<ITrtModule> lm_prefill;

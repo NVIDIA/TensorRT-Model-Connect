@@ -55,7 +55,7 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         throw std::runtime_error("vibevoice bundle declares an unsupported task: " +
                                  context.reader.info().task);
     const auto runtime = require_section(context.reader, "runtime.json");
-    auto config = parse_runtime_config(nlohmann::json::parse(runtime.begin(), runtime.end()));
+    auto config = parse_runtime_config(std::string(runtime.begin(), runtime.end()));
 
     Engines engines;
     const auto lm_plan = require_section(context.reader, "lm.plan");
@@ -74,9 +74,20 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     engines.voice = load(context.backend, context.reader, "voice_encoder.plan", stream);
 
     const auto tokenizer_json = require_section(context.reader, "tokenizer.json");
-    auto tokenizer = CreateBpeTokenizer(tokenizer_json.data(), tokenizer_json.size());
+    auto tokenizer =
+        CreateBpeTokenizer(tokenizer_json.data(), tokenizer_json.size(), false, config.vocab_size);
     if (!tokenizer)
         throw std::runtime_error("vibevoice bundle tokenizer failed to load");
+    // The prompt frame writes these tokens as text; the loop recognizes them by id.
+    for (const auto& [token, id] :
+         {std::pair{config.frame.audio_bos_token, config.audio_bos_token_id},
+          std::pair{config.frame.audio_eos_token, config.audio_eos_token_id},
+          std::pair{config.frame.audio_token, config.audio_token_id}}) {
+        if (tokenizer->id_for_token(token) != id)
+            throw std::runtime_error("vibevoice runtime.json token " + token +
+                                     " does not have the id " + std::to_string(id) +
+                                     " in the bundle's tokenizer");
+    }
     return new VibeVoicePipeline(std::move(engines), std::move(config), std::move(tokenizer),
                                  added_tokens(tokenizer_json));
 }

@@ -17,11 +17,13 @@ audio, the transcript and every check as a ``reference_comparison``.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -126,6 +128,18 @@ def _selected_cases(config) -> tuple[list[str], bool]:
 def _testcase_selection_matches(testcase_filters: set[str], collected: set[str]) -> bool:
     """A testcase-only selection must name an E2E case collected in the session (any family)."""
     return not testcase_filters or bool(testcase_filters & collected)
+
+
+def _collected_e2e_cases(items) -> set[str]:
+    """The case_name of every collected ``test_*e2e`` item, of any family; an ordinary
+    test with a case_name parameter runs no inference and owns no testcase."""
+    return {
+        item.callspec.params["case_name"]
+        for item in items
+        if fnmatch.fnmatchcase(getattr(item, "originalname", ""), "test_*e2e")
+        and getattr(item, "callspec", None) is not None
+        and "case_name" in item.callspec.params
+    }
 
 
 def pytest_generate_tests(metafunc) -> None:
@@ -733,17 +747,26 @@ def test_an_explicit_selection_that_matches_nothing_fails() -> None:
 def test_a_testcase_selection_names_a_collected_case(request) -> None:
     model_filters, testcase_filters = _filters(request.config)
     if not model_filters:
-        collected = {
-            item.callspec.params["case_name"]
-            for item in request.session.items
-            if getattr(item, "callspec", None) is not None and "case_name" in item.callspec.params
-        }
+        collected = _collected_e2e_cases(request.session.items)
         assert _testcase_selection_matches(testcase_filters, collected), (
             f"--e2e-testcase {sorted(testcase_filters)} matches no collected E2E case"
         )
     assert not _testcase_selection_matches({"vibevoice-1.5b-singel"}, {"vibevoice-1.5b-single"})
     assert _testcase_selection_matches({"vibevoice-1.5b-single"}, {"vibevoice-1.5b-single"})
     assert _testcase_selection_matches(set(), set())
+
+
+def test_only_e2e_items_own_a_testcase() -> None:
+    def item(name: str, case: str) -> SimpleNamespace:
+        return SimpleNamespace(originalname=name, callspec=SimpleNamespace(params={"case_name": case}))
+
+    items = [
+        item("test_official_checkpoint_e2e", "vibevoice-1.5b-single"),
+        item("test_parse_case", "vibevoice-1.5b-dialogue"),
+        item("test_other_family_e2e", "qwen-case"),
+        SimpleNamespace(originalname="test_official_checkpoint_e2e"),
+    ]
+    assert _collected_e2e_cases(items) == {"vibevoice-1.5b-single", "qwen-case"}
 
 
 def test_word_edit_distance_is_case_and_punctuation_blind() -> None:

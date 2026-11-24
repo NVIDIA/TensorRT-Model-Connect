@@ -52,7 +52,7 @@ def tiny(tmp_path_factory):
     root = reference.write_tiny_checkpoint(tmp_path_factory.mktemp("vibevoice_tiny"), seed=57)
     cfg = config_module.load(root)
     model = reference.load_reference(root, torch.float32, "cuda")
-    return root, cfg, Checkpoint(root), model
+    return root, cfg, Checkpoint(root, cfg), model
 
 
 class Engine:
@@ -99,10 +99,25 @@ def _rope(cfg, positions):
 def _close(actual, expected, tolerance):
     actual = actual.float().cpu()
     expected = expected.float().cpu()
+    # Broadcasting would hide a shape regression, and a NaN fails no comparison.
+    assert actual.shape == expected.shape, (
+        f"shape {tuple(actual.shape)} differs from {tuple(expected.shape)}"
+    )
+    assert bool(torch.isfinite(actual).all()) and bool(torch.isfinite(expected).all()), (
+        "nonfinite values"
+    )
     scale = expected.abs().max().clamp_min(1e-6)
     error = float(((actual - expected).abs().max() / scale))
     assert error <= tolerance, f"relative max error {error:.3e} > {tolerance:.1e}"
     return error
+
+
+def test_close_refuses_other_shapes_and_nonfinite_values():
+    assert _close(torch.ones(2, 3), torch.ones(2, 3), 0.0) == 0.0
+    with pytest.raises(AssertionError, match="shape"):
+        _close(torch.ones(1, 3), torch.ones(2, 3), 1.0)
+    with pytest.raises(AssertionError, match="nonfinite"):
+        _close(torch.tensor([1.0, float("nan")]), torch.ones(2), 1.0)
 
 
 def test_rope_frequencies_match_the_reference(tiny):

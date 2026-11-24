@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -20,7 +21,11 @@ struct Turn {
 // A transcript is either plain text (one turn of speaker 0) or a script whose
 // every non-empty line reads ``Speaker <id>: <text>``. Speaker ids written
 // from 1 are renumbered from 0, as the model's original script parser does.
-std::vector<Turn> parse_script(std::string_view text);
+// Throws std::length_error, before copying any text, when the turns would hold
+// more than ``max_text_bytes`` bytes or be more than ``max_turns``.
+std::vector<Turn> parse_script(std::string_view text,
+                               std::size_t max_text_bytes = std::numeric_limits<std::size_t>::max(),
+                               std::size_t max_turns = std::numeric_limits<std::size_t>::max());
 
 struct PromptFrame {
     std::string system_prompt;

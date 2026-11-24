@@ -42,4 +42,10 @@ class DpmSolver {
 // The timesteps of diffusers' "linspace" spacing over ``train_steps``.
 std::vector<std::int64_t> linspace_timesteps(std::int32_t train_steps, std::int32_t steps);
 
+// Throws std::invalid_argument unless ``steps`` lies in [1, train_sigmas.size()] and
+// gives a schedule whose log-SNR rises at every step: a rounded "linspace" that repeats
+// a timestep (1000 steps of a 1000-step schedule repeat 500) would divide by zero in the
+// second-order update.
+void check_schedule(const std::vector<float>& train_sigmas, std::int32_t steps);
+
 } // namespace trtmc::vibevoice

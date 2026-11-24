@@ -5,6 +5,7 @@
 
 #include "families/vibevoice/runtime/pipeline.h"
 
+#include "families/vibevoice/runtime/engine_io.h"
 #include "families/vibevoice/runtime/voice.h"
 #include "trtmc/internal/config.h"
 
@@ -40,63 +41,31 @@ const void* require_output(ITrtModule& module, const char* name) {
     return pointer;
 }
 
-template <typename T>
-T positive(const nlohmann::json& json, const char* key) {
-    const auto value = json.at(key).get<T>();
-    if (value <= 0)
-        throw std::runtime_error(std::string("vibevoice runtime.json ") + key +
-                                 " must be positive");
-    return value;
+// The named tensors of a loaded module, with the bounds of its own profile.
+EngineTensors engine_tensors(const ITrtModule& module, const std::vector<std::string>& names) {
+    EngineTensors tensors;
+    for (const auto& name : names) {
+        const bool input = module.has_input(name);
+        if (!input && !module.has_output(name))
+            continue;
+        EngineTensor tensor;
+        tensor.input = input;
+        tensor.dtype = module.tensor_dtype(name);
+        tensor.dynamic = input && module.input_is_dynamic(name);
+        if (tensor.dynamic) {
+            tensor.profile_min =
+                module.input_profile_shape(name, module.profile_idx(), ProfileShapeSelector::kMin);
+            tensor.profile_max =
+                module.input_profile_shape(name, module.profile_idx(), ProfileShapeSelector::kMax);
+        } else {
+            tensor.shape = module.tensor_shape(name);
+        }
+        tensors.emplace(name, std::move(tensor));
+    }
+    return tensors;
 }
 
 } // namespace
-
-RuntimeConfig parse_runtime_config(const nlohmann::json& json) {
-    RuntimeConfig config;
-    const auto precision = json.at("precision").get<std::string>();
-    if (precision != "bf16" && precision != "fp32")
-        throw std::runtime_error("vibevoice runtime.json precision must be bf16 or fp32");
-    config.bfloat16 = precision == "bf16";
-    config.hidden_size = positive<std::int32_t>(json, "hidden_size");
-    config.num_layers = positive<std::int32_t>(json, "num_layers");
-    config.num_kv_heads = positive<std::int32_t>(json, "num_kv_heads");
-    config.head_dim = positive<std::int32_t>(json, "head_dim");
-    config.capacity = positive<std::int32_t>(json, "capacity");
-    config.prefill_chunk = positive<std::int32_t>(json, "prefill_chunk");
-    config.rope_inv_freq = json.at("rope_inv_freq").get<std::vector<float>>();
-    config.control_token_ids = json.at("control_token_ids").get<std::vector<std::int32_t>>();
-    config.eos_token_id = json.at("eos_token_id").get<std::int32_t>();
-    config.audio_bos_token_id = json.at("audio_bos_token_id").get<std::int32_t>();
-    config.audio_eos_token_id = json.at("audio_eos_token_id").get<std::int32_t>();
-    config.audio_token_id = json.at("audio_token_id").get<std::int32_t>();
-    config.frame.system_prompt = json.at("system_prompt").get<std::string>();
-    config.frame.voice_input_header = json.at("voice_input_header").get<std::string>();
-    config.frame.text_input_header = json.at("text_input_header").get<std::string>();
-    config.frame.speech_output_header = json.at("speech_output_header").get<std::string>();
-    config.frame.audio_bos_token = json.at("audio_bos_token").get<std::string>();
-    config.frame.audio_eos_token = json.at("audio_eos_token").get<std::string>();
-    config.frame.audio_token = json.at("audio_token").get<std::string>();
-    config.sample_rate = positive<std::int32_t>(json, "sample_rate");
-    config.hop_length = positive<std::int64_t>(json, "hop_length");
-    config.latent_size = positive<std::int32_t>(json, "latent_size");
-    config.target_dbfs = json.at("target_dbfs").get<float>();
-    config.normalize_eps = json.at("normalize_eps").get<float>();
-    config.max_voice_samples = positive<std::int64_t>(json, "max_voice_samples");
-    config.stream_state_size = positive<std::int64_t>(json, "stream_state_size");
-    config.train_sigmas = json.at("train_sigmas").get<std::vector<float>>();
-    config.default_guidance_scale = json.at("default_guidance_scale").get<double>();
-    config.default_diffusion_steps = positive<std::int64_t>(json, "default_diffusion_steps");
-    std::vector<std::int32_t> expected = {config.eos_token_id, config.audio_bos_token_id,
-                                          config.audio_eos_token_id, config.audio_token_id};
-    std::sort(expected.begin(), expected.end());
-    if (config.control_token_ids != expected)
-        throw std::runtime_error(
-            "vibevoice runtime.json control tokens do not match its token ids");
-    if (static_cast<std::int32_t>(config.rope_inv_freq.size()) * 2 != config.head_dim ||
-        config.train_sigmas.empty() || config.prefill_chunk > config.capacity)
-        throw std::runtime_error("vibevoice runtime.json geometry is inconsistent");
-    return config;
-}
 
 Sequence::Sequence(const RuntimeConfig& config, cudaStream_t stream)
     : storage_({config.num_layers, 2, config.capacity,
@@ -133,6 +102,14 @@ VibeVoicePipeline::VibeVoicePipeline(Engines engines, RuntimeConfig config,
     if (!engines_.lm_prefill || !engines_.lm_decode || !engines_.embed || !engines_.head ||
         !engines_.feedback || !engines_.voice || !tokenizer_)
         throw std::runtime_error("vibevoice pipeline is missing an engine or its tokenizer");
+    // Every buffer below and every binding at run time is sized from runtime.json.
+    check_lm_io(engine_tensors(*engines_.lm_prefill, lm_tensor_names(config_)), config_,
+                config_.prefill_chunk);
+    check_lm_io(engine_tensors(*engines_.lm_decode, lm_tensor_names(config_)), config_, 1);
+    check_embed_io(engine_tensors(*engines_.embed, embed_tensor_names()), config_);
+    check_head_io(engine_tensors(*engines_.head, head_tensor_names()), config_);
+    check_feedback_io(engine_tensors(*engines_.feedback, feedback_tensor_names()), config_);
+    check_voice_io(engine_tensors(*engines_.voice, voice_tensor_names()), config_);
     const auto type = config_.bfloat16 ? DType::kBFloat16 : DType::kFloat32;
     const std::int64_t hidden = config_.hidden_size;
     prompt_ = DeviceTensor({config_.capacity, hidden}, type, stream_);
@@ -186,14 +163,22 @@ VibeVoicePipeline::Options VibeVoicePipeline::resolve_options(internal::ConfigVi
         options.max_new_tokens = *limit;
     }
     options.guidance_scale = *internal::config_get<double>(config, fields, "cfg_scale");
-    if (!std::isfinite(options.guidance_scale) || options.guidance_scale < 0.0)
-        throw internal::ConfigError("vibevoice cfg_scale must be a finite non-negative number");
+    // The guidance is applied in float32 (and bfloat16).
+    if (!std::isfinite(options.guidance_scale) || options.guidance_scale < 0.0 ||
+        options.guidance_scale > std::numeric_limits<float>::max())
+        throw internal::ConfigError(
+            "vibevoice cfg_scale must be a finite non-negative float32 number");
     options.diffusion_steps =
         *internal::config_get<std::int64_t>(config, fields, "diffusion_steps");
     if (options.diffusion_steps <= 0 ||
         options.diffusion_steps > static_cast<std::int64_t>(config_.train_sigmas.size()))
         throw internal::ConfigError("vibevoice diffusion_steps must lie in [1, " +
                                     std::to_string(config_.train_sigmas.size()) + "]");
+    try {
+        check_schedule(config_.train_sigmas, static_cast<std::int32_t>(options.diffusion_steps));
+    } catch (const std::invalid_argument& error) {
+        throw internal::ConfigError(error.what());
+    }
     const auto prompts =
         internal::config_get<Span<const std::string_view>>(config, fields, "voice_prompts");
     for (const auto path : *prompts)
@@ -332,6 +317,8 @@ std::int32_t VibeVoicePipeline::choose(const Decision& conditional, const Decisi
                 uncond = round_bf16(uncond);
             score = scale * (cond - uncond) + uncond;
         }
+        if (!std::isfinite(score))
+            throw std::runtime_error("vibevoice control-token score is not finite");
         if (score > best_score) {
             best_score = score;
             best = index;
@@ -375,6 +362,9 @@ std::vector<float> VibeVoicePipeline::sample_latent(NoiseStream& noise, DpmSolve
                 guided[index] = round_bf16(uncond + round_bf16(scale * round_bf16(cond - uncond)));
             else
                 guided[index] = uncond + scale * (cond - uncond);
+            if (!std::isfinite(guided[index]))
+                throw std::runtime_error(
+                    "vibevoice diffusion guidance is not finite; lower cfg_scale");
         }
         solver.step(step, guided, sample);
     }
@@ -401,6 +391,8 @@ void VibeVoicePipeline::feed_back(const std::vector<float>& latent, std::vector<
                           cudaMemcpyDeviceToDevice, stream_),
           "copying the next input embedding");
     check(cudaStreamSynchronize(stream_), "running the feedback step");
+    if (!all_finite(audio.data() + offset, static_cast<std::size_t>(config_.hop_length)))
+        throw std::runtime_error("vibevoice synthesized a NaN or infinite audio sample");
     state = 1 - state;
 }
 
@@ -411,7 +403,18 @@ internal::AudioResult VibeVoicePipeline::run(const internal::TextToSpeechRequest
         throw std::invalid_argument(
             "vibevoice has no language control; the language follows the text");
     const auto options = resolve_options(config);
-    const auto turns = parse_script(request.text);
+    // The prompt holds every turn's text and leaves a position for generation, and every
+    // rendered turn takes at least one position: the parser refuses text or turns that
+    // cannot fit from their size and count, before copying, rendering or tokenizing them.
+    const auto budget = static_cast<std::size_t>(config_.capacity) - 1U;
+    std::vector<Turn> turns;
+    try {
+        turns = parse_script(request.text, tokenizer_->max_text_bytes(budget), budget);
+    } catch (const std::length_error& error) {
+        throw std::invalid_argument(std::string(error.what()) +
+                                    "; it cannot fit max_sequence_length " +
+                                    std::to_string(config_.capacity));
+    }
     std::set<std::int32_t> speakers;
     for (const auto& turn : turns) {
         speakers.insert(turn.speaker);
@@ -424,12 +427,16 @@ internal::AudioResult VibeVoicePipeline::run(const internal::TextToSpeechRequest
 
     std::vector<std::vector<float>> voices;
     std::vector<std::int64_t> voice_frames;
+    // Each voice frame takes one prompt position: a prompt's voices together are read only
+    // as far as the positions left allow.
+    std::int64_t frames_left = static_cast<std::int64_t>(budget);
     for (std::size_t speaker = 0; speaker < options.voice_prompts.size(); ++speaker) {
         if (speakers.count(static_cast<std::int32_t>(speaker)) == 0)
             throw std::invalid_argument("vibevoice voice prompt " + std::to_string(speaker) +
                                         " has no matching 'Speaker " + std::to_string(speaker) +
                                         "' in the text");
-        auto wav = read_wav(options.voice_prompts[speaker]);
+        auto wav = read_wav(options.voice_prompts[speaker],
+                            std::min(config_.max_voice_samples, frames_left * config_.hop_length));
         if (wav.channels != 1)
             throw std::invalid_argument("vibevoice voice prompts must be mono");
         if (wav.sample_rate != static_cast<std::uint32_t>(config_.sample_rate))
@@ -442,16 +449,23 @@ internal::AudioResult VibeVoicePipeline::run(const internal::TextToSpeechRequest
                 "vibevoice voice prompts are limited to " +
                 std::to_string(config_.max_voice_samples / config_.sample_rate) + " seconds");
         voice_frames.push_back(static_cast<std::int64_t>(prepared.size()) / config_.hop_length);
+        frames_left -= voice_frames.back();
         voices.push_back(std::move(prepared));
     }
 
-    const auto ids = tokenizer_->encode(render_prompt(config_.frame, turns, voice_frames));
+    // The prompt leaves at least one position for generation; tokenization stops as
+    // soon as the prompt cannot fit.
+    std::vector<std::int32_t> ids;
+    try {
+        ids = tokenizer_->encode_within(render_prompt(config_.frame, turns, voice_frames),
+                                        static_cast<std::size_t>(config_.capacity) - 1U);
+    } catch (const std::length_error&) {
+        throw std::invalid_argument(
+            "vibevoice prompt needs more than " + std::to_string(config_.capacity - 1) +
+            " tokens and does not fit max_sequence_length " + std::to_string(config_.capacity));
+    }
     if (ids.empty() || ids.back() != config_.audio_bos_token_id)
         throw std::runtime_error("vibevoice prompt does not end with the speech-start token");
-    if (static_cast<std::int64_t>(ids.size()) >= config_.capacity)
-        throw std::invalid_argument("vibevoice prompt of " + std::to_string(ids.size()) +
-                                    " tokens does not fit max_sequence_length " +
-                                    std::to_string(config_.capacity));
 
     NoiseStream noise(options.seed);
     embed_tokens(ids, prompt_.data());
