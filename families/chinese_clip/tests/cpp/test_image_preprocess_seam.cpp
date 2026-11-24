@@ -4,11 +4,38 @@
  */
 
 #include "families/chinese_clip/runtime/image_preprocess_seam.h"
+#include "families/chinese_clip/runtime/tokenizer.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <new>
 #include <stdexcept>
 #include <vector>
+
+namespace {
+std::size_t allocation_limit = std::numeric_limits<std::size_t>::max();
+struct AllocationBound {
+    explicit AllocationBound(std::size_t limit) { allocation_limit = limit; }
+    ~AllocationBound() { allocation_limit = std::numeric_limits<std::size_t>::max(); }
+};
+} // namespace
+
+void* operator new(std::size_t bytes) {
+    if (bytes > allocation_limit)
+        throw std::bad_alloc();
+    if (void* pointer = std::malloc(bytes ? bytes : 1))
+        return pointer;
+    throw std::bad_alloc();
+}
+void operator delete(void* pointer) noexcept {
+    std::free(pointer);
+}
+void operator delete(void* pointer, std::size_t) noexcept {
+    std::free(pointer);
+}
 
 namespace {
 
@@ -111,9 +138,84 @@ void test_invalid_input_is_refused() {
     check(threw, "a zero standard deviation is refused");
 }
 
+void test_resize_pass_order_matches_pillow13() {
+    struct Case {
+        int height, width, output;
+        std::vector<int> expected;
+    };
+    // Independent Pillow 13 RGB goldens for ((index * 29 + 7) % 256) bytes.
+    const std::vector<Case> cases{
+        {513, 257, 2, {128, 128, 127, 127, 128, 128, 127, 127, 128, 128, 127, 127}},
+        {17, 5, 3, {114, 123, 119, 132, 121, 138, 115, 120, 121, 139, 140, 145, 118, 115,
+                    125, 145, 133, 152, 132, 128, 112, 132, 133, 131, 130, 117, 114}},
+        {5, 17, 3, {106, 119, 124, 139, 143, 112, 110, 121, 131, 135, 149, 134, 118, 124,
+                    124, 139, 151, 133, 122, 140, 117, 127, 135, 125, 127, 130, 112}},
+    };
+    for (const auto& item : cases) {
+        auto config = base_config();
+        config.input_image_h = config.input_image_w = item.output;
+        config.image_mean = {0, 0, 0};
+        config.image_std = {1, 1, 1};
+        std::vector<float> pixels(static_cast<std::size_t>(item.height) * item.width * 3);
+        for (std::size_t index = 0; index < pixels.size(); ++index)
+            pixels[index] = static_cast<float>((index * 29 + 7) % 256) / 255.0F;
+        const auto result =
+            trtmc::preprocess_chinese_clip_image(pixels.data(), item.height, item.width, config);
+        check(result.size() == item.expected.size(), "Pillow 13 resize shape");
+        if (result.size() != item.expected.size())
+            continue;
+        for (std::size_t index = 0; index < result.size(); ++index)
+            check_close(result[index], static_cast<float>(item.expected[index]) / 255.0F, 1e-7F,
+                        "Pillow 13 resize pass order and rounding");
+    }
+}
+
+void test_postprocessor_special_ids_are_validated() {
+    const std::string fixture =
+        R"({"model":{"type":"WordPiece","unk_token":"[UNK]","vocab":{"[UNK]":0,"[CLS]":1,"[SEP]":2,"[PAD]":3,"hello":4}},"post_processor":{"type":"RobertaProcessing","cls":["[CLS]",1],"sep":["[SEP]",2]}})";
+    for (const auto& type : {std::string("RobertaProcessing"), std::string("BertProcessing")}) {
+        auto valid = fixture;
+        const auto offset = valid.find("RobertaProcessing");
+        valid.replace(offset, std::string("RobertaProcessing").size(), type);
+        const auto tokenizer = trtmc::CreateWordPieceTokenizer(valid.data(), valid.size());
+        check(tokenizer->encode("hello") == std::vector<int32_t>{1, 4, 2},
+              "recognized postprocessor preserves vocabulary CLS/SEP framing");
+        const std::string old = R"("[CLS]",1)";
+        valid.replace(valid.find(old), old.size(), R"("[CLS]",0)");
+        bool rejected = false;
+        try {
+            (void)trtmc::CreateWordPieceTokenizer(valid.data(), valid.size());
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        check(rejected, "recognized postprocessor rejects a mismatched CLS ID");
+    }
+}
+
+void test_tall_image_has_bounded_resize_allocations() {
+    auto config = base_config();
+    config.image_mean = {0, 0, 0};
+    config.image_std = {1, 1, 1};
+    std::vector<float> pixels(65536U * 3U, 0.25F);
+    try {
+        AllocationBound bound(16U * 1024U * 1024U);
+        const auto result = trtmc::preprocess_chinese_clip_image(pixels.data(), 65536, 1, config);
+        check(result.size() ==
+                  static_cast<std::size_t>(config.input_image_h) * config.input_image_w * 3,
+              "tall image output shape");
+        for (float value : result)
+            check_close(value, 64.0F / 255.0F, 1e-7F, "tall constant image value");
+    } catch (const std::bad_alloc&) {
+        check(false, "resize must not allocate a source-height by output-width intermediate");
+    }
+}
+
 } // namespace
 
 int main() {
+    test_postprocessor_special_ids_are_validated();
+    test_resize_pass_order_matches_pillow13();
+    test_tall_image_has_bounded_resize_allocations();
     test_resize_preserves_the_full_rectangular_source();
     test_resize_matches_pillow_bicubic_pixels();
     test_normalisation_is_per_channel();

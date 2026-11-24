@@ -18,3 +18,8 @@ Applications accepting untrusted inputs should enforce raw text byte and source
 image pixel admission limits before calling either task. Tokenization and
 resizing still take work proportional to the admitted input. The encoded-token
 profile limit is checked after tokenization and is not a raw input budget.
+
+Reference preprocessing requires Pillow 13.x. Native resizing follows its
+shape-dependent pass order, including vertical-first filtering for strongly
+anisotropic downsampling, with byte rounding between passes. The native tests
+include independent Pillow 13 pixel goldens and a tall-image allocation bound.

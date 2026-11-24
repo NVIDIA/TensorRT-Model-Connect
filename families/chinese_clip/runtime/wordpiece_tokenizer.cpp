@@ -701,7 +701,7 @@ class WordPieceTokenizer final : public ITokenizer {
         std::string pp_type = pp.value("type", "");
         // All known styles use the same cls/sep array format
         if (pp_type == "TemplateProcessing" || pp_type == "BertProcessing" ||
-            pp_type == "Rochinese_clipaProcessing") {
+            pp_type == "RobertaProcessing") {
             mClsId = extract_pp_id(pp, "cls");
             mSepId = extract_pp_id(pp, "sep");
         }
