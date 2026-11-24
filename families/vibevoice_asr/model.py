@@ -57,7 +57,11 @@ NORMALIZE_EPS = 1e-6
 
 def resolve_capacity(max_sequence_length: int | None, cfg: VibeVoiceAsrConfig) -> int:
     """KV-cache rows: prompt (system, speech, duration) plus generated tokens."""
-    capacity = int(max_sequence_length or DEFAULT_MAX_SEQUENCE_LENGTH)
+    if max_sequence_length is not None and (
+        isinstance(max_sequence_length, bool) or not isinstance(max_sequence_length, int)
+    ):
+        raise ValueError(f"{FAMILY} max_sequence_length must be an integer, got {max_sequence_length!r}")
+    capacity = DEFAULT_MAX_SEQUENCE_LENGTH if max_sequence_length is None else max_sequence_length
     limit = cfg.decoder.max_position_embeddings
     if capacity > limit:
         raise ValueError(f"{FAMILY} max_sequence_length {capacity} exceeds {limit} positions")
@@ -221,6 +225,43 @@ QWEN_SPLIT_PATTERN = (
 )
 
 
+def check_merges(vocab: dict, merges, unsupported) -> None:
+    """The merge table as the reference reads it, and one the runtime's batch merge reproduces.
+
+    One entry format for the whole table (pairs, or "left right" strings with exactly one
+    space, after any "#version" header lines); each operand and the result in the
+    vocabulary; and no operand that only a merge of a later rank makes, so merging every
+    occurrence of the best pair at once gives the reference's one-at-a-time result.
+    """
+    if not isinstance(merges, list):
+        raise unsupported("merge", merges)
+    strings = bool(merges) and isinstance(merges[0], str)
+    pairs = []
+    for entry in merges:
+        if strings:
+            if not isinstance(entry, str):
+                raise unsupported("merge", entry)
+            if entry.startswith("#version"):
+                continue
+            parts = entry.split(" ")
+            if len(parts) != 2:
+                raise unsupported("merge", entry)
+        elif isinstance(entry, list) and len(entry) == 2 and all(isinstance(x, str) for x in entry):
+            parts = entry
+        else:
+            raise unsupported("merge", entry)
+        if parts[0] not in vocab or parts[1] not in vocab or parts[0] + parts[1] not in vocab:
+            raise unsupported("merge", entry)
+        pairs.append(tuple(parts))
+    rank = {pair: index for index, pair in enumerate(pairs)}
+    produced: dict[str, int] = {}
+    for (left, right), index in rank.items():
+        produced[left + right] = max(produced.get(left + right, -1), index)
+    for (left, right), index in rank.items():
+        if produced.get(left, -1) >= index or produced.get(right, -1) >= index:
+            raise unsupported("merge", [left, right])
+
+
 def check_tokenizer_layout(tokenizer_json: bytes) -> None:
     """The bundle's tokenizer must have Qwen2.5's layout, the one the runtime reproduces.
 
@@ -294,6 +335,7 @@ def check_tokenizer_layout(tokenizer_json: bytes) -> None:
         or model_section.get("end_of_word_suffix") not in (None, "")
     ):
         raise unsupported("model", model_section)
+    check_merges(bpe["vocab"], bpe.get("merges"), unsupported)
     added = raw.get("added_tokens", [])
     if not isinstance(added, list):
         raise unsupported("added_tokens", added)
@@ -307,6 +349,8 @@ def check_tokenizer_layout(tokenizer_json: bytes) -> None:
                 f"{FAMILY} tokenizer.json added token needs a string content and an integer id: "
                 f"{json.dumps(token)}"
             )
+        if not token["content"]:
+            raise ValueError(f"{FAMILY} tokenizer.json added token needs a nonempty content: {json.dumps(token)}")
         if any(flag(token, option) for option in ("lstrip", "rstrip", "single_word", "normalized")):
             raise unsupported("added token option", token)
 
@@ -356,7 +400,11 @@ def build(request, writer) -> None:
         raise NotImplementedError("vibevoice_asr does not support dynamic_kv_cache")
     if request.max_batch_size != 1:
         raise NotImplementedError(f"{FAMILY} transcribes one request at a time")
-    if int(request.tensor_parallel_size) != 1 or int(request.context_parallel_size) != 1:
+    for name in ("tensor_parallel_size", "context_parallel_size"):
+        value = getattr(request, name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{FAMILY} {name} must be an integer, got {value!r}")
+    if request.tensor_parallel_size != 1 or request.context_parallel_size != 1:
         raise NotImplementedError(f"{FAMILY} runs on one GPU")
     if request.image_height is not None or request.image_width is not None:
         raise NotImplementedError(f"{FAMILY} takes audio, not an image size")

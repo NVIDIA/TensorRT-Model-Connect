@@ -36,7 +36,8 @@ it once with
   output tokens at the default, and the LibriSpeech test clip needs about 4.3
   output tokens per second of speech, JSON included.
 - Output: `text` is the segment contents joined by spaces; `segments` carry the
-  start and end seconds of each segment. Speaker ids have no field in the shared
+  start and end seconds of each segment that has both (a segment without them
+  is in `text` only). Speaker ids have no field in the shared
   result: `raw_output=true` returns the model's JSON segment list instead. When
   generation stops at `max_output_tokens` or the sequence limit before the model
   closes the list, the transcript is partial: `raw_output=true` returns the

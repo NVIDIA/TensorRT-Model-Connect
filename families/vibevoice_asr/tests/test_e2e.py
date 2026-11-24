@@ -22,7 +22,8 @@ timestamps. Oracles:
   are not comparable position by position, so the segments must then agree:
   same count, identical text and speaker, and timestamps within one acoustic
   frame (3200 samples at 24 kHz).
-* ``transcript_words``: the transcripts have the same words and speakers. Used
+* ``transcript_words``: the transcripts have the same words, each with the same
+  speaker. Used
   for 16 kHz input, which the reference resamples with torchaudio and the
   runtime with its own windowed-sinc filter, so the samples differ.
 """
@@ -390,16 +391,46 @@ def _check(name: str, label: str, scope: str, actual, operator: str, expected) -
     }
 
 
+def _speaker_words(segments: list[dict]) -> list[tuple[str, object]]:
+    """Each word of the segments with its segment's speaker, in order."""
+    return [(word, s.get("Speaker")) for s in segments for word in _words(str(s.get("Content", "")))]
+
+
 def _differences(left: list, right: list) -> int:
     """Positions whose items differ, plus the difference in length."""
     return sum(a != b for a, b in zip(left, right)) + abs(len(left) - len(right))
 
 
+def _time(segment: dict, key: str, alias: str) -> float | None:
+    """A timestamp under its key or the alias the runtime accepts; None when absent.
+
+    As in the runtime, a timestamp must be a JSON number: a string or a boolean is a
+    malformed segment, never converted.
+    """
+    for name in (key, alias):
+        value = segment.get(name)
+        if value is None:
+            continue
+        assert isinstance(value, (int, float)) and not isinstance(value, bool), (
+            f"{name} is not a number: {value!r}"
+        )
+        return float(value)
+    return None
+
+
+def _timed(raw_segments: list[dict]) -> list[tuple[float, float, str]]:
+    """The raw segments with both timestamps, the ones the runtime returns as segments."""
+    times = [(_time(s, "Start", "Start time"), _time(s, "End", "End time"), s) for s in raw_segments]
+    return [(start, end, str(s["Content"])) for start, end, s in times if start is not None and end is not None]
+
+
 def _transcript_matches(default: dict, raw_segments: list[dict]) -> bool:
     """``_assert_transcript_consistent`` as a value."""
-    return default["text"] == " ".join(str(s["Content"]) for s in raw_segments).strip() and [
-        (s["start_seconds"], s["end_seconds"], s["text"]) for s in default.get("segments", [])
-    ] == [(float(s["Start"]), float(s["End"]), str(s["Content"])) for s in raw_segments]
+    try:
+        _assert_transcript_consistent(default, raw_segments)
+    except AssertionError:
+        return False
+    return True
 
 
 def _comparison_checks(
@@ -569,10 +600,11 @@ def _comparison_checks(
                 0,
             ),
             _check(
-                "speaker_set_difference",
-                "Speakers in only one of the two transcripts",
+                "speaker_word_differences",
+                "Word positions whose word or speaker differs from the reference, plus the"
+                " word-count difference",
                 independent,
-                len({s["Speaker"] for s in native_segments} ^ {s["Speaker"] for s in segments}),
+                _differences(_speaker_words(native_segments), _speaker_words(segments)),
                 "==",
                 0,
             ),
@@ -660,11 +692,11 @@ def _assert_segments_agree(native: list[dict], reference: list[dict]) -> None:
 
 
 def _assert_transcript_consistent(default: dict, raw_segments: list[dict]) -> None:
-    """The default output is the raw output's contents and timestamps."""
+    """The default output is the raw output's contents and the times of its timed segments."""
     assert default["text"] == " ".join(str(s["Content"]) for s in raw_segments).strip()
     assert [
         (s["start_seconds"], s["end_seconds"], s["text"]) for s in default.get("segments", [])
-    ] == [(float(s["Start"]), float(s["End"]), str(s["Content"])) for s in raw_segments]
+    ] == _timed(raw_segments)
 
 
 def _assert_parity(default: dict, raw: dict, reference: dict, case: dict) -> None:
@@ -696,7 +728,9 @@ def _assert_parity(default: dict, raw: dict, reference: dict, case: dict) -> Non
         assert _words(default["text"]) == _words(expected_text), (
             f"transcript mismatch: native {default['text']!r} reference {expected_text!r}"
         )
-        assert {s["Speaker"] for s in native_segments} == {s["Speaker"] for s in segments}
+        assert _speaker_words(native_segments) == _speaker_words(segments), (
+            "a word has another speaker than in the reference"
+        )
 
 
 def test_near_ties_are_at_most_two_bf16_values_apart() -> None:
@@ -760,6 +794,24 @@ _PARITY_SCENARIOS = {
     "native_runs_differ": ({"default_ids": (5, 9, 2)}, False),
     "words_equal": ({"oracle": "transcript_words", "reference_ids": (5, 9, 9, 2)}, True),
     "words_differ": ({"oracle": "transcript_words", "native_segments": (_OTHER_TEXT,)}, False),
+    "timestamp_as_text": (
+        {"oracle": "transcript_words", "raw_text": json.dumps([{**_SEGMENT, "Start": "0.0"}])},
+        False,
+    ),
+    "speakers_swapped": (
+        {
+            "oracle": "transcript_words",
+            "reference_segments": (
+                {**_SEGMENT, "Speaker": 0, "Content": "Hello"},
+                {**_SEGMENT, "Speaker": 1, "Content": "Goodbye"},
+            ),
+            "native_segments": (
+                {**_SEGMENT, "Speaker": 1, "Content": "Hello"},
+                {**_SEGMENT, "Speaker": 0, "Content": "Goodbye"},
+            ),
+        },
+        False,
+    ),
     "speakers_differ": (
         {"oracle": "transcript_words", "native_segments": ({**_SEGMENT, "Speaker": 1},)},
         False,

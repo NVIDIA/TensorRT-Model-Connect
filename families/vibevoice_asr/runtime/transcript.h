@@ -19,9 +19,11 @@ struct ParsedTranscript {
 
 // Parse the decoded model output, e.g.
 //   assistant\n[{"Start":0.0,"End":7.56,"Speaker":0,"Content":"..."}]\n
-// The leading role name is dropped; a ```json fence and a single segment object
-// are accepted as the official post-processing does; a list truncated by the
-// token limit keeps its complete segments. Other output is returned stripped.
+// The leading role name is dropped; a ```json fence (closed at the end of the
+// output) and a single segment object are accepted as the official post-processing
+// does; a list truncated by the token limit keeps its complete top-level segments.
+// `text` joins every segment's content, and `segments` holds the segments with both
+// timestamps. Other output is returned stripped.
 ParsedTranscript parse_transcript(const std::string& decoded);
 
 } // namespace trtmc::vibevoice_asr

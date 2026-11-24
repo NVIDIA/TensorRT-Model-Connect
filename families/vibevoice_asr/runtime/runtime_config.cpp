@@ -22,11 +22,13 @@ std::int32_t positive_int(const nlohmann::json& raw, const char* name) {
     return value.get<std::int32_t>();
 }
 
+// Token ids are decoder rows: JSON integers in [0, vocab), as the builder writes them.
 std::int32_t token_id(const nlohmann::json& ids, const char* name, std::int32_t vocab) {
-    const auto id = positive_int(ids, name);
-    if (id >= vocab)
+    const auto& value = ids.at(name);
+    if (!value.is_number_integer() || value.get<std::int64_t>() < 0 ||
+        value.get<std::int64_t>() >= vocab)
         throw std::runtime_error(std::string("VibeVoice-ASR token id out of vocabulary: ") + name);
-    return id;
+    return value.get<std::int32_t>();
 }
 
 // Probe ids are JSON integers in [0, vocab): a float such as 117.9 is rejected,
@@ -45,20 +47,24 @@ std::vector<std::int32_t> probe_ids(const nlohmann::json& ids, std::int32_t voca
     return result;
 }
 
-// normalize_loudness divides float(10^(target / 20)) by (rms + float(eps)) in
-// float. For silent input (rms 0) that gain must be a normal float, neither infinite
-// nor rounded to zero (which would silence every input), which needs an eps that is
-// a normal float (checked before the cast: a double above FLT_MAX has no float value)
-// and a target whose amplitude is a normal float.
-bool usable_silence_gain(double target_dbfs, double eps) {
+// normalize_loudness divides float(10^(target / 20)) by (rms + float(eps)) in float,
+// as the reference does, with rms from 0 (silence) to FLT_MAX (the loudest finite
+// input). Over that range the gain must stay finite and above zero, or the input would
+// be silenced. For silence it must be a normal float, which needs an eps that is a
+// normal float (checked before the cast: a double above FLT_MAX has no float value)
+// and a target whose amplitude is a normal float. For the loudest input, FLT_MAX + eps
+// must not overflow, and the quotient must not round to zero.
+bool usable_gain(double target_dbfs, double eps) {
     if (!std::isfinite(target_dbfs) || !(eps >= std::numeric_limits<float>::min()) ||
         !(eps <= std::numeric_limits<float>::max()))
         return false;
     const float eps_float = static_cast<float>(eps);
     const float amplitude = static_cast<float>(std::pow(10.0, target_dbfs / 20.0));
-    const float gain = amplitude / eps_float;
-    return amplitude >= std::numeric_limits<float>::min() && std::isfinite(gain) &&
-           gain >= std::numeric_limits<float>::min();
+    const float silence_gain = amplitude / eps_float;
+    const float loudest = std::numeric_limits<float>::max() + eps_float;
+    return amplitude >= std::numeric_limits<float>::min() && std::isfinite(silence_gain) &&
+           silence_gain >= std::numeric_limits<float>::min() && std::isfinite(loudest) &&
+           amplitude / loudest > 0.0F;
 }
 
 RuntimeConfig parse_runtime_config_json(const std::string& json_text) {
@@ -97,7 +103,7 @@ RuntimeConfig parse_runtime_config_json(const std::string& json_text) {
         config.tokenizer_checks.push_back(std::move(item));
     }
     if (config.tokenizer_checks.empty() ||
-        !usable_silence_gain(config.normalize_target_dbfs, config.normalize_eps) ||
+        !usable_gain(config.normalize_target_dbfs, config.normalize_eps) ||
         config.normalize_target_dbfs >= 0.0 || config.system_prompt.empty() ||
         config.transcription_keys.empty() || config.max_prefill_rows > config.max_sequence_length)
         throw std::runtime_error("VibeVoice-ASR runtime.json is inconsistent");

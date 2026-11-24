@@ -21,6 +21,7 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace trtmc::vibevoice_asr;
@@ -62,10 +63,13 @@ void check_no_throw(Function&& function, const std::string& what) {
 }
 
 // The largest |values[i] - reference(i)| over [begin, end); infinite when either side
-// is not finite, which std::max would otherwise skip.
+// is not finite, which std::max would otherwise skip, or when [begin, end) does not lie
+// inside `values`, so a short output fails instead of being read past its end.
 template <class Reference>
 double max_error(const std::vector<float>& values, std::size_t begin, std::size_t end,
                  Reference reference) {
+    if (begin > end || end > values.size())
+        return std::numeric_limits<double>::infinity();
     double worst = 0.0;
     for (std::size_t i = begin; i < end; ++i) {
         const double expected = reference(i);
@@ -214,6 +218,7 @@ void test_resample() {
     for (std::size_t i = 0; i < tone.size(); ++i)
         tone[i] = static_cast<float>(0.5 * std::sin(2.0 * pi * 440.0 * i / 16000.0));
     const auto out = resample(tone, 16000, 24000);
+    check(out.size() == 24000, "one second at 16 kHz is 24000 samples at 24 kHz");
     const double worst = max_error(out, 2400, out.size() - 2400, [&](std::size_t i) {
         return 0.5 * std::sin(2.0 * pi * 440.0 * i / 24000.0);
     });
@@ -253,6 +258,11 @@ void test_resample() {
                         [&](std::size_t i) { return static_cast<double>(exact[i]); })
             : std::numeric_limits<double>::infinity();
     check(difference < 1e-6, "interpolated and exact taps differ by " + std::to_string(difference));
+    // The coefficient budget picks the path: 44101 Hz's exact table is over the default
+    // budget, so the default call gives the interpolated output, not the exact one.
+    const auto by_default = resample(signal, 44101, 24000);
+    check(by_default == interpolated && by_default != exact,
+          "44101 Hz takes the interpolated path by default");
     check(resample(tone, 16000, 24000, 0).size() == out.size(), "both paths give the same length");
     check(!(max_error({std::numeric_limits<float>::quiet_NaN()}, 0, 1,
                       [](std::size_t) { return 0.0; }) < 1.0),
@@ -328,25 +338,29 @@ void test_normalize() {
 void test_chunks_and_argmax() {
     const auto chunks = plan_encoder_chunks(1000, 450, 60);
     check(chunks.size() == 3, "three encoder chunks");
-    check(chunks[0].first_frame == 0 && chunks[0].frames == 450 && chunks[0].context_frames == 0,
-          "the first chunk has no left context");
-    check(chunks[1].first_frame == 450 && chunks[1].frames == 450 && chunks[1].context_frames == 60,
-          "the second chunk carries the receptive field");
-    check(chunks[2].first_frame == 900 && chunks[2].frames == 100 && chunks[2].context_frames == 60,
-          "the last chunk ends at the last frame");
+    if (chunks.size() == 3) {
+        check(chunks[0].first_frame == 0 && chunks[0].frames == 450 &&
+                  chunks[0].context_frames == 0,
+              "the first chunk has no left context");
+        check(chunks[1].first_frame == 450 && chunks[1].frames == 450 &&
+                  chunks[1].context_frames == 60,
+              "the second chunk carries the receptive field");
+        check(chunks[2].first_frame == 900 && chunks[2].frames == 100 &&
+                  chunks[2].context_frames == 60,
+              "the last chunk ends at the last frame");
+    }
     const auto single = plan_encoder_chunks(3, 450, 60);
     check(single.size() == 1 && single[0].frames == 3, "a short clip is one chunk");
     check_throws_as<std::invalid_argument>([] { plan_encoder_chunks(0, 450, 60); },
                                            "an empty chunk plan", "positive sizes");
     const float tied[] = {0.5F, 2.0F, 1.0F, 2.0F};
     check(argmax(tied, 4) == 1, "argmax keeps the lowest index of a tie");
-    // A prompt of max_sequence_length - 2 tokens leaves room for two output tokens.
+    // A prompt of max_sequence_length - 2 tokens leaves room for two output tokens:
+    // generation goes on after the first and stops after the second.
     const std::int64_t unlimited = std::numeric_limits<std::int64_t>::max();
-    std::int64_t generated = 0;
-    do
-        ++generated;
-    while (!generation_complete(4094, generated, unlimited, 4096));
-    check(generated == 2, "prompt plus output stays within max_sequence_length");
+    check(!generation_complete(4094, 1, unlimited, 4096), "one output token leaves room");
+    check(generation_complete(4094, 2, unlimited, 4096),
+          "prompt plus output stays within max_sequence_length");
     check(generation_complete(10, 3, 3, 4096), "max_new_tokens stops generation");
     check(!generation_complete(10, 2, 3, 4096), "generation continues below both limits");
     // An explicit max_output_tokens must fit with the prompt instead of being cut
@@ -387,6 +401,31 @@ void test_transcript() {
     check(!word.structured && word.text == "assistantship is demanding",
           "a word that starts like the role header is kept");
     check(parse_transcript("assistant").text.empty(), "a bare role header");
+    // A truncated list keeps only its complete top-level objects: a segment inside an
+    // unclosed nested list is not promoted, and a cut-off second object leaves the first.
+    const auto nested = parse_transcript("[{\"Start\":0,\"End\":1,\"Content\":\"one\"},"
+                                         "[{\"Start\":1,\"End\":2,\"Content\":\"nested\"}");
+    check(nested.structured && nested.segments.size() == 1 && nested.text == "one",
+          "a segment inside an unclosed nested list");
+    const auto cut =
+        parse_transcript("[{\"Start\":0,\"End\":1,\"Content\":\"one\"},{\"Start\":1,\"En");
+    check(cut.structured && cut.segments.size() == 1 && cut.text == "one",
+          "a cut-off second segment");
+    // Backticks inside a fenced segment are content: the closing fence ends the document.
+    const auto ticks =
+        parse_transcript("```json\n[{\"Start\":0,\"End\":1,\"Content\":\"say ``` now\"}]\n```");
+    check(ticks.structured && ticks.segments.size() == 1 && ticks.text == "say ``` now",
+          "backticks inside a fenced segment");
+    const auto open_fence =
+        parse_transcript("```json\n[{\"Start\":0,\"End\":1,\"Content\":\"a\"},{\"Start\":1");
+    check(open_fence.structured && open_fence.segments.size() == 1 && open_fence.text == "a",
+          "a fenced list cut before its end");
+    // An untimed segment keeps its text; the timed ones keep their times.
+    const auto mixed =
+        parse_transcript("[{\"Start\":0,\"End\":1,\"Content\":\"one\"},{\"Content\":\"two\"}]");
+    check(mixed.structured && mixed.text == "one two" && mixed.segments.size() == 1 &&
+              mixed.segments[0].text == "one" && mixed.segments[0].end_seconds == 1.0,
+          "a timed segment next to an untimed one");
     // Any whitespace ends the role header, as a line break does.
     for (const char* separator : {" ", "\t", "\r\n"}) {
         const auto spaced = parse_transcript(std::string("assistant") + separator +
@@ -452,6 +491,25 @@ void test_runtime_config() {
     zero_gain["normalize_eps"] = 3e38;
     check_throws_as<std::runtime_error>([&] { parse_runtime_config(zero_gain.dump()); },
                                         "a silence gain of -750 dBFS over eps 3e38");
+    // Loud input must not be silenced either: the float gain stays above zero for the
+    // largest finite RMS (-750 dBFS rounds it to zero; eps 4e36 overflows rms + eps).
+    for (const auto& [target, eps] : {std::pair{-750.0, 1e-3}, std::pair{-25.0, 4e36}}) {
+        auto loud = runtime_json();
+        loud["normalize_target_dbfs"] = target;
+        loud["normalize_eps"] = eps;
+        check_throws_as<std::runtime_error>([&] { parse_runtime_config(loud.dump()); },
+                                            "a gain that rounds to zero for loud input at " +
+                                                std::to_string(target) + " dBFS, eps " +
+                                                std::to_string(eps),
+                                            "is inconsistent");
+    }
+    // Token ids are decoder rows in [0, vocab_size): row 0 is a valid id.
+    auto row_zero = runtime_json();
+    row_zero["token_ids"]["eos"] = 0;
+    std::int32_t row_zero_eos = -1;
+    check_no_throw([&] { row_zero_eos = parse_runtime_config(row_zero.dump()).token_ids.eos; },
+                   "a token id of 0");
+    check(row_zero_eos == 0, "a token id of 0 is kept");
     // An eps above FLT_MAX has no float value, and a target whose float amplitude
     // underflows to zero would silence every input.
     for (const auto& [field, value] :
@@ -663,6 +721,76 @@ void test_tokenizer() {
         check_no_throw([&] { CreateBpeTokenizer(text.data(), text.size(), false, kVocab); },
                        std::string("a tokenizer with ") + what);
     }
+    // The merge table must read the same in the batch merge and in the reference's
+    // one-merge-at-a-time BPE: an operand that only a later-ranked merge makes, an entry
+    // that is not one pair, a pair or result outside the vocabulary, or two entry formats
+    // in one table are rejected.
+    const auto later = byte_tokenizer_json(nullptr, {{"ab", "a"}, {"a", "b"}});
+    check_throws_as<std::runtime_error>(
+        [&] { CreateBpeTokenizer(later.data(), later.size(), false, kVocab); },
+        "a merge whose operand only a later merge makes", "merge");
+    const auto merged = nlohmann::json::parse(byte_tokenizer_json(nullptr, {{"a", "b"}}));
+    for (const char* merges : {R"([["a"]])", R"([["a", "b", "c"]])", R"(["a b c"])", R"(["ab"])",
+                               R"([["a", "c"]])", R"([["a", "b"], "a b"])"}) {
+        auto bad = merged;
+        bad["model"]["merges"] = nlohmann::json::parse(merges);
+        const auto text = bad.dump();
+        check_throws_as<std::runtime_error>(
+            [&] { CreateBpeTokenizer(text.data(), text.size(), false, kVocab); },
+            std::string("the merges ") + merges, "merge");
+    }
+    for (const char* merges : {R"(["a b"])", R"(["#version: 0.2", "a b"])"}) {
+        auto good = merged;
+        good["model"]["merges"] = nlohmann::json::parse(merges);
+        const auto text = good.dump();
+        std::vector<std::int32_t> ids;
+        check_no_throw(
+            [&] {
+                ids = CreateBpeTokenizer(text.data(), text.size(), false, kVocab)->encode("ab");
+            },
+            std::string("the merges ") + merges);
+        check(ids == std::vector<std::int32_t>{262}, std::string("ab merges with ") + merges);
+    }
+    // Added-token ids are the ones the reference assigns (it re-adds tokens by content):
+    // a token listed at row 97 would replace "a" in decoding, and an empty token is dropped
+    // by the reference, so both reject the bundle before any mapping changes.
+    auto row_taken = nlohmann::json::parse(byte_tokenizer_json());
+    row_taken["added_tokens"].push_back({{"id", 97},
+                                         {"content", "UNUSED_SENTINEL"},
+                                         {"special", false},
+                                         {"single_word", false},
+                                         {"lstrip", false},
+                                         {"rstrip", false},
+                                         {"normalized", false}});
+    auto empty_token = nlohmann::json::parse(byte_tokenizer_json());
+    empty_token["added_tokens"][0]["content"] = "";
+    for (const auto& [layout, what, message] :
+         {std::tuple{row_taken, "an added token at another token's row",
+                     "the reference assigns it 262"},
+          std::tuple{empty_token, "an empty added token", "nonempty content"}}) {
+        const auto text = layout.dump();
+        check_throws_as<std::runtime_error>(
+            [&] { CreateBpeTokenizer(text.data(), text.size(), false, kVocab); }, what, message);
+    }
+    // The validated layout selects the byte-level path, not the vocabulary: a non-special
+    // "\u2581" added token matches only where it is written.
+    auto marker = nlohmann::json::parse(byte_tokenizer_json());
+    marker["added_tokens"].push_back({{"id", 262},
+                                      {"content", "\xE2\x96\x81"},
+                                      {"special", false},
+                                      {"single_word", false},
+                                      {"lstrip", false},
+                                      {"rstrip", false},
+                                      {"normalized", false}});
+    const auto marker_text = marker.dump();
+    const auto with_marker =
+        CreateBpeTokenizer(marker_text.data(), marker_text.size(), false, kVocab);
+    check(with_marker->encode("a b") == bytes_of("a b"),
+          "a \"\u2581\" added token keeps the byte-level path");
+    check(with_marker->encode("a"
+                              "\xE2\x96\x81"
+                              "b") == std::vector<std::int32_t>({97, 262, 98}),
+          "the \"\u2581\" added token where it is written");
     // A field of the wrong JSON type is a bundle defect too, not a JSON library error.
     auto mistyped = nlohmann::json::parse(byte_tokenizer_json());
     mistyped["decoder"]["type"] = 7;
@@ -753,7 +881,9 @@ void test_prompt() {
     if (!tokenizer)
         return;
     const auto config = parse_runtime_config(runtime_json().dump());
-    check(tokenizer->encode("user") == config.tokenizer_checks[0].ids, "byte ids match");
+    check(!config.tokenizer_checks.empty() &&
+              tokenizer->encode("user") == config.tokenizer_checks[0].ids,
+          "byte ids match");
     check(user_suffix(config, 181440, "") ==
               "This is a 7.56 seconds audio, please transcribe it with these keys: Start time, "
               "End time, Speaker ID, Content",
@@ -781,16 +911,25 @@ void test_prompt() {
     }
     const auto prompt = build_prompt(*tokenizer, config, 6401, "");
     check(prompt.speech_rows == 3, "ceil(6401 / 3200) speech rows");
-    check(prompt.ids.front() == 257, "the prompt opens the system turn");
-    check(prompt.ids[static_cast<std::size_t>(prompt.speech_offset) - 1] == 259,
-          "speech start precedes the placeholders");
-    for (int row = 0; row < prompt.speech_rows; ++row)
-        check(prompt.ids[static_cast<std::size_t>(prompt.speech_offset + row)] == 261,
-              "speech placeholder rows");
-    check(prompt.ids[static_cast<std::size_t>(prompt.speech_offset + prompt.speech_rows)] == 260,
-          "speech end follows the placeholders");
+    // Indexed checks only when the speech span and its end marker lie inside the prompt.
+    const bool span_inside = prompt.speech_offset >= 1 && prompt.speech_rows >= 0 &&
+                             static_cast<std::size_t>(prompt.speech_offset) +
+                                     static_cast<std::size_t>(prompt.speech_rows) <
+                                 prompt.ids.size();
+    check(span_inside, "the speech span lies inside the prompt");
+    if (span_inside) {
+        check(prompt.ids.front() == 257, "the prompt opens the system turn");
+        check(prompt.ids[static_cast<std::size_t>(prompt.speech_offset) - 1] == 259,
+              "speech start precedes the placeholders");
+        for (int row = 0; row < prompt.speech_rows; ++row)
+            check(prompt.ids[static_cast<std::size_t>(prompt.speech_offset + row)] == 261,
+                  "speech placeholder rows");
+        check(prompt.ids[static_cast<std::size_t>(prompt.speech_offset + prompt.speech_rows)] ==
+                  260,
+              "speech end follows the placeholders");
+        check(prompt.ids.back() == '\n', "no generation prompt after the user turn");
+    }
     check(std::count(prompt.ids.begin(), prompt.ids.end(), 258) == 2, "two turns end");
-    check(prompt.ids.back() == '\n', "no generation prompt after the user turn");
     check_throws_as<std::invalid_argument>([&] { build_prompt(*tokenizer, config, 0, ""); },
                                            "an empty clip", "at least one audio sample");
     // A request is sized before its audio is resampled: 100000 samples at 1 Hz need

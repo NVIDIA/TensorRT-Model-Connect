@@ -264,9 +264,39 @@ def test_only_the_qwen_tokenizer_layout_builds():
     for path, value in ((("added_tokens", 0, "content"), None), (("added_tokens", 0, "id"), 1.0)):
         with pytest.raises(ValueError, match="needs a string content and an integer id"):
             model.check_tokenizer_layout(changed(path, value))
+    with pytest.raises(ValueError, match="needs a nonempty content"):
+        model.check_tokenizer_layout(changed(("added_tokens", 0, "content"), ""))
     # A null option is its default, as for the runtime.
     model.check_tokenizer_layout(changed(("model", "byte_fallback"), None))
 
+
+
+def test_only_merge_tables_read_the_reference_way_build():
+    # The runtime merges every occurrence of the best pair at once; the reference merges
+    # one at a time. They agree when no merge needs an operand that only a later-ranked
+    # merge makes, and the table must be one the reference itself loads.
+    base = _qwen_tokenizer({"a": 0, "b": 1, "c": 2, "ab": 3, "aba": 4}, [])
+
+    def with_merges(merges):
+        raw = copy.deepcopy(base)
+        raw["model"]["merges"] = merges
+        return json.dumps(raw).encode()
+
+    for merges in ([["a", "b"], ["ab", "a"]], ["a b", "ab a"], ["#version: 0.2", "a b"]):
+        model.check_tokenizer_layout(with_merges(merges))
+    for merges in (
+        [["ab", "a"], ["a", "b"]],
+        [["a"]],
+        [["a", "b", "c"]],
+        ["a b c"],
+        ["ab"],
+        [["a", "c"]],
+        [["a", "b"], "ab a"],
+        [["a", 7]],
+        "a b",
+    ):
+        with pytest.raises(ValueError, match="merge"):
+            model.check_tokenizer_layout(with_merges(merges))
 
 _TEMPLATE_POST_PROCESSOR = {
     "type": "TemplateProcessing",
@@ -345,6 +375,8 @@ def test_the_request_accepts_only_what_the_family_builds(tmp_path):
         dict(max_batch_size=2),
         dict(tensor_parallel_size=2),
         dict(context_parallel_size=2),
+        dict(tensor_parallel_size=1.5),
+        dict(context_parallel_size=1.5),
         dict(image_height=224),
         dict(video_num_frames=8),
         dict(mtp_seq_len=2),
@@ -363,7 +395,7 @@ def test_the_kv_capacity_defaults_to_the_single_pass_budget():
     cfg = checkpoint.parse_config(CONFIG)
     assert model.resolve_capacity(None, cfg) == 65536
     assert model.resolve_capacity(8192, cfg) == 8192
-    for invalid in (100, 8000, 131073, 131584):
+    for invalid in (100, 8000, 131073, 131584, 4096.9, 8192.0, True):
         with pytest.raises(ValueError):
             model.resolve_capacity(invalid, cfg)
 

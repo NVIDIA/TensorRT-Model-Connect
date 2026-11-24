@@ -1209,35 +1209,60 @@ class BpeTokenizer final : public ITokenizer {
         }
     }
 
+    // The merge table as the reference reads it: one entry format for the whole table
+    // (pairs, or "left right" strings with exactly one space, after any "#version"
+    // header lines), each operand and the result in the vocabulary, and no operand that
+    // only a merge of a later rank makes. The last condition makes merging every
+    // occurrence of the best pair at once (apply_merges) give the reference's
+    // one-merge-at-a-time result.
     void parse_merges(const nlohmann::json& j) {
-        if (!j["model"].contains("merges"))
-            throw std::runtime_error("Invalid tokenizer.json: missing model.merges");
-
-        auto& merges_arr = j["model"]["merges"];
+        const auto& merges_arr = j["model"]["merges"];
+        const auto reject = [](const nlohmann::json& entry, const char* why) {
+            throw std::runtime_error("tokenizer.json merge " + entry.dump() +
+                                     " is not supported: " + why);
+        };
+        const bool strings = !merges_arr.empty() && merges_arr[0].is_string();
         mMergeRank.reserve(merges_arr.size());
-
-        for (size_t i = 0; i < merges_arr.size(); ++i) {
+        int rank = 0;
+        for (const auto& entry : merges_arr) {
             std::string first, second;
-
-            if (merges_arr[i].is_array()) {
-                auto arr = merges_arr[i].get<std::vector<std::string>>();
-                if (arr.size() != 2)
+            if (strings) {
+                if (!entry.is_string())
+                    reject(entry, "the table mixes two entry formats");
+                const auto text = entry.get<std::string>();
+                if (text.rfind("#version", 0) == 0)
                     continue;
-                first = std::move(arr[0]);
-                second = std::move(arr[1]);
-            } else if (merges_arr[i].is_string()) {
-                std::string merge_str = merges_arr[i].get<std::string>();
-                auto space_pos = merge_str.find(' ');
-                if (space_pos == std::string::npos)
-                    continue;
-                first = merge_str.substr(0, space_pos);
-                second = merge_str.substr(space_pos + 1);
+                const auto space = text.find(' ');
+                if (space == std::string::npos || text.find(' ', space + 1) != std::string::npos)
+                    reject(entry, "not two parts around one space");
+                first = text.substr(0, space);
+                second = text.substr(space + 1);
             } else {
-                continue;
+                if (!entry.is_array() || entry.size() != 2 || !entry[0].is_string() ||
+                    !entry[1].is_string())
+                    reject(entry, "not a pair of strings");
+                first = entry[0].get<std::string>();
+                second = entry[1].get<std::string>();
             }
-
-            auto pair = std::make_pair(std::move(first), std::move(second));
-            mMergeRank[pair] = static_cast<int>(i);
+            if (mTokenToId.count(first) == 0 || mTokenToId.count(second) == 0 ||
+                mTokenToId.count(first + second) == 0)
+                reject(entry, "an operand or the result is outside the vocabulary");
+            mMergeRank[std::make_pair(std::move(first), std::move(second))] = rank++;
+        }
+        // The latest rank of the merges that produce each token.
+        std::unordered_map<std::string, int> produced;
+        for (const auto& [pair, merge_rank] : mMergeRank) {
+            const auto [it, inserted] = produced.emplace(pair.first + pair.second, merge_rank);
+            if (!inserted)
+                it->second = std::max(it->second, merge_rank);
+        }
+        for (const auto& [pair, merge_rank] : mMergeRank) {
+            for (const auto* operand : {&pair.first, &pair.second}) {
+                const auto it = produced.find(*operand);
+                if (it != produced.end() && it->second >= merge_rank)
+                    reject(nlohmann::json::array({pair.first, pair.second}),
+                           "an operand comes only from a later merge");
+            }
         }
     }
 
@@ -1247,6 +1272,13 @@ class BpeTokenizer final : public ITokenizer {
         const auto& tokens = j.at("added_tokens");
         if (!tokens.is_array())
             throw std::runtime_error("tokenizer.json added_tokens must be a list");
+        // The ids the reference assigns: it re-adds the tokens by content, in order, keeping
+        // an earlier added token's id, else the vocabulary id, else the next id after the
+        // vocabulary and the added ids so far. A listed id that differs rejects the bundle,
+        // as the build does, before either mapping changes.
+        const auto vocab_size = static_cast<std::int64_t>(mTokenToId.size());
+        std::unordered_map<std::string, std::int64_t> assigned;
+        std::int64_t highest = -1;
         for (const auto& tok : tokens) {
             // Checked access: a token without a string content or an integer id
             // rejects the bundle instead of reading a missing field.
@@ -1263,12 +1295,27 @@ class BpeTokenizer final : public ITokenizer {
                     unsupported("added token option", tok);
             }
             const std::string content = content_field->get<std::string>();
+            if (content.empty())
+                throw std::runtime_error("tokenizer.json added token needs a nonempty content");
             const std::int64_t raw_id = id_field->get<std::int64_t>();
             // Bounded before the vocabulary grows: one stray id must not size it.
             if (raw_id < 0 || raw_id >= mVocabLimit)
                 throw std::runtime_error(
                     "tokenizer.json added token " + content + " has id " + std::to_string(raw_id) +
                     ", outside the decoder vocabulary of " + std::to_string(mVocabLimit));
+            std::int64_t expected = vocab_size;
+            if (const auto earlier = assigned.find(content); earlier != assigned.end())
+                expected = earlier->second;
+            else if (const auto row = mTokenToId.find(content); row != mTokenToId.end())
+                expected = row->second;
+            else if (highest >= vocab_size || (highest >= 0 && vocab_size == 0))
+                expected = highest + 1;
+            if (raw_id != expected)
+                throw std::runtime_error(
+                    "tokenizer.json added token " + content + " has id " + std::to_string(raw_id) +
+                    ", but the reference assigns it " + std::to_string(expected));
+            assigned[content] = expected;
+            highest = std::max(highest, expected);
             const auto id = static_cast<int32_t>(raw_id);
 
             if (static_cast<size_t>(id) >= mVocab.size()) {
@@ -1428,10 +1475,9 @@ class BpeTokenizer final : public ITokenizer {
         if (mDecoderType == DecoderType::kSequence) {
             parse_sequence_decoder(j["decoder"]);
         }
-        // SentencePiece encode: vocab uses ▁ (U+2581) for spaces.
-        // Detect by: (1) ▁ in vocabulary, or (2) normalizer prepends ▁.
-        static const std::string spiece_marker = "\xe2\x96\x81"; // U+2581
-        mIsSentencePiece = mTokenToId.count(spiece_marker) > 0 || mSentencePiecePrependAlways;
+        // check_supported_layout admits only the byte-level Qwen2.5 layout, so ordinary
+        // text never takes the SentencePiece path, whatever tokens the vocabulary holds.
+        mIsSentencePiece = false;
     }
 
     void parse_seq_decoder_replace(const nlohmann::json& sub) {

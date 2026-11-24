@@ -25,13 +25,15 @@ std::string strip(std::string_view text) {
     return std::string(text);
 }
 
-// Complete top-level objects of a JSON array whose closing part may be missing.
+// Complete top-level objects of a JSON array whose closing part may be missing. Only
+// objects directly in the list count: recovery stops at the end of the list or at any
+// other kind of element (a nested list, a number, a string), as a segment is an object.
 nlohmann::json complete_objects(const std::string& text) {
     auto objects = nlohmann::json::array();
-    int depth = 0;
+    int depth = 0; // nesting inside the current top-level object
     bool in_string = false;
     bool escaped = false;
-    std::size_t start = std::string::npos;
+    std::size_t start = 0;
     for (std::size_t i = 1; i < text.size(); ++i) {
         const char c = text[i];
         if (in_string) {
@@ -43,18 +45,24 @@ nlohmann::json complete_objects(const std::string& text) {
                 in_string = false;
             continue;
         }
+        if (depth == 0) {
+            if (c == '{') {
+                depth = 1;
+                start = i;
+            } else if (c != ',' && !is_space(c)) {
+                break;
+            }
+            continue;
+        }
         if (c == '"') {
             in_string = true;
-        } else if (c == '{') {
-            if (depth++ == 0)
-                start = i;
-        } else if (c == '}' && depth > 0 && --depth == 0) {
+        } else if (c == '{' || c == '[') {
+            ++depth;
+        } else if ((c == '}' || c == ']') && --depth == 0) {
             auto value = nlohmann::json::parse(text.substr(start, i - start + 1), nullptr, false);
             if (value.is_discarded())
                 break;
             objects.push_back(std::move(value));
-        } else if (depth == 0 && c == ']') {
-            break;
         }
     }
     return objects;
@@ -105,24 +113,28 @@ ParsedTranscript parse_transcript(const std::string& decoded) {
     // Output that starts as a JSON document is parsed as it is, so a fence marker
     // inside a segment's text stays content. Otherwise, or when that yields no
     // segment, a ```json fence around the list, as the official post-processing
-    // accepts.
+    // accepts. Its closing fence is the one that ends the output, so backticks inside
+    // a segment stay content; without one, the list may be cut short.
     auto segments = parse_segments(text);
     if (!segments.is_object() && !(segments.is_array() && !segments.empty())) {
         constexpr std::string_view fence = "```json";
+        constexpr std::string_view close = "```";
         if (const auto open = text.find(fence); open != std::string::npos) {
             const auto start = open + fence.size();
-            const auto close = text.find("```", start);
-            segments = parse_segments(strip(std::string_view(text).substr(
-                start, close == std::string::npos ? std::string::npos : close - start)));
+            const bool closed = text.size() >= start + close.size() &&
+                                text.compare(text.size() - close.size(), close.size(), close) == 0;
+            const auto end = closed ? text.size() - close.size() : text.size();
+            segments = parse_segments(strip(std::string_view(text).substr(start, end - start)));
         }
     }
     if (segments.is_object())
         segments = nlohmann::json::array({segments});
     if (!segments.is_array() || segments.empty())
         return result;
-    std::vector<TranscriptionSegment> parsed;
+    // Every segment's content goes into `text`; `segments` holds the segments that have
+    // both timestamps, as no timestamps are invented for the others.
+    std::vector<TranscriptionSegment> timed;
     std::string joined;
-    bool timed = true;
     for (std::size_t i = 0; i < segments.size(); ++i) {
         const auto& segment = segments[i];
         if (!segment.is_object() || !segment.contains("Content") ||
@@ -132,23 +144,21 @@ ParsedTranscript parse_transcript(const std::string& decoded) {
         const auto end = timestamp(segment, "End", "End time");
         if (!start.valid || !end.valid)
             return result;
-        TranscriptionSegment item;
-        item.text = segment.at("Content").get<std::string>();
+        const auto content = segment.at("Content").get<std::string>();
         if (start.value && end.value) {
+            TranscriptionSegment item;
+            item.text = content;
             item.start_seconds = *start.value;
             item.end_seconds = *end.value;
-        } else {
-            timed = false; // no timestamps are invented for an untimed segment
+            timed.push_back(std::move(item));
         }
         if (i > 0)
             joined += ' ';
-        joined += item.text;
-        parsed.push_back(std::move(item));
+        joined += content;
     }
     result.structured = true;
     result.text = strip(joined);
-    if (timed)
-        result.segments = std::move(parsed);
+    result.segments = std::move(timed);
     return result;
 }
 
