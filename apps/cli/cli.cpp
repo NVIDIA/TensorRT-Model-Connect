@@ -9,6 +9,7 @@
 #include "cli/family_cli.h"
 #include "cli/io.h"
 #include "cli/sdk_dispatch.h"
+#include "cli/windows_media.h"
 #include "config.h"
 #include "task_runtime.h"
 #include "trtmc/control.hpp"
@@ -149,7 +150,9 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"generate-video",
          {CommandKind::kGenerateVideo,
           {"--prompt", "--image", "--output", "--negative-prompt", "--height", "--width",
-           "--num-steps", "--seed", "--guidance-scale", "--cfg-scale", "--initial-latents-raw"}}},
+           "--num-frames", "--num-steps", "--seed", "--guidance-scale", "--cfg-scale",
+           "--initial-latents-raw", "--first-frame", "--last-frame", "--reference-image",
+           "--reference-video", "--reference-audio"}}},
         {"solve", {CommandKind::kSolve, {"--branch", "--trunk"}}},
         {"forecast", {CommandKind::kForecast, {"--input", "--mask", "--frequency"}}},
         {"control", {CommandKind::kControl, {"--image", "--state", "--output"}}},
@@ -537,6 +540,7 @@ ImageGenerationConfig image_config(const Command& command) {
         config.negative_prompt = command.options.at("--negative-prompt");
     config.height = int_option(command, "--height", 0, 1);
     config.width = int_option(command, "--width", 0, 1);
+    config.video_num_frames = int_option(command, "--num-frames", 0, 1);
     config.num_steps = int_option(command, "--num-steps", -1, 1);
     config.seed = int_option(command, "--seed", -1);
     config.guidance_scale = float_option(command, "--guidance-scale", -1.0F);
@@ -609,6 +613,103 @@ ImageResult generate_image(const Command& command, ITask& task) {
             prompt, image.pixels.data(), image.height, image.width, config);
     }
     return require_interface<IImageGeneration>(task).generate_image(prompt, config);
+}
+
+VideoImageInput load_video_image(const std::string& path) {
+    auto decoded = read_image(path);
+    VideoImageInput result;
+    result.pixels = std::move(decoded.pixels);
+    result.height = decoded.height;
+    result.width = decoded.width;
+    result.channels = 3;
+    return result;
+}
+
+VideoGenerationRequest video_request(const Command& command, IVideoGeneration& generator) {
+    VideoGenerationRequest request;
+    request.prompt = require_option(command, "--prompt");
+    request.config = image_config(command);
+
+    const bool has_first = has_option(command, "--first-frame");
+    const bool has_last = has_option(command, "--last-frame");
+    if ((has_first || has_last) && !command.video_references.empty())
+        throw std::invalid_argument("key frames cannot be combined with media references");
+    if (has_first || has_last) {
+        request.mode = VideoGenerationMode::kFirstLastFrameToVideoAudio;
+        if (has_first)
+            request.first_frame = load_video_image(command.options.at("--first-frame"));
+        if (has_last)
+            request.last_frame = load_video_image(command.options.at("--last-frame"));
+        return request;
+    }
+    if (command.video_references.empty())
+        return request;
+
+    request.mode = VideoGenerationMode::kReferenceToVideoAudio;
+    const auto policy = generator.reference_media_decode_policy();
+    request.references.reserve(command.video_references.size());
+    for (const auto& argument : command.video_references) {
+        VideoReferenceInput reference;
+        reference.kind = argument.kind;
+        switch (argument.kind) {
+        case VideoReferenceKind::kImage:
+            reference.image = load_video_image(argument.path);
+            break;
+        case VideoReferenceKind::kVideo:
+            if (!policy)
+                throw std::runtime_error(
+                    "loaded family does not provide a reference-media decode policy");
+            reference.video = read_video_file(argument.path, *policy);
+            break;
+        case VideoReferenceKind::kAudio:
+            if (!policy)
+                throw std::runtime_error(
+                    "loaded family does not provide a reference-media decode policy");
+            reference.audio = read_audio_file(argument.path, *policy);
+            break;
+        }
+        request.references.push_back(std::move(reference));
+    }
+    return request;
+}
+
+nlohmann::json write_generated_video(const VideoResult& result, const std::string& path) {
+    if (result.frames.pixels.empty() && result.frames.height == 0 && result.frames.width == 0 &&
+        result.frames.channels == 3 && result.frames.num_frames == 0 &&
+        result.audio.samples.empty() && result.fps == 0) {
+        return {{"worker", true}};
+    }
+    validate_image_result(result.frames);
+    if (result.fps <= 0)
+        throw std::runtime_error("video result has a non-positive frame rate");
+    if (!result.audio.samples.empty()) {
+        if (result.audio.sample_rate <= 0 ||
+            (result.audio.num_channels != 1 && result.audio.num_channels != 2) ||
+            result.audio.samples.size() % static_cast<std::size_t>(result.audio.num_channels) !=
+                0) {
+            throw std::runtime_error("video result has invalid interleaved audio metadata");
+        }
+        require_finite(result.audio.samples, "video audio result");
+    }
+    if (is_mp4_path(path)) {
+        write_mp4(result, path);
+        return {{"output", path},
+                {"frames", result.frames.num_frames},
+                {"fps", result.fps},
+                {"height", result.frames.height},
+                {"width", result.frames.width},
+                {"audio_channels", result.audio.samples.empty() ? 0 : result.audio.num_channels},
+                {"audio_sample_rate", result.audio.samples.empty() ? 0 : result.audio.sample_rate}};
+    }
+
+    auto payload = write_video(result.frames, path);
+    payload["fps"] = result.fps;
+    if (!result.audio.samples.empty()) {
+        const fs::path audio_path = fs::path(path) / "audio.wav";
+        io::write_wav(result.audio, audio_path.string());
+        payload["audio"] = audio_path.string();
+    }
+    return payload;
 }
 
 const char* event_kind_name(SpeechSessionEventKind kind) {
@@ -742,17 +843,17 @@ Command parse_args(int argc, char** argv) {
     if (name == "help") {
         if (argc != 2)
             throw std::invalid_argument("help does not accept arguments");
-        return {CommandKind::kHelp, name, {}, {}, {}, {}, {}, 0, {}, false};
+        return {CommandKind::kHelp, name, {}, {}, {}, {}, {}, {}, 0, {}, false};
     }
     if (name == "version") {
         if (argc != 2)
             throw std::invalid_argument("version does not accept arguments");
-        return {CommandKind::kVersion, name, {}, {}, {}, {}, {}, 0, {}, false};
+        return {CommandKind::kVersion, name, {}, {}, {}, {}, {}, {}, 0, {}, false};
     }
     if (name == "inspect") {
         if (argc != 3 || std::string(argv[2]).empty())
             throw std::invalid_argument("inspect requires exactly one BUNDLE path");
-        return {CommandKind::kInspect, name, argv[2], {}, {}, {}, {}, 0, {}, false};
+        return {CommandKind::kInspect, name, argv[2], {}, {}, {}, {}, {}, 0, {}, false};
     }
 
     const auto spec = command_specs().find(name);
@@ -761,7 +862,7 @@ Command parse_args(int argc, char** argv) {
     if (argc < 3 || std::string(argv[2]).empty())
         throw std::invalid_argument(name + " requires a BUNDLE path");
 
-    Command command{spec->second.kind, name, argv[2], {}, {}, {}, {}, 0, {}, false};
+    Command command{spec->second.kind, name, argv[2], {}, {}, {}, {}, {}, 0, {}, false};
     for (int index = 3; index < argc; ++index) {
         const std::string option = argv[index];
         if (option == "--task") {
@@ -811,6 +912,16 @@ Command parse_args(int argc, char** argv) {
         }
         if (option == "--input" && command.kind == CommandKind::kTranscribeBatch) {
             command.inputs.push_back(take_value(argc, argv, index, option));
+            continue;
+        }
+        if (option == "--reference-image" || option == "--reference-video" ||
+            option == "--reference-audio") {
+            VideoReferenceKind kind = VideoReferenceKind::kImage;
+            if (option == "--reference-video")
+                kind = VideoReferenceKind::kVideo;
+            else if (option == "--reference-audio")
+                kind = VideoReferenceKind::kAudio;
+            command.video_references.push_back({kind, take_value(argc, argv, index, option)});
             continue;
         }
         if (command.options.count(option) != 0)
@@ -1404,8 +1515,22 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
         return EXIT_SUCCESS;
     }
     case CommandKind::kGenerateVideo: {
-        const std::string directory = require_option(command, "--output");
-        write_json(output, write_video(generate_image(command, task), directory));
+        const std::string path = require_option(command, "--output");
+        const bool structured = has_option(command, "--first-frame") ||
+                                has_option(command, "--last-frame") ||
+                                !command.video_references.empty();
+        if (has_option(command, "--image") && structured)
+            throw std::invalid_argument("--image cannot be combined with video reference inputs");
+        if (auto* generator = dynamic_cast<IVideoGeneration*>(&task);
+            generator && !has_option(command, "--image")) {
+            auto request = video_request(command, *generator);
+            write_json(output, write_generated_video(generator->generate_video(request), path));
+        } else {
+            if (structured)
+                throw std::invalid_argument(
+                    "the loaded family does not accept video reference inputs");
+            write_json(output, write_video(generate_image(command, task), path));
+        }
         return EXIT_SUCCESS;
     }
     case CommandKind::kSolve: {
@@ -1669,6 +1794,10 @@ void print_usage(std::ostream& output) {
               "  [--kv-cache-size BYTES|GB|GiB]\n\n"
               "TensorRT-RTX runtime options:\n"
               "  [--runtime-cache PATH] [--cuda-graphs]\n\n"
+              "Video generation options:\n"
+              "  --prompt TEXT --output OUTPUT.mp4 [--num-frames N] [--height N] [--width N]\n"
+              "  [--first-frame IMAGE] [--last-frame IMAGE]\n"
+              "  [--reference-image IMAGE|--reference-video VIDEO|--reference-audio AUDIO]...\n\n"
               "Task SDK options: [--task TASK_ID] [--set NAME=VALUE]...\n"
               "Without --runtime-root, plugins load from the installed runtime directory.\n";
 }

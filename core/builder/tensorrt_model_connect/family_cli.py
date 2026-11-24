@@ -346,7 +346,7 @@ def main(argv: Sequence[str], declarations: dict[str, dict] | None = None) -> in
         name = argument["name"]
         if argument["type"] == "path" and name in values:
             values[name] = [Path(value) for value in values[name]] if argument.get("action") == "append" else Path(values[name])
-    if argv[1] == "build":
+    if command["name"].split("-", 1)[0] == "build":
         from .device_memory import use_full_size_memory_pool
 
         use_full_size_memory_pool()

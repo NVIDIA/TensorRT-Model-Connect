@@ -43,7 +43,11 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#if defined(_WIN32)
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -4551,10 +4555,17 @@ Json compact_observation(const Json& value) {
 // public_task_call_wall timing as the one-shot benchmark path.
 int serve(const Arguments& arguments) {
     std::fflush(stdout);
+#ifdef _WIN32
+    const int protocol_fd = ::_dup(_fileno(stdout));
+    if (protocol_fd < 0 || ::_dup2(_fileno(stderr), _fileno(stdout)) < 0)
+        throw std::runtime_error("cannot reserve the serve protocol stream");
+    FILE* protocol = ::_fdopen(protocol_fd, "w");
+#else
     const int protocol_fd = ::dup(STDOUT_FILENO);
     if (protocol_fd < 0 || ::dup2(STDERR_FILENO, STDOUT_FILENO) < 0)
         throw std::runtime_error("cannot reserve the serve protocol stream");
     FILE* protocol = ::fdopen(protocol_fd, "w");
+#endif
     if (protocol == nullptr)
         throw std::runtime_error("cannot open the serve protocol stream");
     const auto emit = [protocol](const Json& value) {

@@ -9,6 +9,7 @@
 #include "trtmc/task.h"
 
 #include <cstdint>
+#include <string>
 
 namespace trtmc {
 
@@ -18,6 +19,8 @@ struct FamilyContext {
     const BundleReader& reader;
     IBackend& backend;
     std::uint64_t kv_cache_size_bytes{0};
+    std::string runtime_cache_path;
+    bool cuda_graphs{false};
 };
 
 using CreateFamilyFn = ITask* (*)(const FamilyContext& context);

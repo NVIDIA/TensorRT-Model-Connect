@@ -25,13 +25,18 @@ extern "C" int trtmc_family_cli_v1(const char* handler, const char* values_json,
 #else
 
 #include "cli/family_cli.h"
+#include "runtime/platform/dynamic_library.h"
 
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <sstream>
+#if defined(_WIN32)
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 #include <vector>
 
 namespace {
@@ -123,7 +128,7 @@ void descriptor_contract(const fs::path& root, const fs::path& fixture) {
           "unknown declared-family command never falls back");
     check(run(executable, {"trtmc", "fixture", "echo", "value"}).status == 1,
           "execution alone requires the family DSO");
-    fs::copy_file(fixture, root / "libtrtmc_cli_fixture.so");
+    fs::copy_file(fixture, root / trtmc::internal::dynamic_library_filename("trtmc_cli_fixture"));
     const auto typed =
         run(executable, {"trtmc", "fixture", "echo", "value", "--count=-3", "--ratio", "0.25",
                          "--enabled", "false", "--switch", "--tag", "one", "--tag=two"});
@@ -259,7 +264,8 @@ void installation_contract(const fs::path& root, const fs::path& fixture) {
         fs::create_directories(executable.parent_path());
         write_json(prefix / "share/trtmc/families/fixture/cli.json", declaration());
         fs::create_directories(prefix / libdir);
-        fs::copy_file(fixture, prefix / libdir / "libtrtmc_cli_fixture.so");
+        fs::copy_file(fixture, prefix / libdir /
+                                   trtmc::internal::dynamic_library_filename("trtmc_cli_fixture"));
         check(run(executable, {"trtmc", "fixture", "echo", "installed"}).status == 0,
               "standard installation finds share declarations and the installed family library");
         write_json(prefix / "bin/families/fixture/cli.json", declaration());
@@ -292,7 +298,8 @@ void independent_owner_contract(const fs::path& root, const fs::path& fixture) {
                                                                {"choices", {"exact", "fast"}},
                                                                {"default", "exact"}}})}}})}};
     write_json(root / "families/another_owner/cli.json", owner);
-    fs::copy_file(fixture, root / "libtrtmc_cli_another_owner.so");
+    fs::copy_file(fixture,
+                  root / trtmc::internal::dynamic_library_filename("trtmc_cli_another_owner"));
     const auto defaults = run(executable, {"trtmc", "another_owner", "compose"});
     const auto selected =
         run(executable, {"trtmc", "another_owner", "compose", "--owner-policy", "fast"});
@@ -316,7 +323,12 @@ int main(int argc, char** argv) {
         std::cerr << "usage: test_family_cli FIXTURE_DSO\n";
         return 2;
     }
-    const auto root = fs::temp_directory_path() / ("trtmc-family-cli-" + std::to_string(getpid()));
+#if defined(_WIN32)
+    const auto pid = _getpid();
+#else
+    const auto pid = getpid();
+#endif
+    const auto root = fs::temp_directory_path() / ("trtmc-family-cli-" + std::to_string(pid));
     fs::create_directories(root);
     try {
         descriptor_contract(root, fs::absolute(argv[1]));

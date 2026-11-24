@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cuda_runtime_api.h>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -23,6 +24,7 @@ struct ModuleCreateOptions {
     std::shared_ptr<void> distributed_owner; // keeps communicator alive
     const char* runtime_cache_path{""};      // TensorRT-RTX JIT cache, optional
     bool cuda_graphs{false};                 // TensorRT-RTX whole-graph capture
+    std::int32_t optimization_profile{0};    // context profile selected by the family
 };
 
 struct ModuleExternalBinding {
@@ -58,6 +60,37 @@ class IBackend {
     virtual BackendDualProfileModules
     create_dual_profile_modules(const void* plan_data, size_t plan_size,
                                 const ModuleCreateOptions& options) = 0;
+
+    // Optional TensorRT-RTX capability for multi-GiB bundle sections. The
+    // backend validates the exact file range and lets TensorRT stream it
+    // directly instead of materializing a duplicate host buffer.
+    virtual std::unique_ptr<ITrtModule>
+    create_module_from_file(const char* plan_path, std::uint64_t plan_offset,
+                            std::uint64_t plan_size, const ModuleCreateOptions& options,
+                            const std::vector<ModuleExternalBinding>& external_bindings,
+                            std::int64_t weight_streaming_budget_bytes, bool retain_engine,
+                            bool serial_execution_context) {
+        (void)plan_path;
+        (void)plan_offset;
+        (void)plan_size;
+        (void)options;
+        (void)external_bindings;
+        (void)weight_streaming_budget_bytes;
+        (void)retain_engine;
+        (void)serial_execution_context;
+        throw std::runtime_error("backend does not support file-backed TensorRT plans");
+    }
+
+    // Optional explicit lifetime for one process-shared runtime cache. A
+    // family releases its lease after all lazy modules have been destroyed.
+    virtual std::uint64_t acquire_runtime_cache_lease(const char* path) {
+        (void)path;
+        throw std::runtime_error("backend does not support runtime-cache leases");
+    }
+    virtual void release_runtime_cache_lease(std::uint64_t lease) {
+        (void)lease;
+        throw std::runtime_error("backend does not support runtime-cache leases");
+    }
 
     // Backend identity written into the bundle header (currently "trt").
     virtual const char* name() const = 0;
