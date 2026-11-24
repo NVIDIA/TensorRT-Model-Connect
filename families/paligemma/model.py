@@ -8,6 +8,7 @@ from pathlib import Path
 from .checkpoint import CheckpointWeights
 from .config import ModelConfig, eos_token_ids, image_processing
 from .graph import build_decoder, build_vision
+from .quantization import QUANTIZATIONS, decoder_quantization
 from .tokenizer import load_tokenizer
 
 DEFAULT_SEQUENCE_CAPACITY = 1024
@@ -89,12 +90,15 @@ def build(request, writer):
     ):
         if value != default:
             raise ValueError(f"PaliGemma does not support a non-default {name}")
-    if request.quantization not in (None, "none"):
-        raise ValueError("PaliGemma builds the unquantized checkpoint")
+    quantization = request.quantization or "none"
+    if quantization not in ("none", *QUANTIZATIONS):
+        raise ValueError(f"PaliGemma quantization must be none or one of {QUANTIZATIONS}")
     precision = request.precision.lower()
     # FP16 is not qualified for the Gemma decoder; BF16 keeps the FP32 exponent range.
     if precision not in ("fp32", "bf16"):
         raise ValueError("PaliGemma precision must be fp32 or bf16")
+    if quantization != "none" and precision != "bf16":
+        raise ValueError("PaliGemma quantization builds a BF16 decoder; use --precision bf16")
     root = Path(request.model_dir)
     config = ModelConfig.from_dir(root)
     capacity = (DEFAULT_SEQUENCE_CAPACITY if request.max_sequence_length is None
@@ -106,13 +110,17 @@ def build(request, writer):
     eos = eos_token_ids(root, config.raw)
     asset, tokens = load_tokenizer(root, config.image_token_id, config.text.vocab_size)
     weights = CheckpointWeights(root)
+    if quantization != "none":
+        # Refuses an already-quantized checkpoint before the tensor check names its extra scales.
+        quant = decoder_quantization(config.text, weights, quantization)
     _check_tensors(weights, config)
 
     writer.set_header(family="paligemma", task=request.task, backend=request.backend)
     writer.add_bytes("vision.plan", build_vision(
         config, weights, precision=precision, verbose=request.verbose))
     writer.add_bytes("decoder.plan", build_decoder(
-        config, weights, capacity, precision=precision, verbose=request.verbose))
+        config, weights, capacity, precision=precision, verbose=request.verbose,
+        quantization=None if quantization == "none" else quant))
     with writer.open_section("embeddings.f32") as output:
         output.write(weights["text.embed_tokens.weight"].astype("<f4", copy=False).tobytes())
     writer.add_bytes("tokenizer.bpe", asset)

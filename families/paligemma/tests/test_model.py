@@ -118,7 +118,7 @@ class _Writer:
     ({"video_num_frames": 4}, ValueError),
     ({"fp32_layers": (0,)}, ValueError),
     ({"mtp_seq_len": 2}, ValueError),
-    ({"quantization": "fp8"}, ValueError),
+    ({"quantization": "int8"}, ValueError),
     ({"precision": "int8"}, ValueError),
     ({"precision": "fp16"}, ValueError),
 ])
