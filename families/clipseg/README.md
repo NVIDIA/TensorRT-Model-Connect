@@ -17,7 +17,8 @@ selection with `-DTRTMC_BUILD_FAMILIES=clipseg` fails at configuration time when
 ICU is absent. Default builds may skip the optional family; explicitly building
 `trtmc_model_clipseg` then reports the missing prerequisite.
 
-Reference preprocessing requires Pillow 13.x. Native resizing follows its
+Reference preprocessing requires Pillow 13.x bilinear filtering (resample=2).
+Native resizing follows its
 shape-dependent pass order, including vertical-first filtering for strongly
 anisotropic downsampling, with byte rounding between passes. The native tests
 include independent Pillow 13 pixel goldens and a tall-image allocation bound.

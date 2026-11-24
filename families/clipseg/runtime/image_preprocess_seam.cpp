@@ -19,7 +19,7 @@ namespace trtmc {
 namespace {
 
 // Pillow's bilinear resize, reproduced coefficient for coefficient: the
-// reference processor resamples with PIL (resample=3), and a float bilinear or
+// reference processor resamples with PIL (resample=2), and a float bilinear or
 // a Catmull-Rom cubic lands a few least-significant bits away on every pixel,
 // which is enough to move the last digits of a cosine.
 constexpr std::int32_t kPillowPrecisionBits = 22;

@@ -6,6 +6,7 @@
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -13,12 +14,54 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <new>
 #include <nlohmann/json.hpp>
 #include <thread>
 
 namespace {
+constexpr int kSide = 32;
+constexpr std::size_t kMaskCount = kSide * kSide;
+struct CopyProbe {
+    std::atomic<bool> entered{false}, contender_ready{false}, contender_entered{false};
+    std::atomic<bool> overlap{false};
+};
+thread_local CopyProbe* pending_copy = nullptr;
+
+void observe_copy_allocation() {
+    auto& probe = *pending_copy;
+    pending_copy = nullptr;
+    probe.entered = true;
+    while (!probe.contender_ready.load())
+        std::this_thread::yield();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    while (!probe.contender_entered.load() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    probe.overlap = probe.contender_entered.load();
+}
+} // namespace
+
+// Observe the real result-vector allocation, after the mask backend returns and
+// before its bytes are copied. Thread-local output avoids races in broken-lock
+// negative controls; the second request entering here is itself the violation.
+void* operator new(std::size_t size) {
+    auto* memory = std::malloc(size ? size : 1);
+    if (!memory)
+        throw std::bad_alloc();
+    if (pending_copy && size == kMaskCount * sizeof(float))
+        observe_copy_allocation();
+    return memory;
+}
+void operator delete(void* memory) noexcept {
+    std::free(memory);
+}
+void operator delete(void* memory, std::size_t) noexcept {
+    std::free(memory);
+}
+
+namespace {
 struct Calls {
     std::atomic<int> active{0}, overlaps{0};
+    CopyProbe* copy_probe = nullptr;
 };
 
 class Module final : public trtmc::ITrtModule {
@@ -28,10 +71,13 @@ class Module final : public trtmc::ITrtModule {
         // Per-thread storage avoids a data race even in the unfixed pipeline;
         // the overlap counter independently detects broken engine transactions.
         static thread_local float output;
+        static thread_local std::array<float, kMaskCount> masks;
         if (text_) {
             if (calls_.active.fetch_add(1) != 0)
                 ++calls_.overlaps;
             output = static_cast<const int32_t*>(inputs.at("input_ids").data)[0];
+            if (calls_.copy_probe && output == 13.0F)
+                calls_.copy_probe->contender_entered = true;
         } else {
             output = *static_cast<const float*>(inputs.at("conditional_embeddings").data) +
                      *static_cast<const float*>(inputs.at("pixel_values").data);
@@ -39,6 +85,13 @@ class Module final : public trtmc::ITrtModule {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         if (!text_)
             --calls_.active;
+        if (!text_) {
+            masks.fill(output);
+            if (calls_.copy_probe &&
+                *static_cast<const float*>(inputs.at("conditional_embeddings").data) == 12.0F)
+                pending_copy = calls_.copy_probe;
+            return {{"masks", trtmc::Tensor{masks.data(), {kSide, kSide}, trtmc::DType::kFloat32}}};
+        }
         return {{text_ ? "conditional_embeddings" : "masks",
                  trtmc::Tensor{&output, {1}, trtmc::DType::kFloat32}}};
     }
@@ -101,7 +154,7 @@ void write_bundle(const std::filesystem::path& path) {
     const std::string tokenizer =
         R"json({"version":"1.0","truncation":null,"padding":null,"added_tokens":[],"normalizer":{"type":"Sequence","normalizers":[{"type":"NFC"},{"type":"Replace","pattern":{"Regex":"\\s+"},"content":" "},{"type":"Lowercase"}]},"pre_tokenizer":{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":"<\\|startoftext\\|>|<\\|endoftext\\|>|'s|'t|'re|'ve|'m|'ll|'d|[\\p{L}]+|[\\p{N}]|[^\\s\\p{L}\\p{N}]+"},"behavior":"Removed","invert":true},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":true,"use_regex":true}]},"post_processor":null,"decoder":{"type":"ByteLevel","add_prefix_space":true,"trim_offsets":true,"use_regex":true},"model":{"type":"BPE","dropout":null,"unk_token":null,"continuing_subword_prefix":null,"end_of_word_suffix":"</w>","fuse_unk":false,"byte_fallback":false,"vocab":{"a":0,"c":1,"f":2,"i":3,"©":4,"¿":5,"Ã":6,"Ì":7,"Î":8,"Ï":9,"ĥ":10,"ĩ":11,"a</w>":12,"c</w>":13,"f</w>":14,"i</w>":15,"©</w>":16,"¿</w>":17,"Ã</w>":18,"Ì</w>":19,"Î</w>":20,"Ï</w>":21,"ĥ</w>":22,"ĩ</w>":23},"merges":[]}})json";
     const std::string config =
-        R"({"image_size":1,"image_mean":[0,0,0],"image_std":[1,1,1],"max_text_len":16,"projection_dim":1})";
+        R"({"image_size":32,"image_mean":[0,0,0],"image_std":[1,1,1],"max_text_len":16,"projection_dim":1})";
     const std::vector<std::pair<std::string, std::string>> sections{{"runtime.json", config},
                                                                     {"tokenizer.json", tokenizer},
                                                                     {"text.plan", "t"},
@@ -123,6 +176,29 @@ void write_bundle(const std::filesystem::path& path) {
     file << json << payload;
     if (!file)
         throw std::runtime_error("cannot write concurrency fixture");
+}
+
+bool copy_is_serialized(trtmc::ITextPromptedSegmentation& pipeline, Calls& calls) {
+    CopyProbe probe;
+    calls.copy_probe = &probe;
+    const float pixels[] = {0, 0, 0};
+    std::atomic<bool> first_completed{false};
+    std::thread first([&] {
+        pipeline.segment_prompted_text(pixels, 1, 1, "a");
+        first_completed = true;
+    });
+    std::thread contender([&] {
+        while (!probe.entered.load() && !first_completed.load())
+            std::this_thread::yield();
+        if (!probe.entered.load())
+            return;
+        probe.contender_ready = true;
+        pipeline.segment_prompted_text(pixels, 1, 1, "c");
+    });
+    first.join();
+    contender.join();
+    calls.copy_probe = nullptr;
+    return probe.entered && probe.contender_entered && !probe.overlap;
 }
 } // namespace
 
@@ -152,13 +228,18 @@ int main() {
                 const auto result =
                     pipeline->segment_prompted_text(pixels, 1, 1, first ? "a" : "c");
                 const float expected = (first ? 12.0F : 13.0F) + value;
-                if (result.masks.size() != 1 || std::abs(result.masks[0] - expected) > 1e-6F)
+                if (result.masks.size() != kMaskCount ||
+                    std::abs(result.masks[0] - expected) > 1e-6F)
                     ++failures;
             }
         });
     start = true;
     for (auto& thread : threads)
         thread.join();
+    if (!copy_is_serialized(*pipeline, backend.calls)) {
+        std::cerr << "another request entered before the final mask copy\n";
+        ++failures;
+    }
     std::filesystem::remove_all(directory);
     if (failures || backend.calls.active || backend.calls.overlaps) {
         std::cerr << "concurrent engine transactions overlapped or mixed request results\n";
