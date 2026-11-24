@@ -49,6 +49,8 @@ def _case_index() -> dict[str, tuple[Path, dict, dict]]:
 
 
 CASES = _case_index()
+# Names that select this family explicitly: the family, its manifests and its cases.
+OWN_NAMES = frozenset({FAMILY, *CASES, *(manifest["name"] for _, manifest, _ in CASES.values())})
 
 
 def _selected_cases(config) -> tuple[list[str], bool]:
@@ -73,6 +75,11 @@ def _selected_cases(config) -> tuple[list[str], bool]:
                        or manifest["name"] in model_filters)
         if model_match and (not testcase_filters or name in testcase_filters):
             selected.append(name)
+    if not selected and model_filters & OWN_NAMES:
+        # Pytest would skip the empty parametrization, and the run would pass without a test.
+        raise pytest.UsageError(
+            f"no {FAMILY} testcase matches the explicit selection (--e2e-testcase "
+            f"{', '.join(sorted(testcase_filters))}); its testcases are {', '.join(sorted(CASES))}")
     return sorted(selected), True
 
 
@@ -399,9 +406,12 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
         official_psnrs = _frame_psnrs(references["fp16"], exact)
         print(f"{FAMILY} {case_name} official fp16 vs official fp32: "
               f"min {min(official_psnrs):.2f} mean {np.mean(official_psnrs):.2f} dB")
-        # FP16 tactic choices move this between engine builds, even of the same source:
-        # seven healthy builds measured 0.14-1.65 dB, four builds with plain FP16 linear and
-        # convolution layers (FP16 accumulation) 2.72-3.23 dB; the bound lies between them.
+        # The bound (2.2 dB, thresholds/svd-xt-fp16*.json) lies between healthy FP16 builds and
+        # builds whose linear and convolution layers accumulate in FP16, the defect this check
+        # catches; FP16 tactic choices move the shortfall between builds of the same source.
+        # Calibration on svd-xt-fp16-l0: healthy builds -0.17 to 1.71 dB over nine runs (-0.17,
+        # 0.14, 0.42, 0.43, 0.71, 0.99, 1.37, 1.65 and 1.71), builds with FP16-accumulating
+        # layers 2.72 to 3.23 dB over four runs (2.72, 3.05, 3.16 and 3.23).
         shortfall = float(np.mean(official_psnrs)) - float(np.mean(native_psnrs))
         checks.append(_check_row(
             "mean_psnr_shortfall_vs_official_fp16",
