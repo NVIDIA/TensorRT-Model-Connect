@@ -1101,6 +1101,8 @@ endif()
 
 if(TRTMC_BUILD_TESTS AND TRTMC_HAS_TVM_FFI)
   add_executable(test_byok_shape_spec core/runtime/tests/test_byok_shape_spec.cpp)
+  target_compile_definitions(test_byok_shape_spec PRIVATE
+    TRTMC_HAS_TRT=1 TRTMC_HAS_TVM_FFI=1)
   target_include_directories(test_byok_shape_spec SYSTEM PRIVATE
     ${TRTMC_TRT_INCLUDE_DIR}
     ${CUDAToolkit_INCLUDE_DIRS}
