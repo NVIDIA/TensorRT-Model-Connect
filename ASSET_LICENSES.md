@@ -34,6 +34,7 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 
 - `families/layoutlmv3/tests/data/test_img.jpeg`
 - `families/dinov3/tests/data/test_img.jpeg`
+- `families/dpt/tests/data/test_img.jpeg`
 - `families/gemma3n/tests/data/test_img.jpeg`
 - `families/internvl/tests/data/test_img.jpeg`
 - `families/lance/tests/data/test_img.jpeg`

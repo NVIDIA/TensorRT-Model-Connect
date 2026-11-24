@@ -1,0 +1,32 @@
+{
+  "name": "dpt-hybrid-midas-fp16",
+  "hf_id": "Intel/dpt-hybrid-midas",
+  "hf_revision": "11eaf7a1cf4bd70740697dbc216f98980c0aeb03",
+  "bundle": "dpt-hybrid-midas-fp16.bundle",
+  "family": "dpt",
+  "task": "monocular_depth",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "dpt-hybrid-midas-fp16-landscape",
+      "premerge": false,
+      "test_image": "test_img.jpeg",
+      "transpose": false,
+      "min_depth_correlation": 0.99999,
+      "max_depth_relative_error": 0.05,
+      "max_mean_depth_relative_error": 0.002
+    },
+    {
+      "name": "dpt-hybrid-midas-fp16-portrait",
+      "premerge": false,
+      "test_image": "test_img.jpeg",
+      "transpose": true,
+      "min_depth_correlation": 0.99999,
+      "max_depth_relative_error": 0.05,
+      "max_mean_depth_relative_error": 0.002
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}
