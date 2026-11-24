@@ -258,7 +258,7 @@ if(TRTMC_BUILD_BACKEND_RTX)
     )
   endif()
   find_library(TRTMC_RTX_LIBRARY
-    NAMES tensorrt_rtx tensorrt_rtx_1_6
+    NAMES tensorrt_rtx tensorrt_rtx_1_7 tensorrt_rtx_1_6
     PATHS "${TRTMC_RTX_LIBRARY_DIR}"
     NO_DEFAULT_PATH
   )
@@ -270,7 +270,7 @@ if(TRTMC_BUILD_BACKEND_RTX)
 
   if(WIN32)
     find_file(TRTMC_RTX_RUNTIME_DLL
-      NAMES tensorrt_rtx_1_6.dll tensorrt_rtx.dll
+      NAMES tensorrt_rtx_1_7.dll tensorrt_rtx_1_6.dll tensorrt_rtx.dll
       PATHS "${TRTMC_RTX_RUNTIME_DIR}"
       NO_DEFAULT_PATH
     )
