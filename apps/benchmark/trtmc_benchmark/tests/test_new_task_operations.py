@@ -47,6 +47,10 @@ def test_audio_tokens_and_depth_requests_name_their_one_input(tmp_path):
     assert depth.request == {"image_path": str(tmp_path / "scene.jpeg")}
     tokens = resolve_task_case("masked_text_to_token_scores", {"prompt": "MKT<mask>V"}, tmp_path)
     assert tokens.request == {"prompt": "MKT<mask>V"}
+    text = resolve_task_case("masked_text_to_token_scores", {"text": "Paris is [MASK]."}, tmp_path)
+    assert text.request == {"prompt": "Paris is [MASK]."}
+    with pytest.raises(BenchmarkError):
+        resolve_task_case("masked_text_to_token_scores", {"prompt": "a", "text": "b"}, tmp_path)
 
 
 def test_point_cloud_requests_carry_the_points_file_and_its_shape(tmp_path):
