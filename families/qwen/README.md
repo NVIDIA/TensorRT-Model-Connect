@@ -141,3 +141,24 @@ Reasons:
   adds 0.22 KL.
 - No non-finite logits or cache values (quality runs and 3 x 1056 stress tokens
   per engine).
+
+Re-check against the original precision (Qwen3-4B-Instruct-2507, NVFP4 MLP):
+the rule is that the NVFP4 KL against the PyTorch bf16 model must be at most
+about 2x the FP8 KL. Same setup as above, KL on a 2048-token and a 256-token
+build, one job per GPU, TensorRT 11.4. Decode is one token with a CUDA graph
+at position 100.
+
+| GPU | Build | Decode ms FP8 / NVFP4 (vs FP8) | KL fp16 engine | KL FP8 | KL NVFP4 (vs FP8) | WikiText ppl PyTorch / FP8 / NVFP4 | Non-finite |
+|---|---|---|---|---|---|---|---|
+| B200 | 2048 | 3.512 / 3.110 (1.13x) | 0.1081 | 0.0894 | 0.1749 (1.96x) | 21.30 / 23.32 / 24.62 | 0 |
+| B200 | 256 | 2.790 / 2.413 (1.16x) | 0.0018 | 0.0022 | 0.0714 (33x) | 21.30 / 21.29 / 21.96 | 0 |
+| B300 | 2048 | 3.506 / 3.147 (1.11x) | 0.0907 | 0.0897 | 0.1619 (1.81x) | 21.33 / 23.26 / 24.11 | 0 |
+| B300 | 256 | 2.835 / 2.513 (1.13x) | 0.0004 | 0.0023 | 0.0733 (32x) | 21.33 / 21.28 / 22.21 | 0 |
+
+The 2048 numbers are not a fair test: in the 2048-token build the fp16
+engine with nothing quantized is already 0.09 to 0.11 KL away from PyTorch, so
+the FP8 KL there is mostly that error and not quantization loss. In the
+256-token build the fp16 engine matches PyTorch (KL 0.0004 to 0.0018), FP8
+adds almost nothing, and NVFP4 MLP is 32x to 33x the FP8 KL and raises
+perplexity by 0.7 to 0.9. NVFP4 is faster (1.11x to 1.16x of FP8 at decode)
+but fails the quality rule, so it stays not shipped.

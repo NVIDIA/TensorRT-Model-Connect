@@ -10,6 +10,30 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def normalize_target_layers(raw: dict) -> dict:
+    """Canonicalize Nemotron-H's newer target layer names without editing the checkpoint.
+
+    The explicit sequence describes the target only. MTP layers are a separate
+    model and must not contribute to its depth. Existing explicit depth and any
+    conflicting representations remain visible to the topology validator.
+    """
+    if raw.get("model_type") != "nemotron_h":
+        return raw
+    aliases = {"linear_attention": "mamba", "full_attention": "attention"}
+    updated = {}
+    for key in ("layer_types", "layers_block_type"):
+        seq = raw.get(key)
+        if isinstance(seq, list) and all(isinstance(kind, str) for kind in seq) and any(
+            kind in aliases for kind in seq
+        ):
+            updated[key] = [aliases.get(kind, kind) for kind in seq]
+    if not updated:
+        return raw
+    if not any(key in raw for key in ("num_hidden_layers", "num_layers", "n_layer", "n_layers")):
+        updated["num_hidden_layers"] = len(next(iter(updated.values())))
+    return {**raw, **updated}
+
+
 @dataclass
 class ModelConfig:
     """Parsed model architecture from HF config.json."""
@@ -51,7 +75,7 @@ class ModelConfig:
 
     @staticmethod
     def from_json(text: str) -> ModelConfig:
-        d = json.loads(text)
+        d = normalize_target_layers(json.loads(text))
 
         # Some multimodal configs nest decoder fields under "text_config".
         # Merge text_config into top level so standard key lookup works.

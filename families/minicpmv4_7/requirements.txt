@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Provider tokenizer and chat template at build time; official Torch oracle in the family E2E.
+# transformers 5.2.0 has no MiniCPM-V 4.7. huggingface_hub and tokenizers are pinned to the versions the family was
+# validated with; numpy stays in the repository image's range.
+transformers==5.22.2
+huggingface_hub==1.33.0
+tokenizers==0.23.1
+numpy>=1.24,<2.5

@@ -275,6 +275,12 @@ def test_a_local_install_path_does_not_split_the_dependency_digest(monkeypatch):
     assert first == second != third
 
 
+def _named_as_given(monkeypatch):
+    """A run of the named profiles as given (selection is tested on its own): these environments have no catalog."""
+    monkeypatch.setattr("trtmc_aiperf_qual.selection.machine_run_list",
+                        lambda environment, names=None, ignore_exclusions=False: (list(names or []), []))
+
+
 def test_a_machines_environment_names_no_run_ledger_and_run_all_takes_one(tmp_path, monkeypatch, capsys):
     from trtmc_aiperf_qual import cli
 
@@ -289,6 +295,7 @@ def test_a_machines_environment_names_no_run_ledger_and_run_all_takes_one(tmp_pa
         return []
 
     (tmp_path / "env.yaml").write_text(f"repo: {tmp_path}\n")
+    _named_as_given(monkeypatch)
     monkeypatch.setattr("trtmc_aiperf_qual.models.resolve_model", lambda name, environment: {"model": name})
     monkeypatch.setattr("trtmc_aiperf_qual.campaign.run_all", run_all)
     monkeypatch.setattr("trtmc_aiperf_qual.campaign.write_plan", lambda *args, **kwargs: None)
@@ -298,13 +305,16 @@ def test_a_machines_environment_names_no_run_ledger_and_run_all_takes_one(tmp_pa
 
 
 def fragment_root(tmp_path, name, fragment, given, results, *, campaign="c1", host="h1", inputs=None,
-                  config_errors=()):
-    """One fragment's root: its plan (the profiles it was given) and results of each kind."""
+                  config_errors=(), excluded=()):
+    """One fragment's root: its plan (the profiles it was given), its exclusions and results of each kind."""
     path = tmp_path / name
     path.mkdir()
     (path / "plan.json").write_text(json.dumps({
         "selected": list(given), "config_errors": [{"profile": item, "reason": "broken"} for item in config_errors],
         "campaign": campaign, "fragment": fragment, "host": host, "inputs": inputs or {"harness": "x"}}))
+    if excluded:
+        (path / "excluded.json").write_text(json.dumps([{"profile": item, "task": "t", "reason": "128 GB",
+                                                         "source": "config/platforms/small.yaml"} for item in excluded]))
     for profile, kind in results.items():
         (path / profile).mkdir()
         if kind == "build-failed":
@@ -344,6 +354,10 @@ def test_fragments_merge_when_every_profile_has_one_accepted_result(tmp_path):
 
     assert split.fragment_merge_check(manifest, roots) == []
     assert split.accepted_roots(manifest, roots) == [first, retry, broken]
+    # A named profile an exclusion left out has no result to give; a foreign exclusion claims nothing.
+    left_out = fragment_root(tmp_path, "left-out", "g-e-1", [], {}, excluded=["e", "z"])
+    assert split.fragment_merge_check({**manifest, "expected": [*manifest["expected"], "e"],
+                                       "accepted": [*manifest["accepted"], "g-e-1"]}, [*roots, left_out]) == []
 
 
 def test_fragments_do_not_merge_when_a_result_is_missing_doubled_foreign_or_unlike(tmp_path):
@@ -383,6 +397,7 @@ def test_run_all_runs_a_fragment_in_its_given_order_and_records_it(tmp_path, mon
         seen.update(models=[item["model"] for item in models], keep_order=kwargs["keep_order"])
         return []
 
+    _named_as_given(monkeypatch)
     monkeypatch.setattr("trtmc_aiperf_qual.models.resolve_model", lambda name, environment: {"model": name})
     monkeypatch.setattr("trtmc_aiperf_qual.campaign.run_all", run_all)
     monkeypatch.setattr(split, "campaign_inputs", lambda environment: {"harness": "x"})

@@ -208,7 +208,24 @@ def preload_inputs(request: Mapping[str, Any]) -> None:
 
 
 def release_inputs() -> None:
+    """After a request (outside its timer): drop its decoded input files and release cached device memory."""
     _DECODED.clear()
+    release_cached_device_memory()
+
+
+def release_cached_device_memory() -> None:
+    """On a GPU that shares its memory with the CPU (DGX Spark, Jetson Thor), give the system back what PyTorch's
+    caching allocator keeps unused once that exceeds a quarter of the memory. The cache keeps every block it ever
+    reserved: after hundreds of requests of different sizes, Cosmos3-Edge FP32 held 79.5 GiB reserved on DGX Spark,
+    and its largest OCRBench image (50.8 GiB in a fresh process) then took the reservation to 111 GiB and the
+    system out of memory. Smaller caches are kept, so requests of similar sizes reuse them as before."""
+    if not torch.cuda.is_available():
+        return
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    if not properties.is_integrated:
+        return
+    if torch.cuda.memory_reserved() - torch.cuda.memory_allocated() > properties.total_memory // 4:
+        torch.cuda.empty_cache()
 
 
 def load_image(path: str):

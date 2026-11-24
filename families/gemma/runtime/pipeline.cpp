@@ -23,6 +23,14 @@ namespace trtmc {
 
 namespace {
 
+// The next decode step would store one more K/V row. A full cache ends the
+// generation, as max_new_tokens does, instead of dropping the prompt's rows.
+// A state without a length limit (max_length() < 0) never fills.
+bool kv_cache_full(const GemmaInferenceState& state) {
+    const int32_t max_length = state.max_length();
+    return max_length >= 0 && state.position() >= max_length;
+}
+
 bool contains_boxed_answer(const std::string& text) {
     const std::string marker = "\\boxed{";
     const auto start = text.find(marker);
@@ -91,8 +99,13 @@ GemmaTextGenerationPipeline::GemmaTextGenerationPipeline(
          config_.draft_mask_token_id >= config_.vocab_size ||
          !prefill_module().has_input("logits_indices") ||
          !prefill_module().has_output("target_features") ||
-         !assistant_->has_input("target_features") || !assistant_->has_output("draft_logits") ||
-         ((config_.draft_markov || config_.draft_eagle) &&
+         !assistant_->has_input("target_features") ||
+         (config_.draft_eagle_tree
+              ? (!config_.draft_eagle || !assistant_->has_input("branch_tokens") ||
+                 !assistant_->has_input("branch_depth") || !assistant_->has_output("branch_ids") ||
+                 !assistant_->has_output("branch_log_probs"))
+              : !assistant_->has_output("draft_logits")) ||
+         ((config_.draft_markov || (config_.draft_eagle && !config_.draft_eagle_tree)) &&
           !assistant_->has_output("proposal_ids")) ||
          (config_.draft_markov && !assistant_->has_output("proposal_confidence"))))
         throw std::runtime_error("Gemma4 native block draft has an invalid paired contract");
@@ -458,6 +471,8 @@ int32_t GemmaTextGenerationPipeline::run_decode_loop(
         // The sampled token is already the final requested output. Do not
         // execute a decoder step whose logits cannot be consumed.
         if (step + 1 >= max_new_tokens)
+            break;
+        if (kv_cache_full(*state_))
             break;
         run_step(result.token_id, logits);
     }

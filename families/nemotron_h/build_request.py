@@ -41,6 +41,7 @@ class BuildRequest:
     verbose: bool = False
     graph_transform: GraphTransform | None = None
     quantization: str | None = None
+    edge_builder_python: Path | None = None
 
     def __post_init__(self) -> None:
         if not self.precision:
@@ -94,4 +95,5 @@ def coerce_request(request: object) -> BuildRequest:
     names = {field.name for field in fields(BuildRequest)}
     if unknown := set(vars(request)) - names - set(unsupported):
         raise ValueError(f"unknown nemotron_h build inputs: {sorted(unknown)}")
-    return BuildRequest(**{name: getattr(request, name) for name in names})
+    values = {name: getattr(request, name) for name in names if name != "edge_builder_python"}
+    return BuildRequest(**values, edge_builder_python=getattr(request, "edge_builder_python", None))

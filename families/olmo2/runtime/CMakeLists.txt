@@ -60,3 +60,20 @@ if(TRTMC_BUILD_TESTS)
   add_dependencies(test_olmo2_task_config test_olmo2_sdk_c test_olmo2_sdk_cpp)
 
 endif()
+
+if(TRTMC_BUILD_TESTS)
+  # CPU-backed KV-cache test: CUDA calls are served from host memory, and an
+  # overlapping copy fails the test.
+  add_executable(test_olmo2_kv_cache
+    ${PROJECT_SOURCE_DIR}/families/olmo2/tests/cpp/test_kv_cache.cpp
+    kv_cache.cpp
+    ${PROJECT_SOURCE_DIR}/core/runtime/primitives/device_tensor.cpp
+  )
+  target_include_directories(test_olmo2_kv_cache PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_olmo2_kv_cache SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_olmo2_kv_cache PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME olmo2_kv_cache COMMAND test_olmo2_kv_cache)
+endif()

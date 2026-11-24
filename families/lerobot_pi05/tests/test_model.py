@@ -499,12 +499,89 @@ def test_tokenizer_falls_back_to_the_pinned_hub_revision(tmp_path, monkeypatch) 
         load_tokenizer_model(checkpoint)
 
 
+def test_family_cli_preserves_native_manifest_builds(tmp_path, monkeypatch) -> None:
+    from ..edge_llm import cli
+
+    (tmp_path / "config.json").write_text(json.dumps(_config()))
+    requests = []
+    monkeypatch.setattr(cli, "publish", requests.append)
+    base = {"model": str(tmp_path), "output": tmp_path / "policy.bundle"}
+    for options, expected in (({}, "bf16"), ({"precision": "fp32"}, "fp32"),
+                              ({"precision": "bf16", "quantization": "fp8"}, "bf16")):
+        assert cli.build(**base, **options) == 0
+        assert requests[-1].model_dir == tmp_path and requests[-1].precision == expected
+        assert requests[-1].quantization == options.get("quantization")
+        assert getattr(requests[-1], "pi05_policy_config", None) is None
+    for args in ({"precision": "fp16"}, {"precision": "fp32", "quantization": "fp8"},
+                 {"edge_builder_python": tmp_path}, {"pi05_policy_config": "pi05_libero", "quantization": "fp8"}):
+        with pytest.raises(ValueError):
+            cli.build(**base, **args)
+    assert len(requests) == 3
+
+
 def test_manifests_declare_the_public_tokenizer_copy() -> None:
-    # CI cannot authorize a new family's gated dependency from an untrusted PR manifest.
-    expected = [{"path": TOKENIZER_FILE, "url": PUBLIC_COPY + "?generation=1711547605575873"}]
+    # Additional public inputs are scoped to a named policy and exact checkpoint.
+    tokenizer = {"path": TOKENIZER_FILE, "url": PUBLIC_COPY + "?generation=1711547605575873"}
+    stats = "https://storage.googleapis.com/openpi-assets/checkpoints"
+    droid_frames = (
+        "https://huggingface.co/datasets/aractingi/droid_100_test/resolve/"
+        "ae1ae6519703520d5e78b11cadb00cc028499d7f/videos/chunk-000"
+    )
+    policies = {
+        "pi05-openpi-libero-fp16": (
+            "pi05_libero", "lerobot/pi05_libero_base", "5fcf06fc42b6717e22ab885fd381a096574b12c7",
+            [
+                ("pi05_libero_norm_stats.json",
+                 f"{stats}/pi05_libero/assets/physical-intelligence/libero/norm_stats.json"
+                 "?generation=1757354341826612"),
+            ],
+        ),
+        "pi05-openpi-droid-fp16": (
+            "pi05_droid", "lerobot/pi05_droid", "72824c0a93f00ce5bb8bedb7feb58953ba1da364",
+            [
+                ("pi05_droid_norm_stats.json",
+                 f"{stats}/pi05_droid/assets/droid/norm_stats.json?generation=1757354377575323"),
+                ("pi05_droid_exterior.mp4",
+                 f"{droid_frames}/observation.image.exterior_image_1_left/episode_000000.mp4"),
+                ("pi05_droid_wrist.mp4",
+                 f"{droid_frames}/observation.image.wrist_image_left/episode_000000.mp4"),
+            ],
+        ),
+    }
     manifests = sorted((Path(__file__).parent / "manifests").glob("*.json"))
-    assert manifests
+    assert policies.keys() <= {path.stem for path in manifests}
     for path in manifests:
         manifest = json.loads(path.read_text(encoding="utf-8"))
+        expected = [tokenizer]
+        if path.stem in policies:
+            policy, repo, revision, assets = policies[path.stem]
+            assert manifest["name"] == path.stem
+            assert manifest["pi05_policy_config"] == policy
+            assert (manifest["hf_id"], manifest["hf_revision"]) == (repo, revision)
+            expected.extend({"path": name, "url": url} for name, url in assets)
         assert manifest["external_files"] == expected, path.name
         assert "hf_dependencies" not in manifest, path.name
+
+
+def test_active_pi_runner_owns_sdk(tmp_path, monkeypatch):
+    import tensorrt_model_connect
+    from families.lerobot_pi05.edge_llm import builder
+
+    installed = tmp_path / "site-packages/tensorrt_model_connect"
+    runner = installed / "bin/trtmc"
+    runner.parent.mkdir(parents=True)
+    runner.touch()
+    standalone = tmp_path / "standalone"
+    receipt = Path("share/trtmc/edge-llm.json")
+    (standalone / receipt).parent.mkdir(parents=True)
+    (standalone / receipt).write_text('{"version":"0.12.0"}')
+    monkeypatch.setattr(tensorrt_model_connect.__spec__, "origin", str(installed / "__init__.py"))
+    monkeypatch.setattr(builder, "cmake_prefixes", lambda: [standalone])
+
+    # A native-only packaged runner cannot load an Edge bundle for the standalone DSO.
+    assert builder._sdk_prefix() == installed
+    (installed / receipt).parent.mkdir(parents=True)
+    (installed / receipt).write_text('{"version":"0.12.0"}')
+    assert builder._sdk_prefix() == installed
+    runner.unlink()
+    assert builder._sdk_prefix() == standalone
