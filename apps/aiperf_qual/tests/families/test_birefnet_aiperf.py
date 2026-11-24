@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-REPOSITORY = Path(__file__).resolve().parents[3]
+REPOSITORY = Path(__file__).resolve().parents[4]
 
 
 def test_birefnet_owns_its_binary_conversion_benchmark_and_native_loader(monkeypatch):

@@ -102,9 +102,10 @@ environment, the Task defaults, and the reports.
 ## Adding coverage
 
 - Add a weight or profile to the owning family's test manifest catalog.
-- Qualification derives from the catalog entry and its Task; put a family's
-  exceptions and benchmark definitions in
-  `families/<family>/tests/aiperf/<profile>.yaml`.
+- Qualification derives from the catalog entry and its Task; put a profile's
+  AIPerf exceptions and benchmark definitions in
+  `apps/aiperf_qual/config/models/<profile>.yaml`, and a profile no run can
+  qualify in `apps/aiperf_qual/config/exclusions.yaml`.
 - Add benchmark code only when a genuinely new public task interface needs a
   task adapter.
 

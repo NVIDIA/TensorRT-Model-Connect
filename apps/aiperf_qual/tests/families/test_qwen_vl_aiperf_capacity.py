@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The family's OCRBench benchmark bundles hold the prompt and the whole answer.
+"""The Qwen-VL OCRBench benchmark bundles hold the prompt and the whole answer.
 
 Qwen-VL generation stops when its KV cache is full, so each profile reserves its largest image, its
 chat template and the answer on top of the counted question tokens.
@@ -15,7 +15,7 @@ import pytest
 
 yaml = pytest.importorskip("yaml")
 
-AIPERF = Path(__file__).resolve().parent / "aiperf"
+AIPERF = Path(__file__).resolve().parents[2] / "config" / "models"  # the profiles' AIPerf settings
 MAX_PIXELS = 200704  # the image budget both sides use (the reference's processor_kwargs)
 MERGE = 2
 ANSWER_TOKENS = 128  # OCRBench's max_new_tokens

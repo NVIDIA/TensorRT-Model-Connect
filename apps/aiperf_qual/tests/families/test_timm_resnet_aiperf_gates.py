@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The family's ImageNet gate for its FP8 ResNet-50 profile."""
+"""The ImageNet gate of the FP8 ResNet-50 profile."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 
 yaml = pytest.importorskip("yaml")
 
-AIPERF = Path(__file__).resolve().parent / "aiperf"
+AIPERF = Path(__file__).resolve().parents[2] / "config" / "models"  # the profiles' AIPerf settings
 
 
 def test_the_fp8_resnet50_gets_twice_the_imagenet_margin() -> None:

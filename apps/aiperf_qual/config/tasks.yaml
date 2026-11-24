@@ -177,7 +177,7 @@ benchmarks:
   action_parity: {suite: action-parity, suite_definition: lerobot-act-observations-50, metric: action_parity,
                   gate: {max_error_of_range: 0.001}}
   # LeRobot action chunks (GR00T, pi0.5) on recorded LIBERO observations with the family's fixed flow noise on
-  # both sides (each family states its suite and its precision's gate: tests/aiperf), every observation.
+  # both sides (each profile states its suite and its precision's gate: config/models), every observation.
   action_chunk_parity: {suite: action-chunk-parity, metric: action_parity, gate: {max_error_of_range: 0.001}}
   # Structure prediction from the same noise as the native model (the family's suite): lDDT, aligned RMSD, pLDDT
   # and confidence against the native structure, the family's E2E gate.
@@ -237,7 +237,7 @@ tasks:
   # otherwise or needs a query/document role state `exclude`.
   text_to_embedding: *embed
 
-  # Features have no gold answer: each family states its conversion-parity benchmark (tests/aiperf).
+  # Features have no gold answer: each profile states its conversion-parity benchmark (config/models).
   image_features: &image_features
     performance: {output_grader: parity_numeric, output_grader_params: {min_cosine: 0.99}}
   image_to_token_and_pooled_features: *image_features
@@ -250,7 +250,7 @@ tasks:
   image_to_boxes:
     absolute: [{name: coco, request: {score_threshold: null}}]
     performance: {output_grader: parity_boxes}
-  # Open-vocabulary detection: the family states coco_prompted with its thresholds (tests/aiperf).
+  # Open-vocabulary detection: the profile states coco_prompted with its thresholds (config/models).
   image_text_to_boxes:
     absolute: [coco_prompted]
     performance: {output_grader: parity_boxes}
@@ -271,7 +271,7 @@ tasks:
   transcription_streaming:
     <<: *transcribe
     absolute: [librispeech_streaming]
-  speech_transcription: *transcribe  # a non-English model states its own test set (tests/aiperf)
+  speech_transcription: *transcribe  # a non-English model states its own test set (config/models)
 
   # Generative media are slow per request: fewer requests per run, still three runs for the CI.
   audio_generation: &generate_audio
@@ -357,7 +357,7 @@ tasks:
     # The catalog testcases are a few values, not the models' context: Perf times the first ETTh1 window.
     performance: {suite: {from_benchmark: etth1-mse}, output_grader: parity_numeric}
   series_to_point_forecast: *forecast
-  # Tasks whose native reference is the family's own Transformers model (tests/aiperf: reference.adapter).
+  # Tasks whose native reference is the family's own Transformers model (config/models: reference.adapter).
   audio_to_class_scores:
     absolute: [audioset]
     performance: {output_grader: parity_top1}

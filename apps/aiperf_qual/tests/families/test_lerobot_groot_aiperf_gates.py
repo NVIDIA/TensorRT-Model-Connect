@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The action-parity gates of the family's AIPerf profiles."""
+"""The action-parity gates of the LeRobot GR00T AIPerf profiles."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 
 yaml = pytest.importorskip("yaml")
 
-AIPERF = Path(__file__).resolve().parent / "aiperf"
+AIPERF = Path(__file__).resolve().parents[2] / "config" / "models"  # the profiles' AIPerf settings
 GRIPPER = {
     "gripper_component": -1,
     "outliers": {"max_fraction": 0.02, "gate": {"max_gripper_sign_changes": 1}},

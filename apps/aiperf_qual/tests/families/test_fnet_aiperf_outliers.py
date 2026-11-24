@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The family's encoder-parity outlier allowance for its FP16 profiles."""
+"""FNet's encoder-parity outlier allowance for its FP16 profiles."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import pytest
 yaml = pytest.importorskip("yaml")
 
 PROFILES = ("fnet-base",)
-AIPERF = Path(__file__).resolve().parent / "aiperf"
+AIPERF = Path(__file__).resolve().parents[2] / "config" / "models"  # the profiles' AIPerf settings
 
 
 @pytest.mark.parametrize("profile", PROFILES)

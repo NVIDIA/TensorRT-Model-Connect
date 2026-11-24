@@ -1111,15 +1111,15 @@ def test_reports_label_a_timing_normalized_per_audio_second(tmp_path):
     assert "40.000 per audio second</td><td>90.000 per audio second" in report_html._performance([item])
 
 
-def test_a_family_file_adds_an_outlier_allowance_to_a_shared_benchmark_gate(tmp_path):
+def test_a_profile_configuration_adds_an_outlier_allowance_to_a_shared_benchmark_gate(tmp_path):
     from trtmc_aiperf_qual.models import deep_merge, profile_override
 
-    family_file = tmp_path / "families" / "fam" / "tests" / "aiperf" / "enc.yaml"
-    family_file.parent.mkdir(parents=True)
-    family_file.write_text("benchmarks:\n  encoder_parity:\n"
-                           "    gate: {outliers: {max_fraction: 0.01, gate: {max_relative_l2: 0.04}}}\n")
+    definition = tmp_path / "config" / "models" / "enc.yaml"
+    definition.parent.mkdir(parents=True)
+    definition.write_text("benchmarks:\n  encoder_parity:\n"
+                          "    gate: {outliers: {max_fraction: 0.01, gate: {max_relative_l2: 0.04}}}\n")
     shared = {"encoder_parity": {"metric": "vector_parity", "gate": {"min_cosine": 0.999, "max_relative_l2": 0.02}}}
-    override = profile_override("enc", "fam", tmp_path, root=tmp_path / "config")
+    override = profile_override("enc", root=tmp_path / "config")
     gate = deep_merge(shared, override["benchmarks"])["encoder_parity"]["gate"]
     assert gate == {"min_cosine": 0.999, "max_relative_l2": 0.02,
                     "outliers": {"max_fraction": 0.01, "gate": {"max_relative_l2": 0.04}}}
