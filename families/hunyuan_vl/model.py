@@ -107,8 +107,9 @@ _ROLE_TOKENS = {
 
 def _added_tokens(tokenizer: dict, rows: int) -> dict:
     """Validate every token id against the embedding table and return the added tokens. The
-    reference gives an added token outside the base vocabulary its own id (the base entry count,
-    then one past the highest added id), so the file's ids must be those."""
+    reference numbers the added tokens outside the base vocabulary in order from the base entry
+    count (a base token registered again keeps its id and takes no number), so the file's ids
+    must be those."""
     model = tokenizer.get("model")
     vocab = model.get("vocab") if isinstance(model, dict) else None
     if not isinstance(vocab, dict) or not vocab:
@@ -120,7 +121,7 @@ def _added_tokens(tokenizer: dict, rows: int) -> dict:
         if token_id in contents:
             raise ValueError(f"hunyuan_vl tokenizer repeats token id {token_id}")
         contents[token_id] = content
-    added, highest = {}, -1
+    added, next_id = {}, len(vocab)
     for item in tokenizer.get("added_tokens", []):
         content, token_id = item.get("content"), item.get("id")
         if not isinstance(content, str) or not content:
@@ -134,13 +135,12 @@ def _added_tokens(tokenizer: dict, rows: int) -> dict:
         ):
             raise ValueError(f"hunyuan_vl added token {content!r} conflicts with id {token_id}")
         if content not in vocab and content not in added:
-            expected = highest + 1 if highest >= len(vocab) else len(vocab)
-            if token_id != expected:
+            if token_id != next_id:
                 raise ValueError(
                     f"hunyuan_vl added token {content!r} has id {token_id}; tokenizers assigns "
-                    f"{expected}"
+                    f"{next_id}"
                 )
-        highest = max(highest, token_id)
+            next_id += 1
         contents[token_id] = content
         added[content] = token_id
     return added

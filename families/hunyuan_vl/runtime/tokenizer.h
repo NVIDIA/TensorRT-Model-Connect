@@ -23,7 +23,8 @@ class Tokenizer {
     // length alone needs more fails before it is tokenized.
     std::vector<int32_t> encode(std::string_view text,
                                 size_t budget = std::numeric_limits<size_t>::max()) const;
-    // Skips special tokens; byte-level BPE output is not space-normalized.
+    // Skips special tokens and ids without a token, as the reference does; byte-level BPE output
+    // is not space-normalized.
     std::string decode(const std::vector<int32_t>& ids) const;
     // The most bytes a text needing at most `budget` tokens may hold: a token spans at most the
     // longest vocabulary entry or added token. A longer text is refused even when the vocabulary

@@ -455,8 +455,18 @@ def test_token_ids_inside_the_embedding_table_are_accepted():
     assert _added_tokens(tokenizer, rows=4) == {"<x>": 2, "a": 0, "<y>": 3}
 
 
-@pytest.mark.parametrize("ids", [(3, 4), (40, 41), (3, 5)])
-def test_added_token_ids_are_those_tokenizers_assigns(ids):
+@pytest.mark.parametrize(
+    "added",
+    [
+        [("<x>", 3), ("<y>", 4)],
+        [("<x>", 40), ("<y>", 41)],
+        [("<x>", 3), ("<y>", 5)],
+        # A base token registered again keeps its id and does not move the next number.
+        [("c", 7), ("<x>", 3)],
+        [("c", 7), ("<x>", 8)],
+    ],
+)
+def test_added_token_ids_are_those_tokenizers_assigns(added):
     tokenizers = pytest.importorskip("tokenizers")
     # A sparse base vocabulary: three entries, the highest id 7.
     document = {
@@ -476,14 +486,13 @@ def test_added_token_ids_are_those_tokenizers_assigns(ids):
                 "normalized": False,
                 "special": True,
             }
-            for c, i in zip(("<x>", "<y>"), ids)
+            for c, i in added
         ],
     }
     reference = tokenizers.Tokenizer.from_str(json.dumps(document))
-    assigned = {c: reference.token_to_id(c) for c in ("<x>", "<y>")}
-    assert assigned == {"<x>": 3, "<y>": 4}
-    if dict(zip(("<x>", "<y>"), ids)) == assigned:
-        assert _added_tokens(document, rows=8) == assigned
+    assigned = {c: reference.token_to_id(c) for c, _ in added}
+    if dict(added) == assigned:
+        assert _added_tokens(document, rows=64) == assigned
     else:
         with pytest.raises(ValueError, match="tokenizers assigns"):
             _added_tokens(document, rows=64)

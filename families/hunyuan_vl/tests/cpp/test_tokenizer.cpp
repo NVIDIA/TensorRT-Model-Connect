@@ -92,6 +92,14 @@ bool rejected(const std::function<void(nlohmann::json&)>& change) {
     }
     return false;
 }
+std::string decoded(const trtmc::hunyuan_vl::Tokenizer& tokenizer,
+                    const std::vector<int32_t>& ids) {
+    try {
+        return tokenizer.decode(ids);
+    } catch (const std::invalid_argument&) {
+        return "<rejected>";
+    }
+}
 bool budget_exceeded(const trtmc::hunyuan_vl::Tokenizer& tokenizer, const std::string& text,
                      size_t budget) {
     try {
@@ -129,6 +137,17 @@ int main() {
     expect_ids(plain.encode("aqb"), {259}, "unknown bytes are dropped");
     expect_ids(plain.encode("a\r\n"), {97, 10}, "carriage return has no token");
     expect(plain.decode({97, 260, 98}) == "ab", "special tokens are skipped");
+    expect(decoded(plain, {97, 1000, -5, 98}) == "ab",
+           "ids without a token decode to nothing, as in the reference");
+    // A token with a character that is no byte symbol keeps its own UTF-8, as in the reference.
+    auto mixed = nlohmann::json::parse(serialized());
+    auto emoji = added_token(261, "\xC3\xA9\xF0\x9F\x99\x82");
+    emoji["special"] = false;
+    mixed["added_tokens"].push_back(emoji);
+    const trtmc::hunyuan_vl::Tokenizer with_emoji(mixed.dump());
+    expect(with_emoji.decode({97, 261, 98}) == "a\xC3\xA9\xF0\x9F\x99\x82"
+                                               "b",
+           "a token that is not all byte symbols decodes whole");
     expect(plain.decode(plain.encode("Hi .")) == "Hi .", "spaces before punctuation are kept");
     // Token ids are integers inside int32, each base id names one token, and added tokens never
     // remap an id or a content.
@@ -136,6 +155,17 @@ int main() {
     expect(rejected([](auto& j) { j["model"]["vocab"]["zz"] = 400.5; }), "fractional id");
     expect(rejected([](auto& j) { j["model"]["vocab"]["zz"] = true; }), "boolean id");
     expect(rejected([](auto& j) { j["model"]["vocab"]["zz"] = -1; }), "negative id");
+    // Truncation, padding and a post-processor that adds tokens are not implemented.
+    expect(!rejected([](auto& j) {
+        j["truncation"] = nullptr;
+        j["padding"] = nullptr;
+        j["post_processor"] = {{"type", "ByteLevel"}, {"trim_offsets", false}};
+    }),
+           "no truncation or padding and an offsets-only post-processor");
+    expect(rejected([](auto& j) { j["truncation"] = {{"max_length", 8}}; }), "truncation");
+    expect(rejected([](auto& j) { j["padding"] = {{"pad_id", 0}}; }), "padding");
+    expect(rejected([](auto& j) { j["post_processor"] = {{"type", "TemplateProcessing"}}; }),
+           "a post-processor that adds tokens");
     // Characters the vocabulary lacks are dropped, so an unknown token is not supported.
     expect(rejected([](auto& j) { j["model"]["unk_token"] = "a"; }), "unknown token");
     expect(rejected([](auto& j) { j["added_tokens"].push_back(added_token(97, "<|y|>")); }),
@@ -149,6 +179,17 @@ int main() {
            "added token past the reference's next id");
     expect(!rejected([](auto& j) { j["added_tokens"].push_back(added_token(97, "a")); }),
            "added token repeating a base token");
+    // A base token registered again keeps its id and takes no number, even a high one.
+    const auto high_base = [](nlohmann::json& j, int next) {
+        j["model"]["vocab"]["zz"] = 400;
+        j["added_tokens"][0]["id"] = 261;
+        j["added_tokens"].push_back(added_token(400, "zz"));
+        j["added_tokens"].push_back(added_token(next, "<|z|>"));
+    };
+    expect(!rejected([&](auto& j) { high_base(j, 262); }),
+           "a high base id registered again takes no number");
+    expect(rejected([&](auto& j) { high_base(j, 401); }),
+           "an added id counted from a high base id");
     // A merge has two operands; operands and result are in the vocabulary.
     expect(rejected([](auto& j) {
                j["model"]["merges"].push_back(nlohmann::json::array({"1", "2", "3"}));

@@ -428,9 +428,10 @@ def _verdict(actual, reference, baseline, departure, limits):
             "checks": exact,
         }
     else:
-        bound = limits["bf16_departure_max_logit_gap"]
+        # Without a sidecar there is no departure bound, and every reference token must be reproduced.
+        bound = limits.get("bf16_departure_max_logit_gap")
         gap = None if departure is None else departure["logit_gap"]
-        if actual == reference:
+        if actual == reference or bound is None:
             checks = exact
         elif gap is None:
             checks = [
@@ -454,12 +455,20 @@ def _verdict(actual, reference, baseline, departure, limits):
                 )
             ]
         verdict = {
-            "rule": f"exact, or the first departure at an FP32 logit gap <= {bound}",
+            "rule": "exact"
+            if bound is None
+            else f"exact, or the first departure at an FP32 logit gap <= {bound}",
             "bf16_stable": False,
             "checks": checks,
         }
     verdict["passed"] = all(check["passed"] for check in verdict["checks"])
     return verdict
+
+
+def _enough_stable_requests(rows, limits):
+    """Whether enough requests are BF16-stable, when the sidecar asks for a number of them."""
+    required = limits.get("bf16_min_stable_requests")
+    return required is None or sum(row["bf16_stable"] for row in rows) >= required
 
 
 def _end_tokens(checkpoint):
@@ -803,7 +812,6 @@ def test_e2e(case_name, request, tmp_path):
         (actual[i]["text"], decode(actual[i]["token_ids"])) for i in mismatched_text
     ]
     if baseline is not None:
-        stable = sum(row["bf16_stable"] for row in rows)
-        assert stable >= limits["bf16_min_stable_requests"], rows
+        assert _enough_stable_requests(rows, limits), rows
     failed = [index for index, row in enumerate(rows) if not row["passed"]]
     assert not failed, [rows[index] for index in failed]

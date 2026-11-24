@@ -90,6 +90,17 @@ struct Tokenizer::Impl {
             !(normalizer.is_null() ||
               (normalizer.at("type") == "Sequence" && normalizer.at("normalizers").empty())))
             throw std::invalid_argument("Unsupported HunYuanVL tokenizer model");
+        // Truncation, padding and a post-processor that adds tokens change what the reference
+        // encodes; the runtime implements none of them (the ByteLevel post-processor only moves
+        // offsets).
+        const auto absent = [&](const char* key) {
+            return !j.contains(key) || j.at(key).is_null();
+        };
+        if (!absent("truncation") || !absent("padding") ||
+            !(absent("post_processor") ||
+              (j.at("post_processor").is_object() && j.at("post_processor").contains("type") &&
+               j.at("post_processor").at("type") == "ByteLevel")))
+            throw std::invalid_argument("Unsupported HunYuanVL tokenizer post-processing");
         const auto& pre = j.at("pre_tokenizer");
         if (pre.at("type") != "Sequence" || pre.at("pretokenizers").size() < 2)
             throw std::invalid_argument("Unsupported HunYuanVL pre-tokenizer");
@@ -137,10 +148,10 @@ struct Tokenizer::Impl {
             ranks.emplace(pair_key(a, b), rank++);
         }
         ignore_merges = model.value("ignore_merges", false);
-        // The reference gives an added token outside the base vocabulary its own id: the base entry
-        // count, then one past the highest added id. A file that says otherwise would decode
-        // differently, so its ids must be those.
-        int64_t highest = -1;
+        // The reference numbers the added tokens outside the base vocabulary in order from the base
+        // entry count; a base token registered again keeps its id and takes no number. A file that
+        // says otherwise would decode differently, so its ids must be those.
+        int64_t next = int64_t(vocab.size());
         for (const auto& item : j.at("added_tokens")) {
             // Matching flags must not be silently discarded.
             if (item.value("single_word", false) || item.value("lstrip", false) ||
@@ -162,12 +173,12 @@ struct Tokenizer::Impl {
                 (base != vocab.end() && base->second != id) ||
                 (earlier != added.end() && earlier->second != id))
                 throw std::invalid_argument("Conflicting HunYuanVL added token");
-            const auto entries = int64_t(vocab.size());
-            if (base == vocab.end() && earlier == added.end() &&
-                id != (highest >= entries ? highest + 1 : entries))
-                throw std::invalid_argument(
-                    "HunYuanVL added token id differs from the reference's");
-            highest = std::max<int64_t>(highest, id);
+            if (base == vocab.end() && earlier == added.end()) {
+                if (id != next)
+                    throw std::invalid_argument(
+                        "HunYuanVL added token id differs from the reference's");
+                ++next;
+            }
             if (earlier == added.end())
                 added.emplace_back(text, id);
             inverse[id] = text;
@@ -361,19 +372,25 @@ std::string Tokenizer::decode(const std::vector<int32_t>& ids) const {
     for (const int32_t id : ids) {
         if (impl_->special_ids.count(id))
             continue;
+        // Like the reference, an id without a token decodes to nothing (a sampled id may name an
+        // embedding row the tokenizer does not cover).
         const auto found = impl_->inverse.find(id);
         if (found == impl_->inverse.end())
-            throw std::invalid_argument("Invalid HunYuanVL token ID");
+            continue;
+        // As the reference's ByteLevel decoder does, a token becomes bytes only when every
+        // character is a byte symbol; otherwise the token's own UTF-8 is kept whole.
         const auto token = icu::UnicodeString::fromUTF8(found->second);
-        for (int32_t i = 0; i < token.length();) {
+        std::string mapped;
+        bool symbols = true;
+        for (int32_t i = 0; i < token.length() && symbols;) {
             const UChar32 cp = token.char32At(i);
             i += U16_LENGTH(cp);
             const auto byte = impl_->byte_decoder.find(cp);
-            if (byte == impl_->byte_decoder.end())
-                bytes += utf8(icu::UnicodeString(cp));
-            else
-                bytes.push_back(static_cast<char>(byte->second));
+            symbols = byte != impl_->byte_decoder.end();
+            if (symbols)
+                mapped.push_back(static_cast<char>(byte->second));
         }
+        bytes += symbols ? mapped : found->second;
     }
     // Byte BPE can end mid-codepoint: decode with replacement, never emit invalid UTF-8.
     return utf8(icu::UnicodeString::fromUTF8(bytes));

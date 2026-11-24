@@ -96,6 +96,17 @@ def test_bf16_departure_passes_only_at_a_near_tie():
     assert e2e._verdict([1, 2], [1, 2], official, None, LIMITS)["passed"]
 
 
+def test_bf16_without_a_sidecar_must_reproduce_every_token():
+    # No threshold sidecar: no departure bound and no stable-request count.
+    verdict = e2e._verdict([1, 3], [1, 2], [1, 4], _gap(0.0), {})
+    assert verdict["rule"] == "exact" and not verdict["passed"]
+    assert e2e._verdict([1, 2], [1, 2], [1, 4], None, {})["passed"]
+    assert e2e._enough_stable_requests([{"bf16_stable": False}], {})
+    assert not e2e._enough_stable_requests(
+        [{"bf16_stable": True}, {"bf16_stable": False}], {"bf16_min_stable_requests": 2}
+    )
+
+
 def test_verdict_checks_carry_their_own_outcome():
     verdicts = (
         e2e._verdict([1, 2], [1, 2], None, None, LIMITS),
