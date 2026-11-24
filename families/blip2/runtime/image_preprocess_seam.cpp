@@ -6,6 +6,7 @@
 #include "families/blip2/runtime/image_preprocess_seam.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -48,10 +49,10 @@ std::vector<PillowSpan> make_pillow_plan(std::int32_t input_size, std::int32_t o
     std::vector<PillowSpan> plan(static_cast<std::size_t>(output_size));
     for (std::int32_t output_index = 0; output_index < output_size; ++output_index) {
         const double center = (static_cast<double>(output_index) + 0.5) * scale;
-        const auto first =
-            std::max<std::int32_t>(0, static_cast<std::int32_t>(center - support + 0.5));
-        const auto end =
-            std::min<std::int32_t>(input_size, static_cast<std::int32_t>(center + support + 0.5));
+        const auto first = static_cast<std::int32_t>(
+            std::clamp(center - support + 0.5, 0.0, static_cast<double>(input_size)));
+        const auto end = static_cast<std::int32_t>(
+            std::clamp(center + support + 0.5, 0.0, static_cast<double>(input_size)));
         if (end <= first)
             throw std::runtime_error("blip2 Pillow resize produced empty support");
 
@@ -98,36 +99,54 @@ std::uint8_t apply_pillow_span(const std::uint8_t* source, std::int32_t stride,
 std::vector<float> resize_pillow_bicubic(const float* source, std::int32_t input_h,
                                          std::int32_t input_w, std::int32_t output_h,
                                          std::int32_t output_w) {
-    std::vector<std::uint8_t> input(static_cast<std::size_t>(input_h) * input_w * 3U);
-    std::transform(source, source + input.size(), input.begin(), [](float value) {
-        return static_cast<std::uint8_t>(std::lround(std::clamp(value, 0.0F, 1.0F) * 255.0F));
-    });
-
+    const auto input_stride = static_cast<std::size_t>(input_w) * 3U;
+    if (static_cast<std::size_t>(input_h) >
+        std::numeric_limits<std::size_t>::max() / sizeof(float) / input_stride)
+        throw std::invalid_argument("blip2 source image storage overflows");
+    const auto output_stride = static_cast<std::size_t>(output_w) * 3U;
     const auto horizontal_plan = make_pillow_plan(input_w, output_w);
-    std::vector<std::uint8_t> horizontal(static_cast<std::size_t>(input_h) * output_w * 3U);
-    for (std::int32_t y = 0; y < input_h; ++y) {
-        for (std::int32_t x = 0; x < output_w; ++x) {
-            const auto& span = horizontal_plan[static_cast<std::size_t>(x)];
-            for (std::int32_t channel = 0; channel < 3; ++channel) {
-                const auto source_offset = static_cast<std::size_t>(y) * input_w * 3U + channel;
-                const auto target = (static_cast<std::size_t>(y) * output_w + x) * 3U + channel;
-                horizontal[target] = apply_pillow_span(input.data() + source_offset, 3, span);
-            }
-        }
-    }
-
     const auto vertical_plan = make_pillow_plan(input_h, output_h);
-    std::vector<float> output(static_cast<std::size_t>(output_h) * output_w * 3U);
+    // Preserve Pillow's horizontal byte rounding with four cached rows instead
+    // of a source-height by output-width image. Upsampling reuses each row;
+    // downsampling can revisit a row only within the fixed filter support.
+    std::vector<std::uint8_t> input_row(input_stride);
+    std::array<std::vector<std::uint8_t>, 4> filtered_rows;
+    for (auto& row : filtered_rows)
+        row.resize(output_stride);
+    std::array<std::size_t, 4> row_ids;
+    row_ids.fill(std::numeric_limits<std::size_t>::max());
+    std::vector<std::int64_t> sums(output_stride);
+    std::vector<float> output(static_cast<std::size_t>(output_h) * output_stride);
     for (std::int32_t y = 0; y < output_h; ++y) {
-        const auto& span = vertical_plan[static_cast<std::size_t>(y)];
-        for (std::int32_t x = 0; x < output_w; ++x) {
-            for (std::int32_t channel = 0; channel < 3; ++channel) {
-                const auto source_offset = static_cast<std::size_t>(x) * 3U + channel;
-                const auto target = (static_cast<std::size_t>(y) * output_w + x) * 3U + channel;
-                output[target] = static_cast<float>(apply_pillow_span(
-                                     horizontal.data() + source_offset, output_w * 3, span)) /
-                                 255.0F;
+        std::fill(sums.begin(), sums.end(), kPillowRounding);
+        const auto& vertical = vertical_plan[static_cast<std::size_t>(y)];
+        for (std::size_t row = 0; row < vertical.weights.size(); ++row) {
+            const auto source_y = static_cast<std::size_t>(vertical.first) + row;
+            const auto slot = source_y % filtered_rows.size();
+            auto& filtered = filtered_rows[slot];
+            if (row_ids[slot] != source_y) {
+                const auto* first = source + source_y * input_stride;
+                std::transform(first, first + input_stride, input_row.begin(), [](float value) {
+                    return static_cast<std::uint8_t>(
+                        std::lround(std::clamp(value, 0.0F, 1.0F) * 255.0F));
+                });
+                for (std::int32_t x = 0; x < output_w; ++x) {
+                    const auto& horizontal = horizontal_plan[static_cast<std::size_t>(x)];
+                    for (std::int32_t channel = 0; channel < 3; ++channel)
+                        filtered[static_cast<std::size_t>(x) * 3U + channel] =
+                            apply_pillow_span(input_row.data() + channel, 3, horizontal);
+                }
+                row_ids[slot] = source_y;
             }
+            for (std::size_t index = 0; index < output_stride; ++index)
+                sums[index] += static_cast<std::int64_t>(filtered[index]) * vertical.weights[row];
+        }
+        for (std::size_t index = 0; index < output_stride; ++index) {
+            const auto sum = sums[index];
+            const auto pixel =
+                sum <= 0 ? 0 : std::min<std::int64_t>(sum >> kPillowPrecisionBits, 255);
+            output[static_cast<std::size_t>(y) * output_stride + index] =
+                static_cast<float>(pixel) / 255.0F;
         }
     }
     return output;
