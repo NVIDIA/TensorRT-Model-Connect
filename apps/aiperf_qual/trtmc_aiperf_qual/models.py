@@ -268,6 +268,9 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     absolute = _absolute(list(config.get("absolute") or []), definitions, testcase, bool(quantization))
     for item in absolute:  # gold suites: the suite definition, with the benchmark's request settings
         if item.get("metric"):
+            if not item.get("suite_definition"):  # a benchmark whose suite each profile states
+                raise ConfigError(f"{profile}: benchmark {item.get('suite')!r} names no suite_definition; the "
+                                  "profile's own configuration states its suite")
             suite = _suite(item["suite_definition"], profile, config.get("request"))
             if item.get("request"):  # a null removes the suite's field (a Task that declares no such config)
                 request = {**suite.get("request", {}), **item.pop("request")}
