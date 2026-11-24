@@ -39,11 +39,11 @@ TapSpan input_taps(std::int64_t first, std::int64_t taps, std::int64_t count);
 // setup stay bounded for any pair of rates (for example 192001 Hz). A resampled
 // sample beyond the float range throws std::invalid_argument.
 //
-// When `stats` is given, it receives the work done: the kernel taps applied (only
-// those that fall on the input), whether the kernel was interpolated, and the
-// coefficients tabulated.
+// When `stats` is given, it is reset and then receives this call's work: the kernel
+// positions the loops visited (counted as they are visited), whether the kernel was
+// interpolated, and the coefficients tabulated.
 struct ResampleStats {
-    std::int64_t taps{0};
+    std::int64_t visits{0};
     bool interpolated{false};
     std::size_t table_coefficients{0};
 };

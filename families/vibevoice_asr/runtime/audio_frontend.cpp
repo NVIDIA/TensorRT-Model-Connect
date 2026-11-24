@@ -83,6 +83,8 @@ TapSpan input_taps(std::int64_t first, std::int64_t taps, std::int64_t count) {
 std::vector<float> resample(const std::vector<float>& input, std::int32_t from_rate,
                             std::int32_t to_rate, std::size_t max_table_coefficients,
                             ResampleStats* stats) {
+    if (stats != nullptr)
+        *stats = ResampleStats{};
     const std::int64_t outputs =
         static_cast<std::int64_t>(resampled_length(input.size(), from_rate, to_rate));
     if (from_rate == to_rate || input.empty())
@@ -129,6 +131,7 @@ std::vector<float> resample(const std::vector<float>& input, std::int32_t from_r
             stats->table_coefficients = kernel.size();
         }
         const double step = static_cast<double>(kKernelOversampling) / static_cast<double>(spacing);
+        std::int64_t visits = 0;
         for (std::int64_t k = 0; k < outputs; ++k) {
             const std::int64_t centre = k * down;
             const std::int64_t base = centre / up;
@@ -136,9 +139,8 @@ std::vector<float> resample(const std::vector<float>& input, std::int32_t from_r
             const std::int64_t lowest = -((half_width - phase) / up);
             double sum = 0.0;
             const auto span = input_taps(base + lowest, taps, count);
-            if (stats != nullptr)
-                stats->taps += span.end - span.begin;
             for (std::int64_t t = span.begin; t < span.end; ++t) {
+                ++visits;
                 const std::int64_t j = base + lowest + t;
                 const std::int64_t offset = phase - up * (lowest + t);
                 if (offset < -half_width || offset > half_width)
@@ -152,6 +154,8 @@ std::vector<float> resample(const std::vector<float>& input, std::int32_t from_r
             }
             output[static_cast<std::size_t>(k)] = narrow_sample(sum);
         }
+        if (stats != nullptr)
+            stats->visits = visits;
         return output;
     }
     // One tap table per output phase: offsets phase + up * m within the window.
@@ -169,6 +173,7 @@ std::vector<float> resample(const std::vector<float>& input, std::int32_t from_r
                 table[static_cast<std::size_t>(phase * taps + t)] = tap(offset);
         }
     }
+    std::int64_t visits = 0;
     for (std::int64_t k = 0; k < outputs; ++k) {
         const std::int64_t centre = k * down;
         const std::int64_t base = centre / up;
@@ -177,12 +182,14 @@ std::vector<float> resample(const std::vector<float>& input, std::int32_t from_r
         const std::int64_t start = base + first[static_cast<std::size_t>(phase)];
         double sum = 0.0;
         const auto span = input_taps(start, taps, count);
-        if (stats != nullptr)
-            stats->taps += span.end - span.begin;
-        for (std::int64_t t = span.begin; t < span.end; ++t)
+        for (std::int64_t t = span.begin; t < span.end; ++t) {
+            ++visits;
             sum += weights[t] * input[static_cast<std::size_t>(start + t)];
+        }
         output[static_cast<std::size_t>(k)] = narrow_sample(sum);
     }
+    if (stats != nullptr)
+        stats->visits = visits;
     return output;
 }
 

@@ -35,6 +35,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 import wave
 from pathlib import Path
 
@@ -399,9 +400,24 @@ def _complete_objects(text: str) -> list:
 
 def _strict_json(text: str):
     """One JSON document, read as the runtime's parser reads it."""
-    return json.loads(
+    value = json.loads(
         text, parse_constant=_not_json, parse_float=_json_number, parse_int=_json_number
     )
+    if _has_lone_surrogate(value):
+        raise ValueError("a \\u escape of half a surrogate pair is an error for the runtime's parser")
+    return value
+
+
+def _has_lone_surrogate(value) -> bool:
+    """A string or key with a code point U+D800-U+DFFF, which Python decodes from a \\u
+    escape without its pair (a pair becomes one character)."""
+    if isinstance(value, str):
+        return re.search("[\ud800-\udfff]", value) is not None
+    if isinstance(value, dict):
+        return any(_has_lone_surrogate(key) or _has_lone_surrogate(item) for key, item in value.items())
+    if isinstance(value, list):
+        return any(_has_lone_surrogate(item) for item in value)
+    return False
 
 
 def _not_json(name: str):
@@ -487,9 +503,11 @@ def _time_gaps(pairs) -> list[float]:
 
 
 def _largest_gap(differences) -> float:
-    """The largest |difference|; infinite when one is not finite, which max() would skip."""
+    """The largest |difference|. A difference that is not finite (max() would skip NaN), as
+    for a time on one side only, gives the largest finite float: the evidence row stays a
+    JSON number the report accepts, and it fails its limit."""
     gaps = [abs(value) for value in differences]
-    return max(gaps, default=0.0) if all(math.isfinite(gap) for gap in gaps) else math.inf
+    return max(gaps, default=0.0) if all(math.isfinite(gap) for gap in gaps) else sys.float_info.max
 
 
 def _check(name: str, label: str, scope: str, actual, operator: str, expected) -> dict:
@@ -513,10 +531,14 @@ def _speaker_words(segments: list[dict]) -> list[tuple[str, object]]:
 
 
 def _speaker(segment: dict):
-    """The speaker under "Speaker" or "Speaker ID", the two keys the official post-processing maps."""
+    """The speaker under "Speaker" or "Speaker ID", the two keys the official post-processing maps.
+
+    A JSON true or false is not a number: it is tagged, so it never equals the id 1 or 0.
+    """
     for name in ("Speaker", "Speaker ID"):
-        if segment.get(name) is not None:
-            return segment[name]
+        value = segment.get(name)
+        if value is not None:
+            return ("boolean", value) if isinstance(value, bool) else value
     return None
 
 
@@ -883,6 +905,9 @@ def test_the_oracle_reads_raw_output_as_the_runtime_does() -> None:
     assert _segments(json.dumps(one)) == [one]
     assert _segments(listed[:-10]) == [one]
     assert _segments("[" + json.dumps(one) + json.dumps(two)) == [one]
+    # A surrogate pair is one character; half a pair rejects the object, as in the runtime.
+    assert _segments('[{"Content": "\\ud83d\\ude00"}]') == [{"Content": "\U0001F600"}]
+    assert _segments(json.dumps([one]).rstrip("]") + ', {"Content": "b\\udc00"}]') == [one]
     for malformed in (
         "[]",
         "not json",
@@ -892,6 +917,8 @@ def test_the_oracle_reads_raw_output_as_the_runtime_does() -> None:
         '[{"Speaker": 1e999, "Content": "a"}]',
         '[{"Start": 1' + "0" * 400 + ', "Content": "a"}]',
         '[{"Start": NaN, "Content": "a"}]',
+        '[{"Content": "a\\ud800"}]',
+        '[{"Content\\udc00": "a", "Content": "a"}]',
     ):
         assert _segments(malformed) is None, malformed
 
@@ -1007,6 +1034,41 @@ _PARITY_SCENARIOS = {
         },
         True,
     ),
+    # A time on one side only fails the comparison, and its evidence row stays a JSON number.
+    "near_tie_end_time_on_one_side": (
+        {
+            "native_ids": (5, 7, 2),
+            "top": _TIE,
+            "native_segments": ({"Start": 0.0, "Speaker": 0, "Content": "Hello world."},),
+        },
+        False,
+    ),
+    # Each fails if the comparison stops reading the "Start time" / "End time" aliases.
+    "near_tie_with_time_alias_mismatch": (
+        {
+            "native_ids": (5, 7, 2),
+            "top": _TIE,
+            "native_segments": ({"Start time": 0.0, "End time": 1.7, "Speaker": 0, "Content": "Hello world."},),
+            "reference_segments": ({"Start time": 0.0, "End time": 1.5, "Speaker": 0, "Content": "Hello world."},),
+        },
+        False,
+    ),
+    "near_tie_with_mixed_time_keys": (
+        {
+            "native_ids": (5, 7, 2),
+            "top": _TIE,
+            "native_segments": ({"Start time": 0.0, "End time": 1.5, "Speaker": 0, "Content": "Hello world."},),
+        },
+        True,
+    ),
+    "speaker_id_true_against_one": (
+        {
+            "oracle": "transcript_words",
+            "native_segments": ({"Start": 0.0, "End": 1.5, "Speaker ID": True, "Content": "Hello world."},),
+            "reference_segments": ({"Start": 0.0, "End": 1.5, "Speaker ID": 1, "Content": "Hello world."},),
+        },
+        False,
+    ),
     "speakers_differ": (
         {"oracle": "transcript_words", "native_segments": ({**_SEGMENT, "Speaker": 1},)},
         False,
@@ -1068,11 +1130,15 @@ def test_comparison_checks_agree_with_the_assertions(scenario: str) -> None:
     checks = _comparison_checks(default, raw, reference, case)
     assert asserted is expected
     assert all(check["passed"] for check in checks) is expected
+    for check in checks:
+        # The evidence report accepts a finite number or a boolean, not inf or NaN.
+        for value in (check["actual"], check["expected"]):
+            assert type(value) is bool or (type(value) in (int, float) and math.isfinite(value)), check
 
 
 def test_a_timestamp_that_is_not_a_number_fails_its_check() -> None:
     # A non-finite gap is the largest one, where max() would skip it.
-    assert _largest_gap([0.0, math.nan]) == math.inf
+    assert _largest_gap([0.0, math.nan]) == sys.float_info.max
     # After a near-tie the segments are compared; NaN is not JSON, so an output with a NaN
     # time is not a segment list, as for the runtime's parser, and the comparison fails.
     nan_end = json.dumps([{**_SEGMENT, "End": math.nan}])

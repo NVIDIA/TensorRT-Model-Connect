@@ -294,21 +294,32 @@ void test_resample() {
     check(ahead.begin == ahead.end, "taps before the input");
     const auto behind = input_taps(200, 5, 100);
     check(behind.begin == behind.end, "taps after the input");
-    // The loops apply only taps that fall on the input: a one-sample clip at 2147483647 Hz
-    // costs one tap, not the 5,726,624 of the kernel, and two samples at 8 kHz at most two
-    // taps per output sample on the exact-table path.
+    // The loops visit only kernel positions on the input (counted as they are visited): a
+    // one-sample clip at 2147483647 Hz costs one visit, not the 5,726,624 of the kernel, and
+    // two samples at 8 kHz at most two visits per output sample on the exact-table path.
     ResampleStats high_work;
     const auto high =
         resample(std::vector<float>{0.5F}, 2147483647, 24000, kMaxResampleTable, &high_work);
     check(high.size() == 1 && std::isfinite(high[0]), "a one-sample clip at 2147483647 Hz");
-    check(high_work.taps == 1,
-          "one tap for a one-sample clip at 2147483647 Hz, not " + std::to_string(high_work.taps));
+    check(high_work.visits == 1, "one visit for a one-sample clip at 2147483647 Hz, not " +
+                                     std::to_string(high_work.visits));
     ResampleStats short_work;
     const auto short_out =
         resample(std::vector<float>{0.5F, -0.5F}, 8000, 24000, kMaxResampleTable, &short_work);
     check(!short_work.interpolated &&
-              short_work.taps <= 2 * static_cast<std::int64_t>(short_out.size()),
-          "at most two taps per output for a two-sample clip");
+              short_work.visits <= 2 * static_cast<std::int64_t>(short_out.size()),
+          "at most two visits per output for a two-sample clip");
+    // A reused report holds only the last call's work: the exact path after the interpolated
+    // one, then the equal-rate path, which does none.
+    ResampleStats reused;
+    resample(std::vector<float>{0.5F}, 2147483647, 24000, kMaxResampleTable, &reused);
+    resample(std::vector<float>{0.5F, -0.5F}, 8000, 24000, kMaxResampleTable, &reused);
+    check(!reused.interpolated && reused.visits == short_work.visits &&
+              reused.table_coefficients == short_work.table_coefficients,
+          "a reused report after the exact path");
+    resample(std::vector<float>{0.5F, -0.5F}, 24000, 24000, kMaxResampleTable, &reused);
+    check(!reused.interpolated && reused.visits == 0 && reused.table_coefficients == 0,
+          "a reused report after the equal-rate path");
 
     // resampled_length gives resample()'s length without resampling, so a request
     // is sized before its audio work: 100000 samples at 1 Hz would be 2.4e9.
@@ -435,6 +446,9 @@ void test_transcript() {
     // A number that overflows a double is a parse error, so the output is plain text.
     const auto infinite = parse_transcript("[{\"Start\":1e999,\"End\":1,\"Content\":\"a\"}]");
     check(!infinite.structured && infinite.segments.empty(), "an infinite timestamp");
+    // A \u escape of half a surrogate pair is a parse error too.
+    const auto half_pair = parse_transcript("[{\"Start\":0,\"End\":1,\"Content\":\"a\\uD800\"}]");
+    check(!half_pair.structured && half_pair.segments.empty(), "a lone surrogate escape");
     const auto no_comma = parse_transcript("[{\"Start\":0,\"End\":1,\"Content\":\"one\"}"
                                            "{\"Start\":1,\"End\":2,\"Content\":\"two\"}");
     check(no_comma.structured && no_comma.segments.size() == 1 && no_comma.text == "one",
