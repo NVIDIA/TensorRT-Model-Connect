@@ -86,7 +86,7 @@ TVM_FFI_DLL_EXPORT_TYPED_FUNC(vitmatte_fp32_gelu_v1, gelu);
 
 extern "C" const char* trtmc_vitmatte_register_kernels() noexcept {
     static std::once_flag projection_once, gelu_once;
-    static thread_local std::string error;
+    static thread_local char error[1024];
     try {
         Dl_info location{};
         if (!dladdr(reinterpret_cast<void*>(&trtmc_vitmatte_register_kernels), &location) ||
@@ -103,8 +103,13 @@ extern "C" const char* trtmc_vitmatte_register_kernels() noexcept {
         });
         return nullptr;
     } catch (const std::exception& exception) {
-        error = exception.what();
-        return error.c_str();
+        // This noexcept boundary must report errors even when allocation fails.
+        const auto* message = exception.what();
+        std::size_t index = 0;
+        for (; index < sizeof(error) - 1 && message[index]; ++index)
+            error[index] = message[index];
+        error[index] = '\0';
+        return error;
     } catch (...) {
         return "ViTMatte kernel registration failed";
     }

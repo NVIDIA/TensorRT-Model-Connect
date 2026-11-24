@@ -35,3 +35,14 @@ BYOK is disabled or Torch is unavailable; explicitly building
 Kernel registration retries reuse each completed binding and retry only the
 failed binding. The shared backend propagates device-to-host transfer errors
 before returning tensors backed by reusable staging storage.
+Registration error messages use bounded thread-local storage without allocating
+inside the `noexcept` error handler.
+
+BYOK bindings use process-global, versioned kernel names. Use a matching native
+core and family build in one process; loading different builds under the same
+names is not a qualified isolation boundary. The shared loader permits an
+explicit replacement: already resolved function handles retain their callable,
+while later unresolved lookups see the replacement. A changed kernel contract
+requires a new versioned name. Successful bindings and their libraries remain
+loaded for the process lifetime, including after a later registration or engine
+load fails. Family registration therefore does not promise transaction rollback.
