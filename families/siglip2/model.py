@@ -176,7 +176,15 @@ def _named_token(config: dict, name: str) -> str:
     return str(token)
 
 
-def _tokenizer_contract(model_dir: Path, embedding_rows: int | None = None) -> int:
+def _read_tokenizer(model_dir: Path) -> bytes:
+    path = model_dir / "tokenizer.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"missing siglip2 tokenizer: {path}")
+    return path.read_bytes()
+
+
+def _tokenizer_contract(model_dir: Path, embedding_rows: int | None = None,
+                        data: bytes | None = None) -> int:
     """Check the tokenizer is the one the runtime reproduces; return the pad id.
 
     The runtime tokenizer reproduces a SentencePiece-style BPE with byte fallback whose
@@ -190,12 +198,10 @@ def _tokenizer_contract(model_dir: Path, embedding_rows: int | None = None) -> i
     matching option or an id other than its vocabulary id, and the end token expands to its
     own id alone. Anything
     else is refused here rather than tokenised differently; the runtime checks the same
-    on load.
+    on load. ``data`` is the ``tokenizer.json`` the caller has read and will package, so
+    that the bundle carries the bytes that were checked.
     """
-    path = model_dir / "tokenizer.json"
-    if not path.is_file():
-        raise FileNotFoundError(f"missing siglip2 tokenizer: {path}")
-    tokenizer = json.loads(path.read_text(encoding="utf-8"))
+    tokenizer = json.loads((_read_tokenizer(model_dir) if data is None else data).decode("utf-8"))
     model = tokenizer.get("model", {})
     if model.get("type") != "BPE" or model.get("byte_fallback") is not True:
         raise NotImplementedError(
@@ -352,7 +358,9 @@ def build(request, writer) -> None:
                 "siglip2 prompt length is fixed at the checkpoint's window of "
                 f"{text['max_text_len']}")
 
-    pad_token_id = _tokenizer_contract(model_dir, text["vocab_size"])
+    # Read once: the bundle carries the bytes that were checked.
+    tokenizer_data = _read_tokenizer(model_dir)
+    pad_token_id = _tokenizer_contract(model_dir, text["vocab_size"], tokenizer_data)
 
     # Stored the way the reference applies them: the scale in log space, used as
     # exp() of it, and the bias added after.
@@ -363,7 +371,7 @@ def build(request, writer) -> None:
     writer.add_bytes("vision.plan", build_vision_engine(weights, cfg,
                                                         verbose=bool(request.verbose)))
     writer.add_bytes("text.plan", build_text_engine(weights, cfg, verbose=bool(request.verbose)))
-    writer.add_bytes("tokenizer.json", (model_dir / "tokenizer.json").read_bytes())
+    writer.add_bytes("tokenizer.json", tokenizer_data)
     writer.add_json(
         "runtime.json",
         {

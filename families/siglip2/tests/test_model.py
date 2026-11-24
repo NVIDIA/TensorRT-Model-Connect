@@ -388,6 +388,34 @@ def test_a_vocabulary_larger_than_the_embedding_table_is_refused(tmp_path: Path)
         model_module.build(request, _Writer())
 
 
+def test_the_bundle_carries_the_tokenizer_bytes_that_were_checked(
+        tmp_path: Path, monkeypatch) -> None:
+    # tokenizer.json is read once: a file that changes while the engines build does not take
+    # the place of the one that was checked.
+    weights = _weights(**{"text_model.embeddings.token_embedding.weight":
+                          np.zeros((len(_TOKEN_IDS), _HIDDEN), np.float32)})
+    model_dir = _checkpoint(tmp_path, weights)
+    checked = (model_dir / "tokenizer.json").read_bytes()
+    sections = {}
+
+    class _Recorder:
+        def set_header(self, **_):
+            (model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+        def add_bytes(self, name, data):
+            sections[name] = bytes(data)
+
+        def add_json(self, name, value):
+            sections[name] = value
+
+    monkeypatch.setattr(model_module, "build_vision_engine", lambda *args, **kwargs: b"vision")
+    monkeypatch.setattr(model_module, "build_text_engine", lambda *args, **kwargs: b"text")
+    request = BuildRequest(model_dir=model_dir, output_path=tmp_path / "x.bundle", family="siglip2",
+                           task="text_to_embedding", precision="fp32")
+    model_module.build(request, _Recorder())
+    assert sections["tokenizer.json"] == checked
+
+
 def test_a_reduced_precision_checkpoint_is_refused(tmp_path: Path) -> None:
     weights = _weights(**{"text_model.head.weight": np.zeros((_HIDDEN, _HIDDEN), np.float16)})
     model_dir = _checkpoint(tmp_path, weights)
