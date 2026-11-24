@@ -377,6 +377,12 @@ def test_delete_on_pass_uses_the_benchmark_verdict(tmp_path, monkeypatch, acc, c
     assert ("bundle_deleted" in record) is delete
 
 
+def _named_as_given(monkeypatch):
+    """A run of the named profiles as given (selection is tested on its own): these environments have no catalog."""
+    monkeypatch.setattr("trtmc_aiperf_qual.selection.machine_run_list",
+                        lambda environment, names=None, ignore_exclusions=False: (list(names or []), []))
+
+
 @pytest.mark.parametrize("acc, complete, timed, expected_code", [
     ("pass", True, True, 0),
     ("pass", False, True, 1),
@@ -400,6 +406,7 @@ def test_run_cli_accepts_complete_benchmark_measurements_without_rewriting_verdi
         return result
 
     deleted = _stub_phases(monkeypatch, qualify=qualify)
+    _named_as_given(monkeypatch)
     monkeypatch.setattr(campaign, "warm_selections", lambda *args: None)
     environment = Environment({"retention": {"bundle": "delete_on_pass", "temporary_files": "delete_on_pass"}})
     monkeypatch.setattr(cli, "load_environment", lambda path: environment)
@@ -453,6 +460,7 @@ def test_run_one_records_build_failures_and_keeps_errored_bundles(tmp_path, monk
 def test_run_cli_exit_codes_require_a_supported_success_outcome(tmp_path, monkeypatch, capsys, record, expected_code):
     from trtmc_aiperf_qual import cli, models
 
+    _named_as_given(monkeypatch)
     monkeypatch.setattr(cli, "load_environment", lambda path: Environment({}))
     monkeypatch.setattr(models, "resolve_model", lambda *args: _model("m", "org/m"))
     monkeypatch.setattr(campaign, "run_one", lambda *args: record)
@@ -537,14 +545,17 @@ def test_machine_model_list_includes_all_by_default_and_excludes_with_reasons():
     config = {"exclude": [{"profile": "flux-2-dev*", "reason": "does not fit in 80 GB"}]}
     selected, excluded = selection.select(config, CATALOG)
     assert _names(selected) == ["qwen3-0.6b-fp16", "qwen36-27b"]
-    assert excluded == [{"profile": "flux-2-dev", "task": "image_generation", "reason": "does not fit in 80 GB"},
-                        {"profile": "flux-2-dev-fp8", "task": "image_generation", "reason": "does not fit in 80 GB"}]
+    assert excluded == [{"profile": "flux-2-dev", "task": "image_generation", "reason": "does not fit in 80 GB",
+                         "source": "environment"},
+                        {"profile": "flux-2-dev-fp8", "task": "image_generation", "reason": "does not fit in 80 GB",
+                         "source": "environment"}]
 
 
 def test_machine_model_list_include_accepts_names_and_patterns():
     selected, excluded = selection.select({"include": ["qwen*", "flux-2-dev"]}, CATALOG)
     assert _names(selected) == ["qwen3-0.6b-fp16", "qwen36-27b", "flux-2-dev"]
-    assert excluded == [{"profile": "flux-2-dev-fp8", "task": "image_generation", "reason": "not in models.include"}]
+    assert excluded == [{"profile": "flux-2-dev-fp8", "task": "image_generation", "reason": "not in models.include",
+                         "source": "environment"}]
 
 
 def test_machine_model_list_excludes_checkpoints_above_the_size_limit():
@@ -553,25 +564,133 @@ def test_machine_model_list_excludes_checkpoints_above_the_size_limit():
                                           size_gib=lambda profile: sizes[profile.checkpoint])
     assert _names(selected) == ["qwen3-0.6b-fp16", "flux-2-dev", "flux-2-dev-fp8"]  # unknown sizes are kept
     assert excluded == [{"profile": "qwen36-27b", "task": "text_generation",
-                         "reason": "checkpoint 54 GiB > models.max_checkpoint_gib 30"}]
+                         "reason": "checkpoint 54 GiB > models.max_checkpoint_gib 30", "source": "environment"}]
 
 
-def test_a_profile_definition_excludes_the_profile_from_every_machines_list(tmp_path):
-    """``exclude: <reason>`` in a profile's own definition: a profile AIPerf cannot qualify as cataloged."""
-    from trtmc_aiperf_qual.models import profile_override
-
+def test_a_catalog_exclusion_leaves_the_profile_out_of_every_machines_list():
+    """config/tasks.yaml or config/exclusions.yaml: no machine runs the profile, whatever its list includes."""
     reason = "its catalog testcase has no prompt, so no request can be built"
-    definition = tmp_path / "families/f/tests/aiperf/p.yaml"
-    definition.parent.mkdir(parents=True)
-    definition.write_text(f"exclude: {reason}\n")
-    assert profile_override("p", "f", tmp_path, root=tmp_path / "config")["exclude"] == reason
-    declared = selection.Profile("p", "vision_language_generation", "Org/p", None, reason)
+    declared = selection.Profile("p", "vision_language_generation", "Org/p", None, reason, "config/exclusions.yaml")
     selected, excluded = selection.select({}, [*CATALOG, declared])
     assert _names(selected) == _names(CATALOG)
-    assert excluded == [{"profile": "p", "task": "vision_language_generation", "reason": reason}]
-    # A machine whose list does not include it still records the profile's own reason.
+    assert excluded == [{"profile": "p", "task": "vision_language_generation", "reason": reason,
+                         "source": "config/exclusions.yaml"}]
+    # A machine whose list does not include it still records the catalog's reason.
     _, excluded = selection.select({"include": ["qwen3-0.6b-fp16"]}, [*CATALOG, declared])
-    assert {item["profile"]: item["reason"] for item in excluded}["p"] == reason
+    assert {item["profile"]: item["source"] for item in excluded}["p"] == "config/exclusions.yaml"
+
+
+def test_the_catalog_excludes_profiles_without_task_defaults_then_those_config_exclusions_lists(tmp_path):
+    import yaml
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+
+    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())
+    del tasks["tasks"]["text_continuation"]
+    root = tmp_path / "config"
+    root.mkdir()
+    (root / "tasks.yaml").write_text(yaml.safe_dump(tasks))
+    (root / "exclusions.yaml").write_text("exclude:\n  - {profile: flux-schnell, reason: a stated gap}\n"
+                                          "  - {profile: qwen3-0.6b-fp16, reason: never reached}\n")
+    profiles = {profile.name: profile for profile in selection.catalog(REPOSITORY, root=root)}
+    assert (profiles["qwen3-0.6b-fp16"].excluded, profiles["qwen3-0.6b-fp16"].source) == (
+        "no Task defaults for 'text_continuation'", "config/tasks.yaml")
+    assert (profiles["flux-schnell"].excluded, profiles["flux-schnell"].source) == ("a stated gap",
+                                                                                  "config/exclusions.yaml")
+    assert profiles["flux-2-dev"].excluded is None
+
+
+@pytest.mark.parametrize("text, message", [
+    ("include: [a]\n", "holds only exclude"),
+    ("exclude: [{profile: a}]\n", "list of {profile, reason}"),
+    ("exclude: [{profile: a, reason: ' '}]\n", "list of {profile, reason}"),
+    ("exclude: [{profile: a, reason: r, note: n}]\n", "list of {profile, reason}"),
+])
+def test_config_exclusions_are_validated(tmp_path, text, message):
+    from trtmc_aiperf_qual.config import exclusions
+
+    (tmp_path / "exclusions.yaml").write_text(text)
+    with pytest.raises(ConfigError, match=message.replace("{", r"\{").replace("}", r"\}")):
+        exclusions(tmp_path)
+    (tmp_path / "exclusions.yaml").write_text("exclude:\n")
+    assert exclusions(tmp_path) == []
+
+
+def test_every_config_exclusion_names_ready_catalog_profiles():
+    import fnmatch
+
+    from trtmc_aiperf_qual.config import exclusions
+
+    names = [profile.name for profile in selection.catalog(REPOSITORY)]
+    for rule in exclusions():
+        assert [name for name in names if fnmatch.fnmatchcase(name, rule["profile"])], rule
+
+
+def test_a_profile_configuration_cannot_exclude_the_profile(tmp_path):
+    from trtmc_aiperf_qual.models import profile_override
+
+    definition = tmp_path / "families/f/tests/aiperf/p.yaml"
+    definition.parent.mkdir(parents=True)
+    definition.write_text("exclude: no request can be built\n")
+    with pytest.raises(ConfigError, match="config/exclusions.yaml"):
+        profile_override("p", "f", tmp_path, root=tmp_path / "config")
+
+
+def test_named_profiles_replace_the_machines_include_but_keep_its_exclusions():
+    excluded_here = selection.Profile("p", "vision_language_generation", "Org/p", None, "no prompt",
+                                      "config/exclusions.yaml")
+    profiles = [*CATALOG, excluded_here]
+    config = {"include": ["qwen3-0.6b-fp16"], "exclude": [
+        {"profile": "flux-2-dev*", "reason": "128 GB", "source": "config/platforms/small.yaml"}]}
+    names, excluded = selection.run_list(config, profiles, ["p", "qwen36-27b", "flux-*", "qwen3-0.6b-fp16", "gone"],
+                                         size_gib=lambda profile: None)
+    # Named profiles run in the given order (a pattern's in catalog order); one that is no ready catalog profile
+    # is passed on, and its run reports the configuration error.
+    assert names == ["qwen36-27b", "qwen3-0.6b-fp16", "gone"]
+    assert [(item["profile"], item["source"]) for item in excluded] == [
+        ("p", "config/exclusions.yaml"), ("flux-2-dev", "config/platforms/small.yaml"),
+        ("flux-2-dev-fp8", "config/platforms/small.yaml")]
+    # --ignore-exclusions: every named profile, as named.
+    assert selection.run_list(config, profiles, ["p", "flux-*"], ignore_exclusions=True) == (
+        ["p", "flux-2-dev", "flux-2-dev-fp8"], [])
+    with pytest.raises(ConfigError, match="--ignore-exclusions applies to the profiles named with --profile"):
+        selection.run_list(config, profiles, None, ignore_exclusions=True)
+    # Without names, the machine's list.
+    assert selection.run_list(config, profiles, size_gib=lambda profile: None)[0] == ["qwen3-0.6b-fp16"]
+
+
+def test_a_named_run_leaves_an_excluded_profile_out_unless_told_to_ignore_the_exclusions(tmp_path, monkeypatch, capsys):
+    from trtmc_aiperf_qual import cli, models
+
+    excluded_here = selection.Profile("p", "text_generation", "Org/p", None, "random weights", "config/exclusions.yaml")
+    monkeypatch.setattr(cli, "load_environment", lambda path: Environment({"repo": str(tmp_path)}))
+    monkeypatch.setattr(selection, "catalog", lambda repository: [*CATALOG, excluded_here])
+    monkeypatch.setattr(models, "resolve_model", lambda name, environment: _model(name, f"org/{name}"))
+    ran = []
+    monkeypatch.setattr(campaign, "run_one", lambda environment, model, out: ran.append(model["model"]) or
+                        {"category": "pass"})
+    run = ["run", "--profile", "p", "--environment", str(tmp_path / "env.yaml"), "--out", str(tmp_path / "p")]
+
+    assert cli.main(run) == 2 and ran == []
+    assert "p is excluded (config/exclusions.yaml): random weights; --ignore-exclusions" in capsys.readouterr().err
+    assert cli.main([*run, "--ignore-exclusions"]) == 0 and ran == ["p"]
+    capsys.readouterr()
+
+    batch = []
+    monkeypatch.setattr(campaign, "run_all", lambda environment, models, out_root, **kwargs: batch.extend(
+        model["model"] for model in models) or [])
+    out = tmp_path / "out"
+    named = ["run-all", "--environment", str(tmp_path / "env.yaml"), "--out-root", str(out),
+             "--profile", "p", "--profile", "qwen3-*"]
+    assert cli.main(named) == 0 and batch == ["qwen3-0.6b-fp16"]
+    assert json.loads((out / campaign.EXCLUSIONS).read_text()) == [
+        {"profile": "p", "task": "text_generation", "reason": "random weights", "source": "config/exclusions.yaml"}]
+    assert json.loads((out / campaign.PLAN).read_text())["selected"] == ["qwen3-0.6b-fp16"]
+    batch.clear()
+    assert cli.main([*named, "--ignore-exclusions", "--rerun"]) == 0 and batch == ["p", "qwen3-0.6b-fp16"]
+    assert cli.main(["run-all", "--environment", str(tmp_path / "env.yaml"), "--out-root", str(out),
+                     "--ignore-exclusions"]) == 2
+    assert "--ignore-exclusions applies to the profiles named with --profile" in capsys.readouterr().err
 
 
 def test_the_vision_language_profiles_whose_catalog_cases_gained_a_request_are_qualified():
@@ -622,11 +741,12 @@ def test_a_platforms_exclusions_follow_the_machines_own_and_its_deadlines_yield_
     assert environment.values["platform"] == "small" and environment.values["repo"] == "/repo"
     assert environment.values["models"] == {"include": "all", "exclude": [
         {"profile": "qwen36-27b", "reason": "no root here"},
-        {"profile": "flux-2-dev*", "reason": "platform small: 128 GB"}]}
+        {"profile": "flux-2-dev*", "reason": "platform small: 128 GB", "source": "config/platforms/small.yaml"}]}
     assert environment.values["deadlines"] == {"qwen36-27b": 3600, "flux-2-dev": 7200}
     selected, excluded = selection.select(environment.values["models"], CATALOG)
     assert _names(selected) == ["qwen3-0.6b-fp16"]
     assert [item["reason"] for item in excluded] == ["no root here", "platform small: 128 GB", "platform small: 128 GB"]
+    assert [item["source"] for item in excluded] == ["environment", *["config/platforms/small.yaml"] * 2]
 
 
 def test_an_environment_without_a_platform_is_read_as_written(tmp_path):
@@ -890,6 +1010,7 @@ def test_run_all_sets_aside_the_older_result_of_a_profile_that_no_longer_configu
     def broken(name, environment):
         raise ConfigError(f"unknown benchmark 'typo' ({name})")
 
+    _named_as_given(monkeypatch)
     monkeypatch.setattr(cli, "load_environment", lambda path: Environment({}))
     monkeypatch.setattr(models, "resolve_model", broken)
     out = tmp_path / "gb300-1"
