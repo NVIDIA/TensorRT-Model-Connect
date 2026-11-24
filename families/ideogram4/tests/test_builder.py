@@ -26,7 +26,8 @@ def test_weight_only_fp8_dequantization_preserves_bf16_rounding():
 
 
 @pytest.mark.parametrize("value", [0, -1, 255, 257])
-def test_non_image_profiles_are_rejected_before_loading_weights(value, tmp_path):
+@pytest.mark.parametrize("dimension", ["image_height", "image_width"])
+def test_non_image_profiles_are_rejected_before_loading_weights(value, dimension, tmp_path):
     import json
     from tensorrt_model_connect import BuildRequest
     from families.ideogram4.model import build
@@ -36,14 +37,32 @@ def test_non_image_profiles_are_rejected_before_loading_weights(value, tmp_path)
     (tmp_path / "text_encoder/config.json").write_text(
         json.dumps({"model_type": "qwen3_vl", "ideogram_fp8_weight_only": True})
     )
-    with pytest.raises(ValueError):
-        request = BuildRequest(
+    request = BuildRequest(
+        model_dir=tmp_path,
+        output_path=tmp_path / "model.bundle",
+        family="ideogram4",
+        task="text_to_image",
+        precision="bf16",
+        **{dimension: value if value > 0 else 512},
+    )
+    if value <= 0:
+        # Exercise the builder's own guard independently of the public dataclass.
+        object.__setattr__(request, dimension, value)
+    with pytest.raises(ValueError, match="image dimensions"):
+        build(request, None)
+
+
+@pytest.mark.parametrize("value", [0, -1])
+@pytest.mark.parametrize("dimension", ["image_height", "image_width"])
+def test_build_request_rejects_nonpositive_dimensions(value, dimension, tmp_path):
+    from tensorrt_model_connect import BuildRequest
+
+    with pytest.raises(ValueError, match=dimension):
+        BuildRequest(
             model_dir=tmp_path,
             output_path=tmp_path / "model.bundle",
             family="ideogram4",
             task="text_to_image",
             precision="bf16",
-            image_height=value,
-            image_width=512,
+            **{dimension: value},
         )
-        build(request, None)

@@ -16,6 +16,15 @@ The prompt is a structured JSON caption string, as required by the foundation
 model. The native tokenizer applies NFC normalization, byte-level BPE, and the
 published user/assistant chat framing. Prompt enhancement belongs to the
 application. Overlong framed captions are rejected without truncation.
+The per-request `max_prompt_bytes` config defaults to 262144 bytes (256 KiB),
+matching the repository server's default admission budget. It is checked before
+JSON parsing, NFC normalization, or tokenization, independently of the bundle's
+encoded-token capacity. Set a lower budget for tighter application admission;
+overrides must be positive and leave room for framing in the tokenizer's 32-bit
+input size. Malformed JSON and non-object captions are invalid arguments.
+Caption preparation uses immutable tokenizer data and per-call matchers before
+acquiring the pipeline's engine lock. Engine execution and output copies remain
+serialized. Applications still own aggregate request admission and concurrency.
 
 Execution supports one image on one GPU. Build dimensions default to 1024 by
 1024 and must be multiples of 16, at least 256. The text profile defaults to

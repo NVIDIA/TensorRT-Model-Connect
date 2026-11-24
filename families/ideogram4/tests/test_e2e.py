@@ -157,9 +157,29 @@ def reference(root, prompt, initial):
     return image
 
 
+def _build_bundle(root, tmp_path_factory):
+    global _BUNDLE
+    if _BUNDLE is None:
+        bundle_path = tmp_path_factory.mktemp("ideogram4-bundle") / MANIFEST["bundle"]
+        build(
+            BuildRequest(
+                model_dir=root,
+                output_path=bundle_path,
+                family="ideogram4",
+                task="text_to_image",
+                precision=MANIFEST["precision"],
+                image_height=MANIFEST["image_height"],
+                image_width=MANIFEST["image_width"],
+                max_sequence_length=MANIFEST["max_sequence_length"],
+                tensor_parallel_size=MANIFEST["tensor_parallel_size"],
+            )
+        )
+        _BUNDLE = bundle_path
+    return _BUNDLE
+
+
 @pytest.mark.parametrize("case_name", CASES)
 def test_e2e(case_name, request, tmp_path, tmp_path_factory):
-    global _BUNDLE
     require_selected(case_name, request.config)
     case = CASES[case_name]
     from huggingface_hub import snapshot_download
@@ -187,6 +207,8 @@ def test_e2e(case_name, request, tmp_path, tmp_path_factory):
     with evidence_stage("preprocess"):
         from ideogram4.caption_verifier import CaptionVerifier
 
+        runtime_framed = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+        assert framed == runtime_framed
         assert CaptionVerifier().verify_raw(prompt) == []
         samples = [framed, "Cafe\u0301 and 中文 1234567", "<|im_start|>user\nhello"]
         helper = Path(os.environ["TRTMC_NATIVE_BUILD_DIR"]) / "test_ideogram4_tokenizer"
@@ -203,21 +225,7 @@ def test_e2e(case_name, request, tmp_path, tmp_path_factory):
             assert result["ids"] == tokenizer.encode(sample, add_special_tokens=False)
         record_evidence("preprocessing", {"framed_prompt": framed, "token_ids": actual[0]["ids"]})
     with evidence_stage("build"):
-        if _BUNDLE is None:
-            _BUNDLE = tmp_path_factory.mktemp("ideogram4-bundle") / MANIFEST["bundle"]
-            build(
-                BuildRequest(
-                    model_dir=root,
-                    output_path=_BUNDLE,
-                    family="ideogram4",
-                    task="text_to_image",
-                    precision=MANIFEST["precision"],
-                    image_height=MANIFEST["image_height"],
-                    image_width=MANIFEST["image_width"],
-                    max_sequence_length=MANIFEST["max_sequence_length"],
-                    tensor_parallel_size=MANIFEST["tensor_parallel_size"],
-                )
-            )
+        bundle = _build_bundle(root, tmp_path_factory)
     count = (MANIFEST["image_height"] // 16) * (MANIFEST["image_width"] // 16)
     initial = np.random.default_rng(case["seed"]).standard_normal((1, count, 128), dtype=np.float32)
     raw = tmp_path / "initial.raw"
@@ -226,7 +234,7 @@ def test_e2e(case_name, request, tmp_path, tmp_path_factory):
     command = [
         str(binary),
         "generate-image",
-        str(_BUNDLE),
+        str(bundle),
         "--runtime-root",
         str(runtime),
         "--prompt",

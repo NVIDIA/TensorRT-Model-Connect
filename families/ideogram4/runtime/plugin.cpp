@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -22,10 +23,14 @@ namespace trtmc::ideogram4 {
 namespace {
 constexpr std::int32_t kChannels = 128;
 constexpr std::int32_t kFeatures = 53248;
+constexpr std::string_view kUserPrefix = "<|im_start|>user\n";
+constexpr std::string_view kAssistantSuffix = "<|im_end|>\n<|im_start|>assistant\n";
 const internal::ConfigField kFields[] = {
     {"seed", internal::ConfigKind::I64, std::int64_t{0},
      "Initial noise seed; explicit latents override it"},
     {"num_steps", internal::ConfigKind::I64, std::int64_t{20}, "V4_DEFAULT_20 sampler steps"},
+    {"max_prompt_bytes", internal::ConfigKind::I64, std::int64_t{256 * 1024},
+     "Caption byte admission limit before JSON parsing and tokenization"},
 };
 
 std::vector<char> section(const BundleReader& bundle, const char* name) {
@@ -109,20 +114,10 @@ class Pipeline final : public internal::IModel, public internal::ITextToImage {
         internal::validate_config(kFields, config);
         if (*internal::config_get<std::int64_t>(config, kFields, "num_steps") != 20)
             throw internal::ConfigError("ideogram4 bundle implements the V4_DEFAULT_20 sampler");
+        const auto encoded = prepare_prompt(request.prompt, config);
         std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
         if (!lock.owns_lock())
             throw std::invalid_argument("ideogram4 pipeline already has an active request");
-        // The foundation checkpoint consumes structured captions; prompt enhancement is an upstream
-        // application.
-        const auto caption = nlohmann::json::parse(request.prompt.begin(), request.prompt.end());
-        if (!caption.is_object())
-            throw std::invalid_argument(
-                "ideogram4 prompt must be a structured JSON caption object");
-        const std::string framed = "<|im_start|>user\n" + std::string(request.prompt) +
-                                   "<|im_end|>\n<|im_start|>assistant\n";
-        const auto encoded = tokenizer_->encode(framed);
-        if (encoded.empty() || encoded.size() > static_cast<std::size_t>(length_))
-            throw std::invalid_argument("ideogram4 framed prompt exceeds the bundle text profile");
         const auto text_length = static_cast<std::int32_t>(encoded.size());
         const std::int32_t gh = height_ / 16, gw = width_ / 16, count = gh * gw;
         const auto total = text_length + count;
@@ -208,6 +203,31 @@ class Pipeline final : public internal::IModel, public internal::ITextToImage {
     }
 
   private:
+    std::vector<std::int32_t> prepare_prompt(std::string_view prompt,
+                                             internal::ConfigView config) const {
+        const auto maximum =
+            *internal::config_get<std::int64_t>(config, kFields, "max_prompt_bytes");
+        constexpr auto framing_bytes = kUserPrefix.size() + kAssistantSuffix.size();
+        constexpr auto input_capacity =
+            std::numeric_limits<std::int32_t>::max() - static_cast<std::int64_t>(framing_bytes);
+        if (maximum <= 0 || maximum > input_capacity)
+            throw internal::ConfigError("ideogram4 max_prompt_bytes must fit the tokenizer input");
+        if (prompt.size() > static_cast<std::size_t>(maximum))
+            throw std::invalid_argument("ideogram4 prompt exceeds max_prompt_bytes");
+        // Caption admission precedes parsing, normalization, and byte-pair encoding.
+        const auto caption = nlohmann::json::parse(prompt.begin(), prompt.end(), nullptr, false);
+        if (!caption.is_object())
+            throw std::invalid_argument(
+                "ideogram4 prompt must be a structured JSON caption object");
+        std::string framed(kUserPrefix);
+        framed.append(prompt);
+        framed.append(kAssistantSuffix);
+        const auto encoded = tokenizer_->encode(framed);
+        if (encoded.empty() || encoded.size() > static_cast<std::size_t>(length_))
+            throw std::invalid_argument("ideogram4 framed prompt exceeds the bundle text profile");
+        return encoded;
+    }
+
     std::unique_ptr<ITrtModule> text_, positive_, negative_, decoder_;
     std::unique_ptr<Tokenizer> tokenizer_;
     std::int32_t height_, width_, length_;
