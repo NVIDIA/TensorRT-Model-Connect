@@ -41,8 +41,10 @@ full generation accuracy remains unqualified. Native Torch must use the same C++
 ABI as the runtime toolchain; configuration rejects an incompatible distribution.
 The oracle keeps the complete FP32 audio VAE on CUDA because its weight-normalized
 convolutions do not support group offloading. It loads the other neural components
-one at a time and stages their weights in a temporary directory using Diffusers
-disk-backed leaf offloading. This bounds resident host weights and requires
+one at a time and stages their weights using Diffusers disk-backed leaf offloading.
+The parent test owns a temporary offload directory outside the retained output
+directory and removes it after the subprocess exits, including a timeout.
+Reference outputs and stdout/stderr logs remain available. This bounds resident host weights and requires
 scratch disk space for the offloaded components. It trades transfer time for
 lower host and device memory use. The original model, dtypes, scheduler, prompts,
 seeds and comparison gates remain the same.
@@ -51,9 +53,17 @@ Prepare the manifest's isolated reference environment through the repository's
 setup step; the original Diffusers and Transformers pins remain in
 `tests/requirements.txt` while the builder uses the normal package environment.
 
-Set `TRTMC_BINARY`, `TRTMC_RUNTIME_ROOT` and
-`TRTMC_NATIVE_BUILD_DIR` (the CMake build directory containing the family test
-tools), build those tools, then run:
+Install the native `tensorrt-model-connect` package built from the source revision
+being tested. Set `TRTMC_RUNTIME_ROOT` to its `tensorrt_model_connect/bin` directory
+and `TRTMC_BINARY` to `trtmc` in that directory. The builder resolves its math
+library from this installed distribution; the transformer-math test checks that
+both the family math library and TVM-FFI bridge are the files selected by
+`TRTMC_RUNTIME_ROOT` before constructing its graph. A different CMake library
+copy is rejected even if it has the same filename. Reinstall the native package
+after changing those libraries.
+
+Set `TRTMC_NATIVE_BUILD_DIR` to the matching CMake build directory containing the
+family test tools, build those tools, then run:
 
 ```sh
 PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \

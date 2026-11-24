@@ -5,8 +5,6 @@
 import gc
 import json
 import sys
-import tempfile
-from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -17,45 +15,43 @@ from diffusers import ModularPipeline
 from diffusers.hooks.group_offloading import apply_group_offloading
 
 
-@contextmanager
-def _reference_pipeline(directory, output_dir):
+def _reference_pipeline(directory, offload_dir):
     # Load and stage one component at a time so the reference does not retain
     # the complete text encoder, transformer and decoders in resident CPU RAM.
-    with tempfile.TemporaryDirectory(prefix="reference-offload-", dir=output_dir) as scratch:
-        pipeline = ModularPipeline.from_pretrained(
-            str(directory), workflow="t2va", local_files_only=True
-        )
-        options = {"pretrained_model_name_or_path": str(directory), "local_files_only": True}
-        for name in ("transformer", "text_encoder", "vae", "audio_vae"):
-            dtype = torch.float32 if name in {"vae", "audio_vae"} else torch.bfloat16
-            pipeline.load_components(names=name, dtype=dtype, **options)
-            component = getattr(pipeline, name)
-            if name == "transformer":
-                pipeline.load_lora_weights(
-                    str(directory), weight_name="fl2va/adapter.safetensors", local_files_only=True
-                )
-            if name == "text_encoder":
-                component.set_attn_implementation("eager")
-            if name == "audio_vae":
-                # weight_norm pre-hooks require this complete FP32 component
-                # on CUDA; the audio VAE opts out of group offloading.
-                component.to("cuda")
-            else:
-                apply_group_offloading(
-                    component,
-                    onload_device=torch.device("cuda"),
-                    offload_device=torch.device("cpu"),
-                    offload_type="leaf_level",
-                    use_stream=False,
-                    offload_to_disk_path=str(Path(scratch) / name),
-                )
-            gc.collect()
-        # Tokenizers, processors and schedulers do not retain neural weights.
-        pipeline.load_components(
-            dtype={"vae": torch.float32, "audio_vae": torch.float32, "default": torch.bfloat16},
-            **options,
-        )
-        yield pipeline
+    pipeline = ModularPipeline.from_pretrained(
+        str(directory), workflow="t2va", local_files_only=True
+    )
+    options = {"pretrained_model_name_or_path": str(directory), "local_files_only": True}
+    for name in ("transformer", "text_encoder", "vae", "audio_vae"):
+        dtype = torch.float32 if name in {"vae", "audio_vae"} else torch.bfloat16
+        pipeline.load_components(names=name, dtype=dtype, **options)
+        component = getattr(pipeline, name)
+        if name == "transformer":
+            pipeline.load_lora_weights(
+                str(directory), weight_name="fl2va/adapter.safetensors", local_files_only=True
+            )
+        if name == "text_encoder":
+            component.set_attn_implementation("eager")
+        if name == "audio_vae":
+            # weight_norm pre-hooks require this complete FP32 component
+            # on CUDA; the audio VAE opts out of group offloading.
+            component.to("cuda")
+        else:
+            apply_group_offloading(
+                component,
+                onload_device=torch.device("cuda"),
+                offload_device=torch.device("cpu"),
+                offload_type="leaf_level",
+                use_stream=False,
+                offload_to_disk_path=str(offload_dir / name),
+            )
+        gc.collect()
+    # Tokenizers, processors and schedulers do not retain neural weights.
+    pipeline.load_components(
+        dtype={"vae": torch.float32, "audio_vae": torch.float32, "default": torch.bfloat16},
+        **options,
+    )
+    return pipeline
 
 
 def _generate(pipeline, manifest, case, output_dir):
@@ -87,7 +83,7 @@ def _generate(pipeline, manifest, case, output_dir):
 
 
 def main():
-    directory, input_path, output_dir = map(Path, sys.argv[1:])
+    directory, input_path, output_dir, offload_dir = map(Path, sys.argv[1:])
     manifest, case = json.loads(input_path.read_text())
     assert transformers.__version__ == "5.15.0"
     assert torch.__version__.split("+")[0] == "2.12.0"
@@ -104,8 +100,8 @@ def main():
     )
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    with _reference_pipeline(directory, output_dir) as pipeline:
-        _generate(pipeline, manifest, case, output_dir)
+    pipeline = _reference_pipeline(directory, offload_dir)
+    _generate(pipeline, manifest, case, output_dir)
 
 
 if __name__ == "__main__":

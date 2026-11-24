@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from functools import cache
 from pathlib import Path
 
@@ -224,6 +225,76 @@ def _video_metrics(actual, expected):
     return float(np.sqrt(square / actual.size)), maximum, dot / np.sqrt(a2 * b2)
 
 
+def _run_reference(python, directory, input_path, output_dir, timeout, environment):
+    stdout_path = output_dir / "reference-stdout.log"
+    stderr_path = output_dir / "reference-process.log"
+    result = None
+    command = None
+    try:
+        with (
+            tempfile.TemporaryDirectory(prefix="pika-reference-offload-") as scratch,
+            stdout_path.open("w") as stdout,
+            stderr_path.open("w") as stderr,
+        ):
+            command = [
+                str(python),
+                str(TEST_ROOT / "reference.py"),
+                str(directory),
+                str(input_path),
+                str(output_dir),
+                scratch,
+            ]
+            result = subprocess.run(
+                command, stdout=stdout, stderr=stderr, check=False, timeout=timeout, env=environment
+            )
+    finally:
+        record_evidence(
+            "reference_process",
+            {
+                "argv": command,
+                "stdout": stdout_path,
+                "stderr": stderr_path,
+                "returncode": None if result is None else result.returncode,
+            },
+        )
+    return subprocess.CompletedProcess(
+        result.args, result.returncode, stdout_path.read_text(), stderr_path.read_text()
+    )
+
+
+@pytest.mark.parametrize("mode", ["success", "failure", "timeout"])
+def test_reference_offload_cleanup(mode, tmp_path, monkeypatch):
+    import sys
+
+    script_dir = tmp_path / "script"
+    script_dir.mkdir()
+    monkeypatch.setattr(sys.modules[__name__], "TEST_ROOT", script_dir)
+    (script_dir / "reference.py").write_text(
+        "import pathlib, sys, time\n"
+        "_, mode, output, scratch = sys.argv[1:]\n"
+        "output, scratch = pathlib.Path(output), pathlib.Path(scratch)\n"
+        "(output / 'scratch-path').write_text(str(scratch))\n"
+        "(scratch / 'weights').write_text('temporary weights')\n"
+        "(output / 'reference-output').write_text('retained output')\n"
+        "print('reference stdout', flush=True)\n"
+        "print('reference stderr', file=sys.stderr, flush=True)\n"
+        "if mode == 'timeout': time.sleep(60)\n"
+        "sys.exit(2 if mode == 'failure' else 0)\n"
+    )
+    if mode == "timeout":
+        with pytest.raises(subprocess.TimeoutExpired):
+            _run_reference(sys.executable, tmp_path, mode, tmp_path, 2, os.environ.copy())
+    else:
+        result = _run_reference(sys.executable, tmp_path, mode, tmp_path, 10, os.environ.copy())
+        assert result.returncode == (2 if mode == "failure" else 0)
+        assert result.stdout == "reference stdout\n" and result.stderr == "reference stderr\n"
+    scratch = Path((tmp_path / "scratch-path").read_text())
+    assert not scratch.exists() and not scratch.is_relative_to(tmp_path)
+    assert (tmp_path / "reference-output").read_text() == "retained output"
+    assert (tmp_path / "reference-stdout.log").read_text() == "reference stdout\n"
+    assert (tmp_path / "reference-process.log").read_text() == "reference stderr\n"
+
+
 def test_official_checkpoint_e2e(case_name, tmp_path):
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
@@ -281,34 +352,17 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     input_path = tmp_path / "reference-input.json"
     input_path.write_text(json.dumps([manifest, case]))
     with evidence_stage("reference"):
-        oracle = subprocess.run(
-            [
-                str(reference_python),
-                str(TEST_ROOT / "reference.py"),
-                str(directory),
-                str(input_path),
-                str(tmp_path),
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=case["runtime_timeout_s"],
-            env=reference_environment,
+        oracle = _run_reference(
+            reference_python,
+            directory,
+            input_path,
+            tmp_path,
+            case["runtime_timeout_s"],
+            reference_environment,
         )
         reference_metadata = tmp_path / "reference-environment.json"
         if reference_metadata.is_file():
             record_evidence("reference_environment", json.loads(reference_metadata.read_text()))
-        reference_log = tmp_path / "reference-process.log"
-        reference_log.write_text(oracle.stderr)
-        record_evidence(
-            "reference_process",
-            {
-                "argv": oracle.args,
-                "stdout": oracle.stdout,
-                "stderr": reference_log,
-                "returncode": oracle.returncode,
-            },
-        )
         assert oracle.returncode == 0, oracle.stderr + oracle.stdout
         print(oracle.stdout, end="", flush=True)
     bundle = tmp_path / manifest["bundle"]
@@ -601,9 +655,17 @@ def test_transformer_math_matches_pytorch(case_name, tmp_path):
     """Learned BF16 norms, separate LoRA projections and SDPA retain their arithmetic."""
     import tensorrt as trt
     import torch
+    from families.pika_h3_flex.native_math import _bridge
     from families.pika_h3_flex.transformer_graph import TransformerGraph
 
-    _runtime()
+    _, runtime_root = _runtime()
+    math_root = _bridge().parent
+    for name in (f"libtrtmc_model_{FAMILY}.so", "libtrtmc_byok_tvm_ffi.so"):
+        assert (math_root / name).samefile(runtime_root / name), (
+            "transformer math must use the installed native package selected by TRTMC_RUNTIME_ROOT",
+            math_root / name,
+            runtime_root / name,
+        )
     generator = torch.Generator("cpu").manual_seed(42)
 
     def weight(*shape):
@@ -679,6 +741,10 @@ def test_transformer_math_matches_pytorch(case_name, tmp_path):
             "attention": torch.nn.functional.linear(attended, parameters["attn.to_out.0.weight"]),
         }
         assert context.set_input_shape("hidden", tuple(inputs.shape))
+        types = {torch.bfloat16: trt.bfloat16, torch.float32: trt.float32}
+        for name, value in expected.items():
+            assert tuple(context.get_tensor_shape(name)) == tuple(value.shape), (rows, name)
+            assert engine.get_tensor_dtype(name) == types[value.dtype], (rows, name)
         actual = {name: torch.empty_like(value) for name, value in expected.items()}
         for name, value in {"hidden": inputs, **actual}.items():
             context.set_tensor_address(name, value.data_ptr())
