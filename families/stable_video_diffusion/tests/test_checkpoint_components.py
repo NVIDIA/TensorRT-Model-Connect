@@ -49,7 +49,14 @@ LATENT = (8, 16)
 # FP32, and the test then judges it as FP32), VAE decoder 0.8 / 2.9. The UNet measures
 # 1.0 / 1.1 at these shapes, so its bound only limits general precision loss; FP16
 # accumulation in the UNet is caught by the end-to-end FP16 shortfall bound.
-FP32_RATIO = 2.0
+# An FP32 engine's largest error moves between builds of the same network, as TensorRT picks
+# its FP32 convolution (Winograd among them) and GEMM kernels by timing, and the reference's
+# own FP32 error moves with the PyTorch build and the GPU (UNet: 1.8e-4 to 3.3e-4). The FP32
+# bound lies between healthy builds and the same engines built with TF32 allowed, the precision
+# loss it must reject (largest-error ratios, healthy builds on B300 and GB300 with two PyTorch
+# builds / TF32): UNet 0.70-3.12 over 19 builds / 108-142, image encoder 0.23-0.70 over 6 / 856,
+# VAE encoder 0.86-1.53 over 6 / 438, VAE decoder 0.33-1.06 over 6 / 133.
+FP32_RATIO = 8.0
 FP16_RATIOS = {"image encoder": 2.0, "VAE encoder": 1.5, "VAE decoder": 1.5, "UNet": 1.5}
 
 
