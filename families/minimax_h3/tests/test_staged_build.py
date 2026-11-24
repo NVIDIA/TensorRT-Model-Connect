@@ -91,15 +91,22 @@ def _quantized_sources(tmp_path: Path, monkeypatch) -> dict[str, Path]:
     return sources
 
 
+@pytest.mark.parametrize("hub_snapshot", [False, True])
 def test_public_quantized_build_needs_no_original_text_or_denoiser_weights(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, hub_snapshot: bool
 ) -> None:
     from tensorrt_model_connect import BuildRequest
     from families.minimax_h3 import checkpoint
     import huggingface_hub
 
     cli = importlib.import_module("families.minimax_h3.cli_rtx")
-    model_dir = tmp_path / "model"
+    repository = "Example/ConvertedH3" if hub_snapshot else None
+    revision = "b" * 40 if hub_snapshot else None
+    model_dir = (
+        tmp_path / "models--Example--ConvertedH3" / "snapshots" / revision
+        if hub_snapshot
+        else tmp_path / "model"
+    )
     for name in ("transformer", "vae", "audio_vae", "tokenizer"):
         (model_dir / name).mkdir(parents=True)
     (model_dir / "model_index.json").write_text(
@@ -182,6 +189,16 @@ def test_public_quantized_build_needs_no_original_text_or_denoiser_weights(
         output.with_name(output.name + ".plans").joinpath("build_state.json").read_text()
     )
     assert set(state["checkpoint"]["components"]) == {"vae", "audio_vae"}
+    runtime = json.loads(sections["runtime.json"])
+    assert (state["checkpoint"]["repository"], state["checkpoint"]["revision"]) == (
+        repository,
+        revision,
+    )
+    assert (runtime["checkpoint_repository"], runtime["checkpoint_revision"]) == (
+        repository,
+        revision,
+    )
+    assert str(tmp_path) not in json.dumps(runtime)
 
 
 @pytest.mark.parametrize("sr", (False, True))

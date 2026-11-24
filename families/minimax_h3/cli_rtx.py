@@ -11,6 +11,7 @@ from tensorrt_model_connect.build import BuildRequest, select_backend
 from tensorrt_model_connect.bundle_writer import BundleWriter
 from tensorrt_model_connect.model_support import resolve_model
 
+from .provenance import CHECKPOINT_REPOSITORY, CHECKPOINT_REVISION, auxiliary_checkpoint_identity
 from .runtime_config_schema import normalize_build_options
 
 
@@ -56,6 +57,20 @@ def build_trt(
     return _build(request, {"first_block_cache": first_block_cache})
 
 
+def _resolve_rtx_checkpoint(model: str, revision: str | None) -> Path:
+    local = Path(model)
+    if local.is_dir():
+        identity = auxiliary_checkpoint_identity(local)
+        if revision is not None and revision != identity["revision"]:
+            raise ValueError("Cannot verify --revision against this local checkpoint directory")
+        return local
+    if model != CHECKPOINT_REPOSITORY:
+        raise ValueError(f"MiniMax-H3 RTX requires {CHECKPOINT_REPOSITORY} or a local directory")
+    if revision is not None and revision != CHECKPOINT_REVISION:
+        raise ValueError(f"MiniMax-H3 RTX requires checkpoint revision {CHECKPOINT_REVISION}")
+    return resolve_model(CHECKPOINT_REPOSITORY, CHECKPOINT_REVISION)
+
+
 def build_rtx(
     *,
     model: str,
@@ -73,7 +88,7 @@ def build_rtx(
     if (image_width is None) != (image_height is None):
         raise ValueError("MiniMax-H3 requires both image height and width, or neither")
     request = BuildRequest(
-        model_dir=resolve_model(model, revision),
+        model_dir=_resolve_rtx_checkpoint(model, revision),
         output_path=output,
         family="minimax_h3",
         task="image_generation",

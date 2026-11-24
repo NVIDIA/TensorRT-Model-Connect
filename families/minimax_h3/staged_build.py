@@ -44,8 +44,7 @@ from .rtx_config import (
     VISION_ENCODER_DEFAULT_WORKSPACE_BYTES,
 )
 from .provenance import (
-    CHECKPOINT_REPOSITORY,
-    CHECKPOINT_REVISION,
+    auxiliary_checkpoint_identity,
     QUANTIZED_TRANSFORMER_CONFIG,
     SUPER_RESOLUTION_LEARNED_RESIDUAL_STRENGTH,
     super_resolution_bundle_config,
@@ -380,6 +379,7 @@ def _runtime_config(
     trt_abi: str,
     audio_vae_config: dict,
     components: Sequence[tuple[str, str, str]],
+    auxiliary_checkpoint: dict[str, str | None] | None = None,
     transformer_ref_identity=None,
     quantized_transformer_identity=None,
     quantized_text_encoder_identity=None,
@@ -441,7 +441,8 @@ def _runtime_config(
     config: dict[str, object] = {
         "model_type": "minimax_h3",
         "runtime_strategy": "diffusion_minimax_h3",
-        "checkpoint_revision": CHECKPOINT_REVISION,
+        "checkpoint_repository": (auxiliary_checkpoint or {}).get("repository"),
+        "checkpoint_revision": (auxiliary_checkpoint or {}).get("revision"),
         "precision": "bf16",
         "engine_backend": "trt_rtx",
         "trt_version": trt_version,
@@ -608,6 +609,7 @@ def build_staged_bundle(
     """Build or resume each plan, then stream it through the current bundle writer."""
 
     model = Path(model_dir).resolve(strict=True)
+    auxiliary_checkpoint = auxiliary_checkpoint_identity(model)
     plans = Path(plans_dir).absolute()
     plans.mkdir(parents=True, exist_ok=True)
     tokenizer = model / "tokenizer" / "tokenizer.json"
@@ -759,8 +761,7 @@ def build_staged_bundle(
             ref2va=transformer_ref_identity is not None or turbo_ref_identity is not None,
         ),
         "checkpoint": {
-            "repository": CHECKPOINT_REPOSITORY,
-            "revision": CHECKPOINT_REVISION,
+            **auxiliary_checkpoint,
             "components": {
                 name: _component_source_receipts(model / name) for name in checkpoint_components
             },
@@ -878,6 +879,7 @@ def build_staged_bundle(
     writer.add_json(
         "runtime.json",
         _runtime_config(
+            auxiliary_checkpoint=auxiliary_checkpoint,
             trt_version=version,
             trt_abi=abi,
             audio_vae_config=json.loads(audio_config_path.read_text(encoding="utf-8")),

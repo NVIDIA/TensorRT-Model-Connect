@@ -21,9 +21,9 @@
       "executor": "python",
       "handler": "cli_rtx:build_rtx",
       "arguments": [
-        {"name": "model", "type": "string", "help": "Hugging Face model ID or local checkpoint directory"},
+        {"name": "model", "type": "string", "help": "MiniMaxAI/MiniMax-H3 or a local auxiliary checkpoint directory"},
         {"name": "output", "flags": ["-o", "--output"], "type": "path", "required": true},
-        {"name": "revision", "flags": ["--revision"], "type": "string"},
+        {"name": "revision", "flags": ["--revision"], "type": "string", "help": "The remote always uses the pinned MiniMax-H3 revision. For a local snapshot, require this cache commit."},
         {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false},
         {"name": "image_height", "flags": ["--image-height"], "type": "int"},
         {"name": "image_width", "flags": ["--image-width"], "type": "int"},

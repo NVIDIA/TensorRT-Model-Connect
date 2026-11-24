@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import struct
 from pathlib import Path
 
 from tensorrt_model_connect.bundle_writer import BUNDLE_MAGIC
+from tensorrt_model_connect.model_support import checkpoint_identity
 
 from .rtx_config import (
     NATIVE_EXPLICIT_CANVAS_SIZES,
@@ -44,6 +46,26 @@ SUPER_RESOLUTION_BATCH_PROFILE = [1, 4, 8]
 SUPER_RESOLUTION_LEARNED_RESIDUAL_STRENGTH = 0.25
 
 
+def auxiliary_checkpoint_identity(snapshot: Path) -> dict[str, str | None]:
+    """Describe the resolved Hub cache identity, or explicitly mark an unversioned local copy."""
+    identity = checkpoint_identity(snapshot)
+    return {
+        "repository": identity["hf_id"] if identity else None,
+        "revision": identity["revision"] if identity else None,
+    }
+
+
+def _valid_identity(repository: object, revision: object) -> bool:
+    if repository is None or revision is None:
+        return repository is None and revision is None
+    return (
+        isinstance(repository, str)
+        and re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?", repository) is not None
+        and isinstance(revision, str)
+        and re.fullmatch(r"[0-9a-f]{40}", revision) is not None
+    )
+
+
 def checkpoint_snapshot_record(
     snapshot: Path,
     *,
@@ -59,8 +81,7 @@ def checkpoint_snapshot_record(
     if missing:
         raise FileNotFoundError("Incomplete MiniMax-H3 checkpoint; missing: " + ", ".join(missing))
     return {
-        "repository": CHECKPOINT_REPOSITORY,
-        "revision": CHECKPOINT_REVISION,
+        **auxiliary_checkpoint_identity(root),
         "includes_transformer_weights": include_transformer_weights,
     }
 
@@ -70,14 +91,14 @@ def validate_checkpoint_snapshot_record(
     *,
     include_transformer_weights: bool = True,
 ) -> dict[str, object]:
-    expected = {
-        "repository": CHECKPOINT_REPOSITORY,
-        "revision": CHECKPOINT_REVISION,
-        "includes_transformer_weights": include_transformer_weights,
-    }
-    if record != expected:
-        raise ValueError("MiniMax-H3 checkpoint metadata does not match the public model")
-    return dict(expected)
+    if (
+        not isinstance(record, dict)
+        or set(record) != {"repository", "revision", "includes_transformer_weights"}
+        or not _valid_identity(record["repository"], record["revision"])
+        or record["includes_transformer_weights"] is not include_transformer_weights
+    ):
+        raise ValueError("MiniMax-H3 checkpoint metadata is invalid")
+    return dict(record)
 
 
 def _checkpoint_record(path: Path, role: str, filename: str) -> dict[str, object]:
@@ -259,7 +280,14 @@ def load_bundle_config(bundle: Path) -> dict[str, object]:
 
 def validate_native_bundle_config(bundle: Path, *, source_revision: str | None = None) -> dict:
     config = load_bundle_config(bundle)
-    if config.get("checkpoint_revision") != CHECKPOINT_REVISION:
+    if "checkpoint_repository" in config:
+        valid = "checkpoint_revision" in config and _valid_identity(
+            config["checkpoint_repository"], config["checkpoint_revision"]
+        )
+    else:
+        # Older RTX bundles only recorded the canonical revision.
+        valid = config.get("checkpoint_revision") == CHECKPOINT_REVISION
+    if not valid:
         raise ValueError("MiniMax-H3 bundle checkpoint revision is invalid")
     if config.get("explicit_canvas_sizes") != [list(size) for size in NATIVE_EXPLICIT_CANVAS_SIZES]:
         raise ValueError("MiniMax-H3 bundle canvas profile is invalid")

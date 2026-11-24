@@ -77,3 +77,36 @@ def test_incompatible_profiles_fail_before_checkpoint_lookup(monkeypatch, tmp_pa
                 *args[1:],
             ]
         )
+
+
+@pytest.mark.parametrize(
+    "model,revision",
+    [
+        ("MiniMaxAI/MiniMax-H3", "main"),
+        ("MiniMaxAI/MiniMax-H3", "d" * 40),
+        ("Example/Other", cli_rtx.CHECKPOINT_REVISION),
+    ],
+)
+def test_rtx_remote_identity_rejected_before_download(monkeypatch, tmp_path, model, revision):
+    monkeypatch.setattr(cli_rtx, "resolve_model", lambda *_: pytest.fail("unexpected download"))
+    with pytest.raises(ValueError, match="MiniMax-H3 RTX requires"):
+        main(
+            ["minimax_h3", "build-rtx", model, "--revision", revision, "-o", str(tmp_path / "out")]
+        )
+
+
+def test_official_rtx_remote_is_resolved_at_exact_revision(monkeypatch, tmp_path):
+    calls = []
+
+    def resolve(model, revision):
+        calls.append((model, revision))
+        return tmp_path
+
+    monkeypatch.setattr(cli_rtx, "resolve_model", resolve)
+    assert cli_rtx._resolve_rtx_checkpoint(cli_rtx.CHECKPOINT_REPOSITORY, None) == tmp_path
+    assert calls == [(cli_rtx.CHECKPOINT_REPOSITORY, cli_rtx.CHECKPOINT_REVISION)]
+
+
+def test_unversioned_local_directory_cannot_attest_to_requested_revision(tmp_path):
+    with pytest.raises(ValueError, match="Cannot verify --revision"):
+        cli_rtx._resolve_rtx_checkpoint(str(tmp_path), cli_rtx.CHECKPOINT_REVISION)
