@@ -9,6 +9,7 @@
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
+#include <cmath>
 #include <dlfcn.h>
 #include <filesystem>
 #include <functional>
@@ -330,13 +331,33 @@ void preload_byok_kernel(const std::string& runtime_root, const std::string& lib
 std::unique_ptr<ITask> load_task(const std::string& bundle_path, const std::string& runtime_root,
                                  std::uint64_t kv_cache_size_bytes,
                                  const std::string& runtime_cache_path, bool cuda_graphs) {
-    const BundleReader reader(bundle_path);
-    return load_task(reader, runtime_root, kv_cache_size_bytes, runtime_cache_path, cuda_graphs);
+    return load_task(bundle_path, runtime_root, kv_cache_size_bytes, runtime_cache_path,
+                     cuda_graphs, 0);
 }
 
 std::unique_ptr<ITask> load_task(const BundleReader& reader, const std::string& runtime_root,
                                  std::uint64_t kv_cache_size_bytes,
                                  const std::string& runtime_cache_path, bool cuda_graphs) {
+    return load_task(reader, runtime_root, kv_cache_size_bytes, runtime_cache_path, cuda_graphs, 0);
+}
+
+std::unique_ptr<ITask> load_task(const std::string& bundle_path, const std::string& runtime_root,
+                                 std::uint64_t kv_cache_size_bytes,
+                                 const std::string& runtime_cache_path, bool cuda_graphs,
+                                 double kv_cache_memory_ratio) {
+    const BundleReader reader(bundle_path);
+    return load_task(reader, runtime_root, kv_cache_size_bytes, runtime_cache_path, cuda_graphs,
+                     kv_cache_memory_ratio);
+}
+
+std::unique_ptr<ITask> load_task(const BundleReader& reader, const std::string& runtime_root,
+                                 std::uint64_t kv_cache_size_bytes,
+                                 const std::string& runtime_cache_path, bool cuda_graphs,
+                                 double kv_cache_memory_ratio) {
+    if (!std::isfinite(kv_cache_memory_ratio) || kv_cache_memory_ratio < 0 ||
+        kv_cache_memory_ratio > 1 || (kv_cache_size_bytes && kv_cache_memory_ratio))
+        throw std::invalid_argument(
+            "KV cache ratio must be finite in [0,1] and exclusive with bytes");
     const BundleInfo& info = reader.info();
     require_safe_id("family", info.family);
     require_safe_id("task", info.task);
@@ -351,7 +372,7 @@ std::unique_ptr<ITask> load_task(const BundleReader& reader, const std::string& 
     FamilyLibrary& family = cached_family(root, info.family);
     IBackend& configured_backend =
         cached_configured_backend(backend, runtime_cache_path, cuda_graphs);
-    FamilyContext context{reader, configured_backend, kv_cache_size_bytes};
+    FamilyContext context{reader, configured_backend, kv_cache_size_bytes, kv_cache_memory_ratio};
     std::unique_ptr<ITask> task(family.create(context));
     if (task == nullptr)
         throw std::runtime_error("trtmc_create_family returned nullptr");

@@ -49,6 +49,8 @@ DType TrtModuleImpl::from_trt_dtype(nvinfer1::DataType dt) {
         return DType::kBFloat16;
     case nvinfer1::DataType::kINT32:
         return DType::kInt32;
+    case nvinfer1::DataType::kINT64:
+        return DType::kInt64;
     case nvinfer1::DataType::kINT8:
         return DType::kInt8;
     case nvinfer1::DataType::kFP8:
@@ -72,10 +74,10 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
                              cudaStream_t stream, int32_t profile_idx,
                              void* distributed_communicator,
                              const std::vector<ModuleExternalBinding>& external_bindings,
-                             bool backend_managed_cuda_graph)
+                             bool backend_managed_cuda_graph, bool engine_timing)
     : engine_(engine), ctx_(ctx), stream_(stream), profile_idx_(profile_idx),
       distributed_communicator_(distributed_communicator),
-      backend_managed_cuda_graph_(backend_managed_cuda_graph),
+      backend_managed_cuda_graph_(backend_managed_cuda_graph), engine_timing_(engine_timing),
       cuda_graph_(std::make_unique<CudaGraphExec>()) {
     if (!ctx_)
         return;
@@ -155,10 +157,17 @@ void TrtModuleImpl::validate_initial_external_bindings(
                                         "' must be bound after module creation");
         }
 
-        const auto dims = engine->getTensorShape(binding.tensor_name.c_str());
+        auto dims = engine->getTensorShape(binding.tensor_name.c_str());
         if (dims_are_dynamic(dims)) {
-            throw std::invalid_argument("tensor '" + binding.tensor_name +
-                                        "' is dynamic; prebinding requires a static shape");
+            if (engine->getTensorIOMode(binding.tensor_name.c_str()) !=
+                nvinfer1::TensorIOMode::kINPUT)
+                throw std::invalid_argument("dynamic output prebinding is unsupported: " +
+                                            binding.tensor_name);
+            dims = engine->getProfileShape(binding.tensor_name.c_str(), profile_idx_,
+                                           nvinfer1::OptProfileSelector::kMAX);
+            if (dims.nbDims < 0 || dims_are_dynamic(dims))
+                throw std::invalid_argument("prebinding requires a bounded input profile: " +
+                                            binding.tensor_name);
         }
         std::vector<int64_t> shape;
         const auto required_bytes = compute_alloc_bytes(
@@ -725,7 +734,7 @@ void TrtModuleImpl::enqueue_without_cuda_graph() {
 
 void TrtModuleImpl::record_timed_enqueue() {
     TimingEvent timing_event;
-    const bool timing_ok = begin_timing_event(timing_event);
+    const bool timing_ok = engine_timing_ && begin_timing_event(timing_event);
     try {
         if (!use_cuda_graph_)
             enqueue_without_cuda_graph();

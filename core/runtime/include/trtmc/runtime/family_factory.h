@@ -18,6 +18,7 @@ struct FamilyContext {
     const BundleReader& reader;
     IBackend& backend;
     std::uint64_t kv_cache_size_bytes{0};
+    double kv_cache_memory_ratio{0};
 };
 
 using CreateFamilyFn = ITask* (*)(const FamilyContext& context);

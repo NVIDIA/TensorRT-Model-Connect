@@ -1,0 +1,85 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Build all four public HSTU variants and prepare the Triton test repository."""
+
+import argparse
+from dataclasses import replace
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import numpy as np
+from tensorrt_model_connect import BuildRequest, build
+from families.hstu.checkpoint import create_fixture
+from families.hstu.config import Config
+from families.hstu.reference import example_inputs
+from families.hstu.triton.native_repository import generate
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--root", type=Path, required=True)
+    p.add_argument("--runtime-root", type=Path, required=True)
+    p.add_argument(
+        "--checkpoint", type=Path, help="Public checkpoint; omission creates an untrained fixture"
+    )
+    a = p.parse_args()
+    root = a.root.resolve()
+    sdk = a.runtime_root.resolve()
+    if (root / "output").exists() or (root / "triton-models").exists():
+        raise FileExistsError("qualification output/repository must be fresh")
+    if a.checkpoint:
+        Config.load(a.checkpoint)
+    root.mkdir(parents=True, exist_ok=True)
+    for candidates in (50, 64):
+        for precision in ("fp32", "bf16"):
+            name = f"hstu{candidates}-{precision}"
+            out = root / "output" / name
+            if a.checkpoint:
+                out.mkdir(parents=True)
+                for filename in ("hstu_weights.npz", "checkpoint_provenance.json"):
+                    source = a.checkpoint / filename
+                    if source.exists():
+                        shutil.copyfile(source, out / filename)
+                c = replace(Config.load(a.checkpoint), candidates=candidates)
+                c.save(out)
+            else:
+                c = create_fixture(out, candidates)
+            build(
+                BuildRequest(
+                    model_dir=out,
+                    output_path=out / "model.bundle",
+                    family="hstu",
+                    task="structured_ranking",
+                    precision=precision,
+                    max_batch_size=4,
+                )
+            )
+            for batch in (1, 4):
+                np.savez(out / f"inputs-b{batch}.npz", **example_inputs(c, batch))
+            generate(
+                out / "model.bundle", root / "triton-models", "native_" + name.replace("-", "_")
+            )
+            subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "families.hstu.triton.generate_repository",
+                    "--bundle",
+                    str(out / "model.bundle"),
+                    "--repository",
+                    str(root / "triton-models"),
+                    "--name",
+                    "history_" + name.replace("-", "_"),
+                    "--runtime-root",
+                    str(sdk),
+                    "--history-cache",
+                    "--kv-cache-size-bytes",
+                    "9437184",
+                ],
+                check=True,
+            )
+    print("Prepared four variants:", root, flush=True)
+
+
+if __name__ == "__main__":
+    main()

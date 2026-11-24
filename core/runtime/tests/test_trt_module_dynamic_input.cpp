@@ -203,6 +203,41 @@ void test_external_dynamic_input_stays_external(nvinfer1::ICudaEngine& engine,
     cudaFree(external);
 }
 
+void test_constructor_prebinding_uses_dynamic_profile_capacity(nvinfer1::ICudaEngine& engine,
+                                                               cudaStream_t stream) {
+    void* external = nullptr;
+    check(cudaMalloc(&external, 4 * sizeof(float)) == cudaSuccess, "allocate profile-max buffer");
+    if (!external)
+        return;
+    {
+        std::vector<trtmc::ModuleExternalBinding> bindings{{"input", external, 4 * sizeof(float)}};
+        trtmc::TrtModuleImpl module(&engine, engine.createExecutionContext(), stream, 0, nullptr,
+                                    bindings);
+        check(module.ok(), "bounded dynamic input accepts profile-max prebinding");
+        float values[] = {3.0F, 4.0F};
+        const auto output =
+            module.forward({{"input", trtmc::Tensor{values, {2}, trtmc::DType::kFloat32}}});
+        check(module.device_ptr("input") == external,
+              "dynamic prebinding retains borrowed storage");
+        const auto* data = static_cast<const float*>(output.at("output").data);
+        check(data[0] == 3.0F && data[1] == 4.0F, "prebound dynamic input executes correctly");
+    }
+    {
+        std::vector<trtmc::ModuleExternalBinding> bindings{{"input", external, 3 * sizeof(float)}};
+        trtmc::TrtModuleImpl module(&engine, engine.createExecutionContext(), stream, 0, nullptr,
+                                    bindings);
+        check(!module.ok(),
+              "reject prebinding smaller than maximum profile even for a short request");
+    }
+    {
+        std::vector<trtmc::ModuleExternalBinding> bindings{{"output", external, 4 * sizeof(float)}};
+        trtmc::TrtModuleImpl module(&engine, engine.createExecutionContext(), stream, 0, nullptr,
+                                    bindings);
+        check(!module.ok(), "dynamic output prebinding remains unsupported");
+    }
+    cudaFree(external);
+}
+
 void test_backend_managed_graph_does_not_enable_nested_capture(nvinfer1::ICudaEngine& engine,
                                                                cudaStream_t stream) {
     trtmc::TrtModuleImpl module(&engine, engine.createExecutionContext(), stream, 0, nullptr, {},
@@ -298,7 +333,12 @@ int main() {
     if (cudaStreamCreate(&stream) != cudaSuccess)
         return 1;
     test_constructor_rejects_vectorized_fp8(stream);
+    check(trtmc::dtype_size(trtmc::DType::kInt64) == 8, "INT64 uses eight-byte storage");
+    check(trtmc::TrtModuleImplTestPeer::from_trt_dtype(nvinfer1::DataType::kINT64) ==
+              trtmc::DType::kInt64,
+          "INT64 TensorRT mapping");
     test_first_forward_allocates_unbound_dynamic_input(*engine, stream);
+    test_constructor_prebinding_uses_dynamic_profile_capacity(*engine, stream);
     test_external_dynamic_input_stays_external(*engine, stream);
     test_backend_managed_graph_does_not_enable_nested_capture(*engine, stream);
     test_rejected_shape_fails_without_poisoning_the_next_request(*engine, stream);

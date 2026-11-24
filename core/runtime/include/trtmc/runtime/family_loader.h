@@ -34,6 +34,17 @@ std::unique_ptr<ITask> load_task(const BundleReader& reader, const std::string& 
                                  const std::string& runtime_cache_path = {},
                                  bool cuda_graphs = false);
 
+// Extended cache option. The five-argument overloads retain their existing
+// symbols and forward with an unset ratio. A nonzero ratio is exclusive with bytes.
+std::unique_ptr<ITask> load_task(const std::string& bundle_path, const std::string& runtime_root,
+                                 std::uint64_t kv_cache_size_bytes,
+                                 const std::string& runtime_cache_path, bool cuda_graphs,
+                                 double kv_cache_memory_ratio);
+std::unique_ptr<ITask> load_task(const BundleReader& reader, const std::string& runtime_root,
+                                 std::uint64_t kv_cache_size_bytes,
+                                 const std::string& runtime_cache_path, bool cuda_graphs,
+                                 double kv_cache_memory_ratio);
+
 // Register a kernel before model loading, using the existing optional TVM-FFI
 // extension. Successfully loaded extension DSOs remain resident until exit.
 void preload_byok_kernel(const std::string& runtime_root, const std::string& library,

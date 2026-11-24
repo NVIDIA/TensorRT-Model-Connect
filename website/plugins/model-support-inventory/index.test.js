@@ -12,6 +12,16 @@ const test = require('node:test');
 const modelSupportInventoryPlugin = require('./index');
 const {collectModelSupportInventory} = modelSupportInventoryPlugin;
 
+test('structured ranking exposes a local recipe without unsupported CLI or HF claims', () => {
+  const root = repository();
+  addTaskManifest(root, 'structured_ranking');
+  const recipe = collectModelSupportInventory(root).taskRecipes.find(row => row.task === 'structured_ranking');
+  assert.equal(recipe.label, 'Structured ranking');
+  assert.equal(recipe.recipeCount, 1);
+  assert.deepEqual(recipe.families[0].cliCommands, []);
+  assert.equal(recipe.hfUrl, null);
+});
+
 test('head-score recipes are discovered without hidden or vocabulary claims', () => {
   const root = repository();
   addTaskManifest(root, 'text_to_head_scores');

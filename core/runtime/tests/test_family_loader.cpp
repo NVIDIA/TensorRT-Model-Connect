@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -113,6 +114,30 @@ int main(int argc, char** argv) {
     const auto sized_result = sized_forecast->forecast({values, mask});
     check(sized_result.shape == std::vector<std::int64_t>({4096, 3}),
           "runtime KV bytes reach the selected family directly");
+    auto ratio_task =
+        trtmc::load_task(bundle_path.string(), runtime_root.string(), 0, {}, false, 0.05);
+    const auto ratio_result =
+        dynamic_cast<trtmc::ITimeSeriesForecast*>(ratio_task.get())->forecast({values, mask});
+    check(ratio_result.shape == std::vector<std::int64_t>({1, 3, 50}),
+          "runtime KV memory ratio reaches the selected family directly");
+    for (double ratio : {-0.1, 1.1, std::numeric_limits<double>::infinity(),
+                         std::numeric_limits<double>::quiet_NaN()}) {
+        bool rejected = false;
+        try {
+            (void)trtmc::load_task(bundle_path.string(), runtime_root.string(), 0, {}, false,
+                                   ratio);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        check(rejected, "loader rejects invalid KV memory ratio");
+    }
+    bool exclusive = false;
+    try {
+        (void)trtmc::load_task(bundle_path.string(), runtime_root.string(), 4096, {}, false, 0.05);
+    } catch (const std::invalid_argument&) {
+        exclusive = true;
+    }
+    check(exclusive, "KV byte cap and ratio are mutually exclusive");
     check(rtx_options_throw(bundle_path, runtime_root.string()),
           "TensorRT-RTX options reject a non-RTX bundle");
 

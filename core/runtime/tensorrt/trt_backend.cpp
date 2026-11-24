@@ -79,8 +79,9 @@ class TrtBackend final : public IBackend {
             auto* ctx = engine->createExecutionContext();
             if (!ctx)
                 throw std::runtime_error("[trtmc] Failed to create TRT execution context");
-            auto mod = std::make_unique<TrtModuleImpl>(engine.get(), ctx, stream, profile_idx,
-                                                       options.distributed_communicator);
+            auto mod = std::make_unique<TrtModuleImpl>(
+                engine.get(), ctx, stream, profile_idx, options.distributed_communicator,
+                std::vector<ModuleExternalBinding>{}, false, options.engine_timing);
             if (!mod->ok())
                 throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");
             keep_backend_resources(*mod, engine, stream_owner, options.distributed_owner);
@@ -134,7 +135,8 @@ class TrtBackend final : public IBackend {
         }
 
         auto module = std::make_unique<TrtModuleImpl>(
-            engine, ctx, stream, 0, options.distributed_communicator, external_bindings);
+            engine, ctx, stream, 0, options.distributed_communicator, external_bindings, false,
+            options.engine_timing);
         if (!module->ok()) {
             delete engine;
             throw std::runtime_error("[trtmc] TrtModuleImpl creation failed");

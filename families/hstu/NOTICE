@@ -1,0 +1,8 @@
+Public HSTU mathematical reference:
+Copyright (c) Meta Platforms, Inc. and affiliates.
+https://github.com/meta-recsys/generative-recommenders
+Revision 474afe5cfdb3d16d603d04f943f4dbe7eb6866fd
+Apache License 2.0; see UPSTREAM_LICENSE.txt.
+
+The one-block target-aware ranking adapter and its checkpoint recipes are
+family-owned additions, not an official Meta model/checkpoint release.
