@@ -491,6 +491,10 @@ std::vector<int32_t> BarkPipeline::run_semantic(const std::vector<int32_t>& text
             break;
 
         semantic_tokens.push_back(token);
+        // A full KV cache ends generation, as max_tokens does; the cache never
+        // drops the text prompt to make room.
+        if (semantic_state_->position() >= semantic_state_->max_length())
+            break;
 
         if (semantic_->has_input("token_id")) {
             run_step_with_token(*semantic_, *semantic_state_, token, logits);

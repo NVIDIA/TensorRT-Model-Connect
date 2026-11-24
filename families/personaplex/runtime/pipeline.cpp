@@ -18,6 +18,7 @@
 #include "families/personaplex/runtime/speech_runtime_plan.h"
 #include "families/personaplex/runtime/speech_temporal_embed_plan.h"
 #include "families/personaplex/runtime/speech_waveform_postprocess.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <array>
@@ -27,6 +28,7 @@
 #include <functional>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 
 namespace trtmc {
@@ -966,6 +968,18 @@ AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
         plan.effective_frames = num_frames;
         plan.output_frames = std::min(num_frames, max_output_frames);
         plan.total_iters = plan.output_frames;
+    }
+    // The temporal KV cache never drops rows, so every planned step must fit
+    // after the prompt. Step 0 without a system prompt only seeds the delay
+    // cache and runs no temporal step.
+    const int32_t planned_rows = plan.total_iters - (config_.system_prompt_offset == 0 ? 1 : 0);
+    if (const int32_t capacity = temporal_state_->max_length();
+        capacity >= 0 && planned_rows > capacity - temporal_state_->position()) {
+        throw internal::ConfigError(
+            "personaplex input needs " + std::to_string(planned_rows) + " temporal steps after a " +
+            std::to_string(temporal_state_->position()) + "-row prompt but the KV cache holds " +
+            std::to_string(capacity) +
+            "; rebuild the bundle with a larger --max-sequence-length or shorten the audio");
     }
     const int32_t mimi_cb = config_.mimi_decode_codebooks;
     std::vector<int32_t> output_codes;

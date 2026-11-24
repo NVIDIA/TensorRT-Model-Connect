@@ -266,6 +266,10 @@ class BartPipeline final : public ITextGeneration {
         std::vector<float> logits;
         int32_t current_token = decoder_start_token_id_;
         for (int32_t step = 0; step < max_new_tokens; ++step) {
+            // A full KV cache ends decoding, as max_new_tokens does; the cache never
+            // drops rows to make room.
+            if (state_->position() >= state_->max_length())
+                break;
             run_decoder_step(current_token, logits);
             int32_t next = bart_select_argmax_token(logits);
             if (next == eos_token_id_)

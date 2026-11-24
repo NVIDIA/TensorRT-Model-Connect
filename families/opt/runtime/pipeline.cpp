@@ -22,6 +22,14 @@ namespace trtmc {
 
 namespace {
 
+// The next decode step would store one more K/V row. A full cache ends the
+// generation, as max_new_tokens does, instead of dropping the prompt's rows.
+// A state without a length limit (max_length() < 0) never fills.
+bool kv_cache_full(const OptInferenceState& state) {
+    const int32_t max_length = state.max_length();
+    return max_length >= 0 && state.position() >= max_length;
+}
+
 bool contains_boxed_answer(const std::string& text) {
     const std::string marker = "\\boxed{";
     const auto start = text.find(marker);
@@ -317,6 +325,8 @@ OptTextGenerationPipeline::run_decode_loop(OptISampler* sampler, const OptSampli
                                   result.is_eos))
             break;
         if (result.is_eos)
+            break;
+        if (kv_cache_full(*state_))
             break;
         run_step(result.token_id, logits);
     }

@@ -16,6 +16,7 @@
 #include "families/canary/runtime/resampler.h"
 #include "families/canary/runtime/tokenizer.h"
 #include "plugin_helpers.h"
+#include "trtmc/internal/config.h"
 
 #include <cctype>
 #include <cmath>
@@ -25,6 +26,7 @@
 #include <limits>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace trtmc {
@@ -47,6 +49,21 @@ struct CanaryBatchWorkGroup {
 };
 
 namespace {
+
+// The decoder KV cache never drops rows: the prompt must fit, and decoding
+// stops once the cache is full, which leaves L - P + 1 tokens for an L-row
+// cache and a P-token prompt.
+int32_t canary_cache_bounded_tokens(int32_t requested_tokens, int32_t cache_length,
+                                    std::size_t prompt_tokens) {
+    if (cache_length >= 0 && prompt_tokens > static_cast<std::size_t>(cache_length)) {
+        throw internal::ConfigError("canary decoder prompt has " + std::to_string(prompt_tokens) +
+                                    " tokens but the KV cache holds " +
+                                    std::to_string(cache_length) +
+                                    "; rebuild the bundle with a larger --max-sequence-length or "
+                                    "shorten the prompt");
+    }
+    return canary_beam_output_budget(requested_tokens, cache_length, prompt_tokens);
+}
 
 std::string decode_canary_tokens(const ITokenizer& tokenizer, const std::vector<int32_t>& token_ids,
                                  int32_t eot_token_id) {
@@ -941,9 +958,11 @@ std::vector<int32_t> CanaryPipeline::run_decoder(const std::vector<int32_t>& ini
     state_->bind_to(*decoder_);
 
     const int32_t eot_id = canary_config_.eot_token_id;
+    const int32_t output_limit =
+        canary_cache_bounded_tokens(max_new_tokens, state_->max_length(), initial_tokens.size());
 
     auto result = run_canary_decode_loop(
-        initial_tokens, max_new_tokens, eot_id,
+        initial_tokens, output_limit, eot_id,
         [this](int32_t token, std::vector<float>& logits, std::string&) {
             run_decoder_step(token, logits);
             return true;
@@ -989,6 +1008,10 @@ CanaryPipeline::run_greedy_decoder_batch(const std::vector<std::vector<int32_t>>
     cache.set_batch_size(static_cast<int32_t>(batch_size));
     state_->reset();
     state_->bind_to(*decoder_);
+    std::vector<int32_t> output_limits(max_new_tokens.size());
+    for (std::size_t index = 0; index < max_new_tokens.size(); ++index)
+        output_limits[index] =
+            canary_cache_bounded_tokens(max_new_tokens[index], state_->max_length(), prompt_length);
 
     std::vector<float> logits;
     std::vector<int32_t> tokens(batch_size);
@@ -1004,9 +1027,9 @@ CanaryPipeline::run_greedy_decoder_batch(const std::vector<std::vector<int32_t>>
 
     std::vector<std::vector<int32_t>> output(batch_size);
     std::vector<bool> finished(batch_size, false);
-    const int32_t max_steps = *std::max_element(max_new_tokens.begin(), max_new_tokens.end());
+    const int32_t max_steps = *std::max_element(output_limits.begin(), output_limits.end());
     for (int32_t step = 0; step < max_steps; ++step) {
-        if (update_canary_greedy_batch_step(logits, vocab_size, step, max_new_tokens,
+        if (update_canary_greedy_batch_step(logits, vocab_size, step, output_limits,
                                             canary_config_.eot_token_id, tokens, output,
                                             finished)) {
             break;

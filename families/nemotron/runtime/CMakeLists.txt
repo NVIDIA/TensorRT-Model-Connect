@@ -33,3 +33,20 @@ set_target_properties(trtmc_model_nemotron PROPERTIES
 install(TARGETS trtmc_model_nemotron
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  # CPU-backed KV-cache test: CUDA calls are served from host memory, and an
+  # overlapping copy fails the test.
+  add_executable(test_nemotron_kv_cache
+    ${PROJECT_SOURCE_DIR}/families/nemotron/tests/cpp/test_kv_cache.cpp
+    kv_cache.cpp
+    ${PROJECT_SOURCE_DIR}/core/runtime/primitives/device_tensor.cpp
+  )
+  target_include_directories(test_nemotron_kv_cache PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_nemotron_kv_cache SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_nemotron_kv_cache PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME nemotron_kv_cache COMMAND test_nemotron_kv_cache)
+endif()
