@@ -8,6 +8,7 @@ not the sibling policies. Build on the machine where the bundle will run:
 
 ```sh
 trtmc lerobot_groot build nvidia/GR00T-N1.7-LIBERO \
+  --revision 658540327860f93dd2cb9c1ed3e3b10fb792a0eb \
   --precision fp16 -o isaac-libero10.bundle
 ```
 
