@@ -398,9 +398,19 @@ def test_text_encoders_the_generic_references_cannot_serve_are_excluded_with_a_r
     assert not any(excluded[name] for name in ("nemotron-embed-vl-1b-v2", "albert-base-token-features"))
 
 
+def test_profiles_whose_only_native_reference_is_vllm_are_excluded():
+    # The family's independent native reference is a pinned vLLM snapshot, and AIPerf has no vLLM native backend.
+    # Drop this test with the exclusion once AIPerf can serve that reference.
+    from trtmc_aiperf_qual.selection import catalog
+
+    profiles = {profile.name: profile for profile in catalog(REPOSITORY)}
+    assert "vLLM" in profiles["nemotron-omni-nvfp4-text-image"].excluded
+    assert "nemotron-omni-nvfp4-native" not in profiles  # the catalog does not mark it ready
+
+
 def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
-    """A ready profile whose Task has no defaults is a configuration error that reports leave out, so a Task SDK
-    rename drops its profiles without a trace: alias the old entry in config/tasks.yaml, or state the gap here."""
+    """A ready profile whose Task has no defaults is excluded (config/tasks.yaml), so a Task SDK rename would leave
+    its profiles out of every run: alias the old entry in config/tasks.yaml, or state the gap here."""
     import yaml
 
     from trtmc_aiperf_qual.config import CONFIG_ROOT

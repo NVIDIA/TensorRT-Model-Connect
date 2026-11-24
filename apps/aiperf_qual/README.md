@@ -126,10 +126,10 @@ public Task's 448x448 image size, with image decode before timing and preparatio
   comparison: a Task without an Acc check), Red (Acc worse than
   native beyond its margin), Yellow (an Acc difference not shown either way), Green (quality passes with available
   benchmark timings). Historical fixed-workload reports retain their original performance lights.
-  Profiles excluded by the machine model list remain in `excluded.json` for audit and do not contribute
-  report rows, totals, White counts, or pass-rate denominators. A measured result from another host still counts.
-  Catalog profiles without Task test defaults remain in `plan.json` for coverage audit, outside those
-  statistics too. Invalid configurations of supported tests still appear as White errors.
+  Profiles a run excludes (see "Model selection", including those whose Task has no defaults) remain in
+  `excluded.json` with their reason and source for audit and do not contribute report rows, totals, White counts,
+  or pass-rate denominators. A measured result from another host still counts. Invalid configurations of
+  supported tests still appear as White errors.
 
 ### Performance
 
@@ -321,10 +321,31 @@ outputs side by side, Perf lights with labelled p50 values and reasons, L2, evid
 reproduction command), fetching logs next to it. `--baseline ROOT` notes TRTMC
 p50 regressions (> 5%) against a previous run.
 
-### Per-machine model list
+### Model selection
 
-GPU memory decides which models a machine can run. `models` in its environment file selects them
-for `run-all` and `plan` (an explicit `--profile` overrides it):
+Two questions are answered in different places. How a profile runs is derived: its catalog entry, its Task's
+defaults (`config/tasks.yaml`), and its own configuration (`config/models/<profile>.yaml`, merged with the
+family's `tests/aiperf/<profile>.yaml` where one remains). Whether it runs is
+decided by the exclusions below, in this order; the first that applies is the reason, and its `source` names the
+file to change:
+
+| Source | Decides | Applies to |
+|---|---|---|
+| `config/tasks.yaml` | the profile's Task has no defaults (no entry, no exclusion to write) | every machine |
+| `config/exclusions.yaml` | the qualification cannot qualify the profile as cataloged | every machine |
+| `environment` | not in the machine's `models.include`, or in its `models.exclude` | one machine |
+| `config/platforms/<platform>.yaml` | what the hardware cannot run | one kind of hardware |
+| `environment` | a checkpoint above the machine's `models.max_checkpoint_gib` | one machine |
+
+The scope is every ready catalog profile (L0 smoke and regression variants aside). `run-all`, `plan`, `assign`
+and `matrix` take the machine's list; `--profile` (names or glob patterns, in the order given) replaces its
+`include` and is held to the same exclusions, `run --profile` too. `--ignore-exclusions` runs the named profiles
+anyway, for a diagnostic run. `plan` prints each excluded profile with its reason and source, then the derived
+configuration of each selected one. Excluded profiles are written to `<out-root>/excluded.json` (a fragment's
+exclusions count as its answer for those profiles in `merge-check --manifest`) and stay out of `summary` unless
+another result root holds a result for them.
+
+The machine's list (`models` in its environment file):
 
 ```yaml
 models:
@@ -334,8 +355,8 @@ models:
   max_checkpoint_gib: 30          # optional: also exclude larger checkpoints (unknown sizes are kept)
 ```
 
-Excluded profiles are written to `<out-root>/excluded.json` and appear in `summary` as `excluded`
-with their reason, unless another result root holds a result for them.
+`config/exclusions.yaml`, a platform's `models.exclude` and the machine's use the same `{profile, reason}`
+entries. A change that lets a profile run removes its entry in the same pull request.
 
 ### Platform defaults
 
@@ -447,13 +468,12 @@ A suite with media and neither `media_root` nor `hf_datasets_cache` configured i
   `benchmarks`, scored by `gold_metrics.py` or an AIPerf grader) and the Perf output check
   (`output_grader`, a comparator in `plugins/trtmc_aiperf_plugins/accuracy.py`).
 - Task renamed by a Task SDK migration (same operation and output): an alias of its old entry in
-  `config/tasks.yaml` (`text_to_pooled_features: *encode`). A ready profile whose Task has no entry is a
-  configuration error that only `plan.json` lists: reports leave it out.
+  `config/tasks.yaml` (`text_to_pooled_features: *encode`). A ready profile whose Task has no entry is excluded
+  (source `config/tasks.yaml`).
 - Model needing a different input or reference option: `config/models/<profile>.yaml`.
-- Model that cannot be qualified as cataloged (for example a catalog testcase without a prompt):
-  `exclude: <reason>` in the profile's definition (`families/<family>/tests/aiperf/<profile>.yaml`, or its legacy
-  `config/models/<profile>.yaml`). Every machine's model list then excludes it, and the run's `excluded.json`
-  keeps the reason; `run-all --profile` still runs it.
+- Model that cannot be qualified as cataloged (for example a catalog testcase without a prompt): an entry in
+  `config/exclusions.yaml`. Every run then leaves it out, and the run's `excluded.json` keeps the reason;
+  `--ignore-exclusions` still runs it.
 - Model whose native pipeline the generic adapters cannot run: `families/<family>/reference/adapter.py`
   (an `Adapter(spec, host)` with `invoke(request, artifact_base)`; it imports nothing from the applications and
   reaches the serving mechanics through `host`), named by `reference.adapter`.
