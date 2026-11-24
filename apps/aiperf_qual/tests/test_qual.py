@@ -388,6 +388,24 @@ def test_migrated_decoder_language_models_keep_their_benchmarks():
     assert tasks["text_continuation"] == tasks["text_generation"]
 
 
+def test_a_benchmark_without_its_suite_is_a_configuration_error_of_the_profile(tmp_path):
+    """A Task's benchmark whose suite each profile states (action_chunk_parity), named by a profile that states none:
+    the profile's configuration error, never an exception that stops a campaign's other profiles."""
+    import yaml
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT, ConfigError, Environment
+    from trtmc_aiperf_qual.models import resolve_model
+
+    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())
+    tasks["benchmarks"]["stated_per_profile"] = {"suite": "parity", "metric": "action_parity", "gate": {}}
+    tasks["tasks"]["text_continuation"] = {**tasks["tasks"]["text_continuation"], "absolute": ["stated_per_profile"]}
+    root = tmp_path / "config"
+    root.mkdir()
+    (root / "tasks.yaml").write_text(yaml.safe_dump(tasks))
+    with pytest.raises(ConfigError, match="qwen3-0.6b-fp16: benchmark 'parity' names no suite_definition"):
+        resolve_model("qwen3-0.6b-fp16", Environment({"repo": str(REPOSITORY)}), root=root)
+
+
 def test_text_encoders_the_generic_references_cannot_serve_are_excluded_with_a_reason():
     from trtmc_aiperf_qual.selection import catalog
 
