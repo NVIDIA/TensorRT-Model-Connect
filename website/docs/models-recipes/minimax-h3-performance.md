@@ -82,7 +82,7 @@ cmake -S $RepoRoot -B $BuildRoot -G Ninja -DCMAKE_BUILD_TYPE=Release `
   -DTRTMC_BUILD_FAMILIES=minimax_h3 -DTRTMC_BUILD_BACKEND_TRT=OFF `
   -DTRTMC_BUILD_BACKEND_RTX=ON "-DTRTMC_RTX_INCLUDE_DIR=$RtxRoot/include" `
   "-DTRTMC_RTX_LIBRARY_DIR=$RtxRoot/lib" "-DTRTMC_RTX_RUNTIME_DIR=$RtxRoot/bin" `
-  -DTRTMC_ENABLE_BYOK=OFF -DTRTMC_BUILD_TESTS=OFF -DTRTMC_BUILD_EXAMPLES=OFF
+  -DTRTMC_BUILD_SERVER=OFF -DTRTMC_ENABLE_BYOK=OFF -DTRTMC_BUILD_TESTS=OFF -DTRTMC_BUILD_EXAMPLES=OFF
 cmake --build $BuildRoot --parallel --target `
   trtmc trtmc_core trtmc_backend_rtx trtmc_model_minimax_h3
 cmake --install $BuildRoot --prefix $InstallRoot --config Release
