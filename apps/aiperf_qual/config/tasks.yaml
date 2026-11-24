@@ -208,12 +208,13 @@ tasks:
   conditional_text_generation: *generate_text
   text_continuation: *generate_text  # the Task SDK name of the migrated decoder LMs (qwen3, #1558)
 
-  vision_language_generation:
+  vision_language_generation: &vlm
     # OCRBench alone (the owner's choice, October 2026): it caught both VLM conversion defects MMStar caught
     # (qwen3-vl-2b -26 vs -11 points, phi4-multimodal -19 vs -32) and TRTMC answers MMStar slowly (phi4-multimodal:
     # 29 min against 1 min for OCRBench). MMStar stays for profiles that state it.
     absolute: [ocrbench]
     performance: {output_grader: parity_edit_distance, output_grader_params: {max_distance: 0.15}}
+  images_text_to_text: *vlm  # the Task SDK name of the image-text models (gemma-3n, smolvlm, minicpm-v)
   # Image, video and text to text (Cosmos3-Edge): OCRBench through the same bundle's image-text Task (the
   # image-video Task requires a video in every request); the video input is not scored.
   image_video_text_to_text:
