@@ -143,7 +143,7 @@ class BareTextTask final : public trtmc::ITask {
     const char* task() const noexcept override { return trtmc::ITextGeneration::kTask; }
 };
 
-class EmptyImageWorker final : public trtmc::IImageGeneration {
+class EmptyImageWorker : public trtmc::IImageGeneration {
   public:
     trtmc::ImageGenerationConfig seen;
 
@@ -154,6 +154,22 @@ class EmptyImageWorker final : public trtmc::IImageGeneration {
         result.num_frames = 0;
         return result;
     }
+};
+
+class EmptyVideoWorker final : public EmptyImageWorker, public trtmc::IVideoGeneration {
+  public:
+    trtmc::VideoResult generate_video(const std::string&,
+                                      const trtmc::ImageGenerationConfig&) override {
+        throw std::logic_error("expected a structured video request");
+    }
+    trtmc::VideoResult generate_video(const trtmc::VideoGenerationRequest& request) override {
+        prompt = request.prompt;
+        seen = request.config;
+        trtmc::VideoResult result;
+        result.frames.num_frames = 0;
+        return result;
+    }
+    std::string prompt;
 };
 
 class FakeStreamingAudio final : public trtmc::IAudioGeneration,
@@ -792,6 +808,12 @@ int main() {
           "empty context-parallel worker result is explicit");
     check(worker.seen.initial_latents == std::vector<float>({0.25F, -0.5F}),
           "video replay latents reach the Task API");
+    EmptyVideoWorker video_worker;
+    std::ostringstream video_worker_output;
+    check(trtmc::cli::dispatch(worker_command, video_worker, video_worker_output) == 0 &&
+              video_worker.prompt == "hello" &&
+              video_worker.seen.initial_latents == std::vector<float>({0.25F, -0.5F}),
+          "a video-capable worker receives the structured request and replay latents");
     worker_command.kind = trtmc::cli::CommandKind::kGenerateImage;
     worker_command.name = "generate-image";
     worker_output.str("");

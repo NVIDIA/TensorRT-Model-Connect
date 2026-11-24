@@ -260,6 +260,46 @@ def test_build_rejects_unknown_quantization(tmp_path: Path) -> None:
         model.build(_request(tmp_path, quantization="nvfp4"), Mock())
 
 
+def test_fixed_bundle_publishes_the_selected_runtime_plan_set(tmp_path: Path, monkeypatch) -> None:
+    expected = {
+        False: {"denoiser.plan": b"full"},
+        True: {
+            "denoiser.head.plan": b"head",
+            "denoiser.tail.plan": b"tail",
+            "denoiser.finish.plan": b"finish",
+        },
+    }
+    monkeypatch.setattr(model._MiniMaxH3Model, "load_weights", lambda *_: {})
+
+    def components(self, _directory, config, _weights, **_options):
+        profile = model._fixed_profile(config.raw)
+        plans = (
+            {"denoiser_head": b"head", "denoiser_tail": b"tail", "denoiser_finish": b"finish"}
+            if profile.first_block_cache
+            else {"denoiser": b"full"}
+        )
+        return {
+            "profile": profile,
+            "text_encoder": b"text",
+            "adaln_precompute": b"adaln",
+            "vae_decoder": b"vae",
+            "tokenizer_json": b"{}",
+            **plans,
+        }
+
+    monkeypatch.setattr(model._MiniMaxH3Model, "build_components", components)
+    for fbc, expected_denoiser in expected.items():
+        writer = Mock()
+        model.build(_request(tmp_path, quantization=None), writer, first_block_cache=fbc)
+        written = dict(call.args for call in writer.add_bytes.call_args_list)
+        assert {
+            name: data for name, data in written.items() if name.startswith("denoiser")
+        } == expected_denoiser
+        _, runtime = writer.add_json.call_args.args
+        assert runtime["first_block_cache"] is fbc
+        assert runtime["denoiser_cache_mode"] == ("first_block" if fbc else "monolithic")
+
+
 def test_fp8_with_first_block_cache_is_rejected() -> None:
     config = SimpleNamespace(raw={"denoiser_cache_mode": "first_block"})
     with pytest.raises(NotImplementedError, match="first_block_cache"):
