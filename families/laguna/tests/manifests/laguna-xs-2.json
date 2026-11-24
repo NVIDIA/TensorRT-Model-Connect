@@ -16,7 +16,8 @@
       "max_new_tokens": 16,
       "use_chat_template": true,
       "enable_thinking": false,
-      "expected_continuation_text": "Jupiter"
+      "expected_continuation_text": "Jupiter",
+      "exact_answer": true
     },
     {
       "name": "laguna-xs-2-code",
@@ -34,6 +35,7 @@
       "use_chat_template": true,
       "enable_thinking": false,
       "expected_continuation_text": "7319-QZ",
+      "exact_answer": true,
       "past_sliding_window": true
     }
   ]

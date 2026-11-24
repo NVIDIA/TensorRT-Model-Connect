@@ -10,7 +10,8 @@ fed token) and compares with transformers on the same tokens:
 
 * the native prompt token IDs equal the transformers chat-template IDs;
 * the greedy text agrees with the reference greedy text (manifest
-  ``reference_precision``) and contains the case's expected continuation;
+  ``reference_precision``) and contains the case's expected continuation; in a
+  short-answer case (``exact_answer``) both answers are exactly that text;
 * the prefill context's next token equals the reference's;
 * the decode-context logits stay as close to the reference as transformers'
   own runs at the bundle precision do on the same token sequence. Laguna's
@@ -29,6 +30,7 @@ from tools.e2e_evidence import evidence_stage, record_evidence
 import gc
 import json
 import os
+import re
 import subprocess
 from functools import cache
 from pathlib import Path
@@ -65,9 +67,9 @@ _THRESHOLDS = {
 _BASELINE_ATTENTION = ("eager", "sdpa")
 
 
-def _load_cases() -> dict[str, tuple[dict, dict]]:
+def _load_cases(directory: Path) -> dict[str, tuple[dict, dict]]:
     cases: dict[str, tuple[dict, dict]] = {}
-    for path in sorted((_TEST_DIR / "manifests").glob("*.json")):
+    for path in sorted(directory.glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == _FAMILY, path
         assert manifest["task"] == "text_continuation", path
@@ -75,12 +77,14 @@ def _load_cases() -> dict[str, tuple[dict, dict]]:
         assert isinstance(manifest["max_sequence_length"], int), path
         for case in manifest["testcases"]:
             assert case["name"] not in cases, case["name"]
+            for flag in ("exact_answer", "past_sliding_window"):
+                assert isinstance(case.get(flag, False), bool), (case["name"], flag)
             cases[case["name"]] = (manifest, case)
     assert cases, f"{_FAMILY} has no E2E cases"
     return cases
 
 
-_CASES = _load_cases()
+_CASES = _load_cases(_TEST_DIR / "manifests")
 
 
 def _csv_values(values: list[str]) -> set[str]:
@@ -103,20 +107,34 @@ def _selection(config) -> tuple[set[str], set[str]]:
     return models, testcases
 
 
-def _require_selected(case_name: str, manifest: dict, config) -> None:
+def _collected_cases(items) -> set[str]:
+    """The E2E cases of every family collected in this session: the ``case_name`` parameter of each ``test_*e2e``
+    item, which the shared evidence recorder and CI's JUnit check also read."""
+    cases = set()
+    for item in items:
+        parameters = getattr(getattr(item, "callspec", None), "params", {})
+        if re.fullmatch(r"test_.*e2e", getattr(item, "originalname", "") or "") and "case_name" in parameters:
+            cases.add(str(parameters["case_name"]))
+    return cases
+
+
+def _require_selected(case_name: str, manifest: dict, config, collected: set[str]) -> None:
     models, testcases = _selection(config)
     if os.environ.get("TRTMC_E2E") != "1" and not (models or testcases):
         pytest.skip("real family E2E requires TRTMC_E2E=1 or an explicit E2E selection")
     if models and not ({_FAMILY, manifest["name"], case_name} & models):
         pytest.skip(f"{case_name} was not selected")
     if testcases and case_name not in testcases:
-        # Testcases narrow the selection. When they share no case with what --e2e-model selects in this family,
-        # the selection is wrong, and it must not pass by running none.
+        # Testcases narrow the selection. When they share no case with what --e2e-model selects in this family, or,
+        # without --e2e-model, with the E2E cases collected in this session, the selection is wrong, and it must not
+        # pass by running none. A testcase of another family collected in this session skips here.
         selected = {name for name, (other, _) in _CASES.items() if {_FAMILY, other["name"], name} & models}
         if models and not selected & testcases:
             pytest.fail(
                 f"--e2e-testcase {sorted(testcases)} matches none of the selected {_FAMILY} cases: {sorted(selected)}"
             )
+        if not models and not testcases & collected:
+            pytest.fail(f"--e2e-testcase {sorted(testcases)} matches no E2E case collected in this session")
         pytest.skip(f"{case_name} was not selected")
 
 
@@ -390,9 +408,29 @@ def _assert_logits(engine: dict, baseline: dict, thresholds: dict) -> None:
     ), (engine, baseline)
 
 
+def _normalized(text: str) -> str:
+    """Case-folded, with each run of whitespace collapsed to one space."""
+    return " ".join(text.casefold().split())
+
+
+def _stop_ids(model_dir: Path) -> set[int]:
+    """The token IDs that end generation: ``eos_token_id`` of the checkpoint's generation configuration."""
+    value = json.loads((model_dir / "generation_config.json").read_text(encoding="utf-8"))["eos_token_id"]
+    ids = value if isinstance(value, list) else [value]
+    assert ids and all(isinstance(i, int) and not isinstance(i, bool) and i >= 0 for i in ids), value
+    return set(ids)
+
+
+def _answer(tokenizer, token_ids: list[int], stop_ids: set[int]) -> str:
+    """The generated text before its stop token, normalized, without final sentence punctuation."""
+    if token_ids and token_ids[-1] in stop_ids:
+        token_ids = token_ids[:-1]
+    return _normalized(tokenizer.decode(token_ids, skip_special_tokens=True)).rstrip(".!?").rstrip()
+
+
 def _normalized_edit_distance(left: str, right: str) -> float:
-    left = " ".join(left.casefold().split())
-    right = " ".join(right.casefold().split())
+    left = _normalized(left)
+    right = _normalized(right)
     if not left and not right:
         return 0.0
     previous = list(range(len(right) + 1))
@@ -407,7 +445,7 @@ def _normalized_edit_distance(left: str, right: str) -> float:
 @pytest.mark.parametrize("case_name", sorted(_CASES))
 def test_e2e(case_name: str, request, tmp_path: Path, _bundles) -> None:
     manifest, case = _CASES[case_name]
-    _require_selected(case_name, manifest, request.config)
+    _require_selected(case_name, manifest, request.config, _collected_cases(request.session.items))
     record_evidence("inputs", {"manifest": manifest, "case": case})
     binary, runtime_root, build_dir, torch = _required_environment()
     model_dir = _checkpoint(manifest)
@@ -476,5 +514,14 @@ def test_e2e(case_name: str, request, tmp_path: Path, _bundles) -> None:
             reference["text"],
         )
         expected = case["expected_continuation_text"]
+        if case.get("exact_answer", False):
+            # The edit distance and the substring check accept "JupiterX" for "Jupiter"; a short answer is exact.
+            stop_ids = _stop_ids(model_dir)
+            answers = {
+                "native": _answer(reference["tokenizer"], native["token_ids"], stop_ids),
+                "reference": _answer(reference["tokenizer"], reference["ids"], stop_ids),
+            }
+            record_evidence("diagnostics", {"answers": answers})
+            assert answers == dict.fromkeys(answers, _normalized(expected)), (expected, answers)
         assert expected.casefold() in native["text"].casefold(), native["text"]
         assert expected.casefold() in reference["text"].casefold(), reference["text"]
