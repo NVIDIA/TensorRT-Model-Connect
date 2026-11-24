@@ -38,9 +38,19 @@ TapSpan input_taps(std::int64_t first, std::int64_t taps, std::int64_t count);
 // `max_table_coefficients` interpolate a kernel table instead, so memory and
 // setup stay bounded for any pair of rates (for example 192001 Hz). A resampled
 // sample beyond the float range throws std::invalid_argument.
+//
+// When `stats` is given, it receives the work done: the kernel taps applied (only
+// those that fall on the input), whether the kernel was interpolated, and the
+// coefficients tabulated.
+struct ResampleStats {
+    std::int64_t taps{0};
+    bool interpolated{false};
+    std::size_t table_coefficients{0};
+};
 std::vector<float> resample(const std::vector<float>& input, std::int32_t from_rate,
                             std::int32_t to_rate,
-                            std::size_t max_table_coefficients = kMaxResampleTable);
+                            std::size_t max_table_coefficients = kMaxResampleTable,
+                            ResampleStats* stats = nullptr);
 
 // VibeVoice AudioNormalizer: scale to target_dbfs RMS, then divide by the peak
 // (plus eps) when it exceeds 1. Arithmetic follows the reference's float32 steps.

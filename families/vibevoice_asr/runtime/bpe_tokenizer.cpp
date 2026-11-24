@@ -1202,8 +1202,16 @@ class BpeTokenizer final : public ITokenizer {
             highest = std::max(highest, id.get<std::int64_t>());
         }
         mVocab.resize(static_cast<size_t>(highest + 1));
+        // One token per id: the reference merges by operand ids, so a second token on
+        // an id would merge like the first one, which matching by strings cannot follow.
+        std::vector<bool> taken(static_cast<size_t>(highest + 1), false);
         for (const auto& [token, id] : vocab_obj.items()) {
             const auto token_id = id.get<int32_t>();
+            if (taken[static_cast<size_t>(token_id)])
+                throw std::runtime_error("tokenizer.json vocabulary id " +
+                                         std::to_string(token_id) +
+                                         " is used by more than one token");
+            taken[static_cast<size_t>(token_id)] = true;
             mVocab[static_cast<size_t>(token_id)] = token;
             mTokenToId[token] = token_id;
         }
@@ -1273,12 +1281,17 @@ class BpeTokenizer final : public ITokenizer {
         if (!tokens.is_array())
             throw std::runtime_error("tokenizer.json added_tokens must be a list");
         // The ids the reference assigns: it re-adds the tokens by content, in order, keeping
-        // an earlier added token's id, else the vocabulary id, else the next id after the
-        // vocabulary and the added ids so far. A listed id that differs rejects the bundle,
-        // as the build does, before either mapping changes.
-        const auto vocab_size = static_cast<std::int64_t>(mTokenToId.size());
+        // an earlier added token's id, else the vocabulary id, else the next new id, which
+        // counts up from the number of vocabulary entries. A listed id that differs rejects
+        // the bundle, as the build does, before either mapping changes.
+        std::int64_t next_id = static_cast<std::int64_t>(mTokenToId.size());
         std::unordered_map<std::string, std::int64_t> assigned;
-        std::int64_t highest = -1;
+        // The rows the vocabulary gives its tokens. The reference gives a new token the next
+        // id even where a sparse vocabulary gives that row to another token, which then
+        // decodes as the new token; such a bundle is rejected, as the build does.
+        std::vector<bool> vocab_rows(mVocab.size(), false);
+        for (const auto& entry : mTokenToId)
+            vocab_rows[static_cast<std::size_t>(entry.second)] = true;
         for (const auto& tok : tokens) {
             // Checked access: a token without a string content or an integer id
             // rejects the bundle instead of reading a missing field.
@@ -1303,19 +1316,23 @@ class BpeTokenizer final : public ITokenizer {
                 throw std::runtime_error(
                     "tokenizer.json added token " + content + " has id " + std::to_string(raw_id) +
                     ", outside the decoder vocabulary of " + std::to_string(mVocabLimit));
-            std::int64_t expected = vocab_size;
+            std::int64_t expected = next_id;
             if (const auto earlier = assigned.find(content); earlier != assigned.end())
                 expected = earlier->second;
             else if (const auto row = mTokenToId.find(content); row != mTokenToId.end())
                 expected = row->second;
-            else if (highest >= vocab_size || (highest >= 0 && vocab_size == 0))
-                expected = highest + 1;
+            else
+                ++next_id;
             if (raw_id != expected)
                 throw std::runtime_error(
                     "tokenizer.json added token " + content + " has id " + std::to_string(raw_id) +
                     ", but the reference assigns it " + std::to_string(expected));
+            const auto row = static_cast<std::size_t>(expected);
+            if (row < vocab_rows.size() && vocab_rows[row] && mVocab[row] != content)
+                throw std::runtime_error("tokenizer.json added token " + content + " has id " +
+                                         std::to_string(expected) + ", the vocabulary row of " +
+                                         mVocab[row]);
             assigned[content] = expected;
-            highest = std::max(highest, expected);
             const auto id = static_cast<int32_t>(raw_id);
 
             if (static_cast<size_t>(id) >= mVocab.size()) {

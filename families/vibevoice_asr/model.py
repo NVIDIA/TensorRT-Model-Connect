@@ -19,6 +19,7 @@ read from the local Hugging Face cache (the build does not download it).
 
 from __future__ import annotations
 
+import collections
 import json
 from pathlib import Path
 
@@ -210,12 +211,28 @@ def check_tokenizer_ids(tokenizer_json: bytes, vocab_size: int) -> None:
     """Every token id must be a row of the decoder's embedding table."""
     raw = json.loads(tokenizer_json)
     ids = list(raw["model"]["vocab"].values())
+    # One token per vocabulary id: the reference merges by operand ids, so a second token on
+    # an id would merge like the first one, which the runtime's string matching cannot follow.
+    counts = collections.Counter(i for i in ids if type(i) is int)
+    shared = sorted(i for i, n in counts.items() if n > 1)
+    if shared:
+        raise ValueError(f"{FAMILY} tokenizer vocabulary ids {shared[:5]} are used by more than one token")
     ids += [item.get("id") for item in raw.get("added_tokens", [])]
     stray = [i for i in ids if type(i) is not int or not 0 <= i < vocab_size]
     if stray:
         raise ValueError(
             f"{FAMILY} tokenizer ids {stray[:5]} are outside the decoder vocabulary of {vocab_size}"
         )
+    # The reference gives a new added token the next id even where a sparse vocabulary gives
+    # that row to another token, which then decodes as the added token.
+    rows = {i: token for token, i in raw["model"]["vocab"].items()}
+    for item in raw.get("added_tokens", []):
+        holder = rows.get(item["id"], item.get("content"))
+        if holder != item.get("content"):
+            raise ValueError(
+                f"{FAMILY} tokenizer.json added token {item.get('content')} has id {item['id']}, "
+                f"the vocabulary row of {holder}"
+            )
 
 
 # The Split pattern of Qwen2.5's tokenizer.json, the one the runtime's tokenizer implements.

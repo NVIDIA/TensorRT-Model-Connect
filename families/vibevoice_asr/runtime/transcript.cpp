@@ -26,11 +26,13 @@ std::string strip(std::string_view text) {
 }
 
 // Complete top-level objects of a JSON array whose closing part may be missing. Only
-// objects directly in the list count: recovery stops at the end of the list or at any
-// other kind of element (a nested list, a number, a string), as a segment is an object.
+// objects directly in the list count, the second and later ones each after a comma:
+// recovery stops at the end of the list, at a missing comma, or at any other kind of
+// element (a nested list, a number, a string), as a segment is an object.
 nlohmann::json complete_objects(const std::string& text) {
     auto objects = nlohmann::json::array();
-    int depth = 0; // nesting inside the current top-level object
+    int depth = 0;              // nesting inside the current top-level object
+    bool expect_element = true; // after "[" or ",": an element; after an element: "," or "]"
     bool in_string = false;
     bool escaped = false;
     std::size_t start = 0;
@@ -46,10 +48,14 @@ nlohmann::json complete_objects(const std::string& text) {
             continue;
         }
         if (depth == 0) {
-            if (c == '{') {
+            if (is_space(c))
+                continue;
+            if (expect_element && c == '{') {
                 depth = 1;
                 start = i;
-            } else if (c != ',' && !is_space(c)) {
+            } else if (!expect_element && c == ',') {
+                expect_element = true;
+            } else {
                 break;
             }
             continue;
@@ -63,6 +69,7 @@ nlohmann::json complete_objects(const std::string& text) {
             if (value.is_discarded())
                 break;
             objects.push_back(std::move(value));
+            expect_element = false;
         }
     }
     return objects;

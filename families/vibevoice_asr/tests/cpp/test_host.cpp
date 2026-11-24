@@ -236,6 +236,14 @@ void test_resample() {
         odd[i] = static_cast<float>(0.5 * std::sin(2.0 * pi * 440.0 * i / odd_rate));
     const auto odd_out = resample(odd, odd_rate, 24000);
     check(odd_out == resample(odd, odd_rate, 24000, 0), "192001 Hz takes the bounded path");
+    ResampleStats odd_work;
+    resample(odd, odd_rate, 24000, kMaxResampleTable, &odd_work);
+    check(odd_work.interpolated && odd_work.table_coefficients <= kMaxResampleTable,
+          "the default budget interpolates the kernel at 192001 Hz");
+    ResampleStats common_work;
+    resample(tone, 16000, 24000, kMaxResampleTable, &common_work);
+    check(!common_work.interpolated && common_work.table_coefficients <= kMaxResampleTable,
+          "16 kHz uses the exact phase table within the budget");
     check(odd_out.size() == (odd.size() * 24000 + odd_rate - 1) / odd_rate,
           "resampled length is ceil(n * 24000 / 192001)");
     const double odd_worst = max_error(odd_out, 600, odd_out.size() - 600, [&](std::size_t i) {
@@ -286,8 +294,21 @@ void test_resample() {
     check(ahead.begin == ahead.end, "taps before the input");
     const auto behind = input_taps(200, 5, 100);
     check(behind.begin == behind.end, "taps after the input");
-    const auto high = resample(std::vector<float>{0.5F}, 2147483647, 24000);
+    // The loops apply only taps that fall on the input: a one-sample clip at 2147483647 Hz
+    // costs one tap, not the 5,726,624 of the kernel, and two samples at 8 kHz at most two
+    // taps per output sample on the exact-table path.
+    ResampleStats high_work;
+    const auto high =
+        resample(std::vector<float>{0.5F}, 2147483647, 24000, kMaxResampleTable, &high_work);
     check(high.size() == 1 && std::isfinite(high[0]), "a one-sample clip at 2147483647 Hz");
+    check(high_work.taps == 1,
+          "one tap for a one-sample clip at 2147483647 Hz, not " + std::to_string(high_work.taps));
+    ResampleStats short_work;
+    const auto short_out =
+        resample(std::vector<float>{0.5F, -0.5F}, 8000, 24000, kMaxResampleTable, &short_work);
+    check(!short_work.interpolated &&
+              short_work.taps <= 2 * static_cast<std::int64_t>(short_out.size()),
+          "at most two taps per output for a two-sample clip");
 
     // resampled_length gives resample()'s length without resampling, so a request
     // is sized before its audio work: 100000 samples at 1 Hz would be 2.4e9.
@@ -411,6 +432,13 @@ void test_transcript() {
         parse_transcript("[{\"Start\":0,\"End\":1,\"Content\":\"one\"},{\"Start\":1,\"En");
     check(cut.structured && cut.segments.size() == 1 && cut.text == "one",
           "a cut-off second segment");
+    // A number that overflows a double is a parse error, so the output is plain text.
+    const auto infinite = parse_transcript("[{\"Start\":1e999,\"End\":1,\"Content\":\"a\"}]");
+    check(!infinite.structured && infinite.segments.empty(), "an infinite timestamp");
+    const auto no_comma = parse_transcript("[{\"Start\":0,\"End\":1,\"Content\":\"one\"}"
+                                           "{\"Start\":1,\"End\":2,\"Content\":\"two\"}");
+    check(no_comma.structured && no_comma.segments.size() == 1 && no_comma.text == "one",
+          "recovery stops at a missing comma");
     // Backticks inside a fenced segment are content: the closing fence ends the document.
     const auto ticks =
         parse_transcript("```json\n[{\"Start\":0,\"End\":1,\"Content\":\"say ``` now\"}]\n```");
@@ -772,6 +800,47 @@ void test_tokenizer() {
         check_throws_as<std::runtime_error>(
             [&] { CreateBpeTokenizer(text.data(), text.size(), false, kVocab); }, what, message);
     }
+    // One token per vocabulary id: the reference merges by operand ids.
+    auto shared_row = nlohmann::json::parse(byte_tokenizer_json());
+    shared_row["model"]["vocab"]["UNUSED_SENTINEL"] = 97;
+    const auto shared_text = shared_row.dump();
+    check_throws_as<std::runtime_error>(
+        [&] { CreateBpeTokenizer(shared_text.data(), shared_text.size(), false, kVocab); },
+        "two vocabulary tokens on one id", "used by more than one token");
+    // New added-token ids count up from the number of vocabulary entries, whatever ids the
+    // vocabulary uses: with <|box_start|> moved to row 263, the 262 entries put the next
+    // new token at 262, as the reference assigns it.
+    const auto sparse_with = [](const std::vector<std::pair<int, std::string>>& new_tokens) {
+        auto sparse = nlohmann::json::parse(byte_tokenizer_json());
+        sparse["model"]["vocab"]["<|box_start|>"] = 263;
+        for (auto& token : sparse["added_tokens"]) {
+            if (token["content"] == "<|box_start|>")
+                token["id"] = 263;
+        }
+        for (const auto& [id, content] : new_tokens)
+            sparse["added_tokens"].push_back({{"id", id},
+                                              {"content", content},
+                                              {"special", true},
+                                              {"single_word", false},
+                                              {"lstrip", false},
+                                              {"rstrip", false},
+                                              {"normalized", false}});
+        return sparse.dump();
+    };
+    for (const auto& [listed, accepted] : {std::pair{262, true}, std::pair{264, false}}) {
+        const auto text = sparse_with({{listed, "<|new|>"}});
+        const auto load = [&] { CreateBpeTokenizer(text.data(), text.size(), false, kVocab + 2); };
+        if (accepted)
+            check_no_throw(load, "a new added token at 262 after a sparse vocabulary");
+        else
+            check_throws_as<std::runtime_error>(load, "a new added token at 264", "assigns it 262");
+    }
+    // The reference gives a second new token the next id, 263, the vocabulary row of
+    // <|box_start|>, which would then decode as the new token.
+    const auto collision = sparse_with({{262, "<|new|>"}, {263, "<|new2|>"}});
+    check_throws_as<std::runtime_error>(
+        [&] { CreateBpeTokenizer(collision.data(), collision.size(), false, kVocab + 2); },
+        "a new added token on a vocabulary row", "the vocabulary row of <|box_start|>");
     // The validated layout selects the byte-level path, not the vocabulary: a non-special
     // "\u2581" added token matches only where it is written.
     auto marker = nlohmann::json::parse(byte_tokenizer_json());

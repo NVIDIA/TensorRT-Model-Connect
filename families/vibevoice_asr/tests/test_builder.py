@@ -213,6 +213,9 @@ def test_tokenizer_ids_must_be_decoder_rows(monkeypatch):
 
     contract = model.runtime_contract(cfg, 4096, tokenizer({"a": 0, "b": 151642}).encode())
     assert contract["vocab_size"] == 152064
+    # One token per vocabulary id: the reference merges by operand ids.
+    with pytest.raises(ValueError, match="used by more than one token"):
+        model.runtime_contract(cfg, 4096, tokenizer({"a": 0, "c": 0, "b": 1}).encode())
     for vocab, extra in (
         ({"a": 0, "b": 152064}, ()),
         ({"a": -1}, ()),
@@ -335,6 +338,18 @@ def test_added_token_ids_are_the_ids_the_reference_assigns():
         model.tokenizer_checks(json.dumps(raw).encode())
 
 
+def test_a_new_added_token_must_not_take_a_vocabulary_row():
+    # With two vocabulary entries the reference gives the first new added token id 2, even
+    # though the vocabulary gives that row to "b", which would then decode as the added token.
+    pytest.importorskip("tokenizers")
+    options = {"single_word": False, "lstrip": False, "rstrip": False, "normalized": False}
+    token = {"id": 2, "content": "<|endoftext|>", "special": True, **options}
+    raw = json.dumps(_qwen_tokenizer({"a": 0, "b": 2}, [token])).encode()
+    model.tokenizer_checks(raw)
+    with pytest.raises(ValueError, match="has id 2, the vocabulary row of b"):
+        model.check_tokenizer_ids(raw, 152064)
+
+
 def test_tokenizer_config_switches_must_be_off(tmp_path):
     # transformers reads these from tokenizer_config.json; the runtime reads only tokenizer.json.
     (tmp_path / "tokenizer.json").write_text("{}", encoding="utf-8")
@@ -375,8 +390,8 @@ def test_the_request_accepts_only_what_the_family_builds(tmp_path):
         dict(max_batch_size=2),
         dict(tensor_parallel_size=2),
         dict(context_parallel_size=2),
-        dict(tensor_parallel_size=1.5),
-        dict(context_parallel_size=1.5),
+        dict(tensor_parallel_size=1.0),
+        dict(context_parallel_size=1.0),
         dict(image_height=224),
         dict(video_num_frames=8),
         dict(mtp_seq_len=2),

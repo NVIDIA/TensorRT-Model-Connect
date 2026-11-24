@@ -115,6 +115,15 @@ def _selected_cases(config) -> tuple[list[str], bool]:
         )
         if model_match and (not testcase_filters or name in testcase_filters):
             selected.append(name)
+    family_selected = FAMILY in model_filters or any(
+        name in model_filters or manifest["name"] in model_filters
+        for name, (_, manifest, _) in CASES.items()
+    )
+    if family_selected and not selected:
+        raise pytest.UsageError(
+            f"{FAMILY} E2E is selected, but no case matches --e2e-testcase "
+            f"{sorted(testcase_filters)}; its cases are {sorted(CASES)}"
+        )
     return sorted(selected), True
 
 
@@ -306,15 +315,106 @@ def _reference(case: dict, audio: Path, directory: Path) -> dict:
 
 
 def _segments(raw: str) -> list[dict] | None:
-    # The runtime's rule: "assistant" is the role header only when whitespace or the end follows.
+    """The segment list in a raw output, read as the runtime's parse_transcript reads it.
+
+    The role header "assistant" before whitespace or the end is dropped; the output may be
+    a JSON document, a single segment object, a ```json fence (closed at the end of the
+    output) or a list cut short (its complete top-level objects, each after a comma). Every
+    segment needs a string Content and finite numeric timestamps where present. Anything
+    else is not a segment list (None), as the runtime then returns plain text.
+    """
     text = raw.strip()
     if re.match(r"assistant(\s|$)", text):
         text = text[len("assistant") :].strip()
-    try:
-        segments = json.loads(text)
-    except json.JSONDecodeError:
+    segments = _parse_segments(text)
+    if not isinstance(segments, dict) and not segments:
+        fence, close = "```json", "```"
+        if (start := text.find(fence)) >= 0:
+            start += len(fence)
+            closed = len(text) >= start + len(close) and text.endswith(close)
+            segments = _parse_segments(text[start : len(text) - len(close) if closed else len(text)].strip())
+    if isinstance(segments, dict):
+        segments = [segments]
+    if not isinstance(segments, list) or not segments:
         return None
-    return segments if isinstance(segments, list) else None
+    for segment in segments:
+        if not isinstance(segment, dict) or not isinstance(segment.get("Content"), str):
+            return None
+        for key, alias in (("Start", "Start time"), ("End", "End time")):
+            try:
+                _time(segment, key, alias)
+            except AssertionError:
+                return None
+    return segments
+
+
+def _parse_segments(body: str):
+    """The JSON document in ``body`` (which must start as one), or the complete top-level
+    objects of a list whose end is missing."""
+    if not body or body[0] not in "[{":
+        return None
+    try:
+        return _strict_json(body)
+    except ValueError:
+        return _complete_objects(body) if body[0] == "[" else None
+
+
+def _complete_objects(text: str) -> list:
+    """The runtime's recovery of a list cut short: complete top-level objects, each after a comma."""
+    objects, depth, expect_element, in_string, escaped, start = [], 0, True, False, False, 0
+    for i in range(1, len(text)):
+        char = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if depth == 0:
+            if char in " \t\n\r\v\f":
+                continue
+            if expect_element and char == "{":
+                depth, start = 1, i
+            elif not expect_element and char == ",":
+                expect_element = True
+            else:
+                break
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+            if depth == 0:
+                try:
+                    objects.append(_strict_json(text[start : i + 1]))
+                except ValueError:
+                    break
+                expect_element = False
+    return objects
+
+
+def _strict_json(text: str):
+    """One JSON document, read as the runtime's parser reads it."""
+    return json.loads(
+        text, parse_constant=_not_json, parse_float=_json_number, parse_int=_json_number
+    )
+
+
+def _not_json(name: str):
+    """NaN and Infinity are not JSON: the runtime's parser rejects the whole output."""
+    raise ValueError(f"{name} is not a JSON value")
+
+
+def _json_number(text: str) -> int | float:
+    """A number that overflows a double is an error for the runtime's parser."""
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError(f"{text} overflows a double")
+    return int(text) if text.lstrip("-").isdigit() else value
 
 
 def _words(text: str) -> list[str]:
@@ -342,6 +442,9 @@ def _assert_reference_tie(native_ids: list[int], reference: dict, step: int) -> 
     assert choice in top["ids"], f"step {step}: native token {choice} is not in the reference top 5"
     best = top["values"][0]
     value = top["values"][top["ids"].index(choice)]
+    assert math.isfinite(best) and math.isfinite(value), (
+        f"step {step}: logits {best} and {value} are not finite"
+    )
     # With equal signs, consecutive BF16 values have consecutive bit patterns.
     assert (best >= 0) == (value >= 0), f"step {step}: logits {best} and {value} differ in sign"
     distance = abs(_bf16_bits(best) - _bf16_bits(value))
@@ -354,9 +457,9 @@ def _assert_reference_tie(native_ids: list[int], reference: dict, step: int) -> 
 def _tie_distance(native_ids: list[int], reference: dict, step: int) -> int:
     """BF16 values from the reference best to the native token's logit at ``step``.
 
-    No recorded logits at ``step``, a token outside the recorded top 5 or a logit
-    of the other sign gives 65,536, more than any BF16 distance, so the value
-    fails its limit exactly where ``_assert_reference_tie`` fails.
+    No recorded logits at ``step``, a token outside the recorded top 5, a logit that
+    is not finite or a logit of the other sign gives 65,536, more than any BF16
+    distance, so the value fails its limit exactly where ``_assert_reference_tie`` fails.
     """
     if step >= len(reference["top_logits"]):
         return 65536
@@ -365,9 +468,22 @@ def _tie_distance(native_ids: list[int], reference: dict, step: int) -> int:
     if choice not in top["ids"]:
         return 65536
     best, value = top["values"][0], top["values"][top["ids"].index(choice)]
-    if (best >= 0) != (value >= 0):
+    if not (math.isfinite(best) and math.isfinite(value)) or (best >= 0) != (value >= 0):
         return 65536
     return abs(_bf16_bits(best) - _bf16_bits(value))
+
+
+def _time_gaps(pairs) -> list[float]:
+    """|native - reference| per start and end time of paired segments, under either key;
+    infinite when only one side has the time."""
+    gaps = []
+    for ours, theirs in pairs:
+        for key, alias in (("Start", "Start time"), ("End", "End time")):
+            mine, other = _time(ours, key, alias), _time(theirs, key, alias)
+            if mine is None and other is None:
+                continue
+            gaps.append(math.inf if mine is None or other is None else abs(mine - other))
+    return gaps
 
 
 def _largest_gap(differences) -> float:
@@ -393,7 +509,15 @@ def _check(name: str, label: str, scope: str, actual, operator: str, expected) -
 
 def _speaker_words(segments: list[dict]) -> list[tuple[str, object]]:
     """Each word of the segments with its segment's speaker, in order."""
-    return [(word, s.get("Speaker")) for s in segments for word in _words(str(s.get("Content", "")))]
+    return [(word, _speaker(s)) for s in segments for word in _words(str(s.get("Content", "")))]
+
+
+def _speaker(segment: dict):
+    """The speaker under "Speaker" or "Speaker ID", the two keys the official post-processing maps."""
+    for name in ("Speaker", "Speaker ID"):
+        if segment.get(name) is not None:
+            return segment[name]
+    return None
 
 
 def _differences(left: list, right: list) -> int:
@@ -404,8 +528,8 @@ def _differences(left: list, right: list) -> int:
 def _time(segment: dict, key: str, alias: str) -> float | None:
     """A timestamp under its key or the alias the runtime accepts; None when absent.
 
-    As in the runtime, a timestamp must be a JSON number: a string or a boolean is a
-    malformed segment, never converted.
+    As in the runtime, a timestamp must be a finite JSON number: a string, a boolean or a
+    non-finite value is a malformed segment, never converted.
     """
     for name in (key, alias):
         value = segment.get(name)
@@ -414,6 +538,7 @@ def _time(segment: dict, key: str, alias: str) -> float | None:
         assert isinstance(value, (int, float)) and not isinstance(value, bool), (
             f"{name} is not a number: {value!r}"
         )
+        assert math.isfinite(value), f"{name} is not finite: {value!r}"
         return float(value)
     return None
 
@@ -569,7 +694,7 @@ def _comparison_checks(
                     independent,
                     sum(
                         str(ours["Content"]) != str(theirs["Content"])
-                        or ours["Speaker"] != theirs["Speaker"]
+                        or _speaker(ours) != _speaker(theirs)
                         for ours, theirs in pairs
                     ),
                     "==",
@@ -579,11 +704,7 @@ def _comparison_checks(
                     "max_timestamp_difference_seconds",
                     "Largest start or end time difference to the reference, seconds",
                     independent,
-                    _largest_gap(
-                        float(ours[key]) - float(theirs[key])
-                        for ours, theirs in pairs
-                        for key in ("Start", "End")
-                    ),
+                    _largest_gap(_time_gaps(pairs)),
                     "<=",
                     FRAME_SECONDS,
                 ),
@@ -686,9 +807,9 @@ def _assert_segments_agree(native: list[dict], reference: list[dict]) -> None:
     assert len(native) == len(reference), f"{len(native)} native vs {len(reference)} segments"
     for ours, theirs in zip(native, reference):
         assert str(ours["Content"]) == str(theirs["Content"]), (ours, theirs)
-        assert ours["Speaker"] == theirs["Speaker"], (ours, theirs)
-        for key in ("Start", "End"):
-            assert abs(float(ours[key]) - float(theirs[key])) <= FRAME_SECONDS, (ours, theirs)
+        assert _speaker(ours) == _speaker(theirs), (ours, theirs)
+        for gap in _time_gaps([(ours, theirs)]):
+            assert gap <= FRAME_SECONDS, (ours, theirs)
 
 
 def _assert_transcript_consistent(default: dict, raw_segments: list[dict]) -> None:
@@ -746,6 +867,48 @@ def test_near_ties_are_at_most_two_bf16_values_apart() -> None:
             _assert_reference_tie([9], reference(best, value), 0)
     with pytest.raises(AssertionError):
         _assert_reference_tie([5], reference(20.125, 20.125), 0)
+    # Equal infinities share their BF16 bits; a non-finite logit is never a near-tie.
+    for best, value in ((math.inf, math.inf), (math.nan, math.nan), (math.inf, 20.0)):
+        with pytest.raises(AssertionError):
+            _assert_reference_tie([9], reference(best, value), 0)
+        assert _tie_distance([9], reference(best, value), 0) == 65536
+
+
+def test_the_oracle_reads_raw_output_as_the_runtime_does() -> None:
+    one = {"Start": 0.0, "End": 1.0, "Content": "a"}
+    two = {"Start": 1.0, "End": 2.0, "Content": "b"}
+    listed = json.dumps([one, two])
+    assert _segments("assistant\n" + listed) == [one, two]
+    assert _segments("```json\n" + listed + "\n```") == [one, two]
+    assert _segments(json.dumps(one)) == [one]
+    assert _segments(listed[:-10]) == [one]
+    assert _segments("[" + json.dumps(one) + json.dumps(two)) == [one]
+    for malformed in (
+        "[]",
+        "not json",
+        '[{"Content": 1}]',
+        '[{"Start": "0", "Content": "a"}]',
+        '[{"Start": 1e999, "Content": "a"}]',
+        '[{"Speaker": 1e999, "Content": "a"}]',
+        '[{"Start": 1' + "0" * 400 + ', "Content": "a"}]',
+        '[{"Start": NaN, "Content": "a"}]',
+    ):
+        assert _segments(malformed) is None, malformed
+
+
+def test_an_explicit_selection_without_a_case_is_an_error() -> None:
+    class Options:
+        def __init__(self, **values):
+            self.values = values
+
+        def getoption(self, name):
+            return self.values.get(name)
+
+    with pytest.raises(pytest.UsageError, match="no case matches"):
+        _selected_cases(Options(**{"--e2e-model": [FAMILY], "--e2e-testcase": ["typo"]}))
+    # Another family's selection, or a test case of another family, skips this family.
+    assert _selected_cases(Options(**{"--e2e-model": ["other_family"]})) == ([], True)
+    assert _selected_cases(Options(**{"--e2e-testcase": ["other-case"]})) == ([], True)
 
 
 def test_first_difference_counts_an_early_stop() -> None:
@@ -812,6 +975,38 @@ _PARITY_SCENARIOS = {
         },
         False,
     ),
+    "speakers_swapped_speaker_id": (
+        {
+            "oracle": "transcript_words",
+            "reference_segments": (
+                {"Start": 0.0, "End": 1.5, "Speaker ID": 0, "Content": "Hello"},
+                {"Start": 1.5, "End": 3.0, "Speaker ID": 1, "Content": "Goodbye"},
+            ),
+            "native_segments": (
+                {"Start": 0.0, "End": 1.5, "Speaker ID": 1, "Content": "Hello"},
+                {"Start": 1.5, "End": 3.0, "Speaker ID": 0, "Content": "Goodbye"},
+            ),
+        },
+        False,
+    ),
+    "timestamp_nan_without_end": (
+        {
+            "oracle": "transcript_words",
+            "native_segments": (),
+            "transcript": "Hello world.",
+            "raw_text": '[{"Start": NaN, "Speaker": 0, "Content": "Hello world."}]',
+        },
+        False,
+    ),
+    "near_tie_with_time_aliases": (
+        {
+            "native_ids": (5, 7, 2),
+            "top": _TIE,
+            "native_segments": ({"Start time": 0.0, "End time": 1.5, "Speaker": 0, "Content": "Hello world."},),
+            "reference_segments": ({"Start time": 0.0, "End time": 1.5, "Speaker": 0, "Content": "Hello world."},),
+        },
+        True,
+    ),
     "speakers_differ": (
         {"oracle": "transcript_words", "native_segments": ({**_SEGMENT, "Speaker": 1},)},
         False,
@@ -831,7 +1026,11 @@ def _parity_inputs(
     transcript=None,
     default_ids=None,
 ) -> tuple[dict, dict, dict, dict]:
-    """Native and reference results shaped like the runs' JSON, for the oracle tests."""
+    """Native and reference results shaped like the runs' JSON, for the oracle tests.
+
+    The default output is built from ``native_segments``, which must be well formed; a
+    malformed raw output is given as ``raw_text``.
+    """
     native_segments, reference_segments = list(native_segments), list(reference_segments)
     raw = {
         "text": json.dumps(native_segments) if raw_text is None else raw_text,
@@ -843,8 +1042,8 @@ def _parity_inputs(
         else transcript,
         "token_ids": list(native_ids if default_ids is None else default_ids),
         "segments": [
-            {"start_seconds": s["Start"], "end_seconds": s["End"], "text": s["Content"]}
-            for s in native_segments
+            {"start_seconds": start, "end_seconds": end, "text": text}
+            for start, end, text in _timed(native_segments)
         ],
     }
     reference = {
@@ -872,11 +1071,14 @@ def test_comparison_checks_agree_with_the_assertions(scenario: str) -> None:
 
 
 def test_a_timestamp_that_is_not_a_number_fails_its_check() -> None:
-    # After a near-tie the segments are compared; a NaN time must fail the largest-gap row.
-    nan_end = ({**_SEGMENT, "End": math.nan},)
-    inputs = _parity_inputs(native_ids=(5, 7, 2), top=_TIE, native_segments=nan_end)
-    rows = {row["name"]: row for row in _comparison_checks(*inputs)}
-    assert rows["max_timestamp_difference_seconds"]["passed"] is False
+    # A non-finite gap is the largest one, where max() would skip it.
+    assert _largest_gap([0.0, math.nan]) == math.inf
+    # After a near-tie the segments are compared; NaN is not JSON, so an output with a NaN
+    # time is not a segment list, as for the runtime's parser, and the comparison fails.
+    nan_end = json.dumps([{**_SEGMENT, "End": math.nan}])
+    assert "NaN" in nan_end
+    inputs = _parity_inputs(native_ids=(5, 7, 2), top=_TIE, raw_text=nan_end)
+    assert not all(row["passed"] for row in _comparison_checks(*inputs))
 
 
 @pytest.fixture(scope="session")

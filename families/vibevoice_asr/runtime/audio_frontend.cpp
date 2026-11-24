@@ -81,7 +81,8 @@ TapSpan input_taps(std::int64_t first, std::int64_t taps, std::int64_t count) {
 }
 
 std::vector<float> resample(const std::vector<float>& input, std::int32_t from_rate,
-                            std::int32_t to_rate, std::size_t max_table_coefficients) {
+                            std::int32_t to_rate, std::size_t max_table_coefficients,
+                            ResampleStats* stats) {
     const std::int64_t outputs =
         static_cast<std::int64_t>(resampled_length(input.size(), from_rate, to_rate));
     if (from_rate == to_rate || input.empty())
@@ -123,6 +124,10 @@ std::vector<float> resample(const std::vector<float>& input, std::int32_t from_r
             kernel[static_cast<std::size_t>(i)] =
                 sinc * window / norm * static_cast<double>(up) / static_cast<double>(spacing);
         }
+        if (stats != nullptr) {
+            stats->interpolated = true;
+            stats->table_coefficients = kernel.size();
+        }
         const double step = static_cast<double>(kKernelOversampling) / static_cast<double>(spacing);
         for (std::int64_t k = 0; k < outputs; ++k) {
             const std::int64_t centre = k * down;
@@ -131,6 +136,8 @@ std::vector<float> resample(const std::vector<float>& input, std::int32_t from_r
             const std::int64_t lowest = -((half_width - phase) / up);
             double sum = 0.0;
             const auto span = input_taps(base + lowest, taps, count);
+            if (stats != nullptr)
+                stats->taps += span.end - span.begin;
             for (std::int64_t t = span.begin; t < span.end; ++t) {
                 const std::int64_t j = base + lowest + t;
                 const std::int64_t offset = phase - up * (lowest + t);
@@ -150,6 +157,8 @@ std::vector<float> resample(const std::vector<float>& input, std::int32_t from_r
     // One tap table per output phase: offsets phase + up * m within the window.
     std::vector<double> table(static_cast<std::size_t>(up * taps), 0.0);
     std::vector<std::int64_t> first(static_cast<std::size_t>(up), 0);
+    if (stats != nullptr)
+        stats->table_coefficients = table.size();
     for (std::int64_t phase = 0; phase < up; ++phase) {
         // Input j contributes to output centre c = n * down + phase with offset c - j * up.
         const std::int64_t lowest = -((half_width - phase) / up); // m with phase - up * m <= hw
@@ -168,6 +177,8 @@ std::vector<float> resample(const std::vector<float>& input, std::int32_t from_r
         const std::int64_t start = base + first[static_cast<std::size_t>(phase)];
         double sum = 0.0;
         const auto span = input_taps(start, taps, count);
+        if (stats != nullptr)
+            stats->taps += span.end - span.begin;
         for (std::int64_t t = span.begin; t < span.end; ++t)
             sum += weights[t] * input[static_cast<std::size_t>(start + t)];
         output[static_cast<std::size_t>(k)] = narrow_sample(sum);
