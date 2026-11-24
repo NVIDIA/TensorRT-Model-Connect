@@ -374,28 +374,38 @@ inline bool is_two_char_contraction(char c1, char c2) {
     return (c1 == 'r' && c2 == 'e') || (c1 == 'v' && c2 == 'e') || (c1 == 'l' && c2 == 'l');
 }
 
+inline char fold_ascii_case(char c, bool ignore_case) {
+    return ignore_case && c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+}
+
 // Returns length of contraction suffix after apostrophe ('s 't 'm 'd 're 've 'll)
-inline int match_contraction_suffix(const char* p, const char* end) {
+inline int match_contraction_suffix(const char* p, const char* end, bool ignore_case) {
     if (p >= end)
         return 0;
-    char c = *p;
+    char c = fold_ascii_case(*p, ignore_case);
     if (c == 's' || c == 't' || c == 'm' || c == 'd')
         return 1;
-    if (p + 1 < end && is_two_char_contraction(c, p[1]))
+    if (p + 1 < end && is_two_char_contraction(c, fold_ascii_case(p[1], ignore_case)))
         return 2;
     return 0;
 }
 
 // ── GPT-2/Qwen3 pre-tokenize dispatch helpers ──
 
-// Handle apostrophe: either contraction or "other" chars run
+// Handle apostrophe: either contraction or "other" chars run.
+// Qwen3's contraction group is (?i:...), and an apostrophe that starts no
+// contraction belongs to its later branches: the optional prefix before
+// letters, or a punctuation run that keeps trailing newlines.
 inline bool try_contraction(char32_t cp, const char*& p, const char* end, const char* start,
-                            std::vector<std::string>& result) {
+                            Variant variant, std::vector<std::string>& result) {
     if (cp != '\'')
         return false;
-    int suffix = match_contraction_suffix(p, end);
+    const bool qwen3 = variant == Variant::kQwen3;
+    int suffix = match_contraction_suffix(p, end, qwen3);
     if (suffix > 0) {
         p += suffix;
+    } else if (qwen3) {
+        return false;
     } else {
         scan_others(p, end);
     }
@@ -519,7 +529,7 @@ std::vector<std::string> pre_tokenize(const std::string& text, Variant variant,
         const char* start = p;
         char32_t cp = read_utf8(p, end);
 
-        if (try_contraction(cp, p, end, start, result))
+        if (try_contraction(cp, p, end, start, variant, result))
             continue;
         if (try_prefix_run(cp, p, end, start, variant, result))
             continue;
