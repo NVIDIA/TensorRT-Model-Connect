@@ -1,0 +1,32 @@
+{
+  "name": "apertus-8b-instruct-2509-fp8",
+  "bundle": "apertus-8b-instruct-2509-fp8.bundle",
+  "hf_id": "swiss-ai/Apertus-8B-Instruct-2509",
+  "hf_revision": "b946d40447b2b597999b9c86d44bee0b452c919f",
+  "family": "apertus",
+  "task": "text_continuation",
+  "precision": "bf16",
+  "quantization": "fp8",
+  "max_sequence_length": 16384,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "apertus-8b-fp8-chat",
+      "premerge": true,
+      "input": "chat_token_ids",
+      "oracle": "teacher_forced_near_tie",
+      "system_prompt": "You are Apertus, a helpful assistant created by the SwissAI initiative.\nKnowledge cutoff: 2024-04\nCurrent date: 2026-11-12",
+      "prompt": "What is the capital of Switzerland? Answer in one sentence, then name its four national languages.",
+      "max_new_tokens": 64,
+      "determinism_reruns": 1
+    },
+    {
+      "name": "apertus-8b-fp8-text",
+      "premerge": true,
+      "input": "text",
+      "oracle": "teacher_forced_near_tie",
+      "prompt": "The Swiss Alps are a major mountain range. Their highest peak is",
+      "max_new_tokens": 48
+    }
+  ]
+}
