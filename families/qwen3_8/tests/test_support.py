@@ -541,6 +541,11 @@ def test_declared_build_matches_legacy_request(tmp_path, monkeypatch, options):
         original = captured[0]
         assert dispatch.ordinary_candidate(original, raw)
         assert dispatch.ordinary_candidate(replace(original, quantization=None), raw)
+        mtp_request = replace(original, mtp_seq_len=3)
+        assert not dispatch.ordinary_candidate(mtp_request, raw, current=True)
+        native = []
+        dispatch.build(mtp_request, None, lambda request, _: native.append(request))
+        assert native == [mtp_request]
         for overrides in ({"quantization": "none"}, {"quantization": "fp8"},
                           {"tensor_parallel_size": 2}, {"precision": "bf16"}):
             assert not dispatch.ordinary_candidate(replace(original, **overrides), raw)
@@ -703,6 +708,7 @@ assert "huggingface_hub" not in sys.modules
     ("hidden_size", 32, "disagree on hidden_size"),
     ("num_target_layers", 9, "layer count"),
     ("block_size", 6, "documented block"),
+    ("mtp_seq_len", 3, "cannot be combined with an external draft"),
 ])
 def test_paired_draft_contract_rejected_before_export(tmp_path, monkeypatch, variant, field, value, error):
     import json
@@ -711,7 +717,10 @@ def test_paired_draft_contract_rejected_before_export(tmp_path, monkeypatch, var
     request, execution = _dspark_pair_request(tmp_path, variant)
     path = execution.checkpoints[0].model_dir / "config.json"
     draft = json.loads(path.read_text())
-    if field == "block_size":
+    if field == "mtp_seq_len":
+        from dataclasses import replace
+        request = replace(request, mtp_seq_len=value)
+    elif field == "block_size":
         draft[f"{variant}_config"][field] = value
     else:
         draft[field] = value

@@ -258,8 +258,11 @@ do not qualify a full checkpoint or assert FP8 support on every GPU.
 An ordinary request does not enable speculative execution merely because its
 checkpoint contains draft weights. `--execution-variant mtp` maps to the native
 draft and verification graphs with three draft tokens and four verification
-positions. The ordinary native `--mtp-seq-len N` option keeps its requested count. That mapping and uniform projection loading have contract coverage,
-not full uniform-checkpoint MTP model qualification.
+positions. Without an execution variant, `--mtp-seq-len N` selects native MTP
+with the requested count; the ordinary Edge engine cannot verify draft tokens.
+Do not combine this option with an external draft. The mapping and uniform
+projection loading have contract coverage, not full uniform-checkpoint MTP
+model qualification.
 
 The existing chunked-prefill implementation remains available for compatible TP1
 text requests, including ordinary embedded-MTP requests. Explicit

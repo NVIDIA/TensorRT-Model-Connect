@@ -41,7 +41,8 @@ ORDINARY_EDGE_DISPATCH = {
 def ordinary_candidate(request, raw: dict, *, embedded_mtp: bool = False, current: bool = False) -> bool:
     """Admit dense Swish 27B FP16 TP2 or original mixed-NVFP4 TP1."""
     config = raw.get("text_config", raw)
-    if not isinstance(config, dict):
+    # Ordinary Edge engines do not contain the native MTP draft and verifier.
+    if not isinstance(config, dict) or (request.mtp_seq_len is not None and not embedded_mtp):
         return False
     source = Path(request.model_dir)
     quantization = (edge_llm.prepared_checkpoint_quantization(source, raw) if embedded_mtp else
@@ -224,6 +225,8 @@ def build_paired(request, writer, execution) -> None:
 
         build(request, writer, native_mtp, execution_variant="mtp")
         return
+    if request.mtp_seq_len is not None:
+        raise ValueError("--mtp-seq-len selects embedded MTP and cannot be combined with an external draft")
     if execution.variant not in {"dspark", "dflash", "dflash_tree", "domino", "domino_tree"} or tuple(x.role for x in execution.checkpoints) != ("draft",):
         raise ValueError("Qwen3.8 paired execution requires DSpark, DFlash2 or Domino and one draft checkpoint")
     if request.precision.lower() != "fp16":
