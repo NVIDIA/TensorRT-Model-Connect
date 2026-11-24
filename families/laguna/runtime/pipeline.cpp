@@ -26,6 +26,18 @@ using internal::ConfigKind;
 
 constexpr std::int32_t kDefaultMaxNewTokens = 128;
 
+std::int32_t requested_new_tokens(const TextGenerationConfig& cfg) {
+    return cfg.max_new_tokens > 0 ? cfg.max_new_tokens : kDefaultMaxNewTokens;
+}
+
+// The prompt and the requested new tokens must fit the KV cache.
+void require_fits(std::size_t prompt_tokens, std::int32_t max_new, std::int32_t capacity) {
+    if (prompt_tokens + static_cast<std::size_t>(max_new) > static_cast<std::size_t>(capacity))
+        throw std::invalid_argument(
+            "Laguna prompt plus max_new_tokens exceed the bundle's max_sequence_length (" +
+            std::to_string(capacity) + ")");
+}
+
 const ConfigField kTextFields[] = {
     {"max_new_tokens", ConfigKind::I64, std::int64_t{kDefaultMaxNewTokens}, "Generation token cap"},
     {"temperature", ConfigKind::F64, 1.0, "Sampling temperature; zero selects greedy"},
@@ -125,6 +137,10 @@ Pipeline::Pipeline(std::unique_ptr<ITrtModule> prefill, std::unique_ptr<ITrtModu
     if (config_.vocab_size <= 0 || config_.num_layers <= 0 || config_.prefill_chunk_rows <= 0 ||
         config_.eos_token_ids.empty())
         throw std::runtime_error("Laguna pipeline configuration is invalid");
+    if (tokenizer_->max_id() >= config_.vocab_size)
+        throw std::runtime_error("Laguna tokenizer id " + std::to_string(tokenizer_->max_id()) +
+                                 " is outside the embedding's vocab_size " +
+                                 std::to_string(config_.vocab_size));
     decode_->enable_cuda_graph();
 }
 
@@ -138,21 +154,31 @@ TextResult Pipeline::run(const internal::TextContinuationRequest& request,
     reject_unsupported(cfg);
     Lease lease(active_);
     if (const auto* text = std::get_if<std::string_view>(&request.prefix))
-        return generate_tokens(encode_prompt(std::string(*text), cfg), cfg);
+        return generate_tokens(encode_prompt(*text, cfg), cfg);
     if (cfg.use_chat_template)
         throw std::invalid_argument("Laguna token-ID input cannot apply a chat template");
     const auto tokens = std::get<Span<const std::int32_t>>(request.prefix);
+    // Reject an oversized request before copying it.
+    require_fits(tokens.size(), requested_new_tokens(cfg), cache_->max_length());
     return generate_tokens({tokens.begin(), tokens.end()}, cfg);
 }
 
-std::vector<std::int32_t> Pipeline::encode_prompt(const std::string& prompt,
+std::vector<std::int32_t> Pipeline::encode_prompt(std::string_view prompt,
                                                   const TextGenerationConfig& cfg) const {
+    // No prompt longer than the KV cache can run: the tokenizer stops beyond it, and a chat whose
+    // rendered text is too long to fit is rejected before it is rendered.
+    const auto max_tokens = static_cast<std::size_t>(cache_->max_length());
     if (!cfg.use_chat_template)
-        return tokenizer_->encode(prompt, true);
+        return tokenizer_->encode(prompt, true, max_tokens);
     if (!config_.has_chat_template)
         throw std::invalid_argument("this Laguna bundle carries no chat template");
+    if (chat_text_bytes(prompt, cfg.system_prompt, cfg.enable_thinking) >
+        tokenizer_->max_text_bytes(max_tokens))
+        throw std::invalid_argument("Laguna prompt has more than " + std::to_string(max_tokens) +
+                                    " tokens");
     // The rendered template starts with its own leading special token.
-    return tokenizer_->encode(render_chat(prompt, cfg.system_prompt, cfg.enable_thinking), false);
+    return tokenizer_->encode(render_chat(prompt, cfg.system_prompt, cfg.enable_thinking), false,
+                              max_tokens);
 }
 
 SamplingParams Pipeline::sampling_params(const TextGenerationConfig& cfg) const {
@@ -249,12 +275,8 @@ TextResult Pipeline::generate_tokens(const std::vector<std::int32_t>& input_ids,
                                         " is outside the vocabulary [0, " +
                                         std::to_string(config_.vocab_size) + ")");
     }
-    const std::int32_t max_new = cfg.max_new_tokens > 0 ? cfg.max_new_tokens : kDefaultMaxNewTokens;
-    if (input_ids.size() + static_cast<std::size_t>(max_new) >
-        static_cast<std::size_t>(cache_->max_length()))
-        throw std::invalid_argument(
-            "Laguna prompt plus max_new_tokens exceed the bundle's max_sequence_length (" +
-            std::to_string(cache_->max_length()) + ")");
+    const std::int32_t max_new = requested_new_tokens(cfg);
+    require_fits(input_ids.size(), max_new, cache_->max_length());
     const SamplingParams params = sampling_params(cfg);
     auto sampler = create_sampler(params);
     reset();

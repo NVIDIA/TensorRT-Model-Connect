@@ -11,7 +11,9 @@
 #include <array>
 #include <cctype>
 #include <climits>
+#include <functional>
 #include <nlohmann/json.hpp>
+#include <queue>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -274,6 +276,23 @@ const ByteTables& byte_tables() {
     return tables;
 }
 
+std::invalid_argument too_many_tokens(std::size_t max_tokens) {
+    return std::invalid_argument("Laguna prompt has more than " + std::to_string(max_tokens) +
+                                 " tokens");
+}
+
+// Calls visit(word) for each pre-tokenizer piece of one segment without added tokens, in order.
+template <class Visit>
+void for_each_word(std::string_view text, Visit&& visit) {
+    for (const auto piece : newline_pieces(text)) {
+        for (std::size_t k = 0; k < piece.size();) {
+            const std::size_t end = std::max(word_match_end(piece, k), k + 1);
+            visit(piece.substr(k, end - k));
+            k = end;
+        }
+    }
+}
+
 struct PairHash {
     std::size_t operator()(const std::pair<std::string, std::string>& pair) const {
         const std::size_t a = std::hash<std::string>{}(pair.first);
@@ -294,6 +313,14 @@ void require_equal(const nlohmann::json& object, const char* key, const nlohmann
                                  "': " + object.at(key).dump());
 }
 
+// A token id is an integer in [0, INT32_MAX]: get<std::int32_t>() would truncate 1.5 and wrap 2^32.
+std::int32_t token_id(const nlohmann::json& value) {
+    if (!value.is_number_integer() || value.get<std::int64_t>() < 0 ||
+        value.get<std::int64_t>() > INT32_MAX)
+        throw std::runtime_error("laguna tokenizer.json has an invalid token id: " + value.dump());
+    return static_cast<std::int32_t>(value.get<std::int64_t>());
+}
+
 void validate_split(const nlohmann::json& split, std::string_view regex, const char* behavior) {
     require_equal(split, "type", "Split");
     require_equal(split, "behavior", behavior);
@@ -312,10 +339,15 @@ struct Tokenizer::State {
     std::unordered_set<std::int32_t> special;
     std::vector<std::int32_t> prefix_ids;
     std::vector<std::int32_t> suffix_ids;
+    // Bytes of the longest vocabulary or added token: no token covers more input bytes.
+    std::size_t longest_token = 1;
+    std::int32_t largest_id = -1;
 
     void parse(const nlohmann::json& json);
-    void encode_word(const std::string& word, std::vector<std::int32_t>& out) const;
-    void encode_text(std::string_view text, std::vector<std::int32_t>& out) const;
+    void encode_word(std::string_view word, std::vector<std::int32_t>& out,
+                     std::size_t max_tokens) const;
+    void encode_text(std::string_view text, std::vector<std::int32_t>& out,
+                     std::size_t max_tokens) const;
 };
 
 void Tokenizer::State::parse(const nlohmann::json& json) {
@@ -325,6 +357,14 @@ void Tokenizer::State::parse(const nlohmann::json& json) {
     require_equal(model, "ignore_merges", false);
     require_equal(model, "continuing_subword_prefix", "");
     require_equal(model, "end_of_word_suffix", "");
+    // BPE dropout skips merges at random; only deterministic merging (no or zero dropout) is
+    // supported.
+    if (model.contains("dropout")) {
+        const auto& dropout = model.at("dropout");
+        if (!dropout.is_null() && !(dropout.is_number() && dropout.get<double>() == 0.0))
+            throw std::runtime_error("laguna tokenizer.json BPE dropout is not supported: " +
+                                     dropout.dump());
+    }
     if (!require(json, "normalizer").is_null())
         throw std::runtime_error("laguna tokenizer.json must not declare a normalizer");
 
@@ -341,25 +381,63 @@ void Tokenizer::State::parse(const nlohmann::json& json) {
     require_equal(require(json, "decoder"), "type", "ByteLevel");
 
     for (const auto& [token, id] : require(model, "vocab").items()) {
-        vocab[token] = id.get<std::int32_t>();
-        id_to_token[id.get<std::int32_t>()] = token;
+        const auto value = token_id(id);
+        if (!id_to_token.emplace(value, token).second)
+            throw std::runtime_error("laguna tokenizer.json repeats vocab id " +
+                                     std::to_string(value));
+        vocab[token] = value;
+        longest_token = std::max(longest_token, token.size());
+        largest_id = std::max(largest_id, value);
     }
     const auto& merges = require(model, "merges");
+    if (!merges.is_array() || merges.size() > static_cast<std::size_t>(INT_MAX))
+        throw std::runtime_error(
+            "laguna tokenizer.json merges must be a list of at most INT_MAX rules");
     for (std::size_t rank = 0; rank < merges.size(); ++rank) {
         const auto& merge = merges[rank];
-        if (!merge.is_array() || merge.size() != 2)
+        if (!merge.is_array() || merge.size() != 2 || !merge[0].is_string() ||
+            !merge[1].is_string())
             throw std::runtime_error("laguna tokenizer.json merges must be string pairs");
-        merge_rank.emplace(std::make_pair(merge[0].get<std::string>(), merge[1].get<std::string>()),
-                           static_cast<int>(rank));
+        auto first = merge[0].get<std::string>();
+        auto second = merge[1].get<std::string>();
+        // Both operands and their concatenation are vocabulary tokens, as tokenizers requires.
+        if (vocab.count(first) == 0 || vocab.count(second) == 0 || vocab.count(first + second) == 0)
+            throw std::runtime_error("laguna tokenizer.json merge '" + first + " " + second +
+                                     "' is not within the vocabulary");
+        if (!merge_rank
+                 .emplace(std::make_pair(std::move(first), std::move(second)),
+                          static_cast<int>(rank))
+                 .second)
+            throw std::runtime_error("laguna tokenizer.json repeats a merge rule");
     }
+    // tokenizers keeps a vocabulary token's id for an added token and numbers the others from the
+    // vocabulary size on (after the largest added id once that reaches it); a declared id must
+    // equal that assignment.
+    const auto vocab_size = static_cast<std::int64_t>(vocab.size());
+    std::int64_t largest_added = -1;
     for (const auto& token : require(json, "added_tokens")) {
         for (const char* flag : {"lstrip", "rstrip", "single_word", "normalized"})
             require_equal(token, flag, false);
         const auto content = require(token, "content").get<std::string>();
-        const auto id = require(token, "id").get<std::int32_t>();
+        // An empty added token would match at every position without advancing encode().
+        if (content.empty())
+            throw std::runtime_error("laguna tokenizer.json has an added token with empty content");
+        const auto id = token_id(require(token, "id"));
+        const auto known_id = id_to_token.find(id);
+        const auto known_content = vocab.find(content);
+        const std::int64_t assigned = known_content != vocab.end()  ? known_content->second
+                                      : largest_added >= vocab_size ? largest_added + 1
+                                                                    : vocab_size;
+        if (id != assigned || (known_id != id_to_token.end() && known_id->second != content))
+            throw std::runtime_error("laguna tokenizer.json added token '" + content + "' has id " +
+                                     std::to_string(id) + "; tokenizers assigns " +
+                                     std::to_string(assigned));
+        largest_added = std::max<std::int64_t>(largest_added, id);
         added.emplace_back(content, id);
         id_to_token[id] = content;
         vocab[content] = id;
+        longest_token = std::max(longest_token, content.size());
+        largest_id = std::max(largest_id, id);
         if (require(token, "special").get<bool>())
             special.insert(id);
     }
@@ -369,62 +447,105 @@ void Tokenizer::State::parse(const nlohmann::json& json) {
 
     const auto& post = require(json, "post_processor");
     require_equal(post, "type", "TemplateProcessing");
+    // Each item is one operation; the input is one Sequence A, with special tokens before or after
+    // it.
     bool after_sequence = false;
     for (const auto& item : require(post, "single")) {
+        if (!item.is_object() || item.size() != 1)
+            throw std::runtime_error(
+                "laguna tokenizer.json post-processor items hold exactly one operation");
         if (item.contains("Sequence")) {
+            if (after_sequence || require(item.at("Sequence"), "id") != "A")
+                throw std::runtime_error(
+                    "laguna tokenizer.json post-processor needs exactly one Sequence A");
             after_sequence = true;
             continue;
         }
         const auto name = require(require(item, "SpecialToken"), "id").get<std::string>();
         const auto& ids = require(require(require(post, "special_tokens"), name.c_str()), "ids");
-        for (const auto& id : ids)
-            (after_sequence ? suffix_ids : prefix_ids).push_back(id.get<std::int32_t>());
+        for (const auto& id : ids) {
+            (after_sequence ? suffix_ids : prefix_ids).push_back(token_id(id));
+            largest_id = std::max(largest_id, token_id(id));
+        }
     }
+    if (!after_sequence)
+        throw std::runtime_error(
+            "laguna tokenizer.json post-processor needs exactly one Sequence A");
 }
 
-void Tokenizer::State::encode_word(const std::string& word, std::vector<std::int32_t>& out) const {
+void Tokenizer::State::encode_word(std::string_view word, std::vector<std::int32_t>& out,
+                                   std::size_t max_tokens) const {
+    // tokenizers' BPE: merge one pair occurrence at a time, the lowest rank first and the leftmost
+    // among equal ranks, then reconsider the merged symbol's neighbours. Merging every occurrence
+    // of a pair at once gives other tokens when a merge creates a pair of lower rank.
+    struct Symbol {
+        std::string text; // empty once merged into its left neighbour
+        std::ptrdiff_t prev;
+        std::ptrdiff_t next;
+    };
     const auto& tables = byte_tables();
-    std::vector<std::string> symbols;
+    const auto length = static_cast<std::ptrdiff_t>(word.size());
+    std::vector<Symbol> symbols;
     symbols.reserve(word.size());
-    for (unsigned char byte : word)
-        symbols.push_back(tables.encode[byte]);
-    while (symbols.size() > 1) {
-        int best_rank = INT_MAX;
-        std::size_t best = 0;
-        for (std::size_t k = 0; k + 1 < symbols.size(); ++k) {
-            const auto it = merge_rank.find({symbols[k], symbols[k + 1]});
-            if (it != merge_rank.end() && it->second < best_rank) {
-                best_rank = it->second;
-                best = k;
-            }
-        }
-        if (best_rank == INT_MAX)
-            break;
-        const std::string first = symbols[best];
-        const std::string second = symbols[best + 1];
-        std::vector<std::string> merged;
-        merged.reserve(symbols.size());
-        for (std::size_t k = 0; k < symbols.size(); ++k) {
-            if (k + 1 < symbols.size() && symbols[k] == first && symbols[k + 1] == second) {
-                merged.push_back(first + second);
-                ++k;
-            } else {
-                merged.push_back(std::move(symbols[k]));
-            }
-        }
-        symbols = std::move(merged);
+    for (std::ptrdiff_t k = 0; k < length; ++k)
+        symbols.push_back(
+            {tables.encode[static_cast<unsigned char>(word[static_cast<std::size_t>(k)])], k - 1,
+             k + 1 < length ? k + 1 : -1});
+    using Candidate = std::pair<int, std::ptrdiff_t>; // (rank, left position)
+    std::priority_queue<Candidate, std::vector<Candidate>, std::greater<Candidate>> queue;
+    const auto consider = [&](std::ptrdiff_t left) {
+        const auto right = symbols[static_cast<std::size_t>(left)].next;
+        if (right < 0)
+            return;
+        const auto it = merge_rank.find({symbols[static_cast<std::size_t>(left)].text,
+                                         symbols[static_cast<std::size_t>(right)].text});
+        if (it != merge_rank.end())
+            queue.push({it->second, left});
+    };
+    for (std::ptrdiff_t k = 0; k + 1 < length; ++k)
+        consider(k);
+    while (!queue.empty()) {
+        const auto [rank, left] = queue.top();
+        queue.pop();
+        auto& symbol = symbols[static_cast<std::size_t>(left)];
+        if (symbol.text.empty() || symbol.next < 0)
+            continue;
+        auto& right = symbols[static_cast<std::size_t>(symbol.next)];
+        // A candidate is stale once either symbol changed: ranks identify rules, and rules are
+        // unique.
+        const auto it = merge_rank.find({symbol.text, right.text});
+        if (it == merge_rank.end() || it->second != rank)
+            continue;
+        symbol.text += right.text;
+        right.text.clear();
+        symbol.next = right.next;
+        if (symbol.next >= 0)
+            symbols[static_cast<std::size_t>(symbol.next)].prev = left;
+        if (symbol.prev >= 0)
+            consider(symbol.prev);
+        consider(left);
     }
     for (const auto& symbol : symbols) {
-        const auto it = vocab.find(symbol);
+        if (symbol.text.empty())
+            continue;
+        const auto it = vocab.find(symbol.text);
         if (it == vocab.end())
             throw std::runtime_error("laguna tokenizer produced a symbol outside its vocabulary");
+        if (out.size() >= max_tokens)
+            throw too_many_tokens(max_tokens);
         out.push_back(it->second);
     }
 }
 
-void Tokenizer::State::encode_text(std::string_view text, std::vector<std::int32_t>& out) const {
-    for (const auto& word : pre_tokenize(text))
-        encode_word(word, out);
+void Tokenizer::State::encode_text(std::string_view text, std::vector<std::int32_t>& out,
+                                   std::size_t max_tokens) const {
+    for_each_word(text, [&](std::string_view word) {
+        // A word of n bytes has at least ceil(n / longest_token) tokens: reject it before merging.
+        const std::size_t least = (word.size() + longest_token - 1) / longest_token;
+        if (out.size() > max_tokens || least > max_tokens - out.size())
+            throw too_many_tokens(max_tokens);
+        encode_word(word, out, max_tokens);
+    });
 }
 
 Tokenizer::Tokenizer(std::unique_ptr<State> state) : state_(std::move(state)) {}
@@ -432,8 +553,24 @@ Tokenizer::~Tokenizer() = default;
 
 std::unique_ptr<Tokenizer> Tokenizer::create(std::string_view tokenizer_json) {
     nlohmann::json json;
+    // The parser keeps the last of repeated keys; a repeated key (for example a vocab entry) is
+    // rejected.
+    std::vector<std::unordered_set<std::string>> keys;
+    const auto reject_repeated_keys = [&](int, nlohmann::json::parse_event_t event,
+                                          nlohmann::json& parsed) {
+        if (event == nlohmann::json::parse_event_t::object_start)
+            keys.emplace_back();
+        else if (event == nlohmann::json::parse_event_t::object_end)
+            keys.pop_back();
+        else if (event == nlohmann::json::parse_event_t::key &&
+                 !keys.back().insert(parsed.get<std::string>()).second)
+            throw std::runtime_error("laguna tokenizer.json repeats the key '" +
+                                     parsed.get<std::string>() + "'");
+        return true;
+    };
     try {
-        json = nlohmann::json::parse(tokenizer_json.begin(), tokenizer_json.end());
+        json = nlohmann::json::parse(tokenizer_json.begin(), tokenizer_json.end(),
+                                     reject_repeated_keys);
     } catch (const nlohmann::json::exception& error) {
         throw std::runtime_error(std::string("laguna cannot parse tokenizer.json: ") +
                                  error.what());
@@ -443,10 +580,26 @@ std::unique_ptr<Tokenizer> Tokenizer::create(std::string_view tokenizer_json) {
     return std::unique_ptr<Tokenizer>(new Tokenizer(std::move(state)));
 }
 
-std::vector<std::int32_t> Tokenizer::encode(std::string_view text, bool add_special_tokens) const {
+std::int32_t Tokenizer::max_id() const {
+    return state_->largest_id;
+}
+
+std::size_t Tokenizer::max_text_bytes(std::size_t max_tokens) const {
+    return max_tokens < SIZE_MAX / state_->longest_token ? max_tokens * state_->longest_token
+                                                         : SIZE_MAX;
+}
+
+std::vector<std::int32_t> Tokenizer::encode(std::string_view text, bool add_special_tokens,
+                                            std::size_t max_tokens) const {
+    // A text longer than max_text_bytes(max_tokens) has more tokens than the budget.
+    if (text.size() > max_text_bytes(max_tokens))
+        throw too_many_tokens(max_tokens);
     std::vector<std::int32_t> ids;
-    if (add_special_tokens)
+    if (add_special_tokens) {
+        if (state_->prefix_ids.size() > max_tokens)
+            throw too_many_tokens(max_tokens);
         ids = state_->prefix_ids;
+    }
     std::size_t plain = 0;
     for (std::size_t k = 0; k < text.size();) {
         const auto hit =
@@ -457,14 +610,19 @@ std::vector<std::int32_t> Tokenizer::encode(std::string_view text, bool add_spec
             ++k;
             continue;
         }
-        state_->encode_text(text.substr(plain, k - plain), ids);
+        state_->encode_text(text.substr(plain, k - plain), ids, max_tokens);
+        if (ids.size() >= max_tokens)
+            throw too_many_tokens(max_tokens);
         ids.push_back(hit->second);
         k += hit->first.size();
         plain = k;
     }
-    state_->encode_text(text.substr(plain), ids);
-    if (add_special_tokens)
+    state_->encode_text(text.substr(plain), ids, max_tokens);
+    if (add_special_tokens) {
+        if (state_->suffix_ids.size() > max_tokens - ids.size())
+            throw too_many_tokens(max_tokens);
         ids.insert(ids.end(), state_->suffix_ids.begin(), state_->suffix_ids.end());
+    }
     return ids;
 }
 
@@ -502,13 +660,7 @@ std::int32_t Tokenizer::id_for_token(std::string_view token) const {
 
 std::vector<std::string> pre_tokenize(std::string_view text) {
     std::vector<std::string> words;
-    for (const auto piece : newline_pieces(text)) {
-        for (std::size_t k = 0; k < piece.size();) {
-            const std::size_t end = std::max(word_match_end(piece, k), k + 1);
-            words.emplace_back(piece.substr(k, end - k));
-            k = end;
-        }
-    }
+    for_each_word(text, [&](std::string_view word) { words.emplace_back(word); });
     return words;
 }
 

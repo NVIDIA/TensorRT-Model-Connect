@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace trtmc::laguna {
@@ -55,7 +56,7 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
     LogitsTrace trace_logits(const std::string& prompt, const TextGenerationConfig& cfg);
 
   private:
-    std::vector<std::int32_t> encode_prompt(const std::string& prompt,
+    std::vector<std::int32_t> encode_prompt(std::string_view prompt,
                                             const TextGenerationConfig& cfg) const;
     TextResult generate_tokens(const std::vector<std::int32_t>& input_ids,
                                const TextGenerationConfig& cfg);

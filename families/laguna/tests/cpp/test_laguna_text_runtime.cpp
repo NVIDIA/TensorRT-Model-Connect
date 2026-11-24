@@ -16,6 +16,7 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -143,6 +144,131 @@ void test_tokenizer() {
         rejected = true;
     }
     check(rejected, "a different tokenizer contract is rejected");
+
+    const auto rejects = [](const nlohmann::json& candidate) {
+        try {
+            trtmc::laguna::Tokenizer::create(candidate.dump());
+        } catch (const std::runtime_error&) {
+            return true;
+        }
+        return false;
+    };
+    // An empty added token would match at every position without advancing encode().
+    auto empty_added = json;
+    empty_added["added_tokens"].push_back({{"id", 17},
+                                           {"content", ""},
+                                           {"single_word", false},
+                                           {"lstrip", false},
+                                           {"rstrip", false},
+                                           {"normalized", false},
+                                           {"special", false}});
+    check(rejects(empty_added), "an added token with empty content is rejected");
+    // Token ids are integers in [0, INT32_MAX]: 1.5 would truncate to 1 and 2^32 would wrap to 0.
+    auto fractional = json;
+    fractional["added_tokens"][1]["id"] = 1.5;
+    check(rejects(fractional), "a fractional added-token id is rejected");
+    auto wide_vocab = json;
+    wide_vocab["model"]["vocab"]["hello"] = 4294967296ULL;
+    check(rejects(wide_vocab), "a vocab id beyond INT32_MAX is rejected");
+    auto wide_special = json;
+    wide_special["post_processor"]["special_tokens"]["\xE3\x80\x88|EOS|\xE3\x80\x89"]["ids"] = {
+        4294967296ULL};
+    check(rejects(wide_special), "a post-processor token id beyond INT32_MAX is rejected");
+
+    // tokenizers' BPE merges one occurrence at a time: (a, b) creates (ab, a), whose lower rank
+    // applies next, so "abab" is "aba b"; merging every occurrence of (a, b) first would give "ab
+    // ab".
+    auto ranked = json;
+    ranked["model"]["vocab"] = {{"\xE3\x80\x88|EOS|\xE3\x80\x89", 0},
+                                {"<think>", 1},
+                                {"a", 2},
+                                {"b", 3},
+                                {"ab", 4},
+                                {"aba", 5}};
+    ranked["model"]["merges"] = nlohmann::json::array(
+        {nlohmann::json::array({"ab", "a"}), nlohmann::json::array({"a", "b"})});
+    check(trtmc::laguna::Tokenizer::create(ranked.dump())->encode("abab", false) ==
+              std::vector<std::int32_t>{5, 3},
+          "BPE reconsiders merge ranks after each merge");
+
+    auto dropout = json;
+    dropout["model"]["dropout"] = 1.0;
+    check(rejects(dropout), "BPE dropout is rejected");
+    dropout["model"]["dropout"] = 0.0;
+    check(!rejects(dropout), "zero BPE dropout merges deterministically");
+    check(tokenizer->max_id() == 16, "max_id is the largest token id");
+
+    auto repeated_id = json;
+    repeated_id["model"]["vocab"]["hello"] = 2; // the id of "h"
+    check(rejects(repeated_id), "a repeated vocab id is rejected");
+    auto outside_result = json;
+    outside_result["model"]["merges"].push_back({"o", "w"}); // "ow" is not in the vocabulary
+    check(rejects(outside_result), "a merge whose result is outside the vocabulary is rejected");
+    auto outside_operand = json;
+    outside_operand["model"]["merges"].push_back({"he", "llo"}); // "llo" is not in the vocabulary
+    check(rejects(outside_operand), "a merge with an operand outside the vocabulary is rejected");
+    auto repeated_merge = json;
+    repeated_merge["model"]["merges"].push_back({"h", "e"});
+    check(rejects(repeated_merge), "a repeated merge rule is rejected");
+    auto taken_id = json;
+    taken_id["added_tokens"][1]["id"] = 13; // the id of "hello"
+    check(rejects(taken_id), "an added token with another token's id is rejected");
+
+    // tokenizers numbers an added token outside the vocabulary from the 17 vocabulary entries on.
+    const auto new_token = [](int id) {
+        return nlohmann::json{{"id", id},        {"content", "<x>"}, {"single_word", false},
+                              {"lstrip", false}, {"rstrip", false},  {"normalized", false},
+                              {"special", false}};
+    };
+    auto next_added = json;
+    next_added["added_tokens"].push_back(new_token(17));
+    check(!rejects(next_added), "a new added token takes the next id after the vocabulary");
+    auto skipping_added = json;
+    skipping_added["added_tokens"].push_back(new_token(20));
+    check(rejects(skipping_added), "a new added token that skips ids is rejected");
+    // The JSON parser keeps the last of repeated keys; a repeated vocab entry is rejected instead.
+    auto repeated_key = json.dump();
+    const std::string entry = "\"hello\":13";
+    const auto at = repeated_key.find(entry);
+    check(at != std::string::npos, "the fixture holds the vocab entry to repeat");
+    repeated_key.insert(at, entry + ",");
+    bool repeated_rejected = false;
+    try {
+        trtmc::laguna::Tokenizer::create(repeated_key);
+    } catch (const std::runtime_error&) {
+        repeated_rejected = true;
+    }
+    check(repeated_rejected, "a repeated vocab key is rejected");
+
+    auto two_operations = json;
+    two_operations["post_processor"]["single"][0]["Sequence"] = {{"id", "A"}, {"type_id", 0}};
+    check(rejects(two_operations), "a post-processor item with two operations is rejected");
+    auto two_sequences = json;
+    two_sequences["post_processor"]["single"].push_back(
+        {{"Sequence", {{"id", "A"}, {"type_id", 0}}}});
+    check(rejects(two_sequences), "a second post-processor Sequence is rejected");
+    auto no_sequence = json;
+    no_sequence["post_processor"]["single"].erase(1);
+    check(rejects(no_sequence), "a post-processor without Sequence A is rejected");
+
+    // "hello hello" is three tokens (hello, \u0120, hello).
+    check(tokenizer->encode("hello hello", false, 3).size() == 3,
+          "a prompt within the token budget encodes");
+    const auto over_budget = [&](const std::string& text, std::size_t max_tokens) {
+        try {
+            tokenizer->encode(text, false, max_tokens);
+        } catch (const std::invalid_argument&) {
+            return true;
+        }
+        return false;
+    };
+    check(over_budget("hello hello", 2), "a prompt one token over the budget is rejected");
+    // The longest token, \u3008|EOS|\u3009, is 11 bytes: no text over 8 x 11 bytes fits 8 tokens.
+    check(tokenizer->max_text_bytes(8) == 88,
+          "the text limit is the budget times the longest token");
+    check(tokenizer->max_text_bytes(SIZE_MAX) == SIZE_MAX, "the text limit saturates");
+    check(over_budget(std::string(1 << 20, 'h'), 8),
+          "a text longer than the budget times the longest token is rejected");
 }
 
 void test_chat_template() {
@@ -175,6 +301,22 @@ void test_chat_template() {
           "multi-byte characters that are not whitespace are kept");
 }
 
+void test_chat_text_bytes() {
+    // The size is computed as render_chat renders, including the system prompt's trailing
+    // whitespace trim.
+    const std::string long_spaces(10000, ' ');
+    const std::string padded = std::string("be terse") + long_spaces;
+    for (const auto& [user, system, thinking] :
+         std::vector<std::tuple<std::string, std::string, bool>>{
+             {"hi", "", false},
+             {"hi", padded, true},
+             {"\xE6\x97\xA5", long_spaces, false},
+             {"", "sys\n", true}})
+        check(trtmc::laguna::chat_text_bytes(user, system, thinking) ==
+                  trtmc::laguna::render_chat(user, system, thinking).size(),
+              "chat_text_bytes is the rendered chat's size");
+}
+
 void test_sampler() {
     trtmc::laguna::SamplingParams params;
     params.eos_token_ids = {2, 24};
@@ -205,6 +347,7 @@ int main() {
     test_pre_tokenizer();
     test_tokenizer();
     test_chat_template();
+    test_chat_text_bytes();
     test_sampler();
     if (failures != 0) {
         std::fprintf(stderr, "%d Laguna text runtime checks failed\n", failures);

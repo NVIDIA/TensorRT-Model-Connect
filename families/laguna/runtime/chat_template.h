@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <string>
 #include <string_view>
 
@@ -20,5 +21,9 @@ inline constexpr std::string_view kDefaultSystemMessage =
 // `</think>` (no thinking). An empty system prompt selects the default message.
 std::string render_chat(std::string_view user, std::string_view system_prompt,
                         bool enable_thinking);
+
+// The size of render_chat(user, system_prompt, enable_thinking), without rendering it.
+std::size_t chat_text_bytes(std::string_view user, std::string_view system_prompt,
+                            bool enable_thinking);
 
 } // namespace trtmc::laguna

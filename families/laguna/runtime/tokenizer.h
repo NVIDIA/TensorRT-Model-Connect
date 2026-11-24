@@ -14,6 +14,7 @@
 // TemplateProcessing post-processor that prefixes special tokens; ByteLevel
 // decoding with special tokens skipped.
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -29,8 +30,16 @@ class Tokenizer {
     Tokenizer(const Tokenizer&) = delete;
     Tokenizer& operator=(const Tokenizer&) = delete;
 
-    // add_special_tokens inserts the post-processor's leading special tokens.
-    std::vector<std::int32_t> encode(std::string_view text, bool add_special_tokens) const;
+    // add_special_tokens inserts the post-processor's leading special tokens. Throws
+    // std::invalid_argument as soon as the ids exceed max_tokens, before tokenizing the rest of the
+    // text.
+    std::vector<std::int32_t> encode(std::string_view text, bool add_special_tokens,
+                                     std::size_t max_tokens = SIZE_MAX) const;
+    // The longest text that can encode to at most max_tokens ids: no token covers more input bytes
+    // than the longest vocabulary or added token.
+    std::size_t max_text_bytes(std::size_t max_tokens) const;
+    // The largest id of a vocabulary, added or post-processor token.
+    std::int32_t max_id() const;
     // Skips special tokens, as HF decode(skip_special_tokens=True).
     std::string decode(const std::vector<std::int32_t>& ids) const;
     // -1 when the token is not in the vocabulary.

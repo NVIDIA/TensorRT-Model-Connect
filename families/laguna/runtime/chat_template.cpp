@@ -51,21 +51,47 @@ std::string_view rstrip(std::string_view text) {
 
 } // namespace
 
+namespace {
+
+constexpr std::string_view kBegin = "\xE3\x80\x88|EOS|\xE3\x80\x89"; // 〈|EOS|〉
+constexpr std::string_view kSystemOpen = "<system>\n\n";
+constexpr std::string_view kSystemClose = "\n</system>\n";
+constexpr std::string_view kUserOpen = "<user>\n";
+constexpr std::string_view kUserClose = "\n</user>\n<assistant>\n";
+
+std::string_view system_text(std::string_view system_prompt) {
+    return rstrip(system_prompt.empty() ? kDefaultSystemMessage : system_prompt);
+}
+
+std::string_view thinking_tag(bool enable_thinking) {
+    return enable_thinking ? "<think>" : "</think>";
+}
+
+} // namespace
+
 std::string render_chat(std::string_view user, std::string_view system_prompt,
                         bool enable_thinking) {
-    const std::string_view system = system_prompt.empty() ? kDefaultSystemMessage : system_prompt;
-    std::string text = "\xE3\x80\x88|EOS|\xE3\x80\x89"; // 〈|EOS|〉
-    const std::string_view stripped = rstrip(system);
-    if (!stripped.empty()) {
-        text += "<system>\n\n";
-        text += stripped;
-        text += "\n</system>\n";
+    const std::string_view system = system_text(system_prompt);
+    std::string text(kBegin);
+    if (!system.empty()) {
+        text += kSystemOpen;
+        text += system;
+        text += kSystemClose;
     }
-    text += "<user>\n";
+    text += kUserOpen;
     text += user;
-    text += "\n</user>\n<assistant>\n";
-    text += enable_thinking ? "<think>" : "</think>";
+    text += kUserClose;
+    text += thinking_tag(enable_thinking);
     return text;
+}
+
+std::size_t chat_text_bytes(std::string_view user, std::string_view system_prompt,
+                            bool enable_thinking) {
+    const std::string_view system = system_text(system_prompt);
+    const std::size_t system_bytes =
+        system.empty() ? 0 : kSystemOpen.size() + system.size() + kSystemClose.size();
+    return kBegin.size() + system_bytes + kUserOpen.size() + user.size() + kUserClose.size() +
+           thinking_tag(enable_thinking).size();
 }
 
 } // namespace trtmc::laguna
