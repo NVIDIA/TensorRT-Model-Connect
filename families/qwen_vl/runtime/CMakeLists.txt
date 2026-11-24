@@ -51,6 +51,41 @@ install(TARGETS trtmc_model_qwen_vl
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_qwen_vl_kv_cache
+    ${PROJECT_SOURCE_DIR}/families/qwen_vl/tests/cpp/test_kv_cache.cpp
+    kv_cache.cpp
+    ${PROJECT_SOURCE_DIR}/core/runtime/primitives/device_tensor.cpp
+  )
+  target_include_directories(test_qwen_vl_kv_cache PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_qwen_vl_kv_cache SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_qwen_vl_kv_cache PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME qwen_vl_kv_cache COMMAND test_qwen_vl_kv_cache)
+
+  add_executable(test_qwen_vl_generation_bound
+    ${PROJECT_SOURCE_DIR}/families/qwen_vl/tests/cpp/test_generation_bound.cpp
+  )
+  target_include_directories(test_qwen_vl_generation_bound PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_qwen_vl_generation_bound SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(test_qwen_vl_generation_bound PRIVATE
+    trtmc_model_qwen_vl
+    trtmc_core
+    ${TRTMC_CUDART_LIBRARY}
+  )
+  target_compile_options(test_qwen_vl_generation_bound PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME qwen_vl_generation_bound COMMAND test_qwen_vl_generation_bound)
+  set_tests_properties(qwen_vl_generation_bound PROPERTIES
+    SKIP_RETURN_CODE 77
+    LABELS gpu
+  )
+
   add_executable(test_qwen_vl_image_normalization
     ${PROJECT_SOURCE_DIR}/families/qwen_vl/tests/cpp/test_image_normalization.cpp
     image_preprocessor.cpp

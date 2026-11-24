@@ -259,6 +259,10 @@ checks. The original 4B, 9B and 27B DFlash pairs passed the measured short
 and long greedy checks with both linear and top-k-four tree decoding. Some other
 ordinary text profiles remain runnable but miss sampled quality; see the
 family recipe below for the per-checkpoint results and tested scope.
+The prepared 4B NVFP4 target and its matching NVFP4 DFlash draft use the
+0.12 ONNX exporter (install the Edge Python `onnx` extra and configure
+`-DTRTMC_EDGELLM_ONNX=ON`). The native fallback preserves paired decoding
+without ONNX.
 For the 27B TP2 image case, the recipe also identifies a tested A100 pair
 where both Edge runners failed in prefill and MC selects native TensorRT.
 Use `--task images_text_to_text` for ordered images; the legacy single-image
@@ -341,6 +345,10 @@ owns native TensorRT Python graph construction and Model Connect C++ execution,
 including prepared routed experts and media inputs. Publication errors,
 cancellation and runtime errors do not trigger this fallback. Native execution
 needs neither Edge nor ONNX.
+A native single-GPU GPTQ bundle without MTP or a draft also ships `prefill.plan`
+when two copies of the checkpoint weights fit in 80% of the GPU memory. The
+runtime then prefills text and media prompts up to 64 rows per call and decodes
+with `engine.plan`; other bundles prefill one token at a time, as before.
 The existing validation checks seed rejection on Edge and seeded request-local
 repeatability on native, retaining capacity recovery, the independent checkpoint
 reference and the unchanged accuracy gate. Native speculative mappings and

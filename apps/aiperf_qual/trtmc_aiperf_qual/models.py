@@ -163,7 +163,8 @@ def _definition(path: Path) -> Any:
 
 
 def profile_override(profile: str, family: str, repository: Path, root: Path = CONFIG_ROOT) -> dict[str, Any]:
-    """A profile's own configuration: legacy config/models/<profile>.yaml, then the family's definition."""
+    """A profile's own configuration: legacy config/models/<profile>.yaml, then the family's definition. Whether a
+    profile runs is not part of it: config/exclusions.yaml decides that (``selection``)."""
     override_path = root / "models" / f"{profile}.yaml"
     override = configuration((_definition(override_path) if override_path.is_file() else None) or {})
     family_path = repository / "families" / family / "tests" / "aiperf" / f"{profile}.yaml"
@@ -172,6 +173,8 @@ def profile_override(profile: str, family: str, repository: Path, root: Path = C
         if not isinstance(owned, dict):
             raise ConfigError(f"{family_path} must contain a mapping")
         override = deep_merge(override, configuration(owned))
+    if "exclude" in override:
+        raise ConfigError(f"{profile}: exclude belongs in config/exclusions.yaml, not in the profile's configuration")
     return override
 
 
@@ -268,6 +271,9 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     absolute = _absolute(list(config.get("absolute") or []), definitions, testcase, bool(quantization))
     for item in absolute:  # gold suites: the suite definition, with the benchmark's request settings
         if item.get("metric"):
+            if not item.get("suite_definition"):  # a benchmark whose suite each profile states
+                raise ConfigError(f"{profile}: benchmark {item.get('suite')!r} names no suite_definition; the "
+                                  "profile's own configuration states its suite")
             suite = _suite(item["suite_definition"], profile, config.get("request"))
             if item.get("request"):  # a null removes the suite's field (a Task that declares no such config)
                 request = {**suite.get("request", {}), **item.pop("request")}

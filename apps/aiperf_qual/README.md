@@ -119,17 +119,17 @@ public Task's 448x448 image size, with image decode before timing and preparatio
   attempt. Low scores from successfully returned answers do not trigger precision fallback.
 - Both sides run separately with one server and concurrency 1. Legacy Acc replica, MPS, and overlap settings
   are ignored by qualification; their contended timings cannot serve as speed evidence.
-- Every AIPerf run has a 12-hour deadline unless the environment explicitly sets `deadlines.<profile>`.
+- Every AIPerf run has a 12-hour deadline unless the environment (or its platform) sets `deadlines.<profile>`.
   Scheduling ledgers only determine assignment: historical rescoring durations can omit fresh inference.
   A GPU phase that fails before producing its result runs once more.
 - `summary` reports one result per model, worst first: White (no verdict: an error or a failed build; or no valid
   comparison: a Task without an Acc check), Red (Acc worse than
   native beyond its margin), Yellow (an Acc difference not shown either way), Green (quality passes with available
   benchmark timings). Historical fixed-workload reports retain their original performance lights.
-  Profiles excluded by the machine model list remain in `excluded.json` for audit and do not contribute
-  report rows, totals, White counts, or pass-rate denominators. A measured result from another host still counts.
-  Catalog profiles without Task test defaults remain in `plan.json` for coverage audit, outside those
-  statistics too. Invalid configurations of supported tests still appear as White errors.
+  Profiles a run excludes (see "Model selection", including those whose Task has no defaults) remain in
+  `excluded.json` with their reason and source for audit and do not contribute report rows, totals, White counts,
+  or pass-rate denominators. A measured result from another host still counts. Invalid configurations of
+  supported tests still appear as White errors.
 
 ### Performance
 
@@ -267,7 +267,7 @@ that the serving interpreter cannot import (missing, or failing on a missing or 
 ## Commands
 
 ```bash
-E=config/environments/gb300-perf-serving.yaml
+E=config/environments/<machine>.yaml
 trtmc-aiperf-qual plan --environment $E
 trtmc-aiperf-qual matrix --environment $E --output matrix.csv                # exit 1 unless every profile is executable
 trtmc-aiperf-qual run --profile qwen3-0.6b-fp16 --environment $E --out out/qwen3-0.6b-fp16
@@ -321,10 +321,31 @@ outputs side by side, Perf lights with labelled p50 values and reasons, L2, evid
 reproduction command), fetching logs next to it. `--baseline ROOT` notes TRTMC
 p50 regressions (> 5%) against a previous run.
 
-### Per-machine model list
+### Model selection
 
-GPU memory decides which models a machine can run. `models` in its environment file selects them
-for `run-all` and `plan` (an explicit `--profile` overrides it):
+Two questions are answered in different places. How a profile runs is derived: its catalog entry, its Task's
+defaults (`config/tasks.yaml`), and its own configuration (`config/models/<profile>.yaml`, merged with the
+family's `tests/aiperf/<profile>.yaml` where one remains). Whether it runs is
+decided by the exclusions below, in this order; the first that applies is the reason, and its `source` names the
+file to change:
+
+| Source | Decides | Applies to |
+|---|---|---|
+| `config/tasks.yaml` | the profile's Task has no defaults (no entry, no exclusion to write) | every machine |
+| `config/exclusions.yaml` | the qualification cannot qualify the profile as cataloged | every machine |
+| `environment` | not in the machine's `models.include`, or in its `models.exclude` | one machine |
+| `config/platforms/<platform>.yaml` | what the hardware cannot run | one kind of hardware |
+| `environment` | a checkpoint above the machine's `models.max_checkpoint_gib` | one machine |
+
+The scope is every ready catalog profile (L0 smoke and regression variants aside). `run-all`, `plan`, `assign`
+and `matrix` take the machine's list; `--profile` (names or glob patterns, in the order given) replaces its
+`include` and is held to the same exclusions, `run --profile` too. `--ignore-exclusions` runs the named profiles
+anyway, for a diagnostic run. `plan` prints each excluded profile with its reason and source, then the derived
+configuration of each selected one. Excluded profiles are written to `<out-root>/excluded.json` (a fragment's
+exclusions count as its answer for those profiles in `merge-check --manifest`) and stay out of `summary` unless
+another result root holds a result for them.
+
+The machine's list (`models` in its environment file):
 
 ```yaml
 models:
@@ -334,8 +355,17 @@ models:
   max_checkpoint_gib: 30          # optional: also exclude larger checkpoints (unknown sizes are kept)
 ```
 
-Excluded profiles are written to `<out-root>/excluded.json` and appear in `summary` as `excluded`
-with their reason, unless another result root holds a result for them.
+`config/exclusions.yaml`, a platform's `models.exclude` and the machine's use the same `{profile, reason}`
+entries. A change that lets a profile run removes its entry in the same pull request.
+
+### Platform defaults
+
+What a kind of hardware cannot run belongs to the platform, not to each machine. An environment with
+`platform: <name>` takes `config/platforms/<name>.yaml` (`gb300`, `dgx-spark`, `jetson-thor`): its
+`models.exclude` follow the machine's own exclusions, with reasons that name the platform, and its
+`deadlines` apply unless the machine sets the same profile. The lists change with the catalog: a change that
+lets a model run on a platform removes its entry there. A reason tied to one machine rather than to the
+hardware (a bare-metal host without root, for example) stays in that machine's `models.exclude`.
 
 ### Disk retention
 
@@ -438,12 +468,12 @@ A suite with media and neither `media_root` nor `hf_datasets_cache` configured i
   `benchmarks`, scored by `gold_metrics.py` or an AIPerf grader) and the Perf output check
   (`output_grader`, a comparator in `plugins/trtmc_aiperf_plugins/accuracy.py`).
 - Task renamed by a Task SDK migration (same operation and output): an alias of its old entry in
-  `config/tasks.yaml` (`text_to_pooled_features: *encode`). A ready profile whose Task has no entry is a
-  configuration error that only `plan.json` lists: reports leave it out.
+  `config/tasks.yaml` (`text_to_pooled_features: *encode`). A ready profile whose Task has no entry is excluded
+  (source `config/tasks.yaml`).
 - Model needing a different input or reference option: `config/models/<profile>.yaml`.
-- Model that cannot be qualified as cataloged (for example a catalog testcase without a prompt):
-  `exclude: <reason>` in `families/<family>/tests/aiperf/<profile>.yaml`. Every machine's model list then
-  excludes it, and the run's `excluded.json` keeps the reason; `run-all --profile` still runs it.
+- Model that cannot be qualified as cataloged (for example a catalog testcase without a prompt): an entry in
+  `config/exclusions.yaml`. Every run then leaves it out, and the run's `excluded.json` keeps the reason;
+  `--ignore-exclusions` still runs it.
 - Model whose native pipeline the generic adapters cannot run: `families/<family>/reference/adapter.py`
   (an `Adapter(spec, host)` with `invoke(request, artifact_base)`; it imports nothing from the applications and
   reaches the serving mechanics through `host`), named by `reference.adapter`.
@@ -454,9 +484,11 @@ A suite with media and neither `media_root` nor `hf_datasets_cache` configured i
   selection, the fit helpers and AIPerf then count with it, loaded as a plain fast tokenizer with the
   checkpoint's special tokens and chat template (InternLM2: its remote-code tokenizer splits text into characters
   on transformers 5.x).
-- New machine: a new file under `config/environments/` (paths, Python interpreters, ports, lock, model list,
-  retention); Docker or bare metal only differ in these paths. A run's own inputs (its ledger and multi-host
-  assignment) stay with that run's results and are passed by path (`run-all --ledger`, `--assignment`).
+- New machine: a copy of `config/environments/example.yaml` (platform, paths, Python interpreters, ports, lock,
+  model list, retention); Docker or bare metal only differ in these paths. New hardware: a file under
+  `config/platforms/` with the models it cannot run and the deadlines it needs. A run's own inputs (its ledger
+  and multi-host assignment) stay with that run's results and are passed by path (`run-all --ledger`,
+  `--assignment`).
 - Several hosts without a frozen assignment: a coordinator hands profiles (a checkpoint's profiles together) to
   hosts as they free up. Each attempt is a fragment, `run-all --campaign ID --fragment ID --host NAME --profile ...`
   in an `--out-root` of its own (it resumes only as the same fragment). The coordinator's manifest

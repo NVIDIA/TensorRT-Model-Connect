@@ -1,0 +1,5 @@
+# Reference implementation this family is measured against.
+transformers==5.2.0
+# The runtime reproduces Pillow 13's bilinear resize; Pillow 12 orders the two resize
+# passes differently and lands one 8-bit step away on some images.
+pillow==13.0.0

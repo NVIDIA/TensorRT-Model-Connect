@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Thin family-owned adapter to the pinned Edge direct-builder API."""
+"""Family-owned adapter to the pinned Edge builder APIs."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import subprocess
 import struct
 import sys
 
-from tensorrt_model_connect.build import cmake_prefixes, detect_local_platform
+from tensorrt_model_connect.build import cmake_prefixes, detect_local_platform, subprocess_environment
 
 # One C++ SDK per installation; the manifest is its build-time receipt.
 _RELEASES = {
@@ -113,14 +113,14 @@ def installed_package(target: dict) -> dict:
             if not path.is_file():
                 raise FileNotFoundError(f"Edge package {name} is missing: {path}")
             package[name] = str(path)
-        return package
+        return {**package, "_prefix": prefix}
     raise FileNotFoundError(
         "Edge-LLM is not installed; enable the optional Edge-LLM CMake dependency "
         "and set CMAKE_PREFIX_PATH to its install prefix"
     )
 
 
-def builder_python(package: dict, target: dict, requested: Path | None = None) -> str:
+def builder_python(package: dict, target: dict, requested: Path | None = None, onnx: bool = False) -> str:
     """Select a verified builder interpreter for the chosen native SDK release.
 
     The native SDK remains required. This only discovers an interpreter; it
@@ -128,10 +128,16 @@ def builder_python(package: dict, target: dict, requested: Path | None = None) -
     An incompatible ambient install is ignored.
     """
     version = package["version"]
-    module = _RELEASES[version][3]
+    module = "tensorrt_edgellm.onnx.cli" if onnx else _RELEASES[version][3]
     interpreter = sys.executable if requested is None else str(requested)
-    pin_check = ("import transformers; assert transformers.__version__ == '5.17.0'; "
-                 if version == "0.12.0" else "")
+    # A cold exporter imports the entire model stack. Verify the installed
+    # entry point and pins here; let the actual command load it once.
+    entry_check = (
+        "from importlib.metadata import version; from importlib.util import find_spec; "
+        "assert version('transformers') == '5.17.0'; "
+        f"assert find_spec('{module}') is not None; "
+        if version == "0.12.0" else f"from {module} import main; "
+    )
     try:
         if not Path(interpreter).is_absolute() or not Path(interpreter).is_file():
             raise ValueError("Edge builder Python must be an existing absolute interpreter path")
@@ -141,7 +147,7 @@ def builder_python(package: dict, target: dict, requested: Path | None = None) -
                 "-I",
                 "-c",
                 "import json, tensorrt, tensorrt_edgellm; "
-                f"{pin_check}from {module} import main; "
+                f"{entry_check}"
                 "print(json.dumps([tensorrt_edgellm.__version__, tensorrt.__version__]))",
             ],
             check=True,
@@ -281,6 +287,42 @@ def runtime_checkpoint_files(source: Path, config: dict) -> dict[str, Path]:
     return files
 
 
+def _onnx_dflash_commands(package, python, source, draft, engine, input_limit, limit, visual):
+    """Use the released ONNX exporter and native compilers for the prepared pair."""
+    def tool(key):
+        relative = Path(package[key])
+        prefix = package["_prefix"].resolve()
+        binary = (prefix / relative).resolve()
+        if relative.is_absolute() or not binary.is_relative_to(prefix) or not binary.is_file():
+            raise ValueError(f"Invalid Edge SDK {key} path")
+        return str(binary)
+
+    if package.get("onnx") is not True:
+        raise ValueError("The prepared Qwen3.5 4B DFlash pair requires an ONNX-enabled Edge SDK")
+    compiler = tool("onnx_builder")
+    export = [python, "-I", "-c", "from tensorrt_edgellm.onnx.cli import main; main()"]
+    onnx = engine.parent.parent / "onnx"
+    commands = []
+    for role, component in (("base", "llm"), ("draft", "dflash_draft")):
+        directory = onnx / role
+        cmd = [*export, str(source), str(directory), f"--dflash-{role}", "--dflash-draft-dir", str(draft)]
+        if role == "base":
+            cmd += ["--components", "thinker,visual" if visual else "thinker"]
+        commands.extend([cmd, [
+            compiler, "--onnx-dir", str(directory / component), "--engine-dir", str(engine),
+            "--max-input-len", str(input_limit), "--max-kv-cache-capacity", str(limit),
+            "--max-batch-size", "1", f"--spec-{role}",
+            "--max-spec-verify-tokens" if role == "base" else "--max-spec-draft-tokens", "16",
+        ]])
+    if visual:
+        commands.append([
+            tool("visual_builder"), "--onnx-dir", str(onnx / "base/visual"),
+            "--engine-dir", str(engine / "visual"), "--min-image-tokens", "128",
+            "--max-image-tokens", str(input_limit), "--max-image-tokens-per-image", "1280",
+        ])
+    return commands
+
+
 def prepare(
     request,
     raw: dict,
@@ -312,6 +354,13 @@ def prepare(
     if parallel not in (1, 2) or (parallel == 2 and variant is not None):
         raise ValueError("Qwen3.5 Edge TP2 requires non-speculative generation")
     current = package["version"] == "0.12.0"
+    config = raw.get("text_config", raw)
+    quantization = checkpoint_quantization(Path(request.model_dir), raw)
+    # The released direct builder recursively resolves the tied NVFP4 output head.
+    # Use Edge's supported paired ONNX path; do not change draft or precision.
+    onnx_pair = (current and draft_dir is not None and quantization == "nvfp4"
+                 and (config.get("hidden_size"), config.get("num_hidden_layers")) == (2560, 32)
+                 and config.get("tie_word_embeddings", raw.get("tie_word_embeddings")) is True)
     # The 0.12 builder writes tokenizer artifacts to the engine directory, not
     # the input. Pass the source directly and stream its files into the bundle
     # once. Legacy TP1 needs a writable copy; TP2 embeds most projection weights.
@@ -327,7 +376,7 @@ def prepare(
             or source.name in {"merges.txt", "vocab.txt"}
         ):
             if read_source:
-                if parallel == 1 or source.suffix != ".safetensors":
+                if (parallel == 1 and not onnx_pair) or source.suffix != ".safetensors":
                     checkpoint_files[f"edge_llm/checkpoint/{source.name}"] = source.resolve()
             else:
                 shutil.copyfile(source, checkpoint / source.name)
@@ -339,12 +388,13 @@ def prepare(
         for source in draft_dir.iterdir():
             if source.is_file() and source.suffix in {".json", ".safetensors"}:
                 if source.suffix == ".safetensors":
-                    copy_draft_safetensors(source, draft_checkpoint / source.name)
+                    if not onnx_pair:
+                        copy_draft_safetensors(source, draft_checkpoint / source.name)
                 else:
                     shutil.copy2(source, draft_checkpoint / source.name)
-        if not list(draft_checkpoint.glob("*.safetensors")):
-            raise ValueError("DFlash direct builder requires draft safetensors")
-    config = raw.get("text_config", raw)
+        weights_dir = draft_dir if onnx_pair else draft_checkpoint
+        if not any(path.is_file() for path in weights_dir.glob("*.safetensors")):
+            raise ValueError("DFlash requires draft safetensors")
     visual = request.task in {"vision_language_generation", "images_text_to_text"}
     if visual and not isinstance(raw.get("vision_config"), dict):
         raise ValueError("Qwen3.5 vision-language generation requires vision_config")
@@ -362,11 +412,11 @@ def prepare(
     engine = staging / "edge_llm/engine"
     # Preserve checkpoint quantization; fp16 explicitly dequantizes projections.
     dense_policy = (
-        "fp16" if checkpoint_quantization(Path(request.model_dir), raw) == "none" else "auto"
+        "fp16" if quantization == "none" else "auto"
     )
     # Calling upstream main preserves its complete build/artifact orchestration.
     command = [
-        builder_python(package, target, getattr(request, "edge_builder_python", None)),
+        builder_python(package, target, getattr(request, "edge_builder_python", None), onnx_pair),
         "-I",
         "-c",
         f"from {_RELEASES[package['version']][3]} import main; main()",
@@ -423,13 +473,22 @@ def prepare(
     if request.verbose:
         command.append("--verbose")
     with log_path.open("a", encoding="utf-8") as log:
-        for rank in range(parallel):
-            rank_command = command + (["--tp-size", "2", "--tp-rank", str(rank)]
-                                      if parallel == 2 else [])
+        options = {"check": True, "stdout": log, "stderr": subprocess.STDOUT, "cwd": staging}
+        if onnx_pair:
+            commands = _onnx_dflash_commands(
+                package, command[0], checkpoint, draft_dir.resolve(), engine, input_limit, limit, visual
+            )
+            options["env"] = subprocess_environment(
+                {"EDGELLM_PLUGIN_PATH": package["plugin"]},
+                prepend_paths={"LD_LIBRARY_PATH": str(Path(package["plugin"]).parent)},
+            )
+        else:
+            commands = [command + (["--tp-size", "2", "--tp-rank", str(rank)] if parallel == 2 else [])
+                        for rank in range(parallel)]
+        for rank_command in commands:
             log.write(json.dumps(rank_command) + "\n")
             log.flush()
-            subprocess.run(rank_command, check=True, stdout=log, stderr=subprocess.STDOUT,
-                           cwd=staging)
+            subprocess.run(rank_command, **options)
         if visual and parallel == 2:
             # Edge admits tensor parallelism only for LLM; its visual encoder is TP1.
             visual_command = [
@@ -453,6 +512,8 @@ def prepare(
         else (["llm_world2_rank0.engine", "llm_world2_rank1.engine", "config_world2.json"]
               if parallel == 2 else ["llm.engine", "config.json"])
     )
+    if onnx_pair:
+        required.append("embedding.safetensors")
     if visual:
         required += ["visual/visual.engine", "visual/config.json", "visual/preprocessor_config.json"]
     for name in required:
@@ -489,7 +550,8 @@ def prepare(
         **({"edge_release": package["version"]} if current else {}),
         "target": target,
         "precision": "fp16",
-        "checkpoint_quantization": checkpoint_quantization(Path(request.model_dir), raw),
+        "checkpoint_quantization": quantization,
+        **({"builder_flow": "onnx"} if onnx_pair else {}),
         "dense_policy": dense_policy,
         "task": "vision_language_generation" if visual else request.task,
         "max_sequence_length": limit,

@@ -4,6 +4,7 @@
 add_library(trtmc_model_lerobot_pi05 SHARED
   normalization.cpp
   paligemma_bpe.cpp
+  openpi.cpp
   pipeline.cpp
   plugin.cpp
   prompt.cpp
@@ -33,6 +34,8 @@ set_target_properties(trtmc_model_lerobot_pi05 PROPERTIES
 install(TARGETS trtmc_model_lerobot_pi05
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+include("${CMAKE_CURRENT_LIST_DIR}/edge_llm/Adapter.cmake")
 
 if(TRTMC_BUILD_TESTS)
   add_executable(trtmc_lerobot_pi05_qualification
