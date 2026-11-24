@@ -46,9 +46,9 @@ class Pipeline final : public ITextPromptedSegmentation {
         ids.resize(length_, ids.back());
         Tensor input{ids.data(), {length_}, DType::kInt32};
         Tensor eos{&index, {1}, DType::kInt32};
+        auto pixels = preprocess_clipseg_image(image, height, width, prep_);
         auto text_outputs = text_->forward({{"input_ids", input}, {"eos_index", eos}});
         const auto& condition = require(text_outputs, "conditional_embeddings", dim_);
-        auto pixels = preprocess_clipseg_image(image, height, width, prep_);
         Tensor values{
             pixels.data(), {1, 3, prep_.input_image_h, prep_.input_image_w}, DType::kFloat32};
         auto mask_outputs =

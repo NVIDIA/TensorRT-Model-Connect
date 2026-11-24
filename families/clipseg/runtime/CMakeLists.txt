@@ -2,7 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 find_package(ICU COMPONENTS uc QUIET)
 if(NOT ICU_FOUND)
+  if(DEFINED TRTMC_BUILD_FAMILIES AND NOT "*" IN_LIST TRTMC_BUILD_FAMILIES)
+    message(FATAL_ERROR "Selected CLIPSeg runtime requires ICU uc development packages")
+  endif()
   message(STATUS "Skipping clipseg: install ICU development packages for Unicode tokenization")
+  add_custom_target(trtmc_model_clipseg
+    COMMAND ${CMAKE_COMMAND} -E echo "CLIPSeg runtime requires ICU uc development packages"
+    COMMAND ${CMAKE_COMMAND} -E false
+    VERBATIM)
   return()
 endif()
 add_library(trtmc_model_clipseg SHARED bpe_tokenizer.cpp image_preprocess_seam.cpp plugin.cpp)
