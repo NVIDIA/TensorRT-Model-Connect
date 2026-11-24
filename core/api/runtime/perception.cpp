@@ -547,9 +547,12 @@ TRTMC_PERCEPTION_RUN(
         require(in.trimap.height == image.height && in.trimap.width == image.width &&
                     states.size() == image_area(image.height, image.width),
                 "trimap must align with original image");
+        const auto input = (internal::ImageTrimapToAlphaRequest{
+            image, {states, in.trimap.height, in.trimap.width}});
+        family.validate_request(input, options);
         for (const auto state : states)
             require(state <= TRTMC_TRIMAP_FOREGROUND, "invalid categorical trimap state");
-        auto result = family.run({image, {states, in.trimap.height, in.trimap.width}}, options);
+        auto result = family.run(input, options);
         valid_output(result.alpha.rows == image.height && result.alpha.columns == image.width,
                      "alpha matte must retain original image dimensions");
         return result;
@@ -727,9 +730,7 @@ trtmc_status TRTMC_CALL object_pose_result_view(const trtmc_result* result,
 }
 Span<const TaskBinding> perception_task_bindings() noexcept {
 #define B(Interface, Table)                                                                        \
-    {                                                                                              \
-        internal::Interface::kTask, 1, 0, &Table.header                                            \
-    }
+    { internal::Interface::kTask, 1, 0, &Table.header }
     static const TaskBinding bindings[] = {B(IBatchImageTextToBoxes, boxes_batch_api),
                                            B(IImageToSemanticSegmentation, semantic_api),
                                            B(IImagePointsToMasks, points_api),

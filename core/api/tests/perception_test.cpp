@@ -68,6 +68,19 @@ void matting(const std::filesystem::path& root, const trtmc::LoadOptions& option
     states[0] = 3;
     rejects([&] { task.run(input); }, TRTMC_INVALID_ARGUMENT,
             "unknown categorical trimap state rejected");
+    const auto profile_path = root / "matting_reject_profile.bundle";
+    bundle(profile_path, "matting_reject_profile");
+    bool rejected_profile_first = false;
+    try {
+        Model::load(profile_path.string(), options).task<ImageTrimapToAlpha>().run(input);
+    } catch (const Error& error) {
+        rejected_profile_first =
+            error.code() == TRTMC_INVALID_ARGUMENT &&
+            std::string_view(error.what()).find("fixture rejects image profile") !=
+                std::string_view::npos;
+    }
+    check(rejected_profile_first, "family profile rejects metadata before scanning trimap states");
+    std::filesystem::remove(profile_path);
     states[0] = 0;
     rejects([&] { task.run(input, {{"threshold", 0.5}}); }, TRTMC_INVALID_CONFIG,
             "undeclared matting control rejected");

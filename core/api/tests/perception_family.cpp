@@ -487,8 +487,13 @@ class MattingFixture final : public IModel, public IImageTrimapToAlpha {
     std::vector<TaskInstance> task_bindings() override {
         return {bind<IImageTrimapToAlpha>(*this)};
     }
-    AlphaMatteResult run(const ImageTrimapToAlphaRequest& input, ConfigView config) override {
+    void validate_request(const ImageTrimapToAlphaRequest&, ConfigView config) const override {
         validate_config({}, config);
+        if (mode_ == "matting_reject_profile")
+            throw std::invalid_argument("fixture rejects image profile");
+    }
+    AlphaMatteResult run(const ImageTrimapToAlphaRequest& input, ConfigView config) override {
+        validate_request(input, config);
         AlphaMatteResult result;
         result.alpha.rows = input.image.height;
         result.alpha.columns = input.image.width;

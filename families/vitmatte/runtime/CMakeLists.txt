@@ -6,6 +6,9 @@ if(TRTMC_BUILD_TESTS)
   add_test(NAME vitmatte_preprocess COMMAND test_vitmatte_preprocess)
 endif()
 function(_vitmatte_unavailable reason)
+  if(DEFINED TRTMC_BUILD_FAMILIES AND NOT "*" IN_LIST TRTMC_BUILD_FAMILIES)
+    message(FATAL_ERROR "Selected ViTMatte runtime unavailable: ${reason}")
+  endif()
   message(STATUS "Skipping vitmatte: ${reason}")
   add_custom_target(trtmc_model_vitmatte
     COMMAND ${CMAKE_COMMAND} -E echo "ViTMatte runtime unavailable: ${reason}"

@@ -58,6 +58,8 @@ class IImageTrimapToAlpha {
     using TaskInterface = IImageTrimapToAlpha;
     static constexpr std::string_view kTask = "image_trimap_to_alpha";
     virtual ~IImageTrimapToAlpha() = default;
+    // Family profile validation uses metadata only, before shared payload scans.
+    virtual void validate_request(const ImageTrimapToAlphaRequest&, ConfigView) const = 0;
     virtual AlphaMatteResult run(const ImageTrimapToAlphaRequest&, ConfigView) = 0;
 };
 

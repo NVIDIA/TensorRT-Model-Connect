@@ -24,8 +24,8 @@ class Pipeline final : public internal::IModel, public internal::IImageTrimapToA
     std::vector<internal::TaskInstance> task_bindings() override {
         return {internal::bind<internal::IImageTrimapToAlpha>(*this)};
     }
-    internal::AlphaMatteResult run(const internal::ImageTrimapToAlphaRequest& request,
-                                   internal::ConfigView config) override {
+    void validate_request(const internal::ImageTrimapToAlphaRequest& request,
+                          internal::ConfigView config) const override {
         internal::validate_config({}, config);
         const auto& image = request.image;
         const auto& trimap = request.trimap;
@@ -39,6 +39,14 @@ class Pipeline final : public internal::IModel, public internal::IImageTrimapToA
         if ((!byte && image.format != internal::ImageFormat::Float32) ||
             image.byte_size != area * 3 * (byte ? 1 : sizeof(float)))
             throw std::invalid_argument("Invalid ViTMatte RGB storage");
+    }
+    internal::AlphaMatteResult run(const internal::ImageTrimapToAlphaRequest& request,
+                                   internal::ConfigView config) override {
+        validate_request(request, config);
+        const auto& image = request.image;
+        const auto& trimap = request.trimap;
+        const uint64_t area = static_cast<uint64_t>(height_) * width_;
+        const bool byte = image.format == internal::ImageFormat::UInt8;
         std::vector<float> pixels(4 * area);
         for (uint64_t index = 0; index < area; ++index) {
             for (uint32_t channel = 0; channel < 3; ++channel) {
