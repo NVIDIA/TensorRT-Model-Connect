@@ -12,6 +12,7 @@ class Network:
         self.n, self.c, self.w = network, config, weights
         self.low = trt.bfloat16 if precision == "bf16" else trt.float32
         self.precision = precision
+        self.fast_bf16 = precision == "bf16" and config.bf16_policy == "fast"
         self.keep = []
 
     def const(self, value, dtype=None):
@@ -194,7 +195,9 @@ class Network:
                 attended = self.reshape(self.transpose(attended, (0, 2, 1, 3)), (-1, k, d))
                 encoded = self.add(
                     self.add(
-                        self.linear(self.mul(u, self.norm(attended)), "output_weight"),
+                        self.linear(
+                            self.mul(u, self.norm(attended)), "output_weight", low=self.fast_bf16
+                        ),
                         self.const(self.w["output_bias"]),
                     ),
                     x,
@@ -208,12 +211,13 @@ class Network:
                 )
 
             raw_scores = attention_scores(low=True)
-            # Greedy indices are a discontinuous control decision. Keep their
-            # attention/head path FP32, while returned score values retain real
-            # BF16 attention execution. This duplicates attention in BF16 mode;
-            # it preserves slate stability and is not a claimed speedup policy.
+            # Strict mode retains an FP32 selector for greedy slate stability.
+            # Fast mode uses one BF16 attention/output-projection path for both
+            # scores and selections, accepting bounded ranking differences.
             decision_scores = (
-                attention_scores(low=False) if self.precision == "bf16" else raw_scores
+                attention_scores(low=False)
+                if self.precision == "bf16" and not self.fast_bf16
+                else raw_scores
             )
             # Equal item IDs denote the same mathematical query. Canonicalize the
             # score to its first occurrence before stable argmax: GEMM row tiling
@@ -233,7 +237,7 @@ class Network:
             gather = self.n.add_gather(raw_scores, canonical, 1)
             gather.num_elementwise_dims = 1
             raw_scores = gather.get_output(0)
-            if self.precision == "bf16":
+            if self.precision == "bf16" and not self.fast_bf16:
                 decision = self.n.add_gather(decision_scores, canonical, 1)
                 decision.num_elementwise_dims = 1
                 decision_scores = decision.get_output(0)

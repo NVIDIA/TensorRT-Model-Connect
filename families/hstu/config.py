@@ -22,6 +22,8 @@ class Config:
     vocab_size: int = 1024
     epsilon: float = 1e-6
     execution_method: str = "staged"
+    bf16_policy: str = "strict"
+    cuda_graphs: bool = True
 
     def __post_init__(self):
         if self.model_type != "hstu_public_ranking":
@@ -37,6 +39,10 @@ class Config:
             raise ValueError("invalid candidates or vocabulary size")
         if self.epsilon != 1e-6 or self.execution_method != "staged":
             raise ValueError("only upstream epsilon=1e-6 and staged runtime are supported")
+        if self.bf16_policy not in ("strict", "fast"):
+            raise ValueError("bf16_policy must be strict or fast")
+        if not isinstance(self.cuda_graphs, bool):
+            raise ValueError("cuda_graphs must be a boolean")
 
     @classmethod
     def load(cls, path):
@@ -90,6 +96,8 @@ class Config:
             decode_steps=r,
             max_batch_size=batch,
             precision=precision,
+            bf16_policy=self.bf16_policy,
+            cuda_graphs=self.cuda_graphs,
             inputs=history + request,
             outputs=[spec("scores", "float32", c), spec("picked_indices", "int64", r)],
             stages=[

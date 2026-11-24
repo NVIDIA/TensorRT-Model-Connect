@@ -21,6 +21,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--root", type=Path, required=True)
     p.add_argument("--runtime-root", type=Path, required=True)
+    p.add_argument("--bf16-policy", choices=("strict", "fast"))
+    p.add_argument("--cuda-graphs", action=argparse.BooleanOptionalAction, default=None)
     p.add_argument(
         "--checkpoint", type=Path, help="Public checkpoint; omission creates an untrained fixture"
     )
@@ -46,6 +48,13 @@ def main():
                 c.save(out)
             else:
                 c = create_fixture(out, candidates)
+            overrides = {}
+            if a.bf16_policy is not None:
+                overrides["bf16_policy"] = a.bf16_policy
+            if a.cuda_graphs is not None:
+                overrides["cuda_graphs"] = a.cuda_graphs
+            c = replace(c, **overrides)
+            c.save(out)
             build(
                 BuildRequest(
                     model_dir=out,

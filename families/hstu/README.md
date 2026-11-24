@@ -40,8 +40,27 @@ Hugging Face was checked as well. [Lingqu-Rec/HSTU-1B](https://huggingface.co/Li
 
 ## Precision and runtime
 
-FP32 is the baseline. BF16 runs the QK and attention-weight/V GEMMs with BF16 inputs/outputs, casting their results back to FP32 for sensitive arithmetic. The tested A100 Tensor Core tactics accumulate in FP32; the BF16 output rounding remains. Input/output normalization, UVQK/output projections, embeddings, and the scoring head remain FP32. Because greedy selection is discontinuous, BF16 mode also computes an FP32 attention/head path for **selection indices**; returned score values use the BF16 path. This costs extra work: BF16 is an accuracy-preserving execution option here, not a promised speedup.
+FP32 is the baseline. Both BF16 policies run QK and attention-weight/V GEMMs with BF16 inputs/outputs, restoring FP32 for sensitive arithmetic. The tested A100 Tensor Core tactics accumulate in FP32; BF16 output rounding remains. Embeddings, UVQK projection, normalization, and the score head stay FP32. `config.json` selects:
 
+- `"bf16_policy": "strict"` (default): FP32 output projection and a separate FP32 attention/head selector preserve greedy stability. The existing strict numerical gates apply.
+- `"bf16_policy": "fast"`: one attention/head path produces scores and selections; the output projection also uses BF16. This trades full-slate/individual-score parity for lower latency. Ranking overlap, held-out quality, and mean score error have separate checks; passing them does not imply passing strict score parity.
+
+New bundles default to `"cuda_graphs": true`: the native runtime captures/replays the reusable **step engine**, with preparation, the host round loop, and state copies outside capture. TensorRT invalidates its capture when shapes or bindings change. Set the checkpoint field to `false`, or pass `--no-cuda-graphs` below, to disable it. Older bundles without this metadata keep graphs disabled. This family checkpoint option is separate from the shared RTX-only loader graph flag.
+
+Build all four serving variants with the fast BF16 policy and matched graph settings:
+
+```bash
+python3 -m families.hstu.tests.triton.prepare --root /tmp/hstu-fast \
+  --runtime-root /tmp/hstu-sdk --checkpoint /tmp/hstu-movielens \
+  --bf16-policy fast --cuda-graphs
+HSTU_FAST_E2E_ROOT=/tmp/hstu-fast/output TRTMC_RUNTIME_ROOT=/tmp/hstu-sdk \
+  python3 -m pytest families/hstu/tests/test_fast_precision.py -q
+python3 -m families.hstu.tests.compare_precision --root /tmp/hstu-fast/output \
+  --runtime-root /tmp/hstu-sdk --ratings /path/to/ml-100k/u.data \
+  --examples 256 --output /tmp/hstu-fast/quality.json
+```
+
+The quality comparison requires identical FP32/BF16 weights. Its fixed limits are at most 1% relative NDCG@10 loss, one percentage point hit-rate loss, at least 98% mean top-10 overlap, and mean absolute score error at most 0.02. It holds out each sampled user's final interaction. The separate strict numerical gates are unchanged.
 TensorRT owns all fusion and kernel selection. This is SiLU HSTU attention; softmax-MHA fusion counts from another model do not transfer. The A100 trace confirms 100 BF16 Tensor Core GEMM launches per request (two per selection round), versus zero for FP32. QK and AV remain separate GEMMs; no dedicated fused HSTU kernel was observed.
 
 The staged runtime retains the existing three-engine orchestration, GPU slate state, KV byte accounting, SHA-256 snapshots, restore/deduplication, revisions, TTL, leases, and eviction. Cache storage is FP32 in both precision modes: **262,144 KV bytes per history**, plus a 512-byte history mask outside the KV budget. A max-batch-4 engine reserves 1,048,576 scratch KV bytes. Restored histories need budget beyond scratch. Snapshots are bound to the exact bundle hash and cannot migrate from the private model, a rebuilt engine, or a different precision bundle.
@@ -148,7 +167,7 @@ The 26.10 image has four pre-existing configuration-parser defects: it accepts r
 
 AMD64 A100, supplied 26.10/0.2.0 image, TensorRT 11.4.0.106; public MovieLens example weights, seed 20261124. Eight numerical cells pass with each SDK (main and image), 64 history lifecycle checks pass across the two SDKs, and native HTTP/gRPC and snapshot endpoint campaigns each pass 16 transport cells. A leased-entry pressure test observes `allocation_failures=1` through Triton. The native cache/config campaign has 30 passing checks and the four backend parser failures above. Private-model reference scores and fusion counts are not reused.
 
-Indicative median milliseconds for `NativeClient.score`, including synchronized GPU work and host tensor transport; five warmups and twenty measured calls per cell:
+Earlier strict-policy baseline, **CUDA Graphs disabled**: indicative median milliseconds for `NativeClient.score`, including synchronized GPU work and host tensor transport; five warmups and twenty measured calls per cell:
 
 | Candidates | Batch | FP32 ms | BF16 ms |
 | --- | --- | --- | --- |

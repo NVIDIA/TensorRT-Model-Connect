@@ -69,6 +69,8 @@ def test_padding_counts_empty_history_stable_ties_and_nonrepeat(tmp_path, candid
         {"epsilon": 1e-5},
         {"execution_method": "unrolled"},
         {"model_type": "hstu"},
+        {"bf16_policy": "unknown"},
+        {"cuda_graphs": "false"},
     ],
 )
 def test_reject_unimplemented_profiles(kwargs):
@@ -84,3 +86,14 @@ def test_bad_checkpoint_rejected(tmp_path):
     np.savez(p, **w)
     with pytest.raises(ValueError, match="uvqk"):
         load_weights(p.parent, c)
+
+
+@pytest.mark.parametrize("policy", ["strict", "fast"])
+@pytest.mark.parametrize("graphs", [False, True])
+def test_execution_options_survive_checkpoint_roundtrip(tmp_path, policy, graphs):
+    c = Config(bf16_policy=policy, cuda_graphs=graphs)
+    c.save(tmp_path)
+    loaded = Config.load(tmp_path)
+    assert loaded == c
+    runtime = loaded.runtime(4, "bf16")
+    assert runtime["bf16_policy"] == policy and runtime["cuda_graphs"] is graphs

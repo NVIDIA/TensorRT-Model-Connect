@@ -43,6 +43,8 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
             }
         auto step = context.backend.create_module_prebound(step_plan.data(), step_plan.size(),
                                                            options, bindings);
+        if (config.value("cuda_graphs", false))
+            step->enable_cuda_graph();
         const auto identity =
             hydration ? trtmc::hstu::history_file_sha256(context.reader.path()) : std::string{};
         return new trtmc::hstu::StagedPipeline(
