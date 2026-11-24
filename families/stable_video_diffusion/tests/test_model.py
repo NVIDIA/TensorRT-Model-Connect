@@ -116,6 +116,12 @@ def test_the_published_configs_resolve(tmp_path):
     assert cfg["image_encoder"]["projection_dim"] == cfg["unet"]["cross_attention_dim"]
 
 
+def test_config_checks_the_group_count_the_builders_use():
+    from families.stable_video_diffusion import blocks
+
+    assert config_module.NORM_GROUPS == blocks.GROUPS
+
+
 def test_runtime_config_carries_the_pipeline_defaults(tmp_path):
     cfg = config_module.resolve(_checkpoint(tmp_path))
     runtime = model_module._runtime_config(cfg, height=576, width=1024, frames=25, precision="fp16")
@@ -135,6 +141,8 @@ def test_runtime_config_carries_the_pipeline_defaults(tmp_path):
     ("image_encoder/config.json", {"hidden_act": "quick_gelu"}, "exact GELU"),
     ("image_encoder/config.json", {"image_size": 336}, "224"),
     ("model_index.json", {"_class_name": "StableDiffusionPipeline"}, "model_index.json"),
+    ("model_index.json", {"unet": {"diffusers": 0, "UNetSpatioTemporalConditionModel": 0}},
+     "unet must be UNetSpatioTemporalConditionModel"),
     ("vae/config.json", {"block_out_channels": [128, 256, 512],
                          "down_block_types": ["DownEncoderBlock2D"] * 3}, "four levels"),
     ("feature_extractor/preprocessor_config.json", {"image_std": [0.27, 0.0, 0.28]},
@@ -148,10 +156,68 @@ def test_runtime_config_carries_the_pipeline_defaults(tmp_path):
     ("scheduler/scheduler_config.json", {"sigma_min": 0.0}, "Karras range"),
     ("scheduler/scheduler_config.json", {"sigma_min": 800.0}, "Karras range"),
     ("scheduler/scheduler_config.json", {"sigma_max": float("inf")}, "Karras range"),
+    # Values a graph builder refuses are refused here, before weights are read or an engine
+    # is built.
+    ("unet/config.json",
+     {"addition_time_embed_dim": 255, "projection_class_embeddings_input_dim": 765},
+     "even embedding width"),
+    ("unet/config.json", {"block_out_channels": [320, 640, 1280, 1300]}, "normalization groups"),
+    ("unet/config.json", {"num_attention_heads": [5, 10, 20, 0]}, "attention heads"),
+    ("vae/config.json", {"block_out_channels": [128, 256, 512, 520]}, "normalization groups"),
+    ("image_encoder/config.json", {"patch_size": 15}, "patch size"),
+    ("image_encoder/config.json", {"num_attention_heads": 15}, "attention heads"),
+    # JSON values of the wrong type or range are refused, never coerced.
+    ("unet/config.json", {"block_out_channels": [-320, 640, 1280, 1280]}, "positive integers"),
+    ("unet/config.json", {"layers_per_block": 0}, "layers_per_block"),
+    ("unet/config.json",
+     {"block_out_channels": [320, 640], "num_attention_heads": [5, 10],
+      "down_block_types": {"CrossAttnDownBlockSpatioTemporal": 0, "DownBlockSpatioTemporal": 0},
+      "up_block_types": ["UpBlockSpatioTemporal", "CrossAttnUpBlockSpatioTemporal"]},
+     "block type names"),
+    ("unet/config.json", {"num_attention_heads": [5, 10, 20, 20.5]}, "num_attention_heads"),
+    ("unet/config.json", {"transformer_layers_per_block": True}, "one transformer layer"),
+    ("unet/config.json", {"num_frames": 25.9}, "num_frames"),
+    ("unet/config.json", {"num_frames": 2**31}, "num_frames"),
+    ("vae/config.json", {"block_out_channels": [128, 256, 512, 512.5]}, "positive integers"),
+    ("vae/config.json", {"layers_per_block": 0}, "layers_per_block"),
+    ("vae/config.json", {"scaling_factor": True}, "scaling factor"),
+    ("vae/config.json", {"scaling_factor": 10**400}, "scaling factor"),
+    # The runtime works in float32: values that become zero or infinite there are refused.
+    ("vae/config.json", {"scaling_factor": 1e-50}, "scaling factor"),
+    ("vae/config.json", {"scaling_factor": 1e50}, "scaling factor"),
+    ("scheduler/scheduler_config.json", {"sigma_min": 1e-50}, "Karras range"),
+    ("scheduler/scheduler_config.json", {"sigma_max": 1e100}, "Karras range"),
+    ("scheduler/scheduler_config.json", {"sigma_max": 1e20}, "Karras range"),
+    ("scheduler/scheduler_config.json", {"sigma_min": 1e-40}, "Karras range"),
+    ("feature_extractor/preprocessor_config.json", {"image_std": [1e-40, 0.26, 0.27]},
+     "positive standard deviations"),
+    ("feature_extractor/preprocessor_config.json", {"image_mean": [3e38, 0.45, 0.40]},
+     "finite means"),
+    ("vae/config.json", {"force_upcast": "false"}, "force_upcast"),
+    ("image_encoder/config.json", {"num_channels": 3.0}, "RGB"),
+    ("image_encoder/config.json", {"hidden_size": 0}, "hidden_size"),
+    ("image_encoder/config.json", {"layer_norm_eps": -1.0}, "epsilon"),
+    ("image_encoder/config.json", {"layer_norm_eps": 1e-50}, "epsilon"),
+    ("scheduler/scheduler_config.json", {"sigma_min": "0.002"}, "Karras range"),
+    ("scheduler/scheduler_config.json", {"use_beta_sigmas": 0}, "only Karras"),
+    ("feature_extractor/preprocessor_config.json", {"image_std": [1e-50, 0.26, 0.27]},
+     "positive standard deviations"),
+    ("feature_extractor/preprocessor_config.json", {"image_mean": [1e100, 0.45, 0.40]},
+     "finite means"),
 ])
 def test_unbuilt_variants_are_refused(tmp_path, name, change, message):
     with pytest.raises(NotImplementedError, match=message):
         config_module.resolve(_checkpoint(tmp_path, **{name: change}))
+
+
+def test_repeated_config_keys_are_refused(tmp_path):
+    model_dir = _checkpoint(tmp_path)
+    path = model_dir / "unet" / "config.json"
+    text = path.read_text(encoding="utf-8")
+    path.write_text(text.replace('"num_frames": 25', '"num_frames": 25, "num_frames": 14'),
+                    encoding="utf-8")
+    with pytest.raises(ValueError, match="repeats the key 'num_frames'"):
+        config_module.resolve(model_dir)
 
 
 class _Writer:
