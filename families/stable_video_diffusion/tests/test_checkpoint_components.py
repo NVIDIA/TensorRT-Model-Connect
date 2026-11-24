@@ -82,12 +82,29 @@ def _exact_fp32():
     torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = matmul, cudnn
 
 
+def _check_io(engine, inputs: dict, outputs: dict) -> None:
+    """The engine declares exactly these FP32 inputs and outputs, with these shapes: no buffer
+    is read or written past its end, and no output is compared under another layout."""
+    declared = {engine.get_tensor_name(index) for index in range(engine.num_io_tensors)}
+    assert declared == set(inputs) | set(outputs), (
+        sorted(declared), sorted(inputs), sorted(outputs))
+    expected = {**{name: tuple(value.shape) for name, value in inputs.items()},
+                **{name: tuple(shape) for name, shape in outputs.items()}}
+    for name, shape in expected.items():
+        mode = trt.TensorIOMode.INPUT if name in inputs else trt.TensorIOMode.OUTPUT
+        assert engine.get_tensor_mode(name) == mode, name
+        assert engine.get_tensor_dtype(name) == trt.float32, name
+        actual = tuple(engine.get_tensor_shape(name))
+        assert actual == shape, (name, actual, shape)
+
+
 def _run(plan: bytes, inputs: dict, outputs: dict) -> dict:
     # The engine allocates outside PyTorch's caching allocator: hand the blocks the reference
     # run left cached back to the device first, so that a GPU shared with other jobs suffices.
     torch.cuda.empty_cache()
     engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(plan)
     assert engine is not None
+    _check_io(engine, inputs, outputs)
     context = engine.create_execution_context()
     keep = {}
     for name, value in inputs.items():
@@ -128,8 +145,14 @@ def _reference_run(module, call, precision: str):
 def _check(name: str, precision: str, actual, reference, baseline) -> None:
     """FP32 is judged on the largest error; FP16 on the relative L2 error, which does not
     swing with the single worst element as FP16 tactics change between builds."""
+    # An infinite reference error would accept any engine error, and inf <= inf holds.
+    for label, tensor in (("engine", actual), ("reference", reference), ("baseline", baseline)):
+        assert bool(torch.isfinite(tensor).all()), (
+            f"{name} {precision}: {label} output is not finite")
     errors = {metric: (function(actual, baseline), function(reference, baseline))
               for metric, function in (("max", _relative_error), ("l2", _relative_l2))}
+    assert all(math.isfinite(value) for pair in errors.values() for value in pair), (
+        f"{name} {precision}: errors are not finite: {errors}")
     print(f"{name} {precision}: " + ", ".join(
         f"{metric} engine {engine:.3e} reference {ref:.3e}" for metric, (engine, ref) in errors.items()))
     if precision == "fp32":
@@ -138,6 +161,58 @@ def _check(name: str, precision: str, actual, reference, baseline) -> None:
     else:
         engine, ref = errors["l2"]
         assert engine <= FP16_RATIOS[name] * ref
+
+
+class _Engine:
+    """The I/O declarations of an engine: name -> (mode, dtype, shape)."""
+
+    def __init__(self, tensors: dict):
+        self.tensors = tensors
+        self.num_io_tensors = len(tensors)
+
+    def get_tensor_name(self, index: int) -> str:
+        return list(self.tensors)[index]
+
+    def get_tensor_mode(self, name: str):
+        return self.tensors[name][0]
+
+    def get_tensor_dtype(self, name: str):
+        return self.tensors[name][1]
+
+    def get_tensor_shape(self, name: str):
+        return self.tensors[name][2]
+
+
+def test_engine_io_must_match_the_bound_buffers():
+    inputs = {"latents": torch.zeros((FRAMES, 4, *LATENT))}
+    outputs = {"frames": (FRAMES, 3, 64, 128)}
+    declared = {"latents": (trt.TensorIOMode.INPUT, trt.float32, (FRAMES, 4, *LATENT)),
+                "frames": (trt.TensorIOMode.OUTPUT, trt.float32, (FRAMES, 3, 64, 128))}
+    _check_io(_Engine(declared), inputs, outputs)
+    wrong = [
+        {"frames": (trt.TensorIOMode.OUTPUT, trt.float32, (FRAMES, 3, 64, 256))},  # larger output
+        {"frames": (trt.TensorIOMode.OUTPUT, trt.float32, (3 * FRAMES, 64, 128))},  # other layout
+        {"frames": (trt.TensorIOMode.OUTPUT, trt.float16, (FRAMES, 3, 64, 128))},
+        {"latents": (trt.TensorIOMode.OUTPUT, trt.float32, (FRAMES, 4, *LATENT))},
+        {"extra": (trt.TensorIOMode.OUTPUT, trt.float32, (1,))},
+    ]
+    for change in wrong:
+        with pytest.raises(AssertionError):
+            _check_io(_Engine({**declared, **change}), inputs, outputs)
+
+
+def test_the_check_refuses_nonfinite_outputs_and_errors():
+    finite = torch.ones(4)
+    infinite = torch.tensor([1.0, 1.0, float("inf"), 1.0])
+    missing = torch.tensor([1.0, float("nan"), 1.0, 1.0])
+    for actual, reference, baseline in ((finite, infinite, finite), (missing, finite, finite),
+                                        (finite, finite, infinite)):
+        with pytest.raises(AssertionError, match="not finite"):
+            _check("UNet", "fp32", actual, reference, baseline)
+    # An all-zero baseline makes both relative errors infinite.
+    with pytest.raises(AssertionError, match="errors are not finite"):
+        _check("UNet", "fp32", finite, finite, torch.zeros(4))
+    _check("UNet", "fp32", finite, finite, finite)
 
 
 @pytest.mark.parametrize("precision", ["fp32", "fp16"])
