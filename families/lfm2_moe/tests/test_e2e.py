@@ -1,7 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pinned LFM2 MoE MoE parity through native incremental text continuation."""
+"""Pinned LFM2 MoE MoE parity through native incremental text continuation.
+
+Unquantized cases must reproduce the FP32 ``transformers`` greedy tokens exactly. A quantized
+case (``quantization`` in the manifest) is scored with a near-tie oracle instead: the FP32
+reference is run on the prompt plus the native tokens, and every native token must be within
+``near_tie_logit_tolerance`` (a case field) of that step's largest FP32 logit after the same
+repetition penalty the runtime applies.
+"""
 
 from __future__ import annotations
 
@@ -28,6 +35,7 @@ def _case_index() -> dict[str, tuple[Path, dict, dict]]:
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == FAMILY
         assert manifest["task"] in TASKS
+        assert manifest.get("quantization") in (None, "fp8")
         for case in manifest["testcases"]:
             name = str(case["name"])
             assert name not in result
@@ -259,6 +267,11 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
     with evidence_stage("build"):
         _build(directory, bundle, manifest)
     record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
+    if manifest.get("quantization"):
+        _check_quantized(
+            directory, tokenizer, binary, runtime_root, bundle, manifest, case, request
+        )
+        return
     matmul_precision = torch.get_float32_matmul_precision()
     cudnn_tf32 = torch.backends.cudnn.allow_tf32
     request.addfinalizer(lambda: torch.set_float32_matmul_precision(matmul_precision))
@@ -358,3 +371,79 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         assert expected_text.strip()
 
         print(f"LFM2 MoE generated {len(expected_ids)} exact tokens: {expected_text!r}")
+
+
+def _near_tie_gaps(logits, prompt_ids, generated, penalty):
+    """Per generated token: largest penalized FP32 logit minus the token's penalized logit."""
+    import torch
+
+    gaps = []
+    seen = set(prompt_ids)
+    for step, token in enumerate(generated):
+        row = logits[len(prompt_ids) - 1 + step].clone()
+        index = torch.tensor(sorted(seen), device=row.device)
+        values = row[index]
+        row[index] = torch.where(values < 0, values * penalty, values / penalty)
+        gaps.append(float(row.max() - row[token]))
+        seen.add(token)
+    return gaps
+
+
+def _check_quantized(directory, tokenizer, binary, runtime_root, bundle, manifest, case, request):
+    """Score the quantized bundle's greedy tokens with the FP32 reference (near-tie oracle)."""
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    tolerance = float(case["near_tie_logit_tolerance"])
+    record_evidence("thresholds", {"near_tie_logit_tolerance": tolerance})
+    generation = json.loads((directory / "generation_config.json").read_text())
+    penalty = float(generation.get("repetition_penalty") or 1.0)
+    outputs = []
+    for prompt in case["prompts"]:
+        payload = _run_json(
+            binary,
+            runtime_root,
+            bundle,
+            case,
+            "run",
+            "--task",
+            manifest["task"],
+            "--prompt",
+            prompt,
+            "--max-new-tokens",
+            str(case["max_new_tokens"]),
+        )
+        record_evidence("native", {"prompt": prompt, **payload})
+        assert payload["token_ids"] and payload["text"].strip()
+        assert payload["text"] == tokenizer.decode(payload["token_ids"], skip_special_tokens=True)
+        outputs.append((prompt, payload["token_ids"]))
+    matmul_precision = torch.get_float32_matmul_precision()
+    request.addfinalizer(lambda: torch.set_float32_matmul_precision(matmul_precision))
+    torch.set_float32_matmul_precision("highest")
+    reference = (
+        AutoModelForCausalLM.from_pretrained(
+            directory, dtype=torch.float32, attn_implementation="eager"
+        )
+        .eval()
+        .to("cuda")
+    )
+    worst = 0.0
+    for prompt, generated in outputs:
+        prompt_ids = tokenizer.encode(prompt)
+        ids = torch.tensor([prompt_ids + generated], device="cuda")
+        with torch.no_grad():
+            logits = reference(input_ids=ids).logits[0].float()
+        gaps = _near_tie_gaps(logits, prompt_ids, generated, penalty)
+        record_evidence(
+            "reference",
+            {
+                "mode": "hf_transformers_fp32_teacher_forced",
+                "prompt": prompt,
+                "native_fp32_gaps": gaps,
+            },
+        )
+        worst = max(worst, max(gaps))
+        print(f"LFM2 MoE {manifest['quantization']} {prompt!r}: max FP32 logit gap {max(gaps):.3f}")
+    assert worst <= tolerance, (
+        f"a native token is {worst:.3f} below the FP32 maximum (tolerance {tolerance})"
+    )
