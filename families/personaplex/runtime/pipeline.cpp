@@ -795,6 +795,10 @@ void SpeechPipeline::speak_run_generation_loop(const SpeechGenerationSettings& s
         compute_dual_stream_summed_embed(config_, settings.hidden, settings.stream_cb,
                                          moshi_input.data(), user_input.data(), text_input,
                                          summed_embed.data());
+        // A full temporal cache ends generation, as the output budget does.
+        if (const int32_t capacity = temporal_state_->max_length();
+            capacity >= 0 && temporal_state_->position() >= capacity)
+            break;
 
         temporal_timer.start(stream_);
         const auto temporal_output = run_temporal_embed_step(summed_embed.data(), settings.hidden);
@@ -969,14 +973,13 @@ AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
         plan.output_frames = std::min(num_frames, max_output_frames);
         plan.total_iters = plan.output_frames;
     }
-    // The temporal KV cache never drops rows, so every planned step must fit
-    // after the prompt. Step 0 without a system prompt only seeds the delay
-    // cache and runs no temporal step.
-    const int32_t planned_rows = plan.total_iters - (config_.system_prompt_offset == 0 ? 1 : 0);
+    // The temporal KV cache never drops rows. The input audio must fit after the
+    // prompt, one temporal step per frame; generation past the input stops once
+    // the cache is full (speak_run_generation_loop).
     if (const int32_t capacity = temporal_state_->max_length();
-        capacity >= 0 && planned_rows > capacity - temporal_state_->position()) {
+        capacity >= 0 && num_frames > capacity - temporal_state_->position()) {
         throw internal::ConfigError(
-            "personaplex input needs " + std::to_string(planned_rows) + " temporal steps after a " +
+            "personaplex input has " + std::to_string(num_frames) + " frames after a " +
             std::to_string(temporal_state_->position()) + "-row prompt but the KV cache holds " +
             std::to_string(capacity) +
             "; rebuild the bundle with a larger --max-sequence-length or shorten the audio");

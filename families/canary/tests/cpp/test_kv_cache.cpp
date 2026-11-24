@@ -120,6 +120,50 @@ void test_advance_stops_at_a_full_cache() {
     cache.advance();
     check(cache.position() == 1, "The cache did not recover after reset");
 }
+
+std::vector<float*> buffers_of_size(std::size_t size) {
+    std::vector<float*> result;
+    for (const auto& allocation : allocations) {
+        if (allocation.size == size)
+            result.push_back(static_cast<float*>(allocation.pointer));
+    }
+    check(result.size() == 2, "Expected one key and one value buffer of each size");
+    return result;
+}
+
+void test_batched_lanes_append_with_pitch() {
+    // Two decoder lanes: each lane owns kRows cache rows, and advance() copies
+    // every lane's present row with one pitched copy.
+    allocations.clear();
+    trtmc::CanaryKvCache cache(1, kRows, kWidth, nullptr, trtmc::DType::kFloat32, 2);
+    cache.set_batch_size(2);
+    check(cache.ok(), "Valid two-lane cache allocation was rejected");
+    const auto present = buffers_of_size(2 * kRowBytes);
+    for (int32_t step = 1; step <= kRows; ++step) {
+        for (int32_t column = 0; column < kWidth; ++column) {
+            present[0][column] = static_cast<float>(step);
+            present[0][kWidth + column] = static_cast<float>(10 * step);
+            present[1][column] = static_cast<float>(-step);
+            present[1][kWidth + column] = static_cast<float>(-10 * step);
+        }
+        cache.advance();
+    }
+    check(read(cache.cache_k(0)) == rows_of({1, 2, 3, 4, 5, 10, 20, 30, 40, 50}),
+          "Pitched advance wrote the lanes' keys to the wrong rows");
+    check(read(cache.cache_v(0)) == rows_of({-1, -2, -3, -4, -5, -10, -20, -30, -40, -50}),
+          "Pitched advance wrote the lanes' values to the wrong rows");
+
+    const int copies_before = copies;
+    bool rejected = false;
+    try {
+        cache.advance();
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    check(rejected, "Advancing a full two-lane cache must fail explicitly");
+    check(copies == copies_before, "A rejected two-lane advance issued a CUDA copy");
+    check(!overlapping_copy, "The two-lane cache performed an overlapping CUDA copy");
+}
 } // namespace
 
 extern "C" cudaError_t CUDARTAPI cudaMalloc(void** pointer, std::size_t size) {
@@ -168,6 +212,7 @@ extern "C" const char* CUDARTAPI cudaGetErrorString(cudaError_t) {
 int main() {
     try {
         test_advance_stops_at_a_full_cache();
+        test_batched_lanes_append_with_pitch();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "families/whisper/runtime/kv_cache.h"
+#include "families/whisper/runtime/whisper_decode_policy.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -120,6 +121,31 @@ void test_advance_stops_at_a_full_cache() {
     cache.advance();
     check(cache.position() == 1, "The cache did not recover after reset");
 }
+
+void test_decode_loop_fills_but_never_overruns_the_cache() {
+    // WhisperPipeline caps the budget at L - P + 1 for an L-row cache and a
+    // P-token prefix. The loop must not feed the last token back, or that
+    // decoder step would need a row the cache does not have.
+    allocations.clear();
+    trtmc::WhisperKvCache cache(1, kRows, kWidth, nullptr);
+    const std::vector<int32_t> prefix{1, 2};
+    const int32_t budget = kRows - static_cast<int32_t>(prefix.size()) + 1;
+    int32_t decoder_steps = 0;
+    const auto result = trtmc::run_whisper_decode_loop(
+        prefix, budget, -1,
+        [&](int32_t, std::vector<float>& logits, std::string&) {
+            cache.advance();
+            ++decoder_steps;
+            logits.assign(1, 0.0F);
+            return true;
+        },
+        [](const std::vector<float>&) { return 7; });
+    check(!result.prefill_failed && !result.decode_failed, "The decode loop reported a failure");
+    check(result.output_ids == std::vector<int32_t>(static_cast<std::size_t>(budget), 7),
+          "The decode loop did not emit the whole budget");
+    check(decoder_steps == kRows && cache.position() == kRows,
+          "The decode loop must fill the cache exactly, without feeding the last token back");
+}
 } // namespace
 
 extern "C" cudaError_t CUDARTAPI cudaMalloc(void** pointer, std::size_t size) {
@@ -153,6 +179,7 @@ extern "C" cudaError_t CUDARTAPI cudaMemsetAsync(void* destination, int value, s
 int main() {
     try {
         test_advance_stops_at_a_full_cache();
+        test_decode_loop_fills_but_never_overruns_the_cache();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

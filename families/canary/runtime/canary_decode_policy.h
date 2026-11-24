@@ -62,6 +62,11 @@ run_canary_decode_loop(const std::vector<int32_t>& initial_tokens, int32_t max_n
         if (next_token == eot_token_id) {
             break;
         }
+        // The last token needs no decoder step. Skipping it keeps a cache of L
+        // rows and a P-token prefix within L - P + 1 output tokens.
+        if (step + 1 == max_new_tokens) {
+            break;
+        }
 
         if (!run_step(next_token, logits, result.error)) {
             result.decode_failed = true;

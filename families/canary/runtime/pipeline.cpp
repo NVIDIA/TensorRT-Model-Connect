@@ -1051,15 +1051,15 @@ CanaryPipeline::run_beam_decoder_batch(const std::vector<std::vector<int32_t>>& 
 
     const std::size_t prompt_length = validate_canary_batch_prompts(initial_tokens);
     auto& scratch = batch_cache();
-    std::vector<int32_t> cache_bounded_output_limits = max_new_tokens;
-    if (scratch.batch_capacity() > 1) {
-        std::transform(max_new_tokens.begin(), max_new_tokens.end(),
-                       cache_bounded_output_limits.begin(),
-                       [this, prompt_length](int32_t requested_tokens) {
-                           return canary_beam_output_budget(requested_tokens, state_->max_length(),
-                                                            prompt_length);
-                       });
-    }
+    // The cache never drops rows, so every lane layout bounds its output by the
+    // rows the prompt leaves, and a prompt that does not fit fails before prefill.
+    std::vector<int32_t> cache_bounded_output_limits(max_new_tokens.size());
+    std::transform(max_new_tokens.begin(), max_new_tokens.end(),
+                   cache_bounded_output_limits.begin(),
+                   [this, prompt_length](int32_t requested_tokens) {
+                       return canary_cache_bounded_tokens(requested_tokens, state_->max_length(),
+                                                          prompt_length);
+                   });
     scratch.set_batch_size(request_batch);
     state_->reset();
     state_->bind_to(*decoder_);
@@ -1110,10 +1110,10 @@ std::vector<int32_t> CanaryPipeline::run_beam_decoder(const std::vector<int32_t>
                                                       int32_t max_new_tokens, int32_t beam_size,
                                                       float length_penalty) {
     ensure_beam_state_capacity(beam_size);
+    // Single-lane beams share the bound of the batched layout: the cache never
+    // drops rows, and a prompt that does not fit fails before prefill.
     const int32_t cache_bounded_output_limit =
-        batch_cache().batch_capacity() > 1
-            ? canary_beam_output_budget(max_new_tokens, state_->max_length(), initial_tokens.size())
-            : max_new_tokens;
+        canary_cache_bounded_tokens(max_new_tokens, state_->max_length(), initial_tokens.size());
     auto result = run_canary_beam_search(
         initial_tokens, cache_bounded_output_limit, canary_config_.eot_token_id, beam_size,
         length_penalty,

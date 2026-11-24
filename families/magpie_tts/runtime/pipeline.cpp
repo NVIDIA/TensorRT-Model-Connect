@@ -123,6 +123,15 @@ MagpiePipeline::MagpiePipeline(
         throw std::runtime_error("MagpiePipeline: invalid decoder module");
     if (!decoder_state_ || !decoder_state_->ok())
         throw std::runtime_error("MagpiePipeline: invalid decoder state");
+    // The decoder cache never drops rows, so the bundle's speaker context must
+    // fit and leave room for at least one decoded frame.
+    if (const int32_t capacity = decoder_state_->max_length();
+        capacity >= 0 && !context_lengths_.empty() && context_lengths_[0] >= capacity) {
+        throw std::runtime_error(
+            "MagpiePipeline: the speaker context has " + std::to_string(context_lengths_[0]) +
+            " frames but the decoder KV cache holds " + std::to_string(capacity) +
+            "; rebuild the bundle with a larger --max-sequence-length");
+    }
     if (!encoder_ || !encoder_->ok())
         throw std::runtime_error("MagpiePipeline: invalid encoder module");
     upload_embeddings_to_gpu();

@@ -13,6 +13,7 @@
 #include <cuda_runtime_api.h>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -354,6 +355,34 @@ void test_bark_constructor_validates_embed() {
     cudaStreamDestroy(stream);
 }
 
+void test_bark_constructor_validates_cache_rows() {
+    // A cache that cannot hold the semantic prefix (257 rows) or a whole coarse
+    // window (18 rows with config()) is rejected at load: the caches never drop
+    // rows, so such a bundle could not serve any request.
+    const std::vector<float> semantic_logits = {0.9F, 0.8F, 0.7F, 0.1F, 0.0F};
+    const std::vector<float> coarse_logits(12, 0.1F);
+    const auto rejection = [&](int32_t semantic_rows, int32_t coarse_rows) {
+        try {
+            trtmc::BarkPipeline pipeline(
+                module(std::make_shared<ModuleStats>(), semantic_logits, semantic_rows, nullptr),
+                module(std::make_shared<ModuleStats>(), coarse_logits, coarse_rows, nullptr),
+                cache(semantic_rows, nullptr), cache(coarse_rows, nullptr),
+                std::vector<float>(6 * 4, 0.1F), std::vector<float>(11 * 4, 0.1F), config(),
+                nullptr);
+        } catch (const std::runtime_error& error) {
+            return std::string(error.what());
+        }
+        return std::string();
+    };
+    check(rejection(256, kCoarseCacheRows).find("semantic KV cache holds 256 rows but needs 257") !=
+              std::string::npos,
+          "bark constructor rejects a semantic cache shorter than its prefix");
+    check(rejection(512, 17).find("coarse KV cache holds 17 rows but needs 18") !=
+              std::string::npos,
+          "bark constructor rejects a coarse cache shorter than one window");
+    check(rejection(257, 18).empty(), "bark constructor accepts caches that fit exactly");
+}
+
 } // namespace
 
 int main() {
@@ -368,6 +397,7 @@ int main() {
     test_bark_dual_profile_decode_uses_one_embedding_row();
     test_bark_constructor_validates_semantic();
     test_bark_constructor_validates_embed();
+    test_bark_constructor_validates_cache_rows();
     if (failures > 0)
         std::cerr << failures << " bark pipeline test(s) FAILED\n";
     return failures;
