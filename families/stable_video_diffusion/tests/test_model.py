@@ -193,6 +193,14 @@ def test_runtime_config_carries_the_pipeline_defaults(tmp_path):
      "positive standard deviations"),
     ("feature_extractor/preprocessor_config.json", {"image_mean": [3e38, 0.45, 0.40]},
      "finite means"),
+    # The bicubic resize can overshoot [0, 1]: 1.4453 / 3e-39 overflows float32.
+    ("feature_extractor/preprocessor_config.json",
+     {"image_mean": [0.0, 0.0, 0.0], "image_std": [3e-39, 3e-39, 3e-39]},
+     "positive standard deviations"),
+    # 1.5 / std is finite in double precision, but not with the float32 std the runtime stores.
+    ("feature_extractor/preprocessor_config.json",
+     {"image_mean": [0.0, 0.45, 0.40], "image_std": [4.408103955713425e-39, 0.26, 0.27]},
+     "positive standard deviations"),
     ("vae/config.json", {"force_upcast": "false"}, "force_upcast"),
     ("image_encoder/config.json", {"num_channels": 3.0}, "RGB"),
     ("image_encoder/config.json", {"hidden_size": 0}, "hidden_size"),

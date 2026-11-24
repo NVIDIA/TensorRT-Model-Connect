@@ -107,6 +107,25 @@ def _sampler_sigma(value) -> bool:
             and _float32(1.0 / stored) is not None)
 
 
+# The runtime's bicubic resize of the conditioning image (cubic convolution, A = -0.75, no
+# clamp) can leave [0, 1] by up to 0.4453125 on either side: per axis, at most 1.1875 positive
+# and 0.1875 negative weight.
+_RESIZED_PIXEL_BOUNDS = (-0.5, 1.5)
+
+
+def _normalizable(mean, std) -> bool:
+    """(pixel - mean) / std stays finite in float32 for every resized pixel, computed as the
+    runtime does: with the stored float32 mean and std, and two separate float32 operations."""
+    stored_mean, stored_std = _float32(mean), _float32(std)
+    if stored_mean is None or stored_std is None or not stored_std > 0.0:
+        return False
+    for pixel in _RESIZED_PIXEL_BOUNDS:
+        centered = _float32(pixel - stored_mean)
+        if centered is None or _float32(centered / stored_std) is None:
+            return False
+    return True
+
+
 def _per_level(value, levels: int, name: str) -> list[int]:
     if type(value) is int:
         return [value] * levels
@@ -242,10 +261,7 @@ def _feature_extractor(raw: dict) -> dict:
     mean, std = raw["image_mean"], raw["image_std"]
     _require(isinstance(mean, list) and isinstance(std, list) and len(mean) == 3 and len(std) == 3,
              "the CLIP normalization must have three channels")
-    # The runtime normalizes pixels in [0, 1] as (pixel - mean) / std in float32.
-    _require(all(_float32(value) is not None for value in mean)
-             and all(_positive_float32(value) for value in std)
-             and all(_float32((abs(m) + 1.0) / s) is not None for m, s in zip(mean, std)),
+    _require(all(_normalizable(m, s) for m, s in zip(mean, std)),
              "the CLIP normalization needs finite means and positive standard deviations "
              "that keep normalized pixels finite in float32")
     return {"image_mean": [float(value) for value in mean],
