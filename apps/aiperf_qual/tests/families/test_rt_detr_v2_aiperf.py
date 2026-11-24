@@ -3,7 +3,7 @@
 
 from pathlib import Path
 
-REPOSITORY = Path(__file__).resolve().parents[3]
+REPOSITORY = Path(__file__).resolve().parents[4]
 
 
 def test_rtdetr_benchmark_uses_the_fixed_bundle_threshold(monkeypatch):

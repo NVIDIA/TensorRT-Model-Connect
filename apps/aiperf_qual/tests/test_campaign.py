@@ -629,11 +629,11 @@ def test_every_config_exclusion_names_ready_catalog_profiles():
 def test_a_profile_configuration_cannot_exclude_the_profile(tmp_path):
     from trtmc_aiperf_qual.models import profile_override
 
-    definition = tmp_path / "families/f/tests/aiperf/p.yaml"
+    definition = tmp_path / "config/models/p.yaml"
     definition.parent.mkdir(parents=True)
     definition.write_text("exclude: no request can be built\n")
     with pytest.raises(ConfigError, match="config/exclusions.yaml"):
-        profile_override("p", "f", tmp_path, root=tmp_path / "config")
+        profile_override("p", root=tmp_path / "config")
 
 
 def test_named_profiles_replace_the_machines_include_but_keep_its_exclusions():
@@ -704,11 +704,14 @@ def test_an_unreadable_profile_definition_is_an_error_of_that_profile_alone(tmp_
     """A malformed definition raises ConfigError, which the catalog listing and a campaign's other profiles survive."""
     from trtmc_aiperf_qual.models import profile_override
 
-    definition = tmp_path / "families/f/tests/aiperf/p.yaml"
+    definition = tmp_path / "config/models/p.yaml"
     definition.parent.mkdir(parents=True)
     definition.write_text("reference: [unclosed\n")
     with pytest.raises(ConfigError, match="p.yaml"):
-        profile_override("p", "f", tmp_path, root=tmp_path / "config")
+        profile_override("p", root=tmp_path / "config")
+    definition.write_text("- a list\n")
+    with pytest.raises(ConfigError, match="must contain a mapping"):
+        profile_override("p", root=tmp_path / "config")
 
 
 @pytest.mark.parametrize("config, message", [

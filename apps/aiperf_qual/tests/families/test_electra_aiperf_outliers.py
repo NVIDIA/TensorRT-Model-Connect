@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The family's encoder-parity outlier allowance for its BF16 profile."""
+"""ELECTRA's encoder-parity outlier allowance for its BF16 profile."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 
 yaml = pytest.importorskip("yaml")
 
-AIPERF = Path(__file__).resolve().parent / "aiperf"
+AIPERF = Path(__file__).resolve().parents[2] / "config" / "models"  # the profiles' AIPerf settings
 
 
 def test_rare_bf16_outliers_within_twice_the_tolerance_are_allowed() -> None:

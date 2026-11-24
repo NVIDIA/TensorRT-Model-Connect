@@ -6,3 +6,8 @@ reference:
   adapter: families/moge/reference/adapter.py  # the pinned official MoGe source (no generic adapter)
   prepare: families/moge/reference/prepare.py
   requirements: families/moge/requirements.txt  # the family's dependencies, layered on the serving interpreter
+
+benchmarks:
+  geometry_parity:
+    gate:
+      max_median_relative_depth: 0.05

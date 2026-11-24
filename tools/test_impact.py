@@ -167,7 +167,8 @@ def validate(repo: Path) -> None:
                 violations.append(f"{family}: missing {required}")
         if list(root.rglob("MODEL.toml")):
             violations.append(f"{family}: MODEL.toml is forbidden")
-        for obsolete in ("plugin.py", "tests/runner.py", "tests/e2e_plugins"):
+        # tests/aiperf: AIPerf qualification settings live in apps/aiperf_qual/config/models/<profile>.yaml.
+        for obsolete in ("plugin.py", "tests/runner.py", "tests/e2e_plugins", "tests/aiperf"):
             if (root / obsolete).exists():
                 violations.append(f"{family}: obsolete {obsolete}")
         for path in (root / "tests/cpp").glob("**/*"):
