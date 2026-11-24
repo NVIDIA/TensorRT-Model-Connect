@@ -341,27 +341,31 @@ def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path
         _build_tensor_parallel(request, writer, model_dir, config, model, weights,
                                max_sequence_length, visual_config, visual_metadata, readers)
         return
-    # Every plan embeds the full weight set: write each one to the bundle as soon as it is built, so a
-    # 27B build never holds two serialized plans (plus the host weights) in memory at once.
+    # Every plan embeds the full weight set: TensorRT streams the target and prefill plans straight into the
+    # bundle, so a 27B build never holds a serialized plan in host memory next to the builder's own copies.
     _publish_native_header(request, writer)
     if layout == "single":
-        writer.add_bytes("engine.plan", model.build_engine(
-            config,
-            weights,
-            max_sequence_length,
-            precision=precision,
-            quant_ctx=quant_ctx,
-            verbose=bool(request.verbose),
-            debug_layer_outputs=False,
-            **({"target_feature_layers": draft_config.feature_layers} if draft_config else {}),
-            **({"media_inputs": True} if visual else {}),
-        ))
+        with writer.open_section("engine.plan") as section:
+            model.build_engine(
+                config,
+                weights,
+                max_sequence_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                verbose=bool(request.verbose),
+                debug_layer_outputs=False,
+                plan_stream=section,
+                **({"target_feature_layers": draft_config.feature_layers} if draft_config else {}),
+                **({"media_inputs": True} if visual else {}),
+            )
 
     if prefill_chunk_len >= 2:
-        writer.add_bytes("prefill_engine.plan", model.build_engine_prefill(
-            config, weights, max_sequence_length, prefill_chunk_len,
-            precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
-        ))
+        with writer.open_section("prefill_engine.plan") as section:
+            model.build_engine_prefill(
+                config, weights, max_sequence_length, prefill_chunk_len,
+                precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
+                plan_stream=section,
+            )
     else:
         prefill_chunk_len = 0
 
