@@ -37,7 +37,7 @@ double pillow_cubic(double value) {
     if (value < 1.0)
         return ((kA + 2.0) * value - (kA + 3.0)) * value * value + 1.0;
     if (value < 2.0)
-        return ((kA * value - 5.0 * kA) * value + 8.0 * kA) * value - 4.0 * kA;
+        return (((value - 5.0) * value + 8.0) * value - 4.0) * kA;
     return 0.0;
 }
 
@@ -109,6 +109,39 @@ std::vector<float> resize_pillow_bicubic(const float* source, std::int32_t input
     // Preserve Pillow's horizontal byte rounding with four cached rows instead
     // of a source-height by output-width image. Upsampling reuses each row;
     // downsampling can revisit a row only within the fixed filter support.
+    // Pillow 13 filters vertically first for strongly anisotropic downsampling.
+    // Keep that pass order and its intermediate byte rounding with one row.
+    if (static_cast<std::int64_t>(input_h) - output_h > 0 &&
+        static_cast<std::int64_t>(input_h) - output_h >
+            2 * (static_cast<std::int64_t>(input_w) - output_w)) {
+        std::vector<std::uint8_t> vertical_row(input_stride);
+        std::vector<float> output(static_cast<std::size_t>(output_h) * output_stride);
+        for (std::int32_t y = 0; y < output_h; ++y) {
+            const auto& vertical = vertical_plan[static_cast<std::size_t>(y)];
+            for (std::size_t index = 0; index < input_stride; ++index) {
+                std::int64_t sum = kPillowRounding;
+                for (std::size_t row = 0; row < vertical.weights.size(); ++row) {
+                    const auto offset =
+                        (static_cast<std::size_t>(vertical.first) + row) * input_stride + index;
+                    const auto pixel = static_cast<std::uint8_t>(
+                        std::lround(std::clamp(source[offset], 0.0F, 1.0F) * 255.0F));
+                    sum += static_cast<std::int64_t>(pixel) * vertical.weights[row];
+                }
+                vertical_row[index] = static_cast<std::uint8_t>(
+                    sum <= 0 ? 0 : std::min<std::int64_t>(sum >> kPillowPrecisionBits, 255));
+            }
+            for (std::int32_t x = 0; x < output_w; ++x) {
+                const auto& horizontal = horizontal_plan[static_cast<std::size_t>(x)];
+                for (std::size_t channel = 0; channel < 3; ++channel)
+                    output[static_cast<std::size_t>(y) * output_stride +
+                           static_cast<std::size_t>(x) * 3U + channel] =
+                        static_cast<float>(
+                            apply_pillow_span(vertical_row.data() + channel, 3, horizontal)) /
+                        255.0F;
+            }
+        }
+        return output;
+    }
     std::vector<std::uint8_t> input_row(input_stride);
     std::array<std::vector<std::uint8_t>, 4> filtered_rows;
     for (auto& row : filtered_rows)
