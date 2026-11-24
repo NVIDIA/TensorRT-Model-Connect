@@ -68,6 +68,10 @@ photograph, and is distributed under the same terms.
 and saved losslessly as PNG (its pixels equal Pillow's decode of the
 `test_img.jpeg` copies listed above) and is distributed under the same terms.
 
+Byte-identical copies of that PNG are stored at:
+
+- `families/minicpmv4_7/tests/data/test_img.png`
+
 `families/timm_resnet/tests/data/test_img_car.jpeg` is a crop of the same
 photograph (columns 260 to 639, rows 60 to 381, saved again as JPEG) and is
 distributed under the same terms.
