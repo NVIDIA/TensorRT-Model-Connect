@@ -589,7 +589,9 @@ jobs:
     name: Community CPU / Unit / C++ and Python
     needs: authorize
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
+    env:
+      CPP_BUILD_TIMEOUT: "45m"
     permissions:
       contents: read
     steps:
