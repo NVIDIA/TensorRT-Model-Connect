@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""MobileBERT's Transformers pretraining model for ``token_scores``, as tests/test_e2e.py runs it: the text framed as
-[CLS] text [SEP] without padding, the masked-LM logits of the [MASK] positions, or of every position when the text
+"""MobileBERT's Transformers pretraining model for ``token_scores``, as tests/test_e2e.py runs it: the text lowercased
+with accents stripped (an uncased checkpoint) and framed as [CLS] text [SEP] without padding, the masked-LM logits of the [MASK] positions, or of every position when the text
 has no [MASK] (the runtime's selection). A text longer than the bundle window is refused, as the runtime does."""
 
 from pathlib import Path
@@ -14,7 +14,9 @@ class Adapter:
         from transformers import AutoTokenizer, MobileBertForPreTraining
 
         self.spec, self.host = spec, host
-        self.tokenizer = AutoTokenizer.from_pretrained(spec.model, **spec.pretrained_kwargs())
+        # An uncased checkpoint: its tokenizer.json does not lowercase, so the BERT normalizer is asked to (lowercase and
+        # strip accents, as the runtime does); otherwise a capital such as "A" becomes [UNK].
+        self.tokenizer = AutoTokenizer.from_pretrained(spec.model, **{**spec.pretrained_kwargs(), "do_lower_case": True})
         self.model = host.maybe_compile(MobileBertForPreTraining.from_pretrained(
             spec.model, **spec.model_kwargs()).to(spec.device, spec.dtype).eval(), spec)
         self.window = int(spec.options["max_sequence_length"])
