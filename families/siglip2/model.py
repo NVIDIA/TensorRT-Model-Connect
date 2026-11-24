@@ -115,12 +115,20 @@ def _check_bpe_options(model: dict) -> None:
 def _check_vocabulary(vocab: dict) -> None:
     # The runtime keeps the vocabulary as ids 0..N-1 and encodes every space as U+2581.
     size = len(vocab)
+    owners = {}
     for token, token_id in vocab.items():
         if type(token_id) is not int:
             raise ValueError(f"siglip2 vocabulary id of {token!r} is not an integer: {token_id!r}")
         if not 0 <= token_id < size:
             raise NotImplementedError(
                 f"siglip2 vocabulary ids must be integers in [0, {size}); {token!r} has {token_id}")
+        # The reference merges by ids and the runtime by tokens, so two tokens with one id
+        # would merge differently.
+        if token_id in owners:
+            raise NotImplementedError(
+                f"siglip2 vocabulary id {token_id} is given to more than one token: "
+                f"{owners[token_id]!r} and {token!r}")
+        owners[token_id] = token
     if _SENTENCE_PIECE_SPACE not in vocab:
         raise NotImplementedError("siglip2 vocabulary has no U+2581 space marker")
 
@@ -193,10 +201,10 @@ def _tokenizer_contract(model_dir: Path, embedding_rows: int | None = None,
     tokenizer runs: it does not lowercase (``do_lower_case`` in
     ``tokenizer_config.json`` is not applied by the reference), so neither does the
     runtime. The checkpoint's files also never need what the runtime leaves out: no BPE
-    dropout, subword prefix or suffix, or skipped merges; vocabulary ids 0..N-1 with the
-    U+2581 marker; the byte fallback never needs the unknown token, no added token sets a
-    matching option or an id other than its vocabulary id, and the end token expands to its
-    own id alone. Anything
+    dropout, subword prefix or suffix, or skipped merges; vocabulary ids 0..N-1, each
+    given once, with the U+2581 marker; the byte fallback never needs the unknown token,
+    no added token sets a matching option or an id other than its vocabulary id, and the
+    end token expands to its own id alone. Anything
     else is refused here rather than tokenised differently; the runtime checks the same
     on load. ``data`` is the ``tokenizer.json`` the caller has read and will package, so
     that the bundle carries the bytes that were checked.

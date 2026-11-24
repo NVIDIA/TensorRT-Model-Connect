@@ -221,6 +221,9 @@ int main() {
          "vocabulary id of aba is not in 0..266"},
         {"vocabulary id beyond int32", [](Json& t) { t["model"]["vocab"]["aba"] = 2147483658ULL; },
          "vocabulary id of aba is not in 0..266"},
+        // The reference merges by ids: with "b" at the id of "a" it encodes "bb" as "ab".
+        {"vocabulary id given to two tokens", [](Json& t) { t["model"]["vocab"]["b"] = 5; },
+         "vocabulary id 5 is given to more than one token"},
         // Without U+2581 in the vocabulary a space would take another encode path.
         {"no space marker",
          [](Json& t) {

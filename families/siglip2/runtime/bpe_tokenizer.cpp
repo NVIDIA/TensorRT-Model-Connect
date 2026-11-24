@@ -973,6 +973,7 @@ class BpeTokenizer final : public ITokenizer {
             throw std::runtime_error(
                 "Unsupported tokenizer.json: more vocabulary entries than int32 ids");
         mVocab.resize(vocab_size);
+        std::vector<bool> seen(vocab_size, false);
 
         for (auto& [token, id] : vocab_obj.items()) {
             // The vocabulary is kept as ids 0..N-1; the reference takes any id, so a token
@@ -981,6 +982,13 @@ class BpeTokenizer final : public ITokenizer {
                 throw std::runtime_error("Unsupported tokenizer.json: vocabulary id of " + token +
                                          " is not in 0.." + std::to_string(vocab_size - 1));
             const auto token_id = static_cast<int32_t>(id.get<std::uint64_t>());
+            // The reference merges by ids and the runtime by tokens, so two tokens with one
+            // id would merge differently.
+            if (seen[token_id])
+                throw std::runtime_error("Unsupported tokenizer.json: vocabulary id " +
+                                         std::to_string(token_id) +
+                                         " is given to more than one token");
+            seen[token_id] = true;
             mVocab[token_id] = token;
             mTokenToId[token] = token_id;
         }

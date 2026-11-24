@@ -248,6 +248,9 @@ def test_the_tokenizer_contract_returns_the_pad_id(tmp_path: Path) -> None:
         # The runtime keeps ids 0..N-1, where the reference takes any id.
         (_with_model(vocab={**_TOKEN_IDS, "<0xFF>": len(_TOKEN_IDS)}), "ids must be integers in"),
         (_with_model(vocab={**_TOKEN_IDS, "a": 10_000}), "ids must be integers in"),
+        # The reference merges by ids and the runtime by tokens.
+        (_with_model(vocab={**_TOKEN_IDS, "a": 4}),
+         "vocabulary id 4 is given to more than one token"),
         # Without the marker the runtime would not encode on the reference's path.
         (_renamed("▁", "zz"), "no U.2581 space marker"),
         # BPE options the runtime does not apply.
