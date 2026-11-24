@@ -45,7 +45,7 @@ FP32 is the baseline. Both BF16 policies run QK and attention-weight/V GEMMs wit
 - `"bf16_policy": "strict"` (default): FP32 output projection and a separate FP32 attention/head selector preserve greedy stability. The existing strict numerical gates apply.
 - `"bf16_policy": "fast"`: one attention/head path produces scores and selections; the output projection also uses BF16. This trades full-slate/individual-score parity for lower latency. Ranking overlap, held-out quality, and mean score error have separate checks; passing them does not imply passing strict score parity.
 
-New bundles default to `"cuda_graphs": true`: the native runtime captures/replays the reusable **step engine**, with preparation, the host round loop, and state copies outside capture. TensorRT invalidates its capture when shapes or bindings change. Set the checkpoint field to `false`, or pass `--no-cuda-graphs` below, to disable it. Older bundles without this metadata keep graphs disabled. This family checkpoint option is separate from the shared RTX-only loader graph flag.
+These checkpoint fields are encoded in rebuilt bundles. New bundles default to `"cuda_graphs": true`: the native runtime captures/replays the reusable **step engine**, with preparation, the host round loop, and state copies outside capture. TensorRT invalidates its capture when shapes or bindings change. Set the checkpoint field to `false`, or pass `--no-cuda-graphs` below, to disable it. Older bundles without this metadata keep graphs disabled. This family checkpoint option is separate from the shared RTX-only loader graph flag.
 
 Build all four serving variants with the fast BF16 policy and matched graph settings:
 
@@ -61,7 +61,8 @@ python3 -m families.hstu.tests.compare_precision --root /tmp/hstu-fast/output \
 ```
 
 The quality comparison requires identical FP32/BF16 weights. Its fixed limits are at most 1% relative NDCG@10 loss, one percentage point hit-rate loss, at least 98% mean top-10 overlap, and mean absolute score error at most 0.02. It holds out each sampled user's final interaction. The separate strict numerical gates are unchanged.
-TensorRT owns all fusion and kernel selection. This is SiLU HSTU attention; softmax-MHA fusion counts from another model do not transfer. The A100 trace confirms 100 BF16 Tensor Core GEMM launches per request (two per selection round), versus zero for FP32. QK and AV remain separate GEMMs; no dedicated fused HSTU kernel was observed.
+
+TensorRT owns fusion and kernel selection. The current A100 C50/B4 trace contains 150 BF16 Tensor Core GEMM launches in fast mode: 50 QK, 50 AV, and 50 output projections, with FP32 accumulation. FP32 has zero BF16 launches. Both modes replay 50 step CUDA Graphs per request; disabling the checkpoint graph switch produces zero graph launches. QK and AV remain separate; no dedicated fused HSTU kernel was observed. Softmax-MHA fusion results from another model do not transfer.
 
 The staged runtime retains the existing three-engine orchestration, GPU slate state, KV byte accounting, SHA-256 snapshots, restore/deduplication, revisions, TTL, leases, and eviction. Cache storage is FP32 in both precision modes: **262,144 KV bytes per history**, plus a 512-byte history mask outside the KV budget. A max-batch-4 engine reserves 1,048,576 scratch KV bytes. Restored histories need budget beyond scratch. Snapshots are bound to the exact bundle hash and cannot migrate from the private model, a rebuilt engine, or a different precision bundle.
 
@@ -165,15 +166,26 @@ The 26.10 image has four pre-existing configuration-parser defects: it accepts r
 
 ## Measured result
 
-AMD64 A100, supplied 26.10/0.2.0 image, TensorRT 11.4.0.106; public MovieLens example weights, seed 20261124. Eight numerical cells pass with each SDK (main and image), 64 history lifecycle checks pass across the two SDKs, and native HTTP/gRPC and snapshot endpoint campaigns each pass 16 transport cells. A leased-entry pressure test observes `allocation_failures=1` through Triton. The native cache/config campaign has 30 passing checks and the four backend parser failures above. Private-model reference scores and fusion counts are not reused.
+AMD64 A100 PCIe 40 GB, supplied 26.10/0.2.0 image, TensorRT 11.4.0.106; public MovieLens 100-step example weights, seed 20261124. This is a short training/integration example, not production recommendation-quality qualification.
 
-Earlier strict-policy baseline, **CUDA Graphs disabled**: indicative median milliseconds for `NativeClient.score`, including synchronized GPU work and host tensor transport; five warmups and twenty measured calls per cell:
+Matched `NativeClient.score` median milliseconds, including synchronized GPU work and host tensor transport, excluding model loading/compilation and HTTP. CUDA Graphs are **enabled for all three policies**. Each cell uses 50 warmups and 300 measured calls per policy, interleaved over three repeats:
 
-| Candidates | Batch | FP32 ms | BF16 ms |
-| --- | --- | --- | --- |
-| 50 | 1 | 8.85 | 8.73 |
-| 50 | 4 | 7.32 | 9.20 |
-| 64 | 1 | 6.97 | 9.10 |
-| 64 | 4 | 7.76 | 9.58 |
+| Candidates | Batch | FP32 ms | Strict BF16 ms | Fast BF16 ms | Fast latency reduction vs FP32 |
+| --- | --- | --- | --- | --- | --- |
+| 50 | 1 | 5.615 | 7.104 | 5.013 | 10.7% |
+| 50 | 4 | 6.086 | 7.481 | 5.445 | 10.5% |
+| 64 | 1 | 5.994 | 7.419 | 5.088 | 15.1% |
+| 64 | 4 | 6.436 | 7.901 | 5.868 | 8.8% |
 
-The BF16 policy is about parity in the first cell and 24–31% slower in the other cells in this run. Its extra FP32 selection path preserves greedy stability. Numerical accuracy means agreement with this public model's FP32 reference; the short training recipe has a separate, small sampled recommendation-quality smoke evaluation.
+The earlier latency table used strict BF16 with graphs disabled. The fast policy removes the second full attention/head path and moves the output projection to BF16; it beats the matched FP32 baseline in these four staged cases. Unrolled/Loop variants and other GPUs are unqualified.
+
+Held-out quality on all **943 MovieLens users per candidate count**, with matched FP32/BF16 weights and sampled negative candidates:
+
+| Candidates | FP32 NDCG@10 | Fast BF16 NDCG@10 | Mean top-10 overlap | Top-1 agreement | Full-slate position agreement | Mean absolute score error |
+| --- | --- | --- | --- | --- | --- | --- |
+| 50 | 0.19304 | 0.19378 | 99.69% | 99.89% | 96.94% | 0.00597 |
+| 64 | 0.15842 | 0.15842 | 99.73% | 99.89% | 95.71% | 0.00564 |
+
+No NDCG@10 loss was measured in this smoke evaluation. **Fast mode does not preserve individual-score parity:** tail selections can diverge and alter later context, and C64 candidates can cross the selected/unselected boundary. Maximum individual score differences reached 2.486 (C50) and 1.885 (C64). Use strict mode for score calibration or full-slate parity requirements; its original numerical gates remain unchanged.
+
+The optimization rerun includes eight strict numerical cells and eight fast-policy/graph-freshness tests per SDK (image and current main), 64 history lifecycle checks across both SDKs, four main-SDK C++ checks, 16 native HTTP/gRPC cells, and 16 snapshot transport cells with a positive allocation-failure metric check. The seven native gauges and effective KV budgets are checked by the native cache/config campaign; its four existing backend parser failures remain explicit. Source and evidence are recorded outside the repository. The generic modern C-SDK structured-ranking binding remains unavailable; these timings use the family-owned native Task bridge.
