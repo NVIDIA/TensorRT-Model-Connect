@@ -10,6 +10,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def dflash_policy(raw: dict) -> dict:
+    """Read the released draft layout without changing its verification width."""
+    policy = raw.get("dflash_config")
+    if not isinstance(policy, dict):
+        raise ValueError("Missing Qwen3.5 DFlash policy")
+    # ModelOpt-prepared drafts may store the width at the top level, while
+    # floating drafts also use the nested form. Never infer a missing width.
+    widths = [part["block_size"] for part in (raw, policy) if "block_size" in part]
+    if not widths or any(type(width) is not int or width != 16 for width in widths):
+        raise ValueError("Qwen3.5 DFlash requires an explicit block-16 draft profile")
+    return policy
+
+
 @dataclass
 class ModelConfig:
     """Parsed model architecture from HF config.json."""

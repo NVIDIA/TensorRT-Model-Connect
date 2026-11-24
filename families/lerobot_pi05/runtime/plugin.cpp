@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#ifdef TRTMC_PI05_EDGE_012
+#include "families/lerobot_pi05/runtime/edge_llm/adapter.h"
+#endif
 #include "families/lerobot_pi05/runtime/pipeline.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
@@ -43,10 +46,15 @@ Normalization parse_normalization(const nlohmann::json& json) {
 
 RuntimeConfig parse_config(const std::vector<char>& data) {
     const auto json = nlohmann::json::parse(data.begin(), data.end());
-    if (json.at("precision").get<std::string>() != "bf16" &&
-        json.at("precision").get<std::string>() != "fp32")
+    const auto policy = json.value("openpi_policy", std::string{});
+    const auto precision = json.at("precision").get<std::string>();
+    if (policy.empty()
+            ? (precision != "bf16" && precision != "fp32")
+            : (precision != "fp16" ||
+               (policy != "pi05_libero" && policy != "pi05_droid" && policy != "pi05_aloha")))
         throw std::runtime_error("lerobot_pi05 runtime.json has an unsupported precision");
     RuntimeConfig config;
+    config.openpi_policy = policy;
     config.cameras = json.at("cameras").get<std::vector<std::string>>();
     config.empty_cameras = json.at("empty_cameras").get<std::int32_t>();
     config.camera_height = json.at("camera_height").get<std::int32_t>();
@@ -92,6 +100,14 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     if (task != trtmc::internal::IImagesStateTextToActionChunk::kTask)
         throw std::runtime_error("lerobot_pi05 bundle declares an unsupported task: " + task);
 
+    if (context.reader.find_section("edge_llm.json")) {
+#ifdef TRTMC_PI05_EDGE_012
+        return trtmc::lerobot_pi05::edge_llm::create(context.reader);
+#else
+        throw std::runtime_error(
+            "This Pi0.5 Edge bundle needs a runtime built with the Edge 0.12 Pi0.5 add-on");
+#endif
+    }
     auto config = trtmc::lerobot_pi05::parse_config(
         trtmc::lerobot_pi05::require_section(context.reader, "runtime.json"));
     const auto asset = trtmc::lerobot_pi05::require_section(context.reader, "tokenizer.bpe");

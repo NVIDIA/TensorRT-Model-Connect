@@ -1,0 +1,35 @@
+{
+  "name": "seamless-m4t-v2-large-text",
+  "hf_id": "facebook/seamless-m4t-v2-large",
+  "hf_revision": "5f8cc790b19fc3f67a61c105133b20b34e3dcb76",
+  "family": "seamless_m4t_v2",
+  "bundle": "seamless-m4t-v2-large-text.bundle",
+  "task": "text_translation",
+  "precision": "fp32",
+  "max_sequence_length": 128,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "seamless-m4t-v2-large-text",
+      "premerge": true,
+      "max_new_tokens": 64,
+      "inputs": [
+        {
+          "text": "My name is Sarah and I love learning new languages.",
+          "source": "eng",
+          "target": "fra"
+        },
+        {
+          "text": "My name is Sarah and I love learning new languages.",
+          "source": "eng",
+          "target": "deu"
+        },
+        {
+          "text": "\u5317\u4eac\u662f\u4e2d\u56fd\u7684\u9996\u90fd\u3002",
+          "source": "cmn",
+          "target": "eng"
+        }
+      ]
+    }
+  ]
+}

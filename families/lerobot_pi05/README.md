@@ -13,7 +13,72 @@ trtmc build lerobot/pi05_libero_base -o pi05.bundle --precision bf16
 The family is recognised from `type: "pi05"` in `config.json`, never from a
 checkpoint name.
 
-## Supported boundary
+## Selecting the openpi contract
+
+The same weights can represent different input and output contracts. The generic
+build command above uses LeRobot's processor. To request the openpi FP16 policy
+explicitly, use the family command:
+
+```bash
+trtmc lerobot_pi05 build lerobot/pi05_libero_base -o libero-openpi.bundle --pi05-policy-config pi05_libero
+```
+
+| Policy | Checkpoint | Robot-unit output | State in the prompt |
+| --- | --- | --- | --- |
+| `pi05_libero` | `lerobot/pi05_libero_base` | 10 × 7 | No |
+| `pi05_droid` | `lerobot/pi05_droid` | 15 × 8 | Yes |
+| `pi05_aloha` | `lerobot/pi05_base` | 50 × 14 | Yes |
+
+All three use the typed C++ `images_state_text_to_action_chunk` task. Supply
+named RGB cameras, state in the robot's units and a task string. Openpi resizes
+and pads frames and uses its own quantile statistics, not LeRobot's processor
+statistics. In particular, a 50-step LeRobot LIBERO bundle is not a fallback
+for the 10-step openpi LIBERO policy.
+
+When the installed family runtime includes the **matching Pi0.5 Edge 0.12.0
+add-on**, `--edge-builder-python /absolute/path/to/python` can select the
+isolated Edge builder interpreter. The base Edge SDK alone does not provide
+that add-on. Without it the family builds the same FP16 openpi policy with
+native TensorRT. The bundle itself requires no checkpoint or Python for inference.
+For offline native builds, stage the matching `assets/norm_stats.json` and
+`tokenizer.model` alongside `config.json` and `model.safetensors`. The released
+Edge builder also fetches its public tokenizer during conversion.
+
+### Reproduce the openpi LIBERO reference
+
+The openpi manifest uses the same pinned checkpoint and recorded episode 0,
+frame 0 as the LeRobot fixture (see `tests/fixture-source.json`), **not**
+the LeRobot golden actions. Its independent reference is
+[openpi at 215abfb](https://github.com/Physical-Intelligence/openpi/tree/215abfb217dbac7d5f1273282331b9b1866c0479)
+with that revision's PyTorch Transformers replacements. To reproduce the tensor:
+
+1. Apply openpi's `LiberoInputs(PI05)` to the two RGB images, raw state and
+   task from the frame. Apply quantile normalization using the GCS generation
+   in the openpi manifest, resize to 224 × 224, tokenize with the PaliGemma
+   tokenizer (200 positions, **no state in prompt**), and pad state to 32.
+2. Load the pinned policy weights strictly into `PI0Pytorch` with
+   `Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False)`.
+   Use eager evaluation, float32 parameters and inputs, and disable TF32.
+   Use the first 10 × 32 values of `tests/data/noise_seed0.f32` as explicit
+   noise; call `sample_actions` with 10 denoising steps.
+3. Unnormalize the actions with the same quantile statistics and apply
+   `LiberoOutputs`. The golden file is the resulting 10 × 7 robot-unit tensor
+   in row-major little-endian float32. The E2E compares all 70 values; one
+   recorded observation is not a robot task-success evaluation.
+
+### Reproduce the openpi DROID inputs
+
+The DROID case uses episode 0, frame 0 from the two pinned camera clips in
+`tests/manifests/pi05-openpi-droid-fp16.json`. Use the exterior and wrist
+views, the recorded joint and gripper state, and the task from the same frame.
+The test converts the limited-range video to the original RGB values before
+resizing. Its 15 × 32 float32 noise draw uses the manifest's NumPy seed.
+Unlike LIBERO, DROID includes the state in the prompt. The comparison covers
+all 15 × 8 robot-unit actions from the independent FP32 policy.
+See the [fixture provenance](../../ASSET_LICENSES.md#lerobot-pi-05-recorded-observation-fixtures);
+the repository does not redistribute the DROID videos or model weights.
+
+## LeRobot supported boundary
 
 Anything outside this list fails at build time with the offending field named.
 

@@ -19,6 +19,7 @@
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <iostream>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -86,7 +87,27 @@ static int32_t parse_input_index(const std::string& dims) {
     return input_index;
 }
 
-/// @brief Decode inherited or fixed output dimensions from JSON.
+int32_t shape_integer(const nlohmann::json& value, int64_t minimum, int64_t maximum) {
+    if (!value.is_number_integer())
+        throw std::runtime_error("TvmFfiKernelPlugin shape index must be an integer");
+    const auto number = value.get<int64_t>();
+    if (number < minimum || number > maximum)
+        throw std::runtime_error("TvmFfiKernelPlugin shape index is out of range");
+    return static_cast<int32_t>(number);
+}
+
+TvmFfiDimensionSpec parse_dimension(const nlohmann::json& dimension) {
+    if (dimension.is_number_integer())
+        return {shape_integer(dimension, 1, std::numeric_limits<int32_t>::max()), -1, -1};
+    if (!dimension.is_object() || dimension.size() != 2 || !dimension.contains("input") ||
+        !dimension.contains("axis"))
+        throw std::runtime_error(
+            "TvmFfiKernelPlugin dimension must be an integer or input/axis reference");
+    return {0, shape_integer(dimension.at("input"), 0, std::numeric_limits<int32_t>::max()),
+            shape_integer(dimension.at("axis"), 0, 7)};
+}
+
+/// @brief Decode inherited, fixed or input-axis output dimensions from JSON.
 static void parse_dims(TvmFfiOutputSpec& spec, const nlohmann::json& dims_obj) {
     if (dims_obj.is_string()) {
         std::string dims_str = dims_obj.get<std::string>();
@@ -97,11 +118,8 @@ static void parse_dims(TvmFfiOutputSpec& spec, const nlohmann::json& dims_obj) {
         if (dims_obj.empty() || dims_obj.size() > 8)
             throw std::runtime_error("TvmFfiKernelPlugin output rank must be between 1 and 8");
         spec.same_as_input_index = -1;
-        for (const auto& dimension : dims_obj) {
-            if (!dimension.is_number_integer())
-                throw std::runtime_error("TvmFfiKernelPlugin output dims must be integers");
-            spec.dims.push_back(dimension.get<int32_t>());
-        }
+        for (const auto& dimension : dims_obj)
+            spec.dims.push_back(parse_dimension(dimension));
     } else {
         throw std::runtime_error("TvmFfiKernelPlugin output dims must be an array or input ref");
     }
@@ -208,9 +226,10 @@ static void validate_parsed_specs(int32_t num_inputs, int32_t num_outputs, int64
         if (output.same_as_input_index < -1 || output.same_as_input_index >= num_inputs) {
             throw std::runtime_error("TvmFfiKernelPlugin output input index is out of range");
         }
-        for (int32_t dimension : output.dims) {
-            if (dimension <= 0)
-                throw std::runtime_error("TvmFfiKernelPlugin fixed dimensions must be positive");
+        for (const auto& dimension : output.dims) {
+            if (dimension.input >= num_inputs)
+                throw std::runtime_error(
+                    "TvmFfiKernelPlugin dimension input index is out of range");
         }
     }
 }
@@ -335,9 +354,13 @@ TvmFfiKernelPlugin* TvmFfiKernelPlugin::clone() const noexcept {
 
 nvinfer1::DimsExprs
 TvmFfiKernelPlugin::getOutputDimensions(int32_t outputIndex, nvinfer1::DimsExprs const* inputs,
-                                        int32_t, nvinfer1::IExprBuilder& exprBuilder) noexcept {
-    if (outputIndex >= static_cast<int32_t>(output_specs_.size())) {
-        return inputs[0];
+                                        int32_t nbInputs,
+                                        nvinfer1::IExprBuilder& exprBuilder) noexcept {
+    nvinfer1::DimsExprs invalid{};
+    invalid.nbDims = -1;
+    if (outputIndex < 0 || outputIndex >= static_cast<int32_t>(output_specs_.size()) ||
+        nbInputs != num_inputs_ || inputs == nullptr) {
+        return invalid;
     }
     const auto& spec = output_specs_[static_cast<std::size_t>(outputIndex)];
     if (spec.same_as_input_index >= 0) {
@@ -346,7 +369,14 @@ TvmFfiKernelPlugin::getOutputDimensions(int32_t outputIndex, nvinfer1::DimsExprs
     nvinfer1::DimsExprs out;
     out.nbDims = static_cast<int32_t>(spec.dims.size());
     for (int32_t d = 0; d < out.nbDims; ++d) {
-        out.d[d] = exprBuilder.constant(spec.dims[static_cast<std::size_t>(d)]);
+        const auto& dimension = spec.dims[static_cast<std::size_t>(d)];
+        if (dimension.input >= 0) {
+            if (dimension.input >= nbInputs || dimension.axis >= inputs[dimension.input].nbDims)
+                return invalid;
+            out.d[d] = inputs[dimension.input].d[dimension.axis];
+        } else {
+            out.d[d] = exprBuilder.constant(dimension.value);
+        }
     }
     return out;
 }

@@ -3,3 +3,5 @@
 # The native pi0.5 reference (tests/fixture-source.json): LeRobot's pi05 policy and the LIBERO frames.
 lerobot[pi]==0.6.1
 pyarrow
+# Deterministic software decoding for pinned public policy observations.
+av==15.1.0

@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Jetson Thor (128 GB of memory shared by the CPU and the GPU): defaults of every environment with
+# `platform: jetson-thor`. A machine's own `models.exclude` adds to these; its `deadlines` override them.
+models:
+  exclude:
+    - profile: minimax-h3-768p
+      reason: "checkpoint of about 464 GiB: does not fit the 128 GB unified memory"
+    - profile: flux-2-dev
+      reason: "32B DiT and 24B text encoder, about 110 GB of weights alone: does not fit the 128 GB unified memory"
+    - profile: flux-2-dev-fp8
+      reason: "built from the FLUX.2-dev bf16 weights (32B DiT and 24B text encoder): does not fit the 128 GB unified memory"
+    - profile: flux-schnell
+      reason: "does not fit the 128 GB unified memory"
+    - profile: sana-wm-bidirectional
+      reason: "checkpoint of about 95 GiB: does not fit the 128 GB unified memory"
+    - profile: qwen3-omni-30b-a3b-instruct
+      reason: "about 66 GiB of bf16 weights: does not fit the 128 GB unified memory"
+    - profile: qwen3-moe-30b-a3b
+      reason: "about 57 GiB of bf16 weights: the build holds the weights and the engine at once, beyond the 128 GB unified memory"
+    - profile: qwen-image
+      reason: "does not fit the 128 GB unified memory"
+    - profile: qwen-image-2512
+      reason: "does not fit the 128 GB unified memory"
+    - profile: qwen-image-edit-2511
+      reason: "does not fit the 128 GB unified memory"
+    - profile: deepseek-v2-lite
+      reason: "does not fit the 128 GB unified memory"
+    - profile: gpt-oss-20b
+      reason: "does not fit the 128 GB unified memory"
+    - profile: qwen36-27b
+      reason: "27B bf16: the TRTMC build does not fit the 128 GB unified memory (TensorRT cannot allocate a 53.8 GB buffer next to the resident weights)"
+    - profile: qwen38-27b
+      reason: "27B bf16: the TRTMC build does not fit the 128 GB unified memory (TensorRT cannot allocate a 53.8 GB buffer next to the resident weights)"
+    - profile: gemma-3-27b
+      reason: "27B bf16: the TRTMC build does not fit the 128 GB unified memory (TensorRT cannot allocate a 53.8 GB buffer next to the resident weights)"
+
+# AIPerf runs (seconds) that take or may take longer than the 12-hour default here: text and vision-language
+# generation runs about 6-11x slower than on GB300.
+deadlines:
+  muse-glimmer-nvfp4: 108000
+  qwen38-27b-fp8: 108000
+  qwen38-27b-nvfp4: 108000
+  minitron-4b-width: 86400
+  personaplex-7b: 86400
+  personaplex-7b-fp8: 86400
+  wan22-ti2v-5b: 86400
+  wan22-ti2v-5b-fp8: 86400
+  wan22-ti2v-5b-i2v-portrait: 86400
+  lfm3-1.7b-bf16: 86400
+  lfm3-1.7b-fp16: 86400
+  lfm2-350m-bf16-model-card: 86400

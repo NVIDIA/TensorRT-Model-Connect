@@ -445,6 +445,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/tests/fake_family.cpp",
         "core/runtime/tests/test_bundle_format_v1.cpp",
         "core/runtime/tests/test_byok_shape_spec.cpp",
+        "core/runtime/tests/test_cuda_mem_pool.cpp",
         "core/runtime/tests/test_family_loader.cpp",
         "core/runtime/tests/test_internal_config.cpp",
         "core/runtime/tests/test_task_api.cpp",

@@ -4,6 +4,7 @@
  */
 
 #include "families/bert/runtime/tokenizer.h"
+#include "families/bert/runtime/unicode_grapheme.h"
 
 #include <algorithm>
 #include <cassert>
@@ -24,57 +25,6 @@ namespace {
 
 // ─── UTF-8 helpers ───
 
-inline char32_t utf8_to_char32(const std::string& s, size_t& pos) {
-    unsigned char c = static_cast<unsigned char>(s[pos]);
-    if (c < 0x80) {
-        ++pos;
-        return static_cast<char32_t>(c);
-    }
-    if ((c & 0xE0) == 0xC0 && pos + 1 < s.size()) {
-        char32_t cp = (static_cast<char32_t>(c & 0x1F) << 6) |
-                      static_cast<char32_t>(static_cast<unsigned char>(s[pos + 1]) & 0x3F);
-        pos += 2;
-        return cp;
-    }
-    if ((c & 0xF0) == 0xE0 && pos + 2 < s.size()) {
-        char32_t cp = (static_cast<char32_t>(c & 0x0F) << 12) |
-                      (static_cast<char32_t>(static_cast<unsigned char>(s[pos + 1]) & 0x3F) << 6) |
-                      static_cast<char32_t>(static_cast<unsigned char>(s[pos + 2]) & 0x3F);
-        pos += 3;
-        return cp;
-    }
-    if ((c & 0xF8) == 0xF0 && pos + 3 < s.size()) {
-        char32_t cp = (static_cast<char32_t>(c & 0x07) << 18) |
-                      (static_cast<char32_t>(static_cast<unsigned char>(s[pos + 1]) & 0x3F) << 12) |
-                      (static_cast<char32_t>(static_cast<unsigned char>(s[pos + 2]) & 0x3F) << 6) |
-                      static_cast<char32_t>(static_cast<unsigned char>(s[pos + 3]) & 0x3F);
-        pos += 4;
-        return cp;
-    }
-    ++pos;
-    return 0xFFFD;
-}
-
-inline std::string char32_to_utf8(char32_t cp) {
-    std::string r;
-    if (cp <= 0x7F) {
-        r.push_back(static_cast<char>(cp));
-    } else if (cp <= 0x7FF) {
-        r.push_back(static_cast<char>(0xC0 | ((cp >> 6) & 0x1F)));
-        r.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else if (cp <= 0xFFFF) {
-        r.push_back(static_cast<char>(0xE0 | ((cp >> 12) & 0x0F)));
-        r.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        r.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    } else if (cp <= 0x10FFFF) {
-        r.push_back(static_cast<char>(0xF0 | ((cp >> 18) & 0x07)));
-        r.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-        r.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-        r.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-    }
-    return r;
-}
-
 // Return the byte length of the UTF-8 codepoint starting at s[pos].
 inline size_t utf8_char_len(const std::string& s, size_t pos) {
     unsigned char c = static_cast<unsigned char>(s[pos]);
@@ -89,55 +39,152 @@ inline size_t utf8_char_len(const std::string& s, size_t pos) {
     return 1;
 }
 
-// ─── Precompiled Normalizer ───
-//
-// The Precompiled charsmap is a binary blob from HuggingFace tokenizers:
-//   [4 bytes LE] trie_size
-//   [trie_size bytes] double-array trie for NFKC normalization
-//   [remaining bytes] normalized string pool
-//
-// For simplicity, we skip the full NFKC trie and only handle:
-// 1. Control char removal (U+0000-U+001F except tab/newline/CR)
-// 2. Whitespace normalization (various Unicode spaces → regular space)
-// This is sufficient for most practical text inputs.
-
-inline bool is_control(char32_t cp) {
-    if (cp == '\t' || cp == '\n' || cp == '\r')
-        return false;
-    return (cp < 0x20) || cp == 0x7F || (cp >= 0x80 && cp <= 0x9F);
-}
-
-struct UnicodeRange {
-    char32_t lo, hi;
-};
-constexpr UnicodeRange kUnicodeSpaces[] = {
-    {0x00A0, 0x00A0}, {0x1680, 0x1680}, {0x2000, 0x200A}, {0x2028, 0x2029},
-    {0x202F, 0x202F}, {0x205F, 0x205F}, {0x3000, 0x3000},
-};
-
-inline bool is_unicode_space(char32_t cp) {
-    for (const auto& r : kUnicodeSpaces)
-        if (cp >= r.lo && cp <= r.hi)
-            return true;
-    return false;
-}
-
-std::string precompiled_normalize(const std::string& text) {
-    std::string result;
-    result.reserve(text.size());
-    size_t pos = 0;
-    while (pos < text.size()) {
-        char32_t cp = utf8_to_char32(text, pos);
-        if (is_control(cp))
-            continue;
-        if (is_unicode_space(cp)) {
-            result += ' ';
-            continue;
+class PrecompiledNormalizer {
+  public:
+    explicit PrecompiledNormalizer(const std::string& encoded) {
+        const auto bytes = decode_base64(encoded);
+        if (bytes.size() <= 4)
+            throw std::runtime_error("Invalid Precompiled charsmap header");
+        const size_t trie_bytes = read_u32(bytes, 0);
+        if (trie_bytes < 1024 || trie_bytes % 1024 != 0 || trie_bytes >= bytes.size() - 4)
+            throw std::runtime_error("Invalid Precompiled charsmap trie size");
+        mUnits.reserve(trie_bytes / 4);
+        for (size_t pos = 4; pos < 4 + trie_bytes; pos += 4)
+            mUnits.push_back(read_u32(bytes, pos));
+        mReplacements.assign(bytes.begin() + 4 + trie_bytes, bytes.end());
+        if (mReplacements.back() != '\0')
+            throw std::runtime_error("Invalid Precompiled charsmap string pool");
+        validate_replacements();
+        if (label(mUnits[0]) != 0 || (mUnits[0] & 256) != 0 || offset(mUnits[0]) == 0)
+            throw std::runtime_error("Invalid Precompiled charsmap root");
+        for (size_t i = 0; i < mUnits.size(); ++i) {
+            const auto unit = mUnits[i];
+            if (label(unit) <= 255) {
+                const auto child = i ^ offset(unit);
+                if ((child | 255) >= mUnits.size())
+                    throw std::runtime_error("Invalid Precompiled charsmap trie offset");
+                if ((unit & 256) != 0 && (mUnits[child] & 0x80000000U) == 0)
+                    throw std::runtime_error("Invalid Precompiled charsmap leaf");
+            } else {
+                const auto replacement = unit & 0x7fffffffU;
+                if (replacement >= mReplacements.size() ||
+                    (static_cast<unsigned char>(mReplacements[replacement]) & 0xc0) == 0x80)
+                    throw std::runtime_error("Invalid Precompiled charsmap replacement offset");
+            }
         }
-        result += char32_to_utf8(cp);
     }
-    return result;
-}
+
+    std::string normalize(const std::string& text) const {
+        std::string result;
+        result.reserve(text.size());
+        for (size_t pos = 0; pos < text.size();) {
+            const auto end = bert_unicode::grapheme_end(text, pos);
+            size_t replacement = 0;
+            if (end - pos < 6 && transform(text, pos, end, replacement)) {
+                result.append(mReplacements.data() + replacement);
+                pos = end;
+                continue;
+            }
+            while (pos < end) {
+                const auto next = bert_unicode::codepoint_end(text, pos);
+                if (transform(text, pos, next, replacement))
+                    result.append(mReplacements.data() + replacement);
+                else
+                    result.append(text, pos, next - pos);
+                pos = next;
+            }
+        }
+        return result;
+    }
+
+  private:
+    bool transform(const std::string& text, size_t start, size_t end, size_t& replacement) const {
+        size_t node = offset(mUnits[0]);
+        for (size_t pos = start; pos < end; ++pos) {
+            const auto byte = static_cast<unsigned char>(text[pos]);
+            if (byte == 0)
+                break;
+            node ^= byte;
+            const auto unit = mUnits[node];
+            if (label(unit) != byte)
+                break;
+            node ^= offset(unit);
+            if ((unit & 256) != 0) {
+                replacement = mUnits[node] & 0x7fffffffU;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void validate_replacements() const {
+        for (size_t pos = 0; pos < mReplacements.size();) {
+            const auto first = static_cast<unsigned char>(mReplacements[pos]);
+            const size_t length = first < 0x80                     ? 1
+                                  : first >= 0xc2 && first <= 0xdf ? 2
+                                  : first >= 0xe0 && first <= 0xef ? 3
+                                  : first >= 0xf0 && first <= 0xf4 ? 4
+                                                                   : 0;
+            if (length == 0 || length > mReplacements.size() - pos)
+                throw std::runtime_error("Invalid Precompiled replacement UTF-8");
+            for (size_t i = 1; i < length; ++i) {
+                if ((static_cast<unsigned char>(mReplacements[pos + i]) & 0xc0) != 0x80)
+                    throw std::runtime_error("Invalid Precompiled replacement UTF-8");
+            }
+            const auto cp = bert_unicode::codepoint(mReplacements, pos, pos + length);
+            if ((length == 3 && cp < 0x800) || (length == 4 && cp < 0x10000) ||
+                (cp >= 0xd800 && cp <= 0xdfff) || cp > 0x10ffff)
+                throw std::runtime_error("Invalid Precompiled replacement UTF-8");
+            pos += length;
+        }
+    }
+
+    static uint32_t label(uint32_t unit) { return unit & 0x800000ffU; }
+    static uint32_t offset(uint32_t unit) { return (unit >> 10) << ((unit & 512) >> 6); }
+
+    static uint32_t read_u32(const std::vector<unsigned char>& bytes, size_t pos) {
+        return uint32_t(bytes[pos]) | (uint32_t(bytes[pos + 1]) << 8) |
+               (uint32_t(bytes[pos + 2]) << 16) | (uint32_t(bytes[pos + 3]) << 24);
+    }
+
+    static std::vector<unsigned char> decode_base64(const std::string& encoded) {
+        const std::string alphabet =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        if (encoded.empty() || encoded.size() % 4 != 0)
+            throw std::runtime_error("Invalid Precompiled charsmap base64 length");
+        std::vector<unsigned char> bytes;
+        bytes.reserve(encoded.size() / 4 * 3);
+        for (size_t i = 0; i < encoded.size(); i += 4) {
+            uint32_t value = 0;
+            size_t padding = 0;
+            for (size_t j = 0; j < 4; ++j) {
+                const auto character = encoded[i + j];
+                value <<= 6;
+                if (character == '=') {
+                    if (i + 4 != encoded.size() || j < 2)
+                        throw std::runtime_error("Invalid Precompiled charsmap base64 padding");
+                    ++padding;
+                } else {
+                    const auto digit = alphabet.find(character);
+                    if (padding != 0 || digit == std::string::npos)
+                        throw std::runtime_error("Invalid Precompiled charsmap base64 character");
+                    value |= static_cast<uint32_t>(digit);
+                }
+            }
+            if ((padding == 1 && (value & 255) != 0) || (padding == 2 && (value & 65535) != 0))
+                throw std::runtime_error("Invalid Precompiled charsmap base64 trailing bits");
+            bytes.push_back(static_cast<unsigned char>(value >> 16));
+            if (padding < 2)
+                bytes.push_back(static_cast<unsigned char>(value >> 8));
+            if (padding == 0)
+                bytes.push_back(static_cast<unsigned char>(value));
+        }
+        return bytes;
+    }
+
+    std::vector<uint32_t> mUnits;
+    std::string mReplacements;
+};
 
 std::string lowercase_ascii(std::string text) {
     std::transform(text.begin(), text.end(), text.begin(),
@@ -150,21 +197,28 @@ std::string lowercase_ascii(std::string text) {
 
 static const std::string kMetaspaceChar = "\xe2\x96\x81"; // ▁ U+2581
 
-inline bool is_ws(char c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+bool whitespace_at(const std::string& text, size_t pos) {
+    const auto end = bert_unicode::codepoint_end(text, pos);
+    const auto cp = bert_unicode::codepoint(text, pos, end);
+    return (cp >= 0x09 && cp <= 0x0D) || cp == 0x20 || cp == 0x85 || cp == 0xA0 || cp == 0x1680 ||
+           (cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 || cp == 0x2029 || cp == 0x202F ||
+           cp == 0x205F || cp == 0x3000;
 }
 
-std::vector<std::string> whitespace_split(const std::string& text) {
+std::vector<std::string> whitespace_split(const std::string& text, bool unicode_whitespace) {
     std::vector<std::string> words;
+    const auto is_space = [&](size_t pos) {
+        return unicode_whitespace ? whitespace_at(text, pos) : text[pos] == ' ';
+    };
     size_t i = 0;
     while (i < text.size()) {
-        while (i < text.size() && is_ws(text[i]))
-            ++i;
+        while (i < text.size() && is_space(i))
+            i = bert_unicode::codepoint_end(text, i);
         if (i >= text.size())
             break;
         size_t start = i;
-        while (i < text.size() && !is_ws(text[i]))
-            ++i;
+        while (i < text.size() && !is_space(i))
+            i = bert_unicode::codepoint_end(text, i);
         words.push_back(text.substr(start, i - start));
     }
     return words;
@@ -301,7 +355,8 @@ std::vector<int32_t> viterbi_encode(const std::string& text, const Trie& trie, i
             ids.push_back(unk_id);
             break;
         }
-        ids.push_back(best[pos].token_id);
+        if (best[pos].token_id != unk_id || ids.empty() || ids.back() != unk_id)
+            ids.push_back(best[pos].token_id);
         pos = best[pos].prev_pos;
     }
 
@@ -326,19 +381,22 @@ class UnigramTokenizer final : public ITokenizer {
             return mAddSpecialTokens ? make_special_frame({}) : std::vector<int32_t>{};
         }
 
-        // Normalize
-        std::string normalized = mUsePrecompiled ? precompiled_normalize(text) : text;
-        if (mLowercase)
-            normalized = lowercase_ascii(std::move(normalized));
-
-        // Pre-tokenize: WhitespaceSplit → Metaspace
-        auto words = whitespace_split(normalized);
         std::vector<int32_t> ids;
-        for (size_t i = 0; i < words.size(); ++i) {
-            // Metaspace: prepend ▁ to each word
-            std::string processed = kMetaspaceChar + words[i];
-            auto word_ids = viterbi_encode(processed, mTrie, mUnkId, mUnkScore);
-            ids.insert(ids.end(), word_ids.begin(), word_ids.end());
+        for (const auto& raw : split_added_tokens(text, false)) {
+            if (raw.id >= 0) {
+                ids.push_back(raw.id);
+                continue;
+            }
+            for (const auto& segment : split_added_tokens(normalize_text(raw.text), true)) {
+                if (segment.id >= 0) {
+                    ids.push_back(segment.id);
+                    continue;
+                }
+                for (const auto& word : whitespace_split(segment.text, mWhitespaceSplit)) {
+                    auto word_ids = viterbi_encode(kMetaspaceChar + word, mTrie, mUnkId, mUnkScore);
+                    ids.insert(ids.end(), word_ids.begin(), word_ids.end());
+                }
+            }
         }
 
         if (mAddSpecialTokens)
@@ -372,6 +430,90 @@ class UnigramTokenizer final : public ITokenizer {
 
   private:
     UnigramTokenizer() = default;
+
+    struct AddedToken {
+        std::string content;
+        int32_t id;
+        bool normalized, lstrip, rstrip;
+    };
+
+    struct Segment {
+        std::string text;
+        int32_t id;
+    };
+
+    struct NormalizerStep {
+        enum class Type { Precompiled, Lowercase };
+        Type type;
+        std::unique_ptr<PrecompiledNormalizer> precompiled;
+    };
+
+    std::string normalize_text(const std::string& text) const {
+        std::string normalized = text;
+        for (const auto& step : mNormalizerSteps) {
+            if (step.type == NormalizerStep::Type::Precompiled)
+                normalized = step.precompiled->normalize(normalized);
+            else
+                normalized = lowercase_ascii(std::move(normalized));
+        }
+        return normalized;
+    }
+
+    const AddedToken* added_token_at(const std::string& text, size_t pos, bool normalized) const {
+        const AddedToken* best = nullptr;
+        for (const auto& token : mAddedTokens) {
+            if (token.normalized == normalized &&
+                (!best || token.content.size() > best->content.size()) &&
+                text.compare(pos, token.content.size(), token.content) == 0) {
+                best = &token;
+            }
+        }
+        return best;
+    }
+
+    std::vector<Segment> split_added_tokens(const std::string& text, bool normalized) const {
+        std::vector<Segment> segments;
+        size_t pos = 0;
+        size_t search_pos = 0;
+        while (search_pos < text.size()) {
+            const AddedToken* best = nullptr;
+            size_t start = search_pos;
+            for (; start < text.size(); ++start) {
+                best = added_token_at(text, start, normalized);
+                if (best)
+                    break;
+            }
+            if (!best) {
+                break;
+            }
+            search_pos = start + best->content.size();
+            size_t content_end = start;
+            if (best->lstrip) {
+                content_end = pos;
+                for (size_t cursor = pos; cursor < start;) {
+                    const auto next = bert_unicode::codepoint_end(text, cursor);
+                    if (!whitespace_at(text, cursor))
+                        content_end = next;
+                    cursor = next;
+                }
+            }
+            size_t stop = search_pos;
+            if (best->rstrip) {
+                while (stop < text.size() && whitespace_at(text, stop))
+                    stop = bert_unicode::codepoint_end(text, stop);
+            }
+            if (content_end > stop)
+                throw std::runtime_error("Unigram added-token strip ranges overlap out of order");
+            if (content_end > pos)
+                segments.push_back({text.substr(pos, content_end - pos), -1});
+            if (content_end < stop)
+                segments.push_back({{}, best->id});
+            pos = stop;
+        }
+        if (pos < text.size())
+            segments.push_back({text.substr(pos), -1});
+        return segments;
+    }
 
     static std::string decode_metaspace(const std::string& text) {
         std::string result;
@@ -465,12 +607,22 @@ class UnigramTokenizer final : public ITokenizer {
 
     void apply_normalizer_config(const nlohmann::json& norm) {
         const std::string ntype = norm.value("type", "");
+        if (ntype == "Sequence") {
+            for (const auto& sub : norm.at("normalizers"))
+                apply_normalizer_config(sub);
+            return;
+        }
         if (ntype == "Precompiled") {
-            mUsePrecompiled = true;
+            if (!norm.contains("precompiled_charsmap") ||
+                !norm.at("precompiled_charsmap").is_string())
+                throw std::runtime_error("Precompiled normalizer requires precompiled_charsmap");
+            mNormalizerSteps.push_back(
+                {NormalizerStep::Type::Precompiled,
+                 std::make_unique<PrecompiledNormalizer>(norm.at("precompiled_charsmap"))});
             return;
         }
         if (ntype == "Lowercase") {
-            mLowercase = true;
+            mNormalizerSteps.push_back({NormalizerStep::Type::Lowercase, nullptr});
             return;
         }
         if (ntype == "Prepend") {
@@ -497,12 +649,17 @@ class UnigramTokenizer final : public ITokenizer {
         auto& pt = j["pre_tokenizer"];
         std::string ptype = pt.value("type", "");
 
+        if (ptype == "WhitespaceSplit")
+            mWhitespaceSplit = true;
+
         if (ptype == "Metaspace") {
             mAddPrefixSpace = pt.value("add_prefix_space", true);
         } else if (ptype == "Sequence") {
             // Look for Metaspace inside the sequence
             if (pt.contains("pretokenizers")) {
                 for (auto& sub : pt["pretokenizers"]) {
+                    if (sub.value("type", "") == "WhitespaceSplit")
+                        mWhitespaceSplit = true;
                     if (sub.value("type", "") == "Metaspace") {
                         mAddPrefixSpace = sub.value("add_prefix_space", true);
                         break;
@@ -519,6 +676,14 @@ class UnigramTokenizer final : public ITokenizer {
             int32_t tok_id = tok.value("id", -1);
             std::string content = tok.value("content", "");
             if (tok_id >= 0 && !content.empty()) {
+                if (tok.value("single_word", false))
+                    throw std::runtime_error("Unigram single_word added tokens are not supported");
+                const bool normalized = tok.value("normalized", !tok.value("special", false));
+                auto pattern = normalized ? normalize_text(content) : content;
+                if (pattern.empty())
+                    throw std::runtime_error("Unigram added token normalizes to an empty string");
+                mAddedTokens.push_back({std::move(pattern), tok_id, normalized,
+                                        tok.value("lstrip", false), tok.value("rstrip", false)});
                 if (static_cast<size_t>(tok_id) >= mIdToToken.size()) {
                     mIdToToken.resize(static_cast<size_t>(tok_id) + 1);
                     mScores.resize(static_cast<size_t>(tok_id) + 1, 0.0f);
@@ -602,14 +767,15 @@ class UnigramTokenizer final : public ITokenizer {
     std::vector<float> mScores;
     std::unordered_map<std::string, int32_t> mTokenToId;
     std::unordered_set<int32_t> mDecodeSkipIds;
+    std::vector<AddedToken> mAddedTokens;
     Trie mTrie;
 
     int32_t mUnkId = 0;
     float mUnkScore = -100.0f;
     bool mAddSpecialTokens = true;
-    bool mUsePrecompiled = false;
-    bool mLowercase = false;
+    std::vector<NormalizerStep> mNormalizerSteps;
     bool mAddPrefixSpace = true;
+    bool mWhitespaceSplit = false;
 
     int32_t mBosId = -1;
     int32_t mEosId = -1;

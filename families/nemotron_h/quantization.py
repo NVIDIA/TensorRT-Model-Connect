@@ -40,7 +40,6 @@ from typing import Any
 
 import numpy as np
 import tensorrt as trt
-import torch
 from safetensors import safe_open
 
 NVFP4_BLOCK_SIZE = 16
@@ -264,6 +263,8 @@ def _scalar(tensors: dict[str, Any], key: str) -> float | None:
 
 def _raw_bytes(tensors: dict[str, Any], key: str) -> np.ndarray:
     """The tensor's raw bytes as a contiguous uint8 array (no dtype conversion)."""
+    import torch
+
     tensor = tensors[key].get_tensor(key)
     return np.ascontiguousarray(tensor.view(torch.uint8).numpy())
 
@@ -311,6 +312,8 @@ def _read_fp8(tensors, prefix: str) -> _FP8Weight | None:
     weight_key, scale_key = f"{prefix}.weight", f"{prefix}.weight_scale"
     if weight_key not in tensors or scale_key not in tensors:
         return None
+    import torch
+
     if tensors[weight_key].get_tensor(weight_key).dtype != torch.float8_e4m3fn:
         return None
     packed = _raw_bytes(tensors, weight_key)

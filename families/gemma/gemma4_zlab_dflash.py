@@ -29,15 +29,40 @@ def draft_rope_theta(raw):
 
 
 class ZlabDraftGraph(DenseTextGraph):
-    """Original block16 draft, including its pending-anchor output row."""
+    """External block draft, including its pending-anchor output row."""
 
-    def __init__(self, network, raw, readers, precision, capacity, target_readers):
-        if (raw.get("architectures") != ["DFlashDraftModel"] or raw.get("block_size") != 16
-                or raw.get("model_type") != "qwen3" or raw.get("hidden_act") != "silu"
+    def __init__(self, network, raw, readers, precision, capacity, target_readers, *, jetspec=False):
+        self.jetspec = jetspec
+        metadata = raw.get("dflash_config", {})
+        if not isinstance(metadata, dict) or metadata.get("causal_head", False) is not jetspec:
+            raise ValueError("Gemma block draft causal-head metadata disagrees with its variant")
+        if jetspec and (raw.get("sliding_window") is not None
+                        or set(raw.get("layer_types", ())) != {"full_attention"}):
+            raise ValueError("Gemma JetSpec requires the published causal full-attention topology")
+        # The published Bolt block8 declares W4A16_NVFP4 but supplies all
+        # 37 input scales. The 0.12 DFlash default quantizes activations for
+        # these projections; do not replace its calibrated head with a tied
+        # target head or enable the optional dense-last-layer workaround.
+        quant = raw.get("quantization_config") or {}
+        self.packed_block8 = (
+            not jetspec and raw.get("block_size") == 8
+            and raw.get("has_own_lm_head") is True and quant.get("quant_algo") == "W4A16_NVFP4"
+            and quant.get("group_size") == 16 and raw.get("num_target_layers") == 42
+            and raw.get("hidden_size") == 2560 and raw.get("num_hidden_layers") == 5
+            and raw.get("layer_types") == ["sliding_attention"] * 5
+            and raw.get("sliding_window") == 1024 and metadata.get("causal") is False
+            and metadata.get("target_layer_ids") == [5, 11, 17, 23, 35]
+        )
+        if quant and not self.packed_block8:
+            raise ValueError("Unsupported packed Gemma block draft")
+        if (raw.get("architectures") != ["DFlashDraftModel"]
+                or (raw.get("block_size") != 16 and not self.packed_block8)
+                or raw.get("model_type") != "qwen3"
+                or raw.get("hidden_act") != ("gelu_pytorch_tanh" if jetspec else "silu")
                 or raw.get("attention_bias") or raw.get("conv_kernel_size", 0)
                 or len(raw.get("layer_types", [])) != raw["num_hidden_layers"]
                 or set(raw["layer_types"]) - {"sliding_attention", "full_attention"}):
-            raise NotImplementedError("Native Gemma z-lab draft requires its original block16 topology")
+            raise NotImplementedError("Unsupported native Gemma block draft topology")
         self.rope_theta = draft_rope_theta(raw)
         self.net, self.raw, self.readers = network, raw, readers
         self.capacity, self.buffers = capacity, []
@@ -48,6 +73,17 @@ class ZlabDraftGraph(DenseTextGraph):
             raise ValueError("Gemma z-lab draft requires distinct target feature layers")
         if not 1 < capacity <= int(raw["max_position_embeddings"]):
             raise ValueError("Gemma z-lab draft capacity exceeds the checkpoint")
+        if self.packed_block8:
+            if precision != "fp16":
+                raise ValueError("The packed Gemma block8 draft requires FP16 compute")
+            expected = {"fc", "lm_head"} | {
+                f"layers.{layer}.{name}" for layer in range(5)
+                for name in ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj",
+                             "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
+            }
+            for suffix in (".input_scale", ".weight_scale", ".weight_scale_2"):
+                if {k.removesuffix(suffix) for k in readers.tensor_map if k.endswith(suffix)} != expected:
+                    raise ValueError("Incomplete or unexpected calibrated Bolt block8 projection")
         self.target_readers = target_readers
         self.target_embedding = next((p + ".embed_tokens.weight" for p in
             ("model.language_model", "language_model.model", "model")
@@ -61,6 +97,10 @@ class ZlabDraftGraph(DenseTextGraph):
                           self.dtype if dtype is None else dtype)
 
     def linear(self, value, name):
+        if self.packed_block8:
+            from .gemma4_quant import packed_w4a4_linear
+
+            return packed_w4a4_linear(self, self.cast(value, self.dtype), name)
         weight = self.cast(self.weight(name + ".weight"), value.dtype)
         return self.net.add_matrix_multiply(
             value, trt.MatrixOperation.NONE, weight, trt.MatrixOperation.TRANSPOSE).get_output(0)
@@ -80,10 +120,11 @@ class ZlabDraftGraph(DenseTextGraph):
             raise ValueError("Gemma target embedding and z-lab draft geometry differ")
         embedding = self.const(table.astype(self.storage), self.dtype)
         state = n.add_gather(embedding, tokens, 0).get_output(0)
-        # The original draft deliberately bypasses Gemma's scaled embedding.
+        # JetSpec consumes the target model's scaled token embeddings; the
+        # non-causal z-lab drafts specify their own raw-table multiplier.
         metadata = raw["dflash_config"]
         state = self.scale(state, float(metadata.get("input_embedding_scale",
-                                                     raw.get("input_embedding_scale", 1.0))))
+                                                     raw.get("input_embedding_scale", hidden**0.5 if self.jetspec else 1.0))))
         joined_positions = n.add_concatenation([context_positions, positions])
         joined_positions.axis = 0
         all_positions = joined_positions.get_output(0)
@@ -95,10 +136,12 @@ class ZlabDraftGraph(DenseTextGraph):
         query_pos, key_pos = self.reshape(positions, (-1, 1)), self.reshape(all_positions, (1, -1))
         before = self.op(key_pos, self.op(query_pos, self.const(np.array([[1]], np.int32)),
                                          trt.ElementWiseOperation.SUM), trt.ElementWiseOperation.LESS)
-        lower = self.op(query_pos, self.const(np.array([[raw["sliding_window"]]], np.int32)),
-                        trt.ElementWiseOperation.SUB)
-        visible = self.op(before, self.op(key_pos, lower, trt.ElementWiseOperation.GREATER),
-                          trt.ElementWiseOperation.AND)
+        visible = before
+        if not self.jetspec:
+            lower = self.op(query_pos, self.const(np.array([[raw["sliding_window"]]], np.int32)),
+                            trt.ElementWiseOperation.SUB)
+            visible = self.op(before, self.op(key_pos, lower, trt.ElementWiseOperation.GREATER),
+                              trt.ElementWiseOperation.AND)
         mask = n.add_select(visible, self.const(np.zeros((1, 1), np.float32)),
                             self.const(np.full((1, 1), -np.inf, np.float32))).get_output(0)
         shape = n.add_concatenation([self.const(np.array([1, 1], np.int32)),
@@ -106,13 +149,17 @@ class ZlabDraftGraph(DenseTextGraph):
         shape.axis = 0
         expanded = n.add_shuffle(mask)
         expanded.set_input(1, shape.get_output(0))
-        sliding_mask = expanded.get_output(0)
-        full_mask = self.const(np.zeros((1, 1, 1, 1), np.float32))
+        position_mask = expanded.get_output(0)
+        full_mask = position_mask if self.jetspec else self.const(np.zeros((1, 1, 1, 1), np.float32))
 
         for index, kind in enumerate(raw["layer_types"]):
             prefix = f"layers.{index}"
             attn = prefix + ".self_attn"
             normalized = self.norm(state, prefix + ".input_layernorm")
+            # Keep the residual stream in FP32, but the original calibrated
+            # projection takes FP16 inputs, including both segments of K/V.
+            if self.packed_block8:
+                normalized = self.cast(normalized, self.dtype)
             joined = n.add_concatenation([context, normalized])
             joined.axis = 0
             query = self.head_norm(self.linear(normalized, attn + ".q_proj"),
@@ -126,18 +173,26 @@ class ZlabDraftGraph(DenseTextGraph):
                 n, key, kv_heads, dim, cos, sin, all_positions, dim, sequence_length=None)
             attended = self.attention(self.scale(self.cast(query, trt.float32), dim**-0.5),
                 key, value, heads, kv_heads, dim,
-                sliding_mask if kind == "sliding_attention" else full_mask)
-            state = self.op(state, self.linear(attended, attn + ".o_proj"), trt.ElementWiseOperation.SUM)
+                position_mask if kind == "sliding_attention" else full_mask)
+            projected = self.linear(attended, attn + ".o_proj")
+            if self.packed_block8:
+                # The Gemma/Qwen-style draft keeps the residual in FP32 to
+                # avoid overflow. Projection inputs still use source Q/DQ.
+                state, projected = self.cast(state, trt.float32), self.cast(projected, trt.float32)
+            state = self.op(state, projected, trt.ElementWiseOperation.SUM)
             normalized = self.norm(state, prefix + ".post_attention_layernorm")
-            gate, up = (self.cast(self.linear(normalized, prefix + ".mlp." + name), trt.float32)
+            activation_type = self.dtype if self.packed_block8 else trt.float32
+            gate, up = (self.cast(self.linear(normalized, prefix + ".mlp." + name), activation_type)
                         for name in ("gate_proj", "up_proj"))
-            gate = graph_ops.add_activation(n, gate, "silu", dtype=np.float32)
+            gate = graph_ops.add_activation(n, gate, raw["hidden_act"],
+                                            dtype=self.storage if self.packed_block8 else np.float32)
             product = self.op(gate, up, trt.ElementWiseOperation.PROD)
             down = self.cast(self.linear(product, prefix + ".mlp.down_proj"), self.dtype)
-            state = self.op(state, down, trt.ElementWiseOperation.SUM)
+            state = self.op(state, self.cast(down, state.dtype), trt.ElementWiseOperation.SUM)
         state = self.norm(state, "norm")
-        logits = n.add_matrix_multiply(state, trt.MatrixOperation.NONE, embedding,
-                                       trt.MatrixOperation.TRANSPOSE).get_output(0)
+        logits = (self.linear(state, "lm_head") if self.packed_block8 else
+                  n.add_matrix_multiply(state, trt.MatrixOperation.NONE, embedding,
+                                        trt.MatrixOperation.TRANSPOSE).get_output(0))
         logits = self.scale(self.cast(logits, trt.float32),
                            float(metadata.get("output_multiplier", raw.get("output_multiplier", 1.0))))
         cap = metadata.get("final_logit_softcapping", raw.get("final_logit_softcapping"))
