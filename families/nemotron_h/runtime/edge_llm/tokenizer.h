@@ -3,7 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #pragma once
+#ifdef TRTMC_NEMOTRON_H_EDGE_012
+#include <tensorrt_edgellm/tokenizer/tokenizer.h>
+#else
 #include <edgellm/cpp/tokenizer/tokenizer.h>
+#endif
 #include <filesystem>
 #include <memory>
 #include <stdexcept>

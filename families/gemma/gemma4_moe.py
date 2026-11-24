@@ -54,22 +54,27 @@ def add_experts(graph, residual, dense_output, prefix):
                                   0, False).get_output(0)
     from .checkpoint_mapper import _has_tensor
 
+    activation_scales = None
     if _has_tensor(graph.readers, f"{graph.prefix}.{prefix}.experts.gate_up_proj"):
         gate_up = loop.add_iterator(graph.weight(prefix + ".experts.gate_up_proj"),
                                     0, False).get_output(0)
         down = loop.add_iterator(graph.weight(prefix + ".experts.down_proj"),
                                  0, False).get_output(0)
     else:
-        from .gemma4_quant import expert_tensor
+        from .gemma4_quant import expert_activation, expert_input_scales, expert_tensor
 
         gate_up = expert_tensor(graph, prefix, "gate_up_proj", loop)
         down = expert_tensor(graph, prefix, "down_proj", loop)
+        if graph.calibrated_experts:
+            activation_scales = expert_input_scales(graph, prefix, loop)
     if gate_up.shape != (2 * width, hidden) or down.shape != (hidden, width):
         raise ValueError("Gemma4 expert weight shape disagrees with its configuration")
     # Explicit FP32 accumulation preserves the rounded source weights.
     # The FP16 accumulator differed despite bit-identical decoded weights;
     # this boundary restores same-precision reference parity without clamps.
-    projected = n.add_matrix_multiply(graph.cast(normalized, trt.float32), trt.MatrixOperation.NONE,
+    fc1 = (expert_activation(graph, normalized, activation_scales[0])
+           if activation_scales is not None else graph.cast(normalized, trt.float32))
+    projected = n.add_matrix_multiply(fc1, trt.MatrixOperation.NONE,
                                       graph.cast(gate_up, trt.float32),
                                       trt.MatrixOperation.TRANSPOSE).get_output(0)
     projected = graph.cast(projected, graph.dtype)
@@ -80,6 +85,8 @@ def add_experts(graph, residual, dense_output, prefix):
     # the dense Gemma4 MLP, without clipping the original model's values.
     product = graph.op(graph.activation(graph.cast(gate, trt.float32)),
                        graph.cast(up, trt.float32), trt.ElementWiseOperation.PROD)
+    if activation_scales is not None:
+        product = expert_activation(graph, product, activation_scales[1])
     outputs = n.add_matrix_multiply(product, trt.MatrixOperation.NONE,
                                     graph.cast(down, trt.float32),
                                     trt.MatrixOperation.TRANSPOSE).get_output(0)

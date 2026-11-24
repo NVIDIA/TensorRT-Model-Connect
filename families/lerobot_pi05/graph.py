@@ -213,6 +213,10 @@ def attention_mqa(network, query, key, value, bias, *, heads, head_dim):
     scores = mul(network, scores, scalar(network, head_dim ** -0.5, 2, scores.dtype))
     scores = shuffle(network, scores, reshape=(heads, seq, keys))
     if bias is not None:
+        # Padded queries have no valid keys. Casting the finite FP32 mask to FP16
+        # makes every score -inf, so softmax emits NaNs that leak through the KV cache.
+        if scores.dtype == trt.float16:
+            scores = cast(network, scores, trt.float32)
         scores = add(network, scores, cast(network, shuffle(network, bias, reshape=(1, seq, keys)), scores.dtype))
     probs = cast(network, _softmax_fp32(network, scores, 2), value.dtype)
     probs = shuffle(network, probs, reshape=(heads * seq, keys))

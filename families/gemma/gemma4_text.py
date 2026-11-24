@@ -83,9 +83,12 @@ def per_layer_embedding(table: np.ndarray, index: int, width: int) -> np.ndarray
 
 
 class DenseTextGraph:
-    def __init__(self, network, raw, readers, precision, capacity, conditioned=False, paired=False, feature_layers=()):
+    def __init__(self, network, raw, readers, precision, capacity, conditioned=False,
+                 paired=False, feature_layers=(), *, calibrated_experts=False, fp8_cache=False):
         self.net, self.raw, self.readers = network, raw, readers
         self.capacity = capacity
+        self.calibrated_experts = calibrated_experts
+        self.fp8_cache = fp8_cache
         self.conditioned = conditioned
         self.paired = paired
         self.feature_layers = tuple(feature_layers)
@@ -132,6 +135,26 @@ class DenseTextGraph:
     def scale(self, value, factor):
         constant = self.const(np.full((1,) * len(value.shape), factor, np.float32), value.dtype)
         return self.op(value, constant, trt.ElementWiseOperation.PROD)
+
+    def cache_values(self, label, layer, value):
+        # Q stays in compute precision. Both past entries and new K/V must be
+        # consumed at their stored precision, including during prompt prefill.
+        dtype = trt.fp8 if self.fp8_cache else self.dtype
+        cache = self.net.add_input(f"cache_{label}_{layer}", dtype,
+                                   (self.capacity, self.widths[layer]))
+        present = value
+        if self.fp8_cache:
+            # The admitted grouped checkpoint has no per-projection scales;
+            # the released Gemma attention initializes them to one.
+            scale = self.const(np.array([1.0], dtype=np.float32))
+            present = self.net.add_quantize(value, scale, trt.fp8).get_output(0)
+            value = self.net.add_dequantize(present, scale, self.dtype).get_output(0)
+            cache = self.net.add_dequantize(cache, scale, self.dtype).get_output(0)
+        present.name = f"present_{label}_{layer}"
+        self.net.mark_output(present)
+        concat = self.net.add_concatenation([cache, value])
+        concat.axis = 0
+        return concat.get_output(0)
 
     def linear(self, value, name):
         if _has_tensor(self.readers, f"{self.prefix}.{name}.weight_scale_2"):
@@ -282,16 +305,7 @@ class DenseTextGraph:
                 k = graph_ops.add_apply_rope_native(n, k, kv_heads, head_dim, cos, sin, positions,
                                                    head_dim, sequence_length=None)
                 v = self.head_norm(v_raw, kv_heads, head_dim)
-                combined = []
-                for label, value in (("k", k), ("v", v)):
-                    cache = n.add_input(f"cache_{label}_{index}", self.dtype,
-                                        (self.capacity, self.widths[index]))
-                    value.name = f"present_{label}_{index}"
-                    n.mark_output(value)
-                    concat = n.add_concatenation([cache, value])
-                    concat.axis = 0
-                    combined.append(concat.get_output(0))
-                kv[index] = combined
+                kv[index] = (self.cache_values("k", index, k), self.cache_values("v", index, v))
             k, v = kv[owner]
             context = self.attention(q, k, v, heads, kv_heads, head_dim, masks[kind])
             attn = self.norm(self.linear(context, prefix + ".self_attn.o_proj"),
@@ -387,10 +401,16 @@ def build(request, writer, config, *, companion=None, companion_variant="mtp"):
     source = Path(request.model_dir)
     if request.quantization not in {None, "none"}:
         raise NotImplementedError("Gemma4 native quantization requires an already prepared source")
-    from .gemma4_quant import configure_aux_streams, validate_source
+    from .edge_llm.builder import uses_opt_in_release
+    from .gemma4_quant import configure_aux_streams, prepared_target_precision, validate_source
 
     readers = _open_safetensors(source)
-    validate_source(source, raw, readers)
+    calibrated_experts, fp8_cache = prepared_target_precision(
+        raw, variant=companion_variant if companion is not None else None,
+        release_012=uses_opt_in_release())
+    validate_source(source, raw, readers, calibrated_experts=calibrated_experts)
+    if fp8_cache and companion is not None and companion_variant != "jetspec":
+        raise NotImplementedError("Gemma4 prepared FP8 target cache is not mapped for this companion")
     if request.tensor_parallel_size != 1:
         raise NotImplementedError("Gemma4 native tensor parallelism is not implemented")
     if raw.get("attention_bias") or raw.get("use_bidirectional_attention") == "all":
@@ -416,17 +436,19 @@ def build(request, writer, config, *, companion=None, companion_variant="mtp"):
     zlab_draft = False
     if companion is not None:
         import json
-        if companion_variant not in {"mtp", "dflash", "dspark", "eagle3"}:
+        if companion_variant not in {"mtp", "dflash", "dspark", "eagle3", "jetspec"}:
             raise NotImplementedError("Gemma native companion variant is not implemented")
         if conditioned:
             raise ValueError("Gemma4 native companions currently map text-only requests")
         assistant_raw = json.loads((Path(companion) / "config.json").read_text())
-        zlab_draft = (companion_variant == "dflash"
+        zlab_draft = (companion_variant in {"dflash", "jetspec"}
                       and assistant_raw.get("architectures") == ["DFlashDraftModel"])
+        if companion_variant == "jetspec" and not zlab_draft:
+            raise ValueError("Gemma JetSpec requires the published external causal draft")
         if zlab_draft:
             assistant_raw["target_layer_ids"] = assistant_raw["dflash_config"]["target_layer_ids"]
             assistant_raw["mask_token_id"] = assistant_raw["dflash_config"]["mask_token_id"]
-        if companion_variant in {"dflash", "dspark", "eagle3"}:
+        if companion_variant in {"dflash", "dspark", "eagle3", "jetspec"}:
             feature_layers = tuple(assistant_raw["target_layer_ids"])
             if (assistant_raw["hidden_size"] != raw["hidden_size"]
                     or assistant_raw["vocab_size"] != raw["vocab_size"]
@@ -451,18 +473,22 @@ def build(request, writer, config, *, companion=None, companion_variant="mtp"):
 
             assistant_graph = ZlabDraftGraph(
                 assistant_network, assistant_raw, _open_safetensors(Path(companion)),
-                precision, capacity, readers)
-        else:
-            if companion_variant == "eagle3":
-                from .gemma4_eagle3 import EagleDraftGraph as DraftGraph
-            else:
-                from .gemma4_dflash import BlockDraftGraph as DraftGraph
+                precision, capacity, readers, jetspec=companion_variant == "jetspec")
+        elif companion_variant == "eagle3":
+            from .gemma4_eagle3 import EagleDraftGraph
 
-            assistant_graph = DraftGraph(
+            assistant_graph = EagleDraftGraph(
+                assistant_network, assistant_raw, _open_safetensors(Path(companion)),
+                precision, capacity, branch_tree=uses_opt_in_release())
+        else:
+            from .gemma4_dflash import BlockDraftGraph
+
+            assistant_graph = BlockDraftGraph(
                 assistant_network, assistant_raw, _open_safetensors(Path(companion)),
                 precision, capacity)
     graph = DenseTextGraph(network, raw, readers, precision, capacity,
-                           conditioned, paired=companion is not None, feature_layers=feature_layers)
+                           conditioned, paired=companion is not None, feature_layers=feature_layers,
+                           calibrated_experts=calibrated_experts, fp8_cache=fp8_cache)
     graph.build()
     build_config = builder.create_builder_config()
     build_config.builder_optimization_level = 1
@@ -495,12 +521,17 @@ def build(request, writer, config, *, companion=None, companion_variant="mtp"):
     if plan is None:
         raise RuntimeError("Gemma4 native text engine build failed")
     writer.set_header(family="gemma", task=request.task, backend=request.backend)
-    writer.add_bytes("engine.plan", bytes(plan))
-    writer.add_json("runtime.json", _runtime_config(
+    writer.add_bytes("engine.plan", memoryview(plan))
+    runtime = _runtime_config(
         source, config, precision=precision, max_cache_length=capacity,
         decoder_engine_layout="single_profile" if single_context else "dual_profile",
         tensor_parallel_size=1,
-        tensor_parallel_mode="single", kv_cache_dimensions=graph.widths))
+        tensor_parallel_mode="single", kv_cache_dimensions=graph.widths)
+    if fp8_cache:
+        runtime["kv_cache_dtype"] = "fp8"
+    if calibrated_experts:
+        runtime["expert_activation_quantization"] = "calibrated_nvfp4_block16"
+    writer.add_json("runtime.json", runtime)
 
     if assistant_graph is not None:
         # Release target graph storage before constructing the companion.
@@ -510,7 +541,7 @@ def build(request, writer, config, *, companion=None, companion_variant="mtp"):
         assistant_config.builder_optimization_level = 1
         if precision == "fp32":
             assistant_config.clear_flag(trt.BuilderFlag.TF32)
-        if companion_variant in {"dflash", "dspark", "eagle3"}:
+        if companion_variant in {"dflash", "dspark", "eagle3", "jetspec"}:
             draft_profile = builder.create_optimization_profile()
             block = min(assistant_raw.get("block_size", assistant_raw.get("ttt_length")), capacity)
             optimum = min(capacity - 1, 128)
@@ -528,17 +559,29 @@ def build(request, writer, config, *, companion=None, companion_variant="mtp"):
         assistant_plan = builder.build_serialized_network(assistant_network, assistant_config)
         if assistant_plan is None:
             raise RuntimeError("Gemma4 native companion engine build failed")
-        writer.add_bytes("assistant.plan", bytes(assistant_plan))
+        writer.add_bytes("assistant.plan", memoryview(assistant_plan))
         metadata = {
             "variant": companion_variant, "hidden_size": raw["hidden_size"],
             "vocab_size": raw["vocab_size"], "target_layers": assistant_graph.target_layers,
         }
-        if companion_variant in {"dflash", "dspark", "eagle3"}:
+        if companion_variant in {"dflash", "dspark", "eagle3", "jetspec"}:
             metadata["block_size"] = assistant_raw.get("block_size", assistant_raw.get("ttt_length"))
+            if companion_variant == "eagle3" and assistant_graph.branch_tree:
+                metadata.update(draft_top_k=10, draft_steps=6, verify_tokens=60)
             if companion_variant != "eagle3":
                 metadata["mask_token_id"] = assistant_raw["mask_token_id"]
             if zlab_draft:
                 metadata["skip_first"] = True
+            elif companion_variant == "dflash" and uses_opt_in_release():
+                # DeepSeek labels predict the next token. Its last row is
+                # outside the block after accounting for the pending anchor.
+                metadata["shifted_block_labels"] = True
+            if zlab_draft and assistant_graph.packed_block8:
+                width = getattr(getattr(request, "execution", None), "draft_top_k", None) or 1
+                metadata.update(draft_quantization="nvfp4_w4a4", draft_top_k=width,
+                                verify_tokens=8 if width == 1 else 16)
+            if companion_variant == "jetspec":
+                metadata.update(causal_head=True, draft_top_k=7, proposal_tokens=15, verify_tokens=128)
         writer.add_json("assistant.json", metadata)
 
     if include_vision:
@@ -561,7 +604,7 @@ def build(request, writer, config, *, companion=None, companion_variant="mtp"):
         visual_plan = builder.build_serialized_network(visual, visual_config)
         if visual_plan is None:
             raise RuntimeError("Gemma4 native vision engine build failed")
-        writer.add_bytes("vision.plan", bytes(visual_plan))
+        writer.add_bytes("vision.plan", memoryview(visual_plan))
         writer.add_json("vision.json", {
             "patch_size": vision["patch_size"], "pooling_kernel": vision["pooling_kernel_size"],
             "soft_tokens": soft_tokens, "hidden_size": raw["hidden_size"],
@@ -590,7 +633,7 @@ def build(request, writer, config, *, companion=None, companion_variant="mtp"):
         audio_plan = builder.build_serialized_network(acoustic, audio_config)
         if audio_plan is None:
             raise RuntimeError("Gemma4 native audio engine build failed")
-        writer.add_bytes("audio.plan", bytes(audio_plan))
+        writer.add_bytes("audio.plan", memoryview(audio_plan))
         writer.add_json("audio.json", frontend)
         if not unified:
             writer.add_bytes("audio_window.f32", window.astype("<f4").tobytes())

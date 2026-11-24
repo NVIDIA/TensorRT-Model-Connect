@@ -3,10 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/gemma/runtime/gemma4_eagle_tree.h"
+#include "families/gemma/runtime/gemma4_jetspec_tree.h"
 #include "families/gemma/runtime/kv_cache.h"
 #include "families/gemma/runtime/pipeline.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <numeric>
@@ -30,7 +33,8 @@ std::vector<float> block_values(const TensorMap& outputs, const char* name, std:
 } // namespace
 
 std::vector<int32_t>
-GemmaTextGenerationPipeline::propose_block(int32_t pending, const std::vector<int32_t>& output) {
+GemmaTextGenerationPipeline::propose_block(int32_t pending, const std::vector<int32_t>& output,
+                                           std::vector<gemma::JetSpecNode>& tree) {
     const int32_t past = state_->position();
     const int32_t count = std::min(config_.draft_block_size, state_->max_length() - past);
     if (past <= 0 || count <= 0 ||
@@ -38,7 +42,7 @@ GemmaTextGenerationPipeline::propose_block(int32_t pending, const std::vector<in
         throw std::runtime_error("Gemma4 block draft context does not match committed target");
     // z-lab's block includes the pending anchor. A one-row block has
     // no proposal to compute, but the target still consumes the pending token.
-    if (config_.draft_skip_first && count == 1)
+    if ((config_.draft_skip_first || config_.draft_shifted_block_labels) && count == 1)
         return {};
     std::vector<int32_t> ids(count, config_.draft_mask_token_id);
     ids[0] = pending;
@@ -61,12 +65,43 @@ GemmaTextGenerationPipeline::propose_block(int32_t pending, const std::vector<in
         inputs["draft_tokens"] = {ids.data(), {past}, DType::kInt32};
         inputs["draft_positions"] = {positions.data(), {past}, DType::kInt32};
         inputs.erase("context_positions");
+        if (config_.draft_eagle_tree) {
+            auto children = [&](const std::vector<int32_t>& path) {
+                std::array<int32_t, 5> ancestors{};
+                std::copy(path.begin(), path.end(), ancestors.begin());
+                int32_t depth = static_cast<int32_t>(path.size());
+                inputs["branch_tokens"] = {ancestors.data(), {5}, DType::kInt32};
+                inputs["branch_depth"] = {&depth, {1}, DType::kInt32};
+                const auto result = assistant_->forward(inputs);
+                const auto scores = block_values(result, "branch_log_probs", 10);
+                const auto& ids = result.at("branch_ids");
+                if (ids.dtype != DType::kInt32 || ids.numel() != 10 || !ids.data)
+                    throw std::runtime_error("Gemma4 EAGLE3 invalid branch IDs");
+                const auto* tokens = static_cast<const int32_t*>(ids.data);
+                std::vector<std::pair<int32_t, float>> next;
+                for (int i = 0; i < 10; ++i) {
+                    if (tokens[i] < 0 || tokens[i] >= config_.vocab_size)
+                        throw std::runtime_error("Gemma4 EAGLE3 branch ID outside vocabulary");
+                    next.emplace_back(tokens[i], scores[i]);
+                }
+                return next;
+            };
+            tree = gemma::eagle_tree(pending, std::min(6, count - 1), children);
+            block_stats_.proposed += static_cast<int32_t>(tree.size() - 1);
+            return {};
+        }
     }
     const auto outputs = assistant_->forward(inputs);
     const int32_t rows = config_.draft_eagle ? config_.draft_block_size : count;
     const auto values =
         block_values(outputs, "draft_logits", static_cast<std::size_t>(rows) * config_.vocab_size);
     std::vector<int32_t> proposals;
+    if (config_.draft_jetspec || config_.draft_ddtree) {
+        tree = gemma::jetspec_tree(values, config_.vocab_size, pending,
+                                   config_.draft_ddtree ? 4 : 7, config_.draft_ddtree ? 16 : 128);
+        block_stats_.proposed += static_cast<int32_t>(tree.size() - 1);
+        return {};
+    }
     if (config_.draft_markov || config_.draft_eagle) {
         const auto ids = outputs.find("proposal_ids");
         if (ids == outputs.end() || ids->second.dtype != DType::kInt32 ||
@@ -84,7 +119,8 @@ GemmaTextGenerationPipeline::propose_block(int32_t pending, const std::vector<in
             block_values(outputs, "proposal_confidence", count);
         }
     } else {
-        for (int32_t row = config_.draft_skip_first ? 1 : 0; row < count; ++row) {
+        const int32_t end = count - (config_.draft_shifted_block_labels ? 1 : 0);
+        for (int32_t row = config_.draft_skip_first ? 1 : 0; row < end; ++row) {
             const auto start = values.begin() + row * config_.vocab_size;
             proposals.push_back(
                 static_cast<int32_t>(std::max_element(start, start + config_.vocab_size) - start));
@@ -99,7 +135,8 @@ void GemmaTextGenerationPipeline::verify_block(const std::vector<int32_t>& token
                                                std::vector<float>& features) {
     auto* cache = static_cast<GemmaKvCache*>(state_.get());
     const auto count = static_cast<int32_t>(tokens.size());
-    if (count < 1 || count > config_.draft_block_size + (config_.draft_skip_first ? 0 : 1) ||
+    const bool includes_anchor = config_.draft_skip_first || config_.draft_shifted_block_labels;
+    if (count < 1 || count > config_.draft_block_size + (includes_anchor ? 0 : 1) ||
         cache->position() + count > cache->max_length())
         throw std::runtime_error("Gemma4 block verification exceeds target capacity");
     cache->bind_cache_inputs(prefill_module());
@@ -144,9 +181,12 @@ void GemmaTextGenerationPipeline::run_block_loop(GemmaISampler* sampler,
         sampled_next = -1;
         if (emit(pending))
             break;
-        const auto proposals = propose_block(pending, output);
-        const int32_t count = std::min<int32_t>(1 + static_cast<int32_t>(proposals.size()),
-                                                state_->max_length() - state_->position());
+        std::vector<gemma::JetSpecNode> tree;
+        const auto proposals = propose_block(pending, output, tree);
+        int32_t tree_parent = 0;
+        const int32_t window =
+            tree.empty() ? 1 + static_cast<int32_t>(proposals.size()) : config_.draft_block_size;
+        const int32_t count = std::min(window, state_->max_length() - state_->position());
         // FP16 target GEMMs can produce different K/V and logits for a
         // multi-row verification shape, even inside the same serialized plan.
         // Keep the ordinary one-row target shape and commit only its verified
@@ -167,7 +207,18 @@ void GemmaTextGenerationPipeline::run_block_loop(GemmaISampler* sampler,
                 break;
             const auto expected =
                 sampler->sample(logits.data(), config_.vocab_size, params).token_id;
-            if (proposals[row] != expected) {
+            if (!tree.empty()) {
+                // Only the target-selected branch may advance the cache. Unchosen
+                // sibling nodes must neither consume RNG draws nor produce K/V.
+                const auto it = std::find_if(tree.begin() + 1, tree.end(), [&](const auto& node) {
+                    return node.parent == tree_parent && node.token == expected;
+                });
+                if (it == tree.end()) {
+                    sampled_next = expected;
+                    break;
+                }
+                tree_parent = static_cast<int32_t>(it - tree.begin());
+            } else if (proposals[row] != expected) {
                 sampled_next = expected;
                 break;
             }
@@ -185,7 +236,9 @@ void GemmaTextGenerationPipeline::run_block_loop(GemmaISampler* sampler,
             break;
     }
     std::clog << "Gemma4 native "
-              << (config_.draft_eagle ? "EAGLE3" : (config_.draft_markov ? "DSpark" : "DFlash"))
+              << (config_.draft_jetspec ? "JetSpec"
+                  : config_.draft_eagle ? "EAGLE3"
+                                        : (config_.draft_markov ? "DSpark" : "DFlash"))
               << ": proposed=" << block_stats_.proposed << " accepted=" << block_stats_.accepted
               << " verified=" << block_stats_.verified << '\n';
 }

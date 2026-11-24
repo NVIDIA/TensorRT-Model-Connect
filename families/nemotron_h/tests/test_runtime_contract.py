@@ -251,7 +251,10 @@ def test_edge_pair_requires_draft_and_rechecks_local_inputs(tmp_path, monkeypatc
     from families.nemotron_h.edge_llm import dispatch
     from families.nemotron_h import paired
     draft.mkdir()
-    (source / "config.json").write_text(json.dumps({"max_position_embeddings": 4096}))
+    (source / "config.json").write_text(json.dumps({
+        "model_type": "nemotron_h", "max_position_embeddings": 4096,
+        "layer_types": ["linear_attention", "full_attention"],
+    }))
     monkeypatch.setattr(dispatch, "candidate", lambda *_: True)
     monkeypatch.setattr(dispatch, "source_quantization", lambda *_: "nvfp4")
     monkeypatch.setattr(dispatch.edge_llm, "local_target", lambda: {
@@ -274,8 +277,16 @@ def test_edge_pair_requires_draft_and_rechecks_local_inputs(tmp_path, monkeypatc
     def failed(*_):
         raise RuntimeError("paired preparation failed")
 
-    monkeypatch.setattr(dispatch.edge_llm, "prepare_paired", failed)
+    prepared = []
+    def preparation_fails(original, raw, *_):
+        prepared.append((original, raw))
+        raise RuntimeError("paired preparation failed")
+
+    monkeypatch.setattr(dispatch.edge_llm, "prepare_paired", preparation_fails)
     dispatch.build_speculative(request, writer, draft, "dspark")
+    [(original, raw)] = prepared
+    assert original is request
+    assert raw["num_hidden_layers"] == 2 and raw["layer_types"] == ["mamba", "attention"]
     assert native_calls.pop() == "dspark"
     assert "unchanged native pair" in caplog.text
     diagnostics = list(tmp_path.glob(".out.edge-onnx-*.log"))
@@ -295,6 +306,36 @@ def test_edge_pair_requires_draft_and_rechecks_local_inputs(tmp_path, monkeypatc
     with pytest.raises(RuntimeError, match="paired preparation failed"):
         dispatch.build_speculative(request, writer, draft, "dflash")
     assert not native_calls
+
+
+def test_active_runner_owns_edge_sdk(tmp_path, monkeypatch) -> None:
+    from importlib.machinery import ModuleSpec
+
+    from families.nemotron_h.edge_llm import builder
+
+    module = tmp_path / "pkg/tensorrt_model_connect"
+    runner = module / "bin/trtmc"
+    runner.parent.mkdir(parents=True)
+    runner.touch()
+    spec = ModuleSpec("tensorrt_model_connect", None, origin=str(module / "__init__.py"))
+    monkeypatch.setattr(builder, "find_spec", lambda name: spec if name == spec.name else None)
+    relative = Path("share/trtmc/edge-llm.json")
+    standalone = tmp_path / "standalone"
+    (standalone / relative).parent.mkdir(parents=True)
+    (standalone / relative).write_text('{"version":"0.11.0"}')
+    monkeypatch.setattr(builder, "cmake_prefixes", lambda: [standalone])
+
+    # A native-only wheel must not prepare a bundle for another runner.
+    assert not builder.package_present()
+    assert builder.selected_release() is None
+    (module / relative).parent.mkdir(parents=True)
+    (module / relative).write_text('{"version":"0.12.0"}')
+    assert builder.package_present()
+    assert builder.selected_release() == "0.12.0"
+
+    # A source checkout without a packaged binary uses the standalone SDK.
+    runner.unlink()
+    assert builder.selected_release() == "0.11.0"
 
 
 @pytest.mark.parametrize("mode", ["absent", "success", "corrupt", "failure", "cancel", "device_failure"])

@@ -7,8 +7,14 @@
 #include "families/nemotron_h/runtime/edge_llm/contract.h"
 #include "families/nemotron_h/runtime/tokenizer.h"
 
+#ifdef TRTMC_NEMOTRON_H_EDGE_012
+#include <tensorrt_edgellm/runtime/llmRuntimeUtils.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#include <tensorrt_edgellm/sampler/sampling.h>
+#else
 #include <edgellm/cpp/runtime/llmRuntimeUtils.h>
 #include <edgellm/cpp/runtime/streaming.h>
+#endif
 #include <utility>
 
 namespace trtmc::nemotron_h::edge_llm {
@@ -37,11 +43,32 @@ inline trt_edgellm::rt::LLMGenerationRequest make_request(const std::string& pro
     request.applyChatTemplate = false;
     request.addGenerationPrompt = false;
     request.enableThinking = false;
+#ifdef TRTMC_NEMOTRON_H_EDGE_012
+    // Native uses the whole vocabulary for nucleus sampling when top_k is 0 or 1.
+    // Edge uses 0 for that contract; 1 would silently turn the request greedy.
+    const bool nucleus = config.top_p > 0.0F && config.top_p < 1.0F - 1e-6F;
+    const bool greedy = config.temperature < 1e-6F || config.top_p <= 0.0F ||
+                        (!nucleus && (config.top_k == 1 || (config.top_k == 0 && config.seed < 0)));
+    if (!greedy && (config.temperature < 1e-3F || config.top_k > trt_edgellm::kMaxSamplingTopK))
+        throw std::invalid_argument(
+            "Nemotron-H Edge cannot preserve this sampling temperature or top-k");
+    request.temperature = greedy ? 0.0F : config.temperature;
+    request.topK = greedy ? 1 : (nucleus && config.top_k <= 1 ? 0 : config.top_k);
+    request.topP = !greedy && nucleus ? config.top_p : 1.0F;
+    if (!greedy &&
+        !trt_edgellm::shouldUseNonGreedySampling(request.temperature, request.topK, request.topP))
+        throw std::invalid_argument("Nemotron-H Edge cannot preserve this sampling distribution; "
+                                    "the SDK would decode greedily");
+    if (!greedy)
+        request.samplingSeed =
+            config.seed < 0 ? 42U : static_cast<uint64_t>(config.seed == 0 ? 1 : config.seed);
+#else
     const bool greedy = config.temperature < 1e-6F || config.top_p <= 0 ||
                         (config.top_k <= 1 && config.top_p >= 1.0F - 1e-6F);
     request.temperature = greedy ? 0.0F : config.temperature;
     request.topK = config.top_k;
     request.topP = config.top_p <= 0 ? 1.0F : config.top_p;
+#endif
     request.maxGenerateLength =
         config.max_new_tokens > 0 ? config.max_new_tokens : kDefaultMaxNewTokens;
     return request;

@@ -196,7 +196,22 @@ def test_gemma4_per_layer_tables_preserve_original_token_rows(tmp_path):
         "quantization": {"quant_algo": "NVFP4", "group_size": 16, "kv_cache_quant_algo": "FP8"}}))
     raw = {"enable_moe_block": True,
            "quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4"}}
-    validate_source(tmp_path, raw, readers)  # A sidecar alone does not quantize KV.
+    from families.gemma.gemma4_quant import prepared_fp8_cache, prepared_target_precision
+
+    validate_source(tmp_path, raw, readers)
+    assert not prepared_fp8_cache(raw, release_012=True)  # Sidecar alone is insufficient.
+    grouped = {**raw, "quantization_config": {
+        **raw["quantization_config"], "config_groups": {"group_0": {}},
+        "kv_cache_scheme": {"dynamic": False, "num_bits": 8, "type": "float"}}}
+    assert prepared_fp8_cache(grouped, release_012=True)
+    assert not prepared_fp8_cache(grouped, release_012=False)
+    # JetSpec is new to 0.12. Missing offload must not change its native target.
+    assert prepared_target_precision(grouped, variant="jetspec", release_012=False) == (True, True)
+    assert prepared_target_precision(grouped, variant=None, release_012=False) == (False, False)
+    assert prepared_target_precision(grouped, variant=None, release_012=True) == (True, True)
+    grouped["quantization_config"]["kv_cache_scheme"]["num_bits"] = 4
+    with pytest.raises(NotImplementedError, match="E4M3"):
+        prepared_fp8_cache(grouped, release_012=True)
     for name in ("model.layers.0.self_attn.k_proj.k_scale",
                  "model.layers.0.self_attn.q_proj.weight_scale"):
         with pytest.raises(NotImplementedError, match="attention quantization|routed experts only"):

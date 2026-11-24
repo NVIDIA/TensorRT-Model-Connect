@@ -316,6 +316,18 @@ def test_edge_pair_requires_draft_and_rechecks_local_inputs(
                 variant, (NamedCheckpoint("draft", draft),),
             ))
         assert paired_calls == ["dflash", "dflash_ddtree"]
+        # The release-prepared NVFP4 draft moves only the block width to the root.
+        raw_draft = json.loads((draft / "config.json").read_text())
+        raw_draft["block_size"] = raw_draft["dflash_config"].pop("block_size")
+        (draft / "config.json").write_text(json.dumps(raw_draft))
+        execution = BuildExecutionInputs("dflash_ddtree", (NamedCheckpoint("draft", draft),))
+        build_paired(request, None, execution)
+        assert paired_calls[-3:] == ["dflash", "dflash_ddtree", "dflash_ddtree"]
+        raw_draft["dflash_config"]["block_size"] = 8
+        (draft / "config.json").write_text(json.dumps(raw_draft))
+        with pytest.raises(ValueError, match="block-16"):
+            build_paired(request, None, execution)
+
 
 
 @pytest.mark.parametrize("sm", [80, 120])
@@ -478,6 +490,28 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
         (source / "model.safetensors").write_bytes(b"fixture")
         staged = tmp_path / "permission-probe"
         staged.mkdir()
+
+        # ONNX builds the two checkpoint roles separately but verifies the same
+        # 16-token block. The compiler must come from the selected SDK.
+        compiler = prefix / "bin/llm_build"
+        compiler.parent.mkdir(exist_ok=True)
+        compiler.touch()
+        sdk = {"onnx": True, "_prefix": prefix, "onnx_builder": "bin/llm_build"}
+        commands = builder._onnx_dflash_commands(
+            sdk, "python", source, packed, staged / "engine", 1024, 2048, False
+        )
+        base_export, base_build, draft_export, draft_build = commands
+        assert "--dflash-base" in base_export and "--dflash-draft" in draft_export
+        assert all(argv[argv.index("--dflash-draft-dir") + 1] == str(packed)
+                   for argv in (base_export, draft_export))
+        assert base_build[0] == draft_build[0] == str(compiler)
+        assert base_build[-3:] == ["--spec-base", "--max-spec-verify-tokens", "16"]
+        assert draft_build[-3:] == ["--spec-draft", "--max-spec-draft-tokens", "16"]
+        with pytest.raises(ValueError, match="SDK onnx_builder path"):
+            builder._onnx_dflash_commands(
+                {**sdk, "onnx_builder": "../llm_build"}, "python", source, packed,
+                staged / "engine", 1024, 2048, False,
+            )
 
         class StagingChecked(Exception):
             pass
