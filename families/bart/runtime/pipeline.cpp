@@ -183,8 +183,7 @@ std::vector<int32_t> BartPipeline::run_decoder(int32_t max_new_tokens) {
     std::vector<float> logits;
     int32_t current_token = decoder_start_token_id_;
     int32_t capacity = state_->max_length();
-    int32_t max_steps =
-        (capacity > 0) ? std::min(max_new_tokens, capacity) : max_new_tokens;
+    int32_t max_steps = (capacity > 0) ? std::min(max_new_tokens, capacity) : max_new_tokens;
     for (int32_t step = 0; step < max_steps; ++step) {
         run_decoder_step(current_token, logits);
         int32_t next = bart_select_argmax_token(logits);

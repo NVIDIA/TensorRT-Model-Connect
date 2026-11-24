@@ -340,7 +340,8 @@ void test_conditional_text_generation_text_input() {
     require(enc->last_attention_mask.size() == static_cast<std::size_t>(kMaxSourceLength),
             "encoder attention_mask size must match max source length");
     for (std::size_t i = 0; i < valid_text_len; ++i) {
-        require(enc->last_attention_mask[i] == 0.0f, "active position must have unmasked 0.0 score");
+        require(enc->last_attention_mask[i] == 0.0f,
+                "active position must have unmasked 0.0 score");
     }
     for (std::size_t i = valid_text_len; i < static_cast<std::size_t>(kMaxSourceLength); ++i) {
         require(enc->last_attention_mask[i] == -1e9f, "padding position must have masked score");
@@ -375,7 +376,8 @@ void test_conditional_text_generation_token_ids_input() {
     require(enc->last_attention_mask.size() == static_cast<std::size_t>(kMaxSourceLength),
             "encoder attention_mask size must match max source length");
     for (std::size_t i = 0; i < 5; ++i) {
-        require(enc->last_attention_mask[i] == 0.0f, "active position must have unmasked 0.0 score");
+        require(enc->last_attention_mask[i] == 0.0f,
+                "active position must have unmasked 0.0 score");
     }
     for (std::size_t i = 5; i < static_cast<std::size_t>(kMaxSourceLength); ++i) {
         require(enc->last_attention_mask[i] == -1e9f, "padding position must have masked score");
