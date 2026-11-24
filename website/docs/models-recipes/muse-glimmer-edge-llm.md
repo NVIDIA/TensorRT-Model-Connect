@@ -9,10 +9,12 @@ and native TensorRT fallback. Build on the target device. Both paths preserve
 the prepared checkpoint's NVFP4/MXFP8 recipe and the requested draft.
 
 Edge 0.11 is the default and its text offload requires a compatible SM120 SDK.
-To opt in to 0.12, configure Model Connect with `TRTMC_EDGELLM_RELEASE=0.12.0`,
-Edge support and ONNX tools enabled. An installed Model Connect runner uses its own SDK. For a standalone
-build, point `CMAKE_PREFIX_PATH` at the matched
-native SDK. The family option `--edge-builder-python /absolute/path/to/python`
+For 0.12, enable Edge and select `-DTRTMC_EDGELLM_RELEASE=0.12.0`. Also set
+`-DTRTMC_EDGELLM_ONNX=ON -DTRTMC_EDGELLM_ALL_KERNELS=ON`: ONNX tools alone
+do not satisfy Muse's kernel requirement. Provision the SDK from pinned Edge
+source on the target GPU. A packaged runner uses its own SDK; for a standalone
+runner, set `CMAKE_PREFIX_PATH` to the corresponding Model Connect SDK installation.
+The family option `--edge-builder-python /absolute/path/to/python`
 selects a matching wheel or source-installed exporter; it does not replace the
 C++ SDK. The 0.12 path uses the installed SDK's GPU architectures.
 

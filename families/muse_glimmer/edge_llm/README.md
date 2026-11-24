@@ -1,14 +1,22 @@
 # Muse-Glimmer with Edge-LLM
 
 The `muse_glimmer` family owns complete-network offload, argument mapping,
-engine assets, runtime orchestration, and validation. Model Connect defaults to Edge 0.11 during the migration. Select 0.12 at
-CMake configure time with `-DTRTMC_ENABLE_EDGELLM=ON -DTRTMC_EDGELLM_RELEASE=0.12.0
--DTRTMC_EDGELLM_ONNX=ON`. This selects the C++ ABI at build time, not at request time.
+engine assets, runtime orchestration, and validation. Edge 0.11 remains the
+default SDK during migration. To select 0.12, configure Model Connect with
+`-DTRTMC_ENABLE_EDGELLM=ON -DTRTMC_EDGELLM_RELEASE=0.12.0`.
 
 ## Edge 0.12
 
-A packaged Model Connect runner uses its own Edge SDK. For a standalone build,
-expose its matching native SDK via `CMAKE_PREFIX_PATH`. Use an isolated Python environment
+Muse needs both `-DTRTMC_EDGELLM_ONNX=ON` and
+`-DTRTMC_EDGELLM_ALL_KERNELS=ON`. Follow the
+[SDK provisioning guide](../../../cmake/edge_llm/README.md) to build on the
+target GPU. If CMake finds an external SDK, point `TRTMC_EDGELLM_SOURCE_DIR`
+at the populated, pinned Edge checkout: the upstream binary SDK does not
+attest which kernel groups it contains.
+
+A packaged runner uses its own SDK. For a standalone runner, set
+`CMAKE_PREFIX_PATH` to the Model Connect SDK installation containing
+`share/trtmc/edge-llm.json`. Use an isolated Python environment
 with the matching 0.12 exporter (wheel or source installation), Transformers
 5.17.0 and the same TensorRT version as the SDK. Pass its absolute interpreter
 path to the family; the wheel alone does not provide the native runtime. For example:
