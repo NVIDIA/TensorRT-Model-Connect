@@ -15,5 +15,7 @@ exclude:
     reason: the generic embed reference sends unprefixed text; nomic-embed needs a query or document role, and its catalog testcase has no prompt
   - profile: nemotron-omni-nvfp4-text-image
     reason: the native reference cannot load the checkpoint, which needs its own modeling code and is ModelOpt mixed FP8/NVFP4 (Transformers has no modelopt quantizer); the family's independent reference is a pinned vLLM snapshot, and AIPerf has no vLLM native backend
+  - profile: pi05-openpi-*
+    reason: the native reference runs LeRobot's pi0.5 policy and processors on LIBERO observations; the openpi policies use their own normalization, camera mapping and action horizon, and the family's openpi reference is a recorded FP32 action set, not a native model the qualification can serve
   - profile: qwen3-moe-tiny-random
     reason: random-weight test model; there is no accuracy to measure, and its timing of a few ms per call adds no qualification signal (on Jetson Thor it varied beyond the 5% comparability bound)
