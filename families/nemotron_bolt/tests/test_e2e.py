@@ -6,6 +6,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -113,8 +114,6 @@ def _snapshot(hf_id, revision):
 
 @pytest.fixture(scope="module")
 def built_bundle(tmp_path_factory):
-    from families.nemotron_bolt.cli import build
-
     current_key = None
     bundle = None
 
@@ -131,30 +130,45 @@ def built_bundle(tmp_path_factory):
             manifest["max_sequence_length"],
         )
         if key != current_key:
+            current_key = None
             if bundle is not None:
                 bundle.unlink(missing_ok=True)
             with evidence_stage("checkpoint"):
                 checkpoint = _snapshot(manifest["hf_id"], manifest["hf_revision"])
-                pair = {}
+                pair = []
                 if draft:
                     local = _snapshot(draft["hf_id"], draft["hf_revision"])
-                    pair = {"execution_variant": "lilicorr", "companion": [f"draft={local}"]}
+                    pair = ["--execution-variant", "lilicorr", "--companion", f"draft={local}"]
             bundle = tmp_path_factory.mktemp("bolt") / manifest["bundle"]
             with evidence_stage("build"):
-                assert (
-                    build(
-                        model=checkpoint,
-                        output=bundle,
-                        task=manifest["task"],
-                        precision=manifest["precision"],
-                        max_sequence_length=manifest["max_sequence_length"],
-                        edge_builder_python=os.environ.get(
-                            "TRTMC_NEMOTRON_BOLT_EDGE_BUILDER_PYTHON"
-                        ),
-                        **pair,
-                    )
-                    == 0
-                )
+                # Keep a fatal compiler error in the build command, so pytest can report it.
+                command = [
+                    sys.executable,
+                    "-X",
+                    "faulthandler",
+                    "-m",
+                    "tensorrt_model_connect",
+                    _FAMILY,
+                    "build",
+                    str(checkpoint),
+                    "-o",
+                    str(bundle),
+                    "--task",
+                    manifest["task"],
+                    "--precision",
+                    manifest["precision"],
+                    "--max-sequence-length",
+                    str(manifest["max_sequence_length"]),
+                    "--verbose",
+                    *pair,
+                ]
+                if builder_python := os.environ.get("TRTMC_NEMOTRON_BOLT_EDGE_BUILDER_PYTHON"):
+                    command.extend(["--edge-builder-python", builder_python])
+                try:
+                    subprocess.run(command, check=True, capture_output=True, text=True)
+                except subprocess.CalledProcessError as exc:
+                    print(exc.stderr, file=sys.stderr, end="")
+                    raise
             current_key = key
         return bundle
 

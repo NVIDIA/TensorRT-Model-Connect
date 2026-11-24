@@ -4,6 +4,7 @@
 """Publish Bolt's source-independent native TRT plans and only the assets used at runtime."""
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -58,7 +59,12 @@ def build_native(request, writer):
     writer.add_bytes("embeddings.bf16", memoryview(embed.view(np.uint16)))
     for index in [*range(len(kinds)), "head"]:
         key = "head" if index == "head" else f"{index:02d}"
+        if request.verbose:
+            kind = "output" if index == "head" else kinds[index]
+            print(f"Building Bolt language plan {key} ({kind})", file=sys.stderr, flush=True)
         plan = build_plan(weights, text, index, capacity, logger=logger)
+        if request.verbose:
+            print(f"Serialized Bolt language plan {key}", file=sys.stderr, flush=True)
         writer.add_bytes(f"language/{key}.plan", memoryview(plan))
         del plan
     if request.task == "vision_language_generation":
