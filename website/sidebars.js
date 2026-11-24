@@ -49,9 +49,9 @@ module.exports = {
         'models-recipes/cosmos3-edge-llm',
         'models-recipes/hunyuan-edge-llm',
         'models-recipes/mistral-edge-llm',
-        'models-recipes/qwen-flash-next-edge-llm',
         'models-recipes/nemotron-omni-edge-llm',
         'models-recipes/pi05-edge-llm',
+        'models-recipes/qwen-flash-next-edge-llm',
         {
           type: 'category',
           label: 'Model Recipes',
