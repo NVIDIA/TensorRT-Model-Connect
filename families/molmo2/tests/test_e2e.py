@@ -1,6 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Direct build, upstream preprocessing, and native Task generation qualification."""
+"""Direct build, upstream preprocessing, and native Task generation qualification.
+
+Every manifest under ``manifests/`` is one bundle: the BF16 build and the FP8
+build (``quantization`` in the manifest) answer the same requests and must
+match the upstream BF16 reference token for token.
+"""
 
 from __future__ import annotations
 
@@ -19,10 +24,19 @@ from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 from tools.ci.environment import prepared_python
 
 ROOT = Path(__file__).resolve().parent
-MANIFEST = json.loads((ROOT / "manifests/molmo2-8b.json").read_text())
+MANIFESTS = {
+    path.name: json.loads(path.read_text()) for path in sorted((ROOT / "manifests").glob("*.json"))
+}
+DEFAULT_MANIFEST = "molmo2-8b.json"
+MANIFEST = MANIFESTS[DEFAULT_MANIFEST]
+CASES = {
+    case["name"]: (file, case)
+    for file, manifest in MANIFESTS.items()
+    for case in manifest["testcases"]
+}
 
 
-def _selected(config, case):
+def _selected(config, manifest, case):
     models = {part for arg in config.getoption("--e2e-model") for part in arg.split(",")}
     selection_file = config.getoption("--e2e-models-file")
     if selection_file:
@@ -30,7 +44,7 @@ def _selected(config, case):
     cases = {part for arg in config.getoption("--e2e-testcase") for part in arg.split(",")}
     return (
         bool(models or cases)
-        and (not models or models.intersection({"molmo2", MANIFEST["name"], case["name"]}))
+        and (not models or models.intersection({"molmo2", manifest["name"], case["name"]}))
         and (not cases or case["name"] in cases)
     )
 
@@ -54,27 +68,27 @@ def _reference_python():
     return prepared_python(ROOT.parents[2], MANIFEST["family"], dict(os.environ))
 
 
-def _validate_bundle(inspection):
-    assert inspection["family"] == MANIFEST["family"]
-    assert inspection["task"] == MANIFEST["task"] and inspection["backend"] == "trt"
+def _validate_bundle(inspection, manifest=MANIFEST):
+    assert inspection["family"] == manifest["family"]
+    assert inspection["task"] == manifest["task"] and inspection["backend"] == "trt"
     provenance = inspection.get("provenance")
     assert isinstance(provenance, dict) and provenance.get("version") == 1, (
         "Molmo2 qualification requires recorded build provenance"
     )
     assert provenance.get("checkpoint") == {
-        "hf_id": MANIFEST["hf_id"],
-        "revision": MANIFEST["hf_revision"],
+        "hf_id": manifest["hf_id"],
+        "revision": manifest["hf_revision"],
     }, "Molmo2 bundle checkpoint identity does not match the selected manifest"
     expected = {
-        "precision": MANIFEST["precision"],
-        "max_sequence_length": MANIFEST["max_sequence_length"],
-        "tensor_parallel_size": MANIFEST["tensor_parallel_size"],
+        "precision": manifest["precision"],
+        "max_sequence_length": manifest["max_sequence_length"],
+        "tensor_parallel_size": manifest["tensor_parallel_size"],
         "context_parallel_size": 1,
         "max_batch_size": 1,
         "image_height": None,
         "image_width": None,
         "video_num_frames": None,
-        "quantization": None,
+        "quantization": manifest.get("quantization"),
         "fp32_layers": [],
         "dynamic_kv_cache": False,
         "mtp_seq_len": None,
@@ -91,9 +105,10 @@ def _validate_bundle(inspection):
 @pytest.fixture(scope="session")
 def artifacts(tmp_path_factory):
     # Keep both outcomes so a failed shared build is never retried per case.
-    outcome = {"stage": "preparation"}
+    outcomes = {}
 
-    def prepare():
+    def prepare(manifest_file=DEFAULT_MANIFEST):
+        outcome = outcomes.setdefault(manifest_file, {"stage": "preparation"})
         if "error" in outcome:
             for name in ("checkpoint", "native_process", "qualification_results"):
                 if name in outcome:
@@ -102,7 +117,7 @@ def artifacts(tmp_path_factory):
                 raise outcome["error"]
         if "result" not in outcome:
             try:
-                outcome["result"] = _prepare_artifacts(tmp_path_factory, outcome)
+                outcome["result"] = _prepare_artifacts(tmp_path_factory, outcome, manifest_file)
             except Exception as error:
                 outcome["error"] = error
                 raise
@@ -111,25 +126,26 @@ def artifacts(tmp_path_factory):
     return prepare
 
 
-def _prepare_artifacts(tmp_path_factory, outcome):
+def _prepare_artifacts(tmp_path_factory, outcome, manifest_file):
+    manifest = MANIFESTS[manifest_file]
     started = time.monotonic()
     with evidence_stage("preparation"):
         root = tmp_path_factory.mktemp("molmo2")
     outcome["stage"] = "checkpoint"
     with evidence_stage("checkpoint"):
-        checkpoint = checkpoint_directory(MANIFEST["hf_id"], MANIFEST["hf_revision"])
+        checkpoint = checkpoint_directory(manifest["hf_id"], manifest["hf_revision"])
         overridden = "TRTMC_MOLMO2_MODEL_DIR" in os.environ
         outcome["checkpoint"] = {
             "resolved_directory": str(checkpoint.resolve()),
             "from_override": overridden,
-            "resolved_revision": None if overridden else MANIFEST["hf_revision"],
+            "resolved_revision": None if overridden else manifest["hf_revision"],
         }
         record_evidence("checkpoint", outcome["checkpoint"])
     outcome["stage"] = "preparation"
     with evidence_stage("preparation"):
         runtime = _path("TRTMC_RUNTIME_ROOT")
         binary = _path("TRTMC_BINARY")
-    bundle = Path(os.environ.get("TRTMC_MOLMO2_BUNDLE", root / MANIFEST["bundle"]))
+    bundle = Path(os.environ.get("TRTMC_MOLMO2_BUNDLE", root / manifest["bundle"]))
     reference = os.environ.get("TRTMC_MOLMO2_REFERENCE_RESULTS")
     python = None
     if "TRTMC_MOLMO2_BUNDLE" not in os.environ:
@@ -144,10 +160,11 @@ def _prepare_artifacts(tmp_path_factory, outcome):
                     checkpoint,
                     bundle,
                     "molmo2",
-                    MANIFEST["task"],
-                    MANIFEST["precision"],
-                    max_sequence_length=MANIFEST["max_sequence_length"],
-                    tensor_parallel_size=MANIFEST["tensor_parallel_size"],
+                    manifest["task"],
+                    manifest["precision"],
+                    max_sequence_length=manifest["max_sequence_length"],
+                    tensor_parallel_size=manifest["tensor_parallel_size"],
+                    quantization=manifest.get("quantization"),
                 )
             )
     outcome["stage"] = "build"
@@ -156,7 +173,7 @@ def _prepare_artifacts(tmp_path_factory, outcome):
         inspection = json.loads(
             subprocess.check_output([str(binary), "inspect", str(bundle)], text=True)
         )
-        _validate_bundle(inspection)
+        _validate_bundle(inspection, manifest)
     outcome["stage"] = "reference"
     if reference:
         reference = Path(reference)
@@ -173,6 +190,8 @@ def _prepare_artifacts(tmp_path_factory, outcome):
                     str(checkpoint),
                     "--output",
                     str(reference),
+                    "--manifest",
+                    str(ROOT / "manifests" / manifest_file),
                 ],
                 check=True,
                 timeout=1800,
@@ -198,7 +217,7 @@ def _prepare_artifacts(tmp_path_factory, outcome):
                 str(bundle),
                 str(runtime),
                 str(reference),
-                str(ROOT / "manifests/molmo2-8b.json"),
+                str(ROOT / "manifests" / manifest_file),
             ],
             check=True,
             capture_output=True,
@@ -228,7 +247,7 @@ def _prepare_artifacts(tmp_path_factory, outcome):
     record_evidence("qualification_results", outcome["qualification_results"])
     outcome["stage"] = "compare"
     with evidence_stage("compare"):
-        assert len(native) == len(MANIFEST["testcases"]) + 1
+        assert len(native) == len(manifest["testcases"]) + 1
         for output in native:
             expected = results[output["name"]]
             assert output["token_ids"] == expected["tokens"]
@@ -237,7 +256,7 @@ def _prepare_artifacts(tmp_path_factory, outcome):
     preparation = {
         "shared": True,
         "seconds": time.monotonic() - started,
-        "cases": [case["name"] for case in MANIFEST["testcases"]],
+        "cases": [case["name"] for case in manifest["testcases"]],
         "bundle_info": inspection,
         "checkpoint": outcome["checkpoint"],
         "native_process": outcome["native_process"],
@@ -247,15 +266,16 @@ def _prepare_artifacts(tmp_path_factory, outcome):
 
 
 @pytest.mark.e2e
-@pytest.mark.parametrize("case_name", [case["name"] for case in MANIFEST["testcases"]])
+@pytest.mark.parametrize("case_name", list(CASES))
 def test_upstream_and_native_e2e(case_name, request, tmp_path):
-    case = next(case for case in MANIFEST["testcases"] if case["name"] == case_name)
-    if not _selected(request.config, case):
+    manifest_file, case = CASES[case_name]
+    manifest = MANIFESTS[manifest_file]
+    if not _selected(request.config, manifest, case):
         pytest.skip("Molmo2 E2E requires an explicit family or testcase selector")
-    record_evidence("inputs", {"manifest": MANIFEST, "case": case, "prompt": case["prompt"]})
+    record_evidence("inputs", {"manifest": manifest, "case": case, "prompt": case["prompt"]})
     record_evidence(
         "checkpoint",
-        {"requested_repo_id": MANIFEST["hf_id"], "requested_revision": MANIFEST["hf_revision"]},
+        {"requested_repo_id": manifest["hf_id"], "requested_revision": manifest["hf_revision"]},
     )
     record_evidence(
         "thresholds",
@@ -269,7 +289,7 @@ def test_upstream_and_native_e2e(case_name, request, tmp_path):
         },
     )
     checkpoint, bundle, reference, results, outputs, preparation, reference_source = (
-        request.getfixturevalue("artifacts")()
+        request.getfixturevalue("artifacts")(manifest_file)
     )
     name = case["name"]
     expected = results[name]

@@ -15,6 +15,12 @@ def main():
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--preprocess-only", action="store_true")
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=Path(__file__).parent / "manifests/molmo2-8b.json",
+        help="manifest whose testcases to run (the reference is always the BF16 model)",
+    )
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     os.environ["HF_MODULES_CACHE"] = str(args.output / "hf-modules")
@@ -29,7 +35,7 @@ def main():
     assert transformers.__version__ == "4.57.1", (
         "use tests/requirements.txt in an isolated reference environment"
     )
-    manifest = json.loads((Path(__file__).parent / "manifests/molmo2-8b.json").read_text())
+    manifest = json.loads(args.manifest.read_text())
     processor = AutoProcessor.from_pretrained(
         args.model_dir, trust_remote_code=True, local_files_only=True
     )
