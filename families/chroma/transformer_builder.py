@@ -60,8 +60,9 @@ def modulation_index_features(rows: int) -> np.ndarray:
 
 class _Denoiser:
     def __init__(self, graph: Graph, weights: SafetensorsDirectory, config: TransformerConfig,
-                 text_length: int, image_tokens: int) -> None:
+                 text_length: int, image_tokens: int, quantized: dict | None = None) -> None:
         self.g = graph
+        self.quantized = quantized or {}
         self.w = weights
         self.c = config
         self.text_length = text_length
@@ -70,6 +71,11 @@ class _Denoiser:
 
     # ---------------------------------------------------------------- pieces
     def linear(self, x: trt.ITensor, name: str) -> trt.ITensor:
+        spec = self.quantized.get(name)
+        if spec is not None:
+            from .quantization import quantized_linear
+
+            return quantized_linear(self.g, x, self.w[f"{name}.weight"], self.w[f"{name}.bias"], *spec)
         return self.g.linear(x, self.w[f"{name}.weight"], self.w[f"{name}.bias"])
 
     def row(self, modulation: trt.ITensor, index: int) -> trt.ITensor:
@@ -167,7 +173,19 @@ class _Denoiser:
         key = self.qk_norm(self.heads(self.linear(x, f"{name}.attn.to_k"), self.tokens), f"{name}.attn.norm_k")
         value = self.heads(self.linear(x, f"{name}.attn.to_v"), self.tokens)
         attended = self.attend(query, key, value, rope, mask)
-        projected = self.linear(g.concat([attended, mlp], axis=2), f"{name}.proj_out")
+        spec = self.quantized.get(f"{name}.proj_out.mlp")
+        if spec is None:
+            projected = self.linear(g.concat([attended, mlp], axis=2), f"{name}.proj_out")
+        else:
+            # Split by input columns: the attention half stays BF16, the MLP half is quantized.
+            from .quantization import quantized_linear
+
+            weight = self.w[f"{name}.proj_out.weight"]
+            inner = self.c.inner_dim
+            projected = g.add(
+                g.linear(attended, weight[:, :inner]),
+                quantized_linear(g, mlp, weight[:, inner:], self.w[f"{name}.proj_out.bias"], *spec),
+            )
         return g.add(hidden, g.mul(gate, projected))
 
     def approximator(self, timestep_features: trt.ITensor) -> trt.ITensor:
@@ -197,10 +215,12 @@ def build_transformer_network(
     text_length: int,
     grid_height: int,
     grid_width: int,
+    quantized: dict | None = None,
 ) -> None:
+    """``quantized`` maps projection names to ``(format, activation scale)``; see ``quantization.py``."""
     network = graph.network
     image_tokens = grid_height * grid_width
-    model = _Denoiser(graph, weights, config, text_length, image_tokens)
+    model = _Denoiser(graph, weights, config, text_length, image_tokens, quantized)
 
     hidden_states = network.add_input("hidden_states", trt.float32, (1, image_tokens, config.in_channels))
     encoder_states = network.add_input(
