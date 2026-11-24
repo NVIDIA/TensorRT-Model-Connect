@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -135,6 +136,29 @@ def _run_native(binary: Path, runtime_root: Path, bundle: Path, case: dict) -> d
     return json.loads(completed.stdout)
 
 
+def _equal_phase_potentials(answer: str) -> bool:
+    """Recognize an explicit equality between the liquid and solid phases of pure water."""
+    liquid = r"(?:the )?liquid(?: water| phase)?"
+    solid = r"(?:the )?(?:ice|solid(?: water| phase)?)"
+    pair = rf"(?:{liquid} and {solid}|{solid} and {liquid})"
+    same = r"(?:equal|identical|the same)"
+    for clause in re.split(r"[.;!?\n]", answer):
+        if re.search(r"\b(?:not|never|false)\b|n['’]t\b", clause):
+            continue
+        for first, second in ((liquid, solid), (solid, liquid)):
+            if re.search(
+                rf"\bchemical potential of {first} (?:equals|is equal to) "
+                rf"(?:that of|the chemical potential of) {second}\b",
+                clause,
+            ):
+                return True
+        if re.search(
+            rf"\b{pair} (?:have|share) {same} chemical potentials?\b", clause
+        ) or re.search(rf"\bchemical potentials? (?:of|in) {pair} (?:are|is) {same}\b", clause):
+            return True
+    return False
+
+
 def _assert_correctness(payload: dict, case: dict, tokenizer: Tokenizer) -> None:
     ids = payload["token_ids"]
     assert isinstance(ids, list) and ids
@@ -168,6 +192,10 @@ def _assert_correctness(payload: dict, case: dict, tokenizer: Tokenizer) -> None
     )
     for alternatives in case["expected_terms"]:
         assert any(term.casefold() in answer for term in alternatives), (alternatives, answer)
+    if energy_terms := case.get("phase_energy_terms"):
+        assert any(term.casefold() in answer for term in energy_terms) or _equal_phase_potentials(
+            answer
+        ), (energy_terms, answer)
 
 
 @pytest.mark.parametrize("case_name", sorted(_CASES))

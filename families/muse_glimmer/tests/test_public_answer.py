@@ -19,6 +19,11 @@ def tokenizer():
         "to=self",
         "ice",
         "Gibbs",
+        "The chemical potentials of liquid water and ice are equal.",
+        "Liquid water and ice have unequal chemical potentials.",
+        "The chemical potential of ice equals that of liquid water.",
+        "Ice and liquid water do not have equal chemical potentials.",
+        "Ice melts; liquid water and vapor have equal chemical potentials.",
     ]
     tokenizer = Tokenizer(WordLevel(dict(zip(words, range(len(words))))))
     tokenizer.add_special_tokens(words[:3])
@@ -29,6 +34,11 @@ def tokenizer():
     ("thinking", "ids", "error"),
     [
         (False, [6, 7], None),
+        (False, [8], None),
+        (False, [9], "gibbs"),
+        (True, [2, 0, 3, 4, 1, 10], None),
+        (False, [11], "gibbs"),
+        (False, [12], "gibbs"),
         (True, [5, 1, 2, 0, 3, 4, 1, 6, 7], None),
         (False, [5, 1, 6, 7], "unexpected turn"),
         (True, [3, 4, 6, 7], "no generated public turn"),
@@ -42,7 +52,8 @@ def test_public_answer(tokenizer, thinking, ids, error):
     case = {
         "max_new_tokens": 12,
         "enable_thinking": thinking,
-        "expected_terms": [["ice"], ["gibbs"]],
+        "expected_terms": [["ice"]],
+        "phase_energy_terms": ["gibbs"],
     }
     if error is None:
         _assert_correctness(payload, case, tokenizer)

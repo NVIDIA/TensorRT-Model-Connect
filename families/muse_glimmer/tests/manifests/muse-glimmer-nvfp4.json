@@ -21,7 +21,8 @@
       "top_p": 1.0,
       "use_chat_template": true,
       "enable_thinking": false,
-      "expected_terms": [["free energy", "gibbs"], ["ice", "crystal"]]
+      "expected_terms": [["ice", "crystal"]],
+      "phase_energy_terms": ["free energy", "gibbs"]
     }
   ]
 }
