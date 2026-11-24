@@ -1,4 +1,8 @@
-// SPDX-License-Identifier: Apache-2.0
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 // In-process trusted host-pointer bridge. No model policy or TensorRT topology.
 #include "families/hstu/include/history_cache.h"
 #include "trtmc/runtime/family_loader.h"

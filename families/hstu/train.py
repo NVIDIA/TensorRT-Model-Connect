@@ -1,4 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
 """Train the public one-block HSTU ranking adapter on a local MovieLens u.data.
 
 This is an example checkpoint recipe, not an official Meta pretrained model.

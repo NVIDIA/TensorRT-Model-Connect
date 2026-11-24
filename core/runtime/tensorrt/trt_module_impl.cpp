@@ -139,6 +139,20 @@ void TrtModuleImpl::discover_tensor_aliases(nvinfer1::ICudaEngine* engine) {
     }
 }
 
+nvinfer1::Dims TrtModuleImpl::initial_external_binding_dims(nvinfer1::ICudaEngine* engine,
+                                                            const std::string& name) const {
+    auto dims = engine->getTensorShape(name.c_str());
+    if (dims_are_dynamic(dims)) {
+        if (engine->getTensorIOMode(name.c_str()) != nvinfer1::TensorIOMode::kINPUT)
+            throw std::invalid_argument("dynamic output prebinding is unsupported: " + name);
+        dims =
+            engine->getProfileShape(name.c_str(), profile_idx_, nvinfer1::OptProfileSelector::kMAX);
+        if (dims.nbDims < 0 || dims_are_dynamic(dims))
+            throw std::invalid_argument("prebinding requires a bounded input profile: " + name);
+    }
+    return dims;
+}
+
 void TrtModuleImpl::validate_initial_external_bindings(
     nvinfer1::ICudaEngine* engine, const std::vector<ModuleExternalBinding>& external_bindings) {
     for (const auto& binding : external_bindings) {
@@ -157,18 +171,7 @@ void TrtModuleImpl::validate_initial_external_bindings(
                                         "' must be bound after module creation");
         }
 
-        auto dims = engine->getTensorShape(binding.tensor_name.c_str());
-        if (dims_are_dynamic(dims)) {
-            if (engine->getTensorIOMode(binding.tensor_name.c_str()) !=
-                nvinfer1::TensorIOMode::kINPUT)
-                throw std::invalid_argument("dynamic output prebinding is unsupported: " +
-                                            binding.tensor_name);
-            dims = engine->getProfileShape(binding.tensor_name.c_str(), profile_idx_,
-                                           nvinfer1::OptProfileSelector::kMAX);
-            if (dims.nbDims < 0 || dims_are_dynamic(dims))
-                throw std::invalid_argument("prebinding requires a bounded input profile: " +
-                                            binding.tensor_name);
-        }
+        const auto dims = initial_external_binding_dims(engine, binding.tensor_name);
         std::vector<int64_t> shape;
         const auto required_bytes = compute_alloc_bytes(
             dims, from_trt_dtype(engine->getTensorDataType(binding.tensor_name.c_str())), shape);

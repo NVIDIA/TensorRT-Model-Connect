@@ -1,4 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
 """Execute the pinned Meta block itself; shim only dense/jagged transport on CPU."""
 
 import ast

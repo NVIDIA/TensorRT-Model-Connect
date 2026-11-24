@@ -1,4 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
 """Build a public plugin against the supplied 26.10 prototype SDK ABI.
 
 Run INSIDE tritonserver:26.10-py3-trtmc-0.2.0. Its release-coupled C++

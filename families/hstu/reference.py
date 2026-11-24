@@ -1,4 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
 """Dense NumPy form of Meta's public HSTU block and a target-aware ranking adapter.
 
 The block is LN -> SiLU(U,V,Q,K) -> SiLU(QK^T)/N -> mask -> AV ->

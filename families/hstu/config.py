@@ -1,4 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
 """Public schema, with no dependency on a customer checkpoint or feature set."""
 
 from dataclasses import asdict, dataclass

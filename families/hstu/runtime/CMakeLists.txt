@@ -1,4 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+
 add_library(trtmc_model_hstu SHARED pipeline.cpp staged_pipeline.cpp history_snapshot.cpp plugin.cpp)
 target_include_directories(trtmc_model_hstu PRIVATE ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include)
 target_include_directories(trtmc_model_hstu SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
