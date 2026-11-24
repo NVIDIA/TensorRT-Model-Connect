@@ -52,3 +52,20 @@ if(TRTMC_BUILD_TESTS)
   add_test(NAME test_glm_pipeline COMMAND test_glm_pipeline)
   set_tests_properties(test_glm_pipeline PROPERTIES SKIP_RETURN_CODE 77 LABELS gpu)
 endif()
+
+if(TRTMC_BUILD_TESTS)
+  # CPU-backed KV-cache test: CUDA calls are served from host memory, and an
+  # overlapping copy fails the test.
+  add_executable(test_glm_kv_cache
+    ${PROJECT_SOURCE_DIR}/families/glm/tests/cpp/test_kv_cache.cpp
+    kv_cache.cpp
+    ${PROJECT_SOURCE_DIR}/core/runtime/primitives/device_tensor.cpp
+  )
+  target_include_directories(test_glm_kv_cache PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_glm_kv_cache SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_glm_kv_cache PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME glm_kv_cache COMMAND test_glm_kv_cache)
+endif()

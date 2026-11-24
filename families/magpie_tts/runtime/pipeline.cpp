@@ -27,6 +27,15 @@
 namespace trtmc {
 
 namespace {
+// Every decoded frame stores one K/V row before its codes are sampled. The
+// cache never drops rows, so decoding stops once it is full.
+int32_t frames_left_in_cache(const MagpieInferenceState& state, int32_t max_frames) {
+    const int32_t capacity = state.max_length();
+    if (capacity < 0)
+        return max_frames;
+    return std::min(max_frames, std::max(0, capacity - state.position()));
+}
+
 using SteadyClock = std::chrono::steady_clock;
 using TimePoint = SteadyClock::time_point;
 inline double elapsed_ms(TimePoint start, TimePoint end) {
@@ -114,6 +123,15 @@ MagpiePipeline::MagpiePipeline(
         throw std::runtime_error("MagpiePipeline: invalid decoder module");
     if (!decoder_state_ || !decoder_state_->ok())
         throw std::runtime_error("MagpiePipeline: invalid decoder state");
+    // The decoder cache never drops rows, so the bundle's speaker context must
+    // fit and leave room for at least one decoded frame.
+    if (const int32_t capacity = decoder_state_->max_length();
+        capacity >= 0 && !context_lengths_.empty() && context_lengths_[0] >= capacity) {
+        throw std::runtime_error(
+            "MagpiePipeline: the speaker context has " + std::to_string(context_lengths_[0]) +
+            " frames but the decoder KV cache holds " + std::to_string(capacity) +
+            "; rebuild the bundle with a larger --max-sequence-length");
+    }
     if (!encoder_ || !encoder_->ok())
         throw std::runtime_error("MagpiePipeline: invalid encoder module");
     upload_embeddings_to_gpu();
@@ -986,6 +1004,8 @@ std::vector<int32_t> MagpiePipeline::run_decoder(int32_t max_frames) {
     if (ctx_frames < 0)
         return {};
 
+    max_frames = frames_left_in_cache(*decoder_state_, max_frames);
+
     // Phase 2: Autoregressive decode — upload BOS codes and dispatch to loop
     std::vector<int32_t> bos(static_cast<std::size_t>(state.num_cb), kMagpieBosToken);
     upload_magpie_prev_codes_to_device(device_prev_codes_, bos.data(), state.num_cb,
@@ -1435,6 +1455,7 @@ int32_t MagpiePipeline::generate_audio_streaming(const std::vector<int32_t>& tex
     const int32_t ctx_frames = prefill_context(state);
     if (ctx_frames < 0)
         return 0;
+    max_frames = frames_left_in_cache(*decoder_state_, max_frames);
 
     std::cerr << "[magpie-tts] Prefill: " << elapsed_ms(t_start, SteadyClock::now()) << " ms"
               << std::endl;

@@ -27,6 +27,7 @@ The following paths contain byte-identical copies of an original photograph
 provided by the project maintainer who took the photograph and authorized its
 inclusion and redistribution in this repository under the Apache License 2.0:
 
+- `families/chinese_clip/tests/data/test_img.jpeg`
 - `families/idefics3/tests/data/test_img.jpeg`
 - `families/detr/tests/data/test_img.jpeg`
 - `families/vjepa2/tests/data/test_img.jpeg`
@@ -213,6 +214,7 @@ International license:
 - `families/hubert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/mimi/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/qwen3_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/vibevoice_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/wav2vec2_bert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/wavlm/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav`

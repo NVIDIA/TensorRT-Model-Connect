@@ -19,6 +19,14 @@ namespace trtmc {
 
 namespace {
 
+// The next decode step would store one more K/V row. A full cache ends the
+// generation, as max_new_tokens does, instead of dropping the prompt's rows.
+// A state without a length limit (max_length() < 0) never fills.
+bool kv_cache_full(const Phi4MultimodalInferenceState& state) {
+    const int32_t max_length = state.max_length();
+    return max_length >= 0 && state.position() >= max_length;
+}
+
 void validate_pipeline_components(const ITrtModule* text_decoder,
                                   const Phi4MultimodalInferenceState* state,
                                   const ITrtModule* prefill) {
@@ -514,6 +522,8 @@ Phi4MultimodalPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
         // No forward pass once generation is over, as in the reference.
         if (result.is_eos || step + 1 == max_new_tokens)
             break;
+        if (kv_cache_full(*state_))
+            break;
         run_decode_step(output, logits, prefill_sequence);
     }
 
@@ -626,6 +636,8 @@ void Phi4MultimodalPipeline::run_vl_decode_loop(Phi4MultimodalISampler* sampler,
         output.push_back(result.token_id);
         // No forward pass once generation is over, as in the reference.
         if (result.is_eos || step + 1 == max_new_tokens)
+            break;
+        if (kv_cache_full(*state_))
             break;
         run_decode_step(output, logits, prefill_sequence);
     }

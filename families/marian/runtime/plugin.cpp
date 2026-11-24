@@ -297,6 +297,10 @@ class MarianPipeline final : public ITextGeneration {
             if (next_token == eos_id)
                 break;
 
+            // A full KV cache ends decoding, as max_new_tokens does; the cache never
+            // drops rows to make room.
+            if (cache_->position() >= cache_->max_length())
+                break;
             run_decoder_step(next_token, logits);
         }
 

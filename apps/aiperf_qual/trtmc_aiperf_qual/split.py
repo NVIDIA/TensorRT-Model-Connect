@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from .campaign import KEPT_ASIDE, PLAN, _groups, code_digests, dependencies_digest, harness_digest
+from .campaign import EXCLUSIONS, KEPT_ASIDE, PLAN, _groups, code_digests, dependencies_digest, harness_digest
 from .config import ConfigError, Environment
 
 RULE = ("checkpoint groups (profiles sharing a checkpoint stay together) by ledger seconds, longest first, each to "
@@ -228,6 +228,12 @@ def _plan(root: Path) -> dict[str, Any]:
     return json.loads((root / PLAN).read_text()) if (root / PLAN).is_file() else {}
 
 
+def _excluded(root: Path) -> list[str]:
+    """The profiles the root's run left out (``excluded.json``)."""
+    items = json.loads((root / EXCLUSIONS).read_text()) if (root / EXCLUSIONS).is_file() else []
+    return [str(item.get("profile")) for item in items if isinstance(item, Mapping)]
+
+
 def _manifest_problems(manifest: Mapping[str, Any]) -> list[str]:
     campaign, expected, accepted = manifest.get("campaign"), manifest.get("expected"), manifest.get("accepted")
     problems = []
@@ -254,7 +260,7 @@ def fragment_merge_check(manifest: Mapping[str, Any], roots: Sequence[Path], mod
     ``{"campaign": ID, "expected": [profiles], "accepted": [fragments]}``. Each accepted fragment has exactly one root,
     run in this campaign with the same campaign inputs as the others; each holds only the profiles it was given;
     every expected profile has exactly one result among them (a result of ``mode``, a failed build, a harness error,
-    or the configuration error the fragment recorded), and none holds a profile outside the campaign. Roots of other
+    or the configuration error or exclusion the fragment recorded), and none holds a profile outside the campaign. Roots of other
     campaigns are problems; roots of fragments the manifest did not accept are left out."""
     problems = _manifest_problems(manifest)
     if problems:
@@ -288,6 +294,9 @@ def fragment_merge_check(manifest: Mapping[str, Any], roots: Sequence[Path], mod
         given = set(plan.get("selected") or [])
         for item in plan.get("config_errors") or []:
             claim(str(item.get("profile")), root)
+        for name in _excluded(root):  # a named profile an exclusion left out has no result to give
+            if name in expected:
+                claim(name, root)
         for directory in sorted(path for path in root.iterdir() if path.is_dir() and not KEPT_ASIDE.search(path.name)):
             kind = _final(directory)
             if kind is None:

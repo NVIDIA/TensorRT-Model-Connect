@@ -14,9 +14,12 @@
 #include "families/whisper/runtime/whisper_host_plan.h"
 #include "families/whisper/runtime/whisper_mel_spectrogram.h"
 #include "plugin_helpers.h"
+#include "trtmc/internal/config.h"
 
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace trtmc {
@@ -222,6 +225,21 @@ void WhisperPipeline::setup_cross_attention(int32_t actual_enc_seq_len) {
 
 std::vector<int32_t> WhisperPipeline::run_decoder(const std::vector<int32_t>& initial_tokens,
                                                   int32_t max_new_tokens) {
+    // The KV cache never drops rows: the forced prefix must fit, and decoding
+    // stops when the cache is full. The last sampled token is not fed back, so
+    // a cache of L rows and a P-token prefix yield at most L - P + 1 tokens.
+    const int32_t capacity = state_->max_length();
+    const auto prefix = static_cast<int32_t>(initial_tokens.size());
+    if (capacity >= 0) {
+        if (prefix > capacity) {
+            throw internal::ConfigError(
+                "whisper decoder prompt has " + std::to_string(prefix) +
+                " tokens but the KV cache holds " + std::to_string(capacity) +
+                "; rebuild the bundle with a larger --max-sequence-length or shorten the prompt");
+        }
+        max_new_tokens = std::min(max_new_tokens, capacity - prefix + 1);
+    }
+
     state_->reset();
     state_->bind_to(*decoder_);
 

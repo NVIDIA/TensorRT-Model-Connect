@@ -6,6 +6,7 @@
 #include "families/qwen3_5/runtime/pipeline.h"
 
 #include "families/qwen3_5/runtime/chat_templates.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <chrono>
@@ -24,6 +25,18 @@ inline double elapsed_ms(TimePoint start, TimePoint end) {
 } // namespace
 
 namespace trtmc {
+
+namespace {
+
+// The next decode step would store one more K/V row. A full cache ends the
+// generation, as max_new_tokens does, instead of dropping the prompt's rows.
+// A state without a length limit (max_length() < 0) never fills.
+bool kv_cache_full(const Qwen35InferenceState& state) {
+    const int32_t max_length = state.max_length();
+    return max_length >= 0 && state.position() >= max_length;
+}
+
+} // namespace
 
 RecurrentPipeline::RecurrentPipeline(std::unique_ptr<ITrtModule> decoder,
                                      std::unique_ptr<Qwen35InferenceState> state,
@@ -207,6 +220,16 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
     if (mtp_scheduler_)
         return generate_from_ids_speculative(input_ids, max_new_tokens, params, *active_sampler);
 
+    // The KV cache never drops rows: a prompt it cannot hold is rejected before
+    // prefill, and generation stops once the cache is full.
+    if (const int32_t capacity = state_->max_length();
+        capacity >= 0 && input_ids.size() > static_cast<std::size_t>(capacity)) {
+        throw internal::ConfigError("qwen3_5 prompt has " + std::to_string(input_ids.size()) +
+                                    " tokens but the KV cache holds " + std::to_string(capacity) +
+                                    "; rebuild the bundle with a larger --max-sequence-length or "
+                                    "shorten the prompt");
+    }
+
     state_->reset();
     state_->bind_to(*decoder_);
 
@@ -217,8 +240,8 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
 
     // ── Prefill phase ──
     auto t_prefill_start = SteadyClock::now();
-    // A prompt longer than the cache keeps the token loop, whose KV cache
-    // slides once full.
+    // Longer prompts were rejected above. A state without a length limit
+    // (max_length() < 0) keeps the token loop.
     if (prefill_ && static_cast<int64_t>(input_ids.size()) <= state_->max_length()) {
         run_prefill_chunks(input_ids, logits);
     } else {
@@ -237,6 +260,8 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
         Qwen35SampleResult result = active_sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
         if (result.is_eos || step + 1 == max_new_tokens)
+            break;
+        if (kv_cache_full(*state_))
             break;
         run_step(result.token_id, logits);
         ++decode_steps;
