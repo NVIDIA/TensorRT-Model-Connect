@@ -44,7 +44,13 @@ _FAMILY = _TEST_DIR.parent.name
 _THRESHOLDS = {
     # The median trace row must agree closely with the reference.
     "logit_cosine_p50_floor": 0.99,
-    # Bounds relative to transformers at the bundle precision on the same tokens.
+    # Bounds relative to transformers at the bundle precision on the same tokens. Calibrated on the three cases
+    # (69, 167 and 617 trace rows, 105 of them past the window) on a GB200 and a B300: transformers' eager and SDPA
+    # BF16 runs differ by up to 1.42 x in relative L2 p95, 0.020 in cosine p5 and 0.029 in top-1 agreement; the
+    # engine's smallest headroom against these bounds was 0.0038 (cosine p50), 0.013 (cosine p5) and 0.047
+    # (relative L2 p95). Engines with YaRN attention_factor 1.0, without the sliding window (past the window:
+    # cosine p5 -0.25 and relative L2 p95 3.00 against bounds of 0.82 and 0.72) or with moe_routed_scaling_factor
+    # 1.0 fail them.
     "logit_cosine_p50_margin": 0.005,
     "logit_cosine_p5_margin": 0.03,
     "logit_rel_l2_p95_ratio": 1.25,
@@ -101,15 +107,16 @@ def _require_selected(case_name: str, manifest: dict, config) -> None:
     models, testcases = _selection(config)
     if os.environ.get("TRTMC_E2E") != "1" and not (models or testcases):
         pytest.skip("real family E2E requires TRTMC_E2E=1 or an explicit E2E selection")
-    if testcases:
-        if case_name in testcases:
-            return
-        # Testcases narrow an explicit selection of this family; when none of them is one of its cases, the
-        # selection is wrong and must not pass by running every case or none.
-        if {_FAMILY, manifest["name"]} & models and not set(_CASES) & testcases:
-            pytest.fail(f"--e2e-testcase {sorted(testcases)} names no {_FAMILY} testcase: {sorted(_CASES)}")
-        pytest.skip(f"{case_name} was not selected")
     if models and not ({_FAMILY, manifest["name"], case_name} & models):
+        pytest.skip(f"{case_name} was not selected")
+    if testcases and case_name not in testcases:
+        # Testcases narrow the selection. When they share no case with what --e2e-model selects in this family,
+        # the selection is wrong, and it must not pass by running none.
+        selected = {name for name, (other, _) in _CASES.items() if {_FAMILY, other["name"], name} & models}
+        if models and not selected & testcases:
+            pytest.fail(
+                f"--e2e-testcase {sorted(testcases)} matches none of the selected {_FAMILY} cases: {sorted(selected)}"
+            )
         pytest.skip(f"{case_name} was not selected")
 
 
@@ -330,6 +337,28 @@ def _logit_statistics(actual: np.ndarray, reference: np.ndarray) -> dict:
     }
 
 
+def _trace_segments(rows: int, window: int, case: dict, thresholds: dict) -> dict[str, slice]:
+    """All trace rows, and the rows past the sliding window when the trace crosses it.
+
+    Row r holds position r; from row `window` on, the sliding window hides the oldest keys from the
+    sliding-attention layers. A case marked `past_sliding_window` must reach that segment.
+    """
+    segments = {"all_rows": slice(0, rows)}
+    past_window = rows - window
+    if case.get("past_sliding_window", False) or past_window > 0:
+        assert past_window >= thresholds["min_rows_past_window"], (past_window, window)
+        segments["rows_past_window"] = slice(window, rows)
+    return segments
+
+
+def _prefill_prediction(prefill_last: np.ndarray, reference_row: np.ndarray) -> tuple[int, float]:
+    """The prefill context's next token and the cosine of its logits to the reference row, both finite."""
+    assert np.isfinite(prefill_last).all(), "prefill logits are not finite"
+    cosine = float(_cosine(prefill_last.astype(np.float64), reference_row))
+    assert np.isfinite(cosine), cosine
+    return int(np.argmax(prefill_last)), cosine
+
+
 def _envelope(baselines: list[dict]) -> dict:
     """The less favourable value of each statistic over the baseline runs."""
     return {
@@ -411,14 +440,7 @@ def test_e2e(case_name: str, request, tmp_path: Path, _bundles) -> None:
         assert fed_ids[:prompt_length] == reference["prompt_ids"], "prompt token IDs differ"
         assert native["token_ids"] and len(native["token_ids"]) <= case["max_new_tokens"]
         target = reference["reference_logits"]
-        # Row r holds position r; from row `window` on, the sliding window hides
-        # the oldest keys from the sliding-attention layers.
-        window = reference["window"]
-        segments = {"all_rows": slice(0, trace.shape[0])}
-        past_window = trace.shape[0] - window
-        if past_window > 0:
-            assert past_window >= thresholds["min_rows_past_window"], (past_window, window)
-            segments["rows_past_window"] = slice(window, trace.shape[0])
+        segments = _trace_segments(trace.shape[0], reference["window"], case, thresholds)
         statistics = {}
         for segment, rows in segments.items():
             runs = {
@@ -430,13 +452,13 @@ def test_e2e(case_name: str, request, tmp_path: Path, _bundles) -> None:
                 "baselines": runs,
                 "envelope": _envelope(list(runs.values())),
             }
-        prefill_cosine = float(_cosine(prefill_last.astype(np.float64), target[prompt_length - 1]))
+        prefill_token, prefill_cosine = _prefill_prediction(prefill_last, target[prompt_length - 1])
         record_evidence("diagnostics", {"logits": statistics, "prefill_cosine": prefill_cosine})
         engine = statistics["all_rows"]["engine"]
         assert engine["cosine_p50"] >= thresholds["logit_cosine_p50_floor"], engine
         for segment in statistics.values():
             _assert_logits(segment["engine"], segment["envelope"], thresholds)
-        assert int(np.argmax(prefill_last)) == int(np.argmax(target[prompt_length - 1])), (
+        assert prefill_token == int(np.argmax(target[prompt_length - 1])), (
             "the prefill context predicts a different next token"
         )
         decoded = reference["tokenizer"].decode(native["token_ids"], skip_special_tokens=True)

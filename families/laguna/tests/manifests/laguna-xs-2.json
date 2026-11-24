@@ -33,7 +33,8 @@
       "max_new_tokens": 16,
       "use_chat_template": true,
       "enable_thinking": false,
-      "expected_continuation_text": "7319-QZ"
+      "expected_continuation_text": "7319-QZ",
+      "past_sliding_window": true
     }
   ]
 }
