@@ -9,9 +9,12 @@ Native preprocessing uses address-sized buffer offsets and clamps resampling
 support before converting coordinates to integer indices. Callers must provide
 the full source image storage described by the SDK request.
 
-Applications accepting untrusted images should enforce a source-pixel and
-working-memory budget before invoking the SDK. Resizing first constructs a
-three-channel byte image of the source dimensions, then a horizontal byte buffer
-with `source_height * output_width * 3` elements. The fixed model output size
-does not bound these allocations. Allocation failure is reported as a request
-failure; source-image admission limits belong to the hosting application.
+Resize workspace uses one source row, four filtered rows, axis coefficient
+tables and the fixed output. It no longer allocates a full source byte image or
+a `source_height * output_width * 3` intermediate. Horizontal byte rounding and
+bicubic coefficients are unchanged.
+
+Applications accepting untrusted inputs should enforce raw text byte and source
+image pixel admission limits before calling either task. Tokenization and
+resizing still take work proportional to the admitted input. The encoded-token
+profile limit is checked after tokenization and is not a raw input budget.
