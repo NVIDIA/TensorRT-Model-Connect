@@ -134,7 +134,9 @@ int main() {
             check(actual[static_cast<std::size_t>(position) - 1] == 0.0F,
                   "last written cache row visible" + at);
         }
-        cache.advance();
+        // A full cache rejects another row, so the last position is only checked.
+        if (position < kMaxLength)
+            cache.advance();
     }
     cudaFree(d_mask);
 

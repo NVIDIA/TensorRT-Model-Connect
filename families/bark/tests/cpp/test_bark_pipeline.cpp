@@ -118,6 +118,11 @@ trtmc::BarkConfig config(int32_t semantic_output_vocab = 10048) {
     return value;
 }
 
+// A coarse window holds max_coarse_input_length + 1 + max_coarse_history input
+// rows plus sliding_window_len - 1 decoded rows (18 with config()), and the
+// cache never drops rows, so the coarse cache must hold a whole window.
+constexpr int32_t kCoarseCacheRows = 32;
+
 std::unique_ptr<trtmc::BarkKvCache> cache(int32_t max_length, cudaStream_t stream) {
     trtmc::BarkKvCacheNames names;
     names.cache_k = {"cache_k_0"};
@@ -144,8 +149,9 @@ void test_bark_generate_audio() {
 
     trtmc::BarkPipeline pipeline(
         module(std::make_shared<ModuleStats>(), semantic_logits, 512, stream),
-        module(std::make_shared<ModuleStats>(), coarse_logits, 16, stream), cache(512, stream),
-        cache(16, stream), std::move(semantic_embed), std::move(coarse_embed), config(), stream);
+        module(std::make_shared<ModuleStats>(), coarse_logits, kCoarseCacheRows, stream),
+        cache(512, stream), cache(kCoarseCacheRows, stream), std::move(semantic_embed),
+        std::move(coarse_embed), config(), stream);
 
     trtmc::internal::ITextToAudio& audio = pipeline;
     trtmc::internal::TextToAudioRequest request;
@@ -187,8 +193,9 @@ void test_bark_seed_handling() {
 
     trtmc::BarkPipeline pipeline(
         module(std::make_shared<ModuleStats>(), semantic_logits, 512, stream),
-        module(std::make_shared<ModuleStats>(), coarse_logits, 16, stream), cache(512, stream),
-        cache(16, stream), std::move(semantic_embed), std::move(coarse_embed), cfg, stream);
+        module(std::make_shared<ModuleStats>(), coarse_logits, kCoarseCacheRows, stream),
+        cache(512, stream), cache(kCoarseCacheRows, stream), std::move(semantic_embed),
+        std::move(coarse_embed), cfg, stream);
 
     trtmc::internal::ITextToAudio& audio = pipeline;
     trtmc::internal::TextToAudioRequest request;
@@ -245,12 +252,13 @@ void test_bark_batches_semantic_and_coarse_prefill() {
 
     trtmc::BarkPipeline pipeline(
         module(std::make_shared<ModuleStats>(), semantic_logits, 512, stream),
-        module(std::make_shared<ModuleStats>(), coarse_logits, 16, stream), cache(512, stream),
-        cache(16, stream), std::move(semantic_embed), std::move(coarse_embed), config(), stream);
+        module(std::make_shared<ModuleStats>(), coarse_logits, kCoarseCacheRows, stream),
+        cache(512, stream), cache(kCoarseCacheRows, stream), std::move(semantic_embed),
+        std::move(coarse_embed), config(), stream);
     auto semantic_stats = std::make_shared<ModuleStats>();
     auto coarse_stats = std::make_shared<ModuleStats>();
     pipeline.set_prefill_modules(module(semantic_stats, semantic_logits, 512, stream),
-                                 module(coarse_stats, coarse_logits, 16, stream));
+                                 module(coarse_stats, coarse_logits, kCoarseCacheRows, stream));
 
     trtmc::internal::TextToAudioRequest request;
     request.prompt = "";
@@ -280,12 +288,14 @@ void test_bark_dual_profile_decode_uses_one_embedding_row() {
     std::vector<float> semantic_embed(6 * 4, 0.1F);
     std::vector<float> coarse_embed(11 * 4, 0.1F);
 
-    trtmc::BarkPipeline pipeline(module(semantic_decode_stats, semantic_logits, 512, nullptr),
-                                 module(coarse_decode_stats, coarse_logits, 16, nullptr),
-                                 cache(512, nullptr), cache(16, nullptr), std::move(semantic_embed),
-                                 std::move(coarse_embed), config(5), nullptr);
-    pipeline.set_prefill_modules(module(semantic_prefill_stats, semantic_logits, 512, nullptr),
-                                 module(coarse_prefill_stats, coarse_logits, 16, nullptr));
+    trtmc::BarkPipeline pipeline(
+        module(semantic_decode_stats, semantic_logits, 512, nullptr),
+        module(coarse_decode_stats, coarse_logits, kCoarseCacheRows, nullptr), cache(512, nullptr),
+        cache(kCoarseCacheRows, nullptr), std::move(semantic_embed), std::move(coarse_embed),
+        config(5), nullptr);
+    pipeline.set_prefill_modules(
+        module(semantic_prefill_stats, semantic_logits, 512, nullptr),
+        module(coarse_prefill_stats, coarse_logits, kCoarseCacheRows, nullptr));
 
     trtmc::internal::TextToAudioRequest request;
     request.prompt = "";
@@ -312,11 +322,12 @@ void test_bark_constructor_validates_semantic() {
     std::vector<float> coarse_embed(11 * 4, 0.1F);
     bool threw = false;
     try {
-        trtmc::BarkPipeline pipeline(
-            nullptr,
-            module(std::make_shared<ModuleStats>(), std::vector<float>(12, 0.1F), 16, stream),
-            cache(512, stream), cache(16, stream), std::move(semantic_embed),
-            std::move(coarse_embed), config(), stream);
+        trtmc::BarkPipeline pipeline(nullptr,
+                                     module(std::make_shared<ModuleStats>(),
+                                            std::vector<float>(12, 0.1F), kCoarseCacheRows, stream),
+                                     cache(512, stream), cache(kCoarseCacheRows, stream),
+                                     std::move(semantic_embed), std::move(coarse_embed), config(),
+                                     stream);
     } catch (const std::exception&) {
         threw = true;
     }
@@ -333,8 +344,9 @@ void test_bark_constructor_validates_embed() {
     try {
         trtmc::BarkPipeline pipeline(
             module(std::make_shared<ModuleStats>(), semantic_logits, 512, stream),
-            module(std::make_shared<ModuleStats>(), coarse_logits, 16, stream), cache(512, stream),
-            cache(16, stream), {}, std::vector<float>(11 * 4, 0.1F), config(), stream);
+            module(std::make_shared<ModuleStats>(), coarse_logits, kCoarseCacheRows, stream),
+            cache(512, stream), cache(kCoarseCacheRows, stream), {},
+            std::vector<float>(11 * 4, 0.1F), config(), stream);
     } catch (const std::exception&) {
         threw = true;
     }
