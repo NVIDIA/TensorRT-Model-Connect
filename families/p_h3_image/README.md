@@ -25,3 +25,8 @@ retains its default 256px VAE tiles and 64px minimum overlap.
 Checkpoint weights and generated engines are not distributed in this source
 tree. Obtain the checkpoint under its published licenses, including the
 MiniMax H3 Community License terms.
+
+Native tokenization requires the ICU `uc` and `i18n` development libraries.
+Selecting `-DTRTMC_BUILD_FAMILIES=p_h3_image` checks these at configuration time.
+A default build may skip this optional family when ICU is absent; explicitly
+building `trtmc_model_p_h3_image` then reports the missing prerequisite.

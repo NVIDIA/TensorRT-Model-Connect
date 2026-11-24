@@ -3,6 +3,9 @@
 
 find_package(ICU COMPONENTS uc i18n QUIET)
 if(NOT ICU_FOUND)
+  if(DEFINED TRTMC_BUILD_FAMILIES AND NOT "*" IN_LIST TRTMC_BUILD_FAMILIES)
+    message(FATAL_ERROR "Selected P-H3-Image runtime requires ICU uc and i18n development packages")
+  endif()
   message(STATUS "Skipping p_h3_image: install ICU development packages for Unicode tokenization")
   add_custom_target(trtmc_model_p_h3_image
     COMMAND ${CMAKE_COMMAND} -E echo "P-H3-Image runtime requires ICU uc and i18n development packages"

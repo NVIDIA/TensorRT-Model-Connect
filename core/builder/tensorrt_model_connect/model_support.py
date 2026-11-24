@@ -180,12 +180,17 @@ def _read_object(path: Path) -> dict[str, Any]:
 
 
 def load_model_metadata(model_dir: str | Path) -> ModelMetadata:
-    """Read the standard Hugging Face identity files from a local snapshot."""
+    """Read standard identities, or a modular index for an unidentified snapshot."""
 
     root = Path(model_dir)
     config = _read_object(root / "config.json")
     index_path = root / "model_index.json"
-    if not index_path.exists():
+    configured = ModelMetadata(config=config, model_index={})
+    has_config_identity = bool(_key(configured.model_type)) or any(
+        _key(name) for name in configured.architectures
+    )
+    # Supplemental modular metadata must not alter existing config identities.
+    if not index_path.exists() and not has_config_identity:
         index_path = root / "modular_model_index.json"
     model_index = _read_object(index_path)
     files = tuple(
@@ -247,9 +252,7 @@ def resolve_family(
                 "family must be a lowercase identifier containing only letters, digits, "
                 "and underscores"
             )
-        selected = next(
-            (family for family in directories if family.name == requested_family), None
-        )
+        selected = next((family for family in directories if family.name == requested_family), None)
         if selected is None:
             raise FamilyResolutionError(
                 f"unknown family {requested_family!r}; omit --family to discover compatible families"
