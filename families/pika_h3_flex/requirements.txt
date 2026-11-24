@@ -1,0 +1,4 @@
+# The original Diffusers/Transformers oracle runs in tests/requirements.txt's environment.
+torch==2.12.0
+numpy==2.5.2
+safetensors==0.8.0
