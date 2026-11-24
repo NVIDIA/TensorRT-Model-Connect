@@ -5,6 +5,9 @@
 
 #include "families/lerobot_pi05/runtime/pipeline.h"
 
+#include "families/lerobot_pi05/runtime/openpi.h"
+#include "families/lerobot_pi05/runtime/request.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -20,14 +23,6 @@ namespace {
 
 // LeRobot's additive attention mask for blocked keys.
 constexpr float kBlocked = -2.3819763e38F;
-
-const internal::ConfigField kFields[] = {
-    {"seed", internal::ConfigKind::I64, std::nullopt,
-     "Seed for the initial flow noise. Omit for a fresh random draw on every call."},
-    {"noise", internal::ConfigKind::F64List, std::nullopt,
-     "Explicit initial noise of chunk_size x max_action_dim values, row-major. It overrides "
-     "seed; use it to reproduce a reference run."},
-};
 
 Tensor tensor_of(void* data, std::vector<std::int64_t> shape, DType dtype) {
     Tensor tensor;
@@ -74,6 +69,26 @@ Pipeline::Pipeline(std::unique_ptr<ITrtModule> prefix, std::unique_ptr<ITrtModul
             config_.camera_slots() * config_.tokens_per_image + config_.prompt_tokens) {
         throw std::runtime_error("lerobot_pi05 runtime.json does not match its runtime contract");
     }
+    if (!config_.openpi_policy.empty()) {
+        const bool libero = config_.openpi_policy == "pi05_libero";
+        const bool droid = config_.openpi_policy == "pi05_droid";
+        const std::vector<std::string> expected =
+            libero
+                ? std::vector<std::string>{"observation/image", "observation/wrist_image"}
+                : (droid
+                       ? std::vector<std::string>{"observation/exterior_image_1_left",
+                                                  "observation/wrist_image_left"}
+                       : std::vector<std::string>{"cam_high", "cam_left_wrist", "cam_right_wrist"});
+        if ((!libero && !droid && config_.openpi_policy != "pi05_aloha") ||
+            config_.cameras != expected || config_.camera_height != 224 ||
+            config_.camera_width != 224 || config_.empty_cameras != 0 ||
+            config_.state_dim != (libero || droid ? 8 : 14) ||
+            config_.action_dim != (libero ? 7 : (droid ? 8 : 14)) ||
+            config_.chunk_size != (libero ? 10 : (droid ? 15 : 50)) ||
+            config_.max_action_dim != 32 || config_.prompt_tokens != 200 ||
+            config_.num_inference_steps != 10 || config_.tokens_per_image != 256)
+            throw std::runtime_error("Invalid openpi runtime contract");
+    }
     const auto check_stats = [](const Normalization& norm, std::int32_t dim, const char* what) {
         if (!norm.identity() && (norm.offset.size() != static_cast<std::size_t>(dim) ||
                                  norm.scale.size() != norm.offset.size()))
@@ -118,54 +133,17 @@ std::vector<internal::TaskInstance> Pipeline::task_bindings() {
         *this, Span<const internal::ConfigField>{kFields, std::size(kFields)})};
 }
 
-Pipeline::Options Pipeline::parse_options(internal::ConfigView config) const {
-    Options options;
-    for (const auto& entry : config) {
-        if (entry.name == "seed") {
-            const auto seed = std::get<std::int64_t>(entry.value);
-            if (seed < 0)
-                throw std::invalid_argument("lerobot_pi05 seed must not be negative");
-            options.has_seed = true;
-            options.seed = static_cast<std::uint64_t>(seed);
-        } else if (entry.name == "noise") {
-            const auto values = std::get<Span<const double>>(entry.value);
-            const auto expected =
-                static_cast<std::size_t>(config_.chunk_size) * config_.max_action_dim;
-            if (values.size() != expected)
-                throw std::invalid_argument("lerobot_pi05 noise must have chunk_size x "
-                                            "max_action_dim values");
-            options.noise.reserve(expected);
-            for (const double value : values) {
-                if (!std::isfinite(value))
-                    throw std::invalid_argument("lerobot_pi05 noise must be finite");
-                options.noise.push_back(static_cast<float>(value));
-            }
-        }
-    }
-    return options;
-}
-
-std::vector<float> Pipeline::initial_noise(const Options& options) {
-    if (!options.noise.empty())
-        return options.noise;
-    std::vector<float> noise(static_cast<std::size_t>(config_.chunk_size) * config_.max_action_dim);
-    std::mt19937_64 seeded(options.seed);
-    auto& engine = options.has_seed ? seeded : rng_;
-    std::normal_distribution<float> normal(0.0F, 1.0F);
-    for (float& value : noise)
-        value = normal(engine);
-    return noise;
-}
-
-std::vector<float>
-Pipeline::pack_pixels(const internal::ImagesStateTextObservation& observation) const {
+std::vector<float> Pipeline::pack_pixels(const internal::ImagesStateTextObservation& observation,
+                                         std::vector<bool>& seen) const {
     const auto height = static_cast<std::size_t>(config_.camera_height);
     const auto width = static_cast<std::size_t>(config_.camera_width);
     const std::size_t plane = height * width;
     std::vector<float> pixels(static_cast<std::size_t>(config_.camera_slots()) * 3 * plane, 0.0F);
 
-    std::vector<bool> seen(config_.cameras.size(), false);
+    seen.assign(config_.cameras.size(), false);
     for (const auto& named : observation.images) {
+        if (config_.openpi_policy == "pi05_aloha" && named.name == "cam_low")
+            continue;
         const auto found =
             std::find(config_.cameras.begin(), config_.cameras.end(), std::string(named.name));
         if (found == config_.cameras.end())
@@ -173,6 +151,13 @@ Pipeline::pack_pixels(const internal::ImagesStateTextObservation& observation) c
                                         std::string(named.name) + "'");
         const auto slot = static_cast<std::size_t>(found - config_.cameras.begin());
         const auto& image = named.image;
+        if (seen[slot])
+            throw std::invalid_argument("duplicate pi05 camera: " + std::string(named.name));
+        if (!config_.openpi_policy.empty()) {
+            openpi_image(image, pixels.data() + slot * 3 * plane);
+            seen[slot] = true;
+            continue;
+        }
         if (image.height != height || image.width != width || image.channels != 3)
             throw std::invalid_argument("lerobot_pi05 camera '" + std::string(named.name) +
                                         "' must be " + std::to_string(height) + "x" +
@@ -194,7 +179,7 @@ Pipeline::pack_pixels(const internal::ImagesStateTextObservation& observation) c
         }
     }
     for (std::size_t slot = 0; slot < seen.size(); ++slot)
-        if (!seen[slot])
+        if (!seen[slot] && (config_.openpi_policy != "pi05_aloha" || slot == 0))
             throw std::invalid_argument("lerobot_pi05 requires camera '" + config_.cameras[slot] +
                                         "'");
     return pixels;
@@ -204,7 +189,7 @@ std::vector<float> Pipeline::normalized_state(Span<const float> state) const {
     if (state.size() != static_cast<std::size_t>(config_.state_dim))
         throw std::invalid_argument("lerobot_pi05 state must have " +
                                     std::to_string(config_.state_dim) + " values");
-    std::vector<float> values(state.begin(), state.end());
+    auto values = openpi_state(config_.openpi_policy, state);
     const auto& norm = config_.state_normalization;
     for (std::size_t index = 0; index < values.size(); ++index) {
         if (!std::isfinite(values[index]))
@@ -219,10 +204,14 @@ Pipeline::prefix_inputs(const internal::ImagesStateTextObservation& observation)
     if (observation.text.empty())
         throw std::invalid_argument("lerobot_pi05 requires a non-empty instruction");
     PrefixInputs inputs;
-    inputs.pixels = pack_pixels(observation);
-    auto prompt = tokenizer_.tokenize_pi05(observation.text, normalized_state(observation.state),
-                                           static_cast<std::size_t>(config_.prompt_tokens));
-    if (prompt.truncated)
+    std::vector<bool> seen;
+    inputs.pixels = pack_pixels(observation, seen);
+    const auto state = normalized_state(observation.state);
+    auto prompt = config_.openpi_policy == "pi05_libero"
+                      ? tokenizer_.tokenize_task_only(observation.text, config_.prompt_tokens)
+                      : tokenizer_.tokenize_pi05(observation.text, state,
+                                                 static_cast<std::size_t>(config_.prompt_tokens));
+    if (prompt.truncated && config_.openpi_policy.empty())
         throw std::invalid_argument("lerobot_pi05 instruction and state exceed " +
                                     std::to_string(config_.prompt_tokens) + " prompt tokens");
     inputs.token_ids = std::move(prompt.token_ids);
@@ -232,7 +221,9 @@ Pipeline::prefix_inputs(const internal::ImagesStateTextObservation& observation)
     const auto prefix = static_cast<std::size_t>(config_.prefix_tokens);
     const auto tokens_per_image = static_cast<std::size_t>(config_.tokens_per_image);
     std::vector<std::uint8_t> valid(prefix, 0);
-    std::fill_n(valid.begin(), config_.cameras.size() * tokens_per_image, 1);
+    for (std::size_t i = 0; i < seen.size(); ++i)
+        if (seen[i])
+            std::fill_n(valid.begin() + i * tokens_per_image, tokens_per_image, 1);
     const auto prompt_start = static_cast<std::size_t>(config_.camera_slots()) * tokens_per_image;
     for (std::size_t index = 0; index < prompt.token_mask.size(); ++index)
         valid[prompt_start + index] = prompt.token_mask[index] != 0 ? 1 : 0;
@@ -311,7 +302,8 @@ internal::ImagesStateTextActionChunkResult
 Pipeline::run(const internal::ImagesStateTextToActionChunkRequest& request,
               internal::ConfigView config) {
     const auto started = std::chrono::steady_clock::now();
-    const auto options = parse_options(config);
+    const auto options = parse_options(config, static_cast<std::size_t>(config_.chunk_size) *
+                                                   config_.max_action_dim);
     auto inputs = prefix_inputs(request.observation);
 
     auto prefix_outputs = prefix_->forward(
@@ -328,7 +320,14 @@ Pipeline::run(const internal::ImagesStateTextToActionChunkRequest& request,
     const Tensor& k_cache = require_output(prefix_outputs, "k_cache", cache_numel_);
     const Tensor& v_cache = require_output(prefix_outputs, "v_cache", cache_numel_);
 
-    auto result = pack_actions(denoise(inputs, k_cache, v_cache, initial_noise(options)));
+    auto result = pack_actions(denoise(
+        inputs, k_cache, v_cache,
+        initial_noise(
+            options, static_cast<std::size_t>(config_.chunk_size) * config_.max_action_dim, rng_)));
+    if (config_.openpi_policy == "pi05_aloha")
+        openpi_actions(config_.openpi_policy,
+                       openpi_state(config_.openpi_policy, request.observation.state),
+                       result.actions.values.values);
     result.inference_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
             .count();

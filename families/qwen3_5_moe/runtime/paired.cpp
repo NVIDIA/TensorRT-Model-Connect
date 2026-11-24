@@ -106,7 +106,7 @@ void Qwen35MoePairedDraft::reset(ITrtModule& target, std::size_t prompt_length,
         throw std::invalid_argument(
             "Qwen3.5-MoE paired prompt and generation exceed bundle capacity");
     if (tree() && !qwen35_is_greedy(sampling))
-        throw std::invalid_argument("Qwen3.5-MoE DFlash DDTree supports greedy decoding only");
+        throw std::invalid_argument("Qwen3.5-MoE speculative tree supports greedy decoding only");
     require_tensor(target, "target_hidden", DType::kFloat16,
                    {1, static_cast<int64_t>(feature_width_)}, false);
     seen_ = 0;
@@ -134,11 +134,11 @@ Qwen35MoePairedDraft::propose(int32_t anchor, const Qwen35MoeSamplingParams& sam
     std::vector<float> mask(static_cast<std::size_t>(rows) * (capacity + rows),
                             -std::numeric_limits<float>::infinity());
     for (int32_t row = 0; row < rows; ++row) {
-        // Pinned Qwen DFlash is bidirectional over all confirmed target
-        // features and all proposal rows, irrespective of generic SWA labels.
+        // All confirmed target features are visible. Only JetSpec masks future proposal rows.
         for (int32_t column = 0; column < seen_; ++column)
             mask[static_cast<std::size_t>(row) * (capacity + rows) + column] = 0;
-        for (int32_t column = 0; column < rows; ++column)
+        const int32_t visible = variant() == "jetspec" ? row + 1 : rows;
+        for (int32_t column = 0; column < visible; ++column)
             mask[static_cast<std::size_t>(row) * (capacity + rows) + capacity + column] = 0;
     }
     TensorMap inputs{
@@ -239,14 +239,18 @@ create_qwen35_paired(const FamilyContext& context, int32_t hidden, int32_t layer
     auto layers_sorted = config.feature_layers;
     std::sort(layers_sorted.begin(), layers_sorted.end());
     const bool dflash = config.variant == "dflash";
-    const bool tree = config.variant == "dflash_ddtree";
+    const bool jetspec = config.variant == "jetspec";
+    const bool tree = config.variant == "dflash_ddtree" || jetspec;
     if ((!dflash && !tree) || hidden != config.hidden_size || vocab != config.vocab_size ||
         capacity != config.capacity || config.max_input_length != capacity || capacity <= 16 ||
         precision != "fp16" || tensor_parallel_size != 1 || layers_sorted.empty() ||
         layers_sorted.front() < 0 || layers_sorted.back() >= layers ||
         std::adjacent_find(layers_sorted.begin(), layers_sorted.end()) != layers_sorted.end() ||
         config.rows != 16 || config.mask_token < 0 || config.mask_token >= vocab ||
-        config.top_k != (tree ? 4 : 1) || config.verify_size != 16)
+        config.top_k != (jetspec ? 7
+                         : tree  ? 4
+                                 : 1) ||
+        config.verify_size != 16)
         throw std::runtime_error("Qwen3.5-MoE paired metadata does not match the target and draft");
     const auto load = [&](const char* section) {
         const auto plan = qwen3_5_moe::require_section(context.reader, section);

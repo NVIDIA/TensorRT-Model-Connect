@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import math
 
+from ..config import normalize_target_layers
+
 _PATTERN = {"M": "mamba", "-": "mlp", "*": "attention", "E": "moe"}
 
 
@@ -29,7 +31,8 @@ def layers(raw: dict) -> list[str] | None:
 
 
 def topology_matches(raw: dict, precision: str) -> bool:
-    """Admit only pinned dense/SSD or non-gated NVFP4 MoE semantics."""
+    """Require supported dense/SSD or non-gated prepared MoE semantics."""
+    raw = normalize_target_layers(raw)
     kinds = layers(raw)
     if (raw.get("model_type") != "nemotron_h"
             or raw.get("architectures") != ["NemotronHForCausalLM"] or kinds is None
@@ -70,7 +73,8 @@ def topology_matches(raw: dict, precision: str) -> bool:
     scale = raw.get("routed_scaling_factor", 1.0)
     latent = raw.get("moe_latent_size", hidden)
     latent = hidden if latent is None else latent
-    return (precision == "nvfp4" and experts <= 512 and topk <= experts
+    compressed_fp8 = precision == "fp8" and (raw.get("quantization_config") or {}).get("quant_method") == "compressed-tensors"
+    return ((precision == "nvfp4" or compressed_fp8) and experts <= 512 and topk <= experts
             and experts % router_groups == 0 and selected_groups <= router_groups
             and topk <= selected_groups * (experts // router_groups)
             and raw.get("n_shared_experts", 1) == 1 and intermediate % 16 == shared % 16 == 0

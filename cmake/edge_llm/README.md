@@ -39,6 +39,14 @@ The SDK must include its installed license. To request all kernel groups
 `TRTMC_EDGELLM_ONNX=ON` installs the upstream ONNX builder commands only when
 requested; it does not change the native MC graph path or qualify any family.
 
+For the optional GR00T and Pi0.5 C++ APIs, also set
+`-DTRTMC_EDGELLM_POLICY_SDK=ON`. The stock 0.12 SDK does not install them.
+When provisioning from pinned source, this builds the two upstream static
+libraries and installs their headers under `include/tensorrt_edgellm/` in
+the same prefix as the core. An explicitly selected external SDK must already
+contain both components. The option is off by default and does not select a
+model backend or install Python, models, or policy examples.
+
 Keep the **0.12 Python builder separate from the MC environment**. For
 example, when the native SDK uses TensorRT 11.4.0.106:
 
@@ -161,9 +169,11 @@ and `edgellm-onnx-audio-build`. The package manifest exposes their
 Families decide which checkpoint towers to build; provisioning adds no model
 selection or runtime dispatch. The original Edge source pin is unchanged.
 
-For a native GB300 build, specify the numeric GPU architecture `103`. The
-0.12 provider uses the upstream `103a` compiler target for its SDK kernels;
-the installed receipt and CuTe asset tag still identify SM103. The reduced SDK build includes the
-CTM decode kernels required by the upstream attention plugin on this GPU.
-Model Connect also uses `103a` when device-linking the SDK into a consumer;
-using `103` there can leave runtime CUDA kernels unavailable.
+Specify the numeric GPU architecture for a native build (for example,
+`100` on GB200 or `103` on GB300). The 0.12 provider follows the pinned
+SDK's native compiler selection: architectures 100, 101, 103, 110 and 121
+use the `a` suffix for compiling the SDK and device-linking its consumers.
+The numeric GPU check, installed receipt and CuTe asset tag do not change.
+Compiling for plain `100`, for example, rejects the FP4 conversion used by
+the upstream quantization kernel. The reduced SDK build on GB300 also
+includes the CTM decode kernels required by the upstream attention plugin.

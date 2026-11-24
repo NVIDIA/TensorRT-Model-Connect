@@ -1,0 +1,23 @@
+{
+  "name": "kolibri-1-fp16",
+  "hf_id": "Aleph-Alpha/Kolibri-1",
+  "hf_revision": "abfe85f673fd79a3e1cdb98289e7a1c635345ee1",
+  "bundle": "kolibri-1-fp16.bundle",
+  "family": "kolibri1",
+  "task": "text_continuation",
+  "precision": "fp16",
+  "max_sequence_length": 128,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "kolibri-1-fp16",
+      "premerge": true,
+      "max_new_tokens": 16,
+      "prompts": [
+        "The capital of Germany is",
+        "def add(a, b):\n    return"
+      ],
+      "runtime_timeout_s": 3600
+    }
+  ]
+}

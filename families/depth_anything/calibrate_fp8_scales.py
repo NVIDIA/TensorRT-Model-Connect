@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Developer tool: calibrate FP8 activation scales for a Depth Anything model config.
+"""Developer tool: calibrate FP8 and NVFP4 activation scales for a Depth Anything model config.
 
 Not used when building an engine. Calibrate each supported model config and
-commit the updated ``fp8_activation_scales.json``::
+commit the updated ``fp8_activation_scales.json`` and ``nvfp4_activation_scales.json``::
 
     python -m families.depth_anything.calibrate_fp8_scales fetch --out images
     python -m families.depth_anything.calibrate_fp8_scales calibrate \
@@ -20,6 +20,13 @@ square size and normalized the way the family's runtime does, and stores
 the median of its kind is stored as ``null`` and stays unquantized. The images after the
 first ``--calib-images`` are left for evaluation. ``fetch`` needs network access;
 ``calibrate`` needs a GPU.
+
+The NVFP4 table holds the global input scale of the NVFP4 projections
+(``quantization.NVFP4_PROJECTIONS``): the same amax divided by ``6 * 448``, that is the FP8
+scale divided by 6. ``calibrate`` writes both tables; ``nvfp4`` writes the NVFP4 table from
+the committed FP8 table without a GPU::
+
+    python -m families.depth_anything.calibrate_fp8_scales nvfp4
 """
 
 from __future__ import annotations
@@ -33,8 +40,11 @@ from pathlib import Path
 
 from .quantization import (
     ACTIVATION_SCALES_FILENAME,
+    E2M1_MAX,
     FP8_E4M3_MAX,
     LAYER_PROJECTIONS,
+    NVFP4_ACTIVATION_SCALES_FILENAME,
+    NVFP4_PROJECTIONS,
     OUTLIER_RATIO,
     projections,
     scale_key,
@@ -119,6 +129,34 @@ def mark_outliers(scales: dict[str, float]) -> dict[str, float | None]:
     return marked
 
 
+def nvfp4_scales(fp8_scales: dict[str, float | None]) -> dict[str, float | None]:
+    """NVFP4 global input scales of the NVFP4 projections: the FP8 scale (amax / 448) / 6.
+
+    A ``null`` FP8 entry (an outlier) stays ``null``: that projection stays unquantized.
+    """
+    return {
+        name: None if value is None else value / E2M1_MAX
+        for name, value in sorted(fp8_scales.items())
+        if any(name.endswith(f".{stem}") for stem in NVFP4_PROJECTIONS)
+    }
+
+
+def _write_table(filename: str, key: str, entries: dict) -> None:
+    """Store ``entries`` under ``key`` in one committed scale table, keeping the other keys."""
+    path = Path(__file__).parent / filename
+    table = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    table[key] = dict(sorted(entries.items()))
+    path.write_text(json.dumps(dict(sorted(table.items())), indent=2) + "\n", encoding="utf-8")
+    print(f"wrote {len(entries)} entries for {key!r} to {path}")
+
+
+def write_nvfp4_from_fp8() -> None:
+    """Write the NVFP4 table of every model config in the committed FP8 table."""
+    fp8 = json.loads((Path(__file__).parent / ACTIVATION_SCALES_FILENAME).read_text("utf-8"))
+    for key, scales in sorted(fp8.items()):
+        _write_table(NVFP4_ACTIVATION_SCALES_FILENAME, key, nvfp4_scales(scales))
+
+
 def calibrate(model_dir: Path, images: Path, calib_images: int) -> None:
     """Run ModelOpt FP8 calibration and store the activation scales under the config key."""
     import modelopt.torch.quantization as mtq
@@ -174,11 +212,8 @@ def calibrate(model_dir: Path, images: Path, calib_images: int) -> None:
     outliers = sorted(name for name, value in marked.items() if value is None)
     print(f"outliers kept unquantized (> {OUTLIER_RATIO}x median of their kind): {outliers}")
 
-    path = Path(__file__).parent / ACTIVATION_SCALES_FILENAME
-    table = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-    table[key] = dict(sorted(marked.items()))
-    path.write_text(json.dumps(dict(sorted(table.items())), indent=2) + "\n", encoding="utf-8")
-    print(f"wrote {len(marked)} entries for {key!r} to {path}")
+    _write_table(ACTIVATION_SCALES_FILENAME, key, marked)
+    _write_table(NVFP4_ACTIVATION_SCALES_FILENAME, key, nvfp4_scales(marked))
 
 
 def main() -> None:
@@ -192,9 +227,12 @@ def main() -> None:
     run.add_argument("--model-dir", type=Path, required=True)
     run.add_argument("--images", type=Path, required=True)
     run.add_argument("--calib-images", type=int, default=200)
+    commands.add_parser("nvfp4")
     args = parser.parse_args()
     if args.command == "fetch":
         fetch_images(args.out, args.count)
+    elif args.command == "nvfp4":
+        write_nvfp4_from_fp8()
     else:
         calibrate(args.model_dir, args.images, args.calib_images)
 

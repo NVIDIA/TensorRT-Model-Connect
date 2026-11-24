@@ -117,12 +117,17 @@ from Model Connect's shared pin. This option provisions the native SDK; it
 does not port any family adapter. See the [native SDK setup](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/cmake/edge_llm/README.md)
 for provisioning options. Follow each family's instructions for model builds.
 
-On GB300, pass `-DCMAKE_CUDA_ARCHITECTURES=103` for a native build. Model
-Connect records SM103 and selects the upstream `103a` compiler target when
-it builds the optional 0.12 SDK kernels. The reduced SDK build includes the
-CTM decode kernels required by the upstream attention plugin on this GPU.
-Model Connect also uses `103a` when device-linking the SDK into a consumer;
-using `103` there can leave runtime CUDA kernels unavailable.
+To include the optional GR00T and Pi0.5 C++ libraries and headers in the 0.12
+SDK, add `-DTRTMC_EDGELLM_POLICY_SDK=ON` when provisioning from source, or
+select a matching external SDK that already contains both. The base SDK does
+not contain them; installing the Edge Python wheel does not add them.
+
+Build on the GPU where the SDK will run. Pass its numeric architecture:
+for example, `-DCMAKE_CUDA_ARCHITECTURES=100` on GB200 or
+`-DCMAKE_CUDA_ARCHITECTURES=103` on GB300. The 0.12 provider selects the
+matching accelerated compiler target (`100a` or `103a`) for both the SDK
+and its consumers. The device check and installed receipt remain numeric.
+This compiler selection does not qualify a model on that GPU.
 
 ## Optional Edge-LLM Python tools
 

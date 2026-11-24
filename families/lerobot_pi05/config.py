@@ -110,6 +110,7 @@ class Pi05Config:
     action_normalization: Normalization
     # Dataset min/max of each action dimension, when the checkpoint carries them.
     action_range: tuple[tuple[float, ...], tuple[float, ...]] | None = None
+    openpi_policy: str | None = None
 
     @property
     def camera_slots(self) -> int:

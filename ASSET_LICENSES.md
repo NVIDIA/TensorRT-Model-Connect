@@ -68,6 +68,10 @@ photograph, and is distributed under the same terms.
 and saved losslessly as PNG (its pixels equal Pillow's decode of the
 `test_img.jpeg` copies listed above) and is distributed under the same terms.
 
+Byte-identical copies of that PNG are stored at:
+
+- `families/minicpmv4_7/tests/data/test_img.png`
+
 `families/timm_resnet/tests/data/test_img_car.jpeg` is a crop of the same
 photograph (columns 260 to 639, rows 60 to 381, saved again as JPEG) and is
 distributed under the same terms.
@@ -195,28 +199,35 @@ golden data.
 
 ## LibriSpeech accuracy fixture
 
-`families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav` and
-`families/mimi/tests/data/librispeech-test-clean-6930-75918-0003.wav`
-are unmodified copies of utterance `6930-75918-0003` from the LibriSpeech `test-clean` split,
-distributed by OpenSLR as SLR12 under the Creative Commons Attribution 4.0
-`families/wav2vec2_bert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
-are PCM WAV conversions of utterance `6930-75918-0003` from the LibriSpeech
-`test-clean` split, which OpenSLR distributes as FLAC in SLR12 under the
-Creative Commons Attribution 4.0
-International license. LibriSpeech was prepared by Vassil Panayotov with the
-assistance of Daniel Povey and is derived from LibriVox public-domain
-audiobooks.
+The following files are byte-identical PCM WAV conversions of utterance
+`6930-75918-0003` from the LibriSpeech `test-clean` split, which OpenSLR
+distributes as FLAC in SLR12 under the Creative Commons Attribution 4.0
+International license:
+
+- `families/glmasr/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/higgs_audio_v2_tokenizer/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/hubert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/mimi/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/qwen3_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/wav2vec2_bert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/wavlm/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+
+`families/wavlm/tests/data/librispeech-test-clean-6930-75918-0003.txt` is the
+utterance's transcript from the same LibriSpeech release.
+
+LibriSpeech was prepared by Vassil Panayotov with the assistance of Daniel Povey
+and is derived from LibriVox public-domain audiobooks.
 
 - Source and attribution: https://www.openslr.org/12/
 - License: https://creativecommons.org/licenses/by/4.0/
 
-A byte-identical copy is stored at
-`families/qwen3_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`.
-
-A byte-identical copy is stored at
-`families/wavlm/tests/data/librispeech-test-clean-6930-75918-0003.wav`, next to
-`families/wavlm/tests/data/librispeech-test-clean-6930-75918-0003.txt`, the
-utterance's transcript from the same LibriSpeech release.
+`families/moss_transcribe_diarize/tests/data/continuation_20s.wav` and
+`families/moss_transcribe_diarize/tests/data/two_speakers_22s.wav` join
+utterances of several speakers from the same `test-clean` split, with 0.8 s of
+silence between utterances, as 16 kHz mono 16-bit PCM, and are distributed under
+the same license. `families/moss_transcribe_diarize/tests/data/README.md` lists
+the utterance IDs and their positions.
 
 ## SANA world-model fixtures
 
@@ -262,7 +273,7 @@ revision, episode, frame, and tensor shapes.
 
 ## LeRobot Pi 0.5 recorded-observation fixtures
 
-The files below `families/lerobot_pi05/tests/data/` are three recorded LIBERO
+The LeRobot fixtures below `families/lerobot_pi05/tests/data/` are three recorded LIBERO
 observations from three different tasks, the outputs of the pinned LeRobot `pi05`
 policy for them, and LeRobot's prompt token ids for a set of test instructions.
 `recorded_observation/ep*_f*/` hold a lossless PNG re-encoding of the `image` and
@@ -270,7 +281,7 @@ policy for them, and LeRobot's prompt token ids for a set of test instructions.
 episode 379 frame 60 and episode 807 frame 70 in `physical-intelligence/libero`
 revision `a4336d589d589045d1c56423ffdf3b88a0e19b1f`. That dataset is distributed
 under CC-BY-4.0. Each `observation.json` records the source. `noise_seed0.f32` is a
-`torch.randn` draw, `reference/*.f32` are LeRobot `lerobot[pi]==0.6.1` outputs, and
+`torch.randn` draw, the original 50 x 7 reference actions are LeRobot `lerobot[pi]==0.6.1` outputs, and
 `tokenizer_golden.json` holds instructions written for this test with the token ids
 LeRobot's preprocessor produced for them; none of these contains third-party content.
 
@@ -280,6 +291,22 @@ LeRobot's preprocessor produced for them; none of these contains third-party con
 - `noise_seed0.f32`: little-endian float32 flow noise, 50 x 32
 - `reference/ep*_f*.{fp32,bf16}.f32`: little-endian float32 actions, 50 x 7
 - `tokenizer_golden.json`: test instructions, states and expected token ids
+
+The separate openpi FP16 cases have independent FP32 action references generated
+with [openpi at `215abfb`](https://github.com/Physical-Intelligence/openpi/tree/215abfb217dbac7d5f1273282331b9b1866c0479), not with Model Connect:
+
+- `reference/ep0000_f000.openpi_libero.fp32.f32`: 10 x 7 actions using the
+  existing LIBERO observation above and [the pinned LIBERO checkpoint](https://huggingface.co/lerobot/pi05_libero_base/tree/5fcf06fc42b6717e22ab885fd381a096574b12c7).
+- `recorded_observation/droid_ep0000_f000/observation.json`: joint and gripper
+  state and task for episode 0, frame 0 of the [DROID subset](https://huggingface.co/datasets/aractingi/droid_100_test/tree/ae1ae6519703520d5e78b11cadb00cc028499d7f).
+  The pinned dataset card identifies the subset as Apache-2.0; see also the
+  [original DROID dataset](https://droid-dataset.github.io/).
+- `reference/droid_ep0000_f000.openpi.fp32.f32`: 15 x 8 actions from
+  [the pinned DROID checkpoint](https://huggingface.co/lerobot/pi05_droid/tree/72824c0a93f00ce5bb8bedb7feb58953ba1da364).
+
+The policy manifests reference the tokenizer, normalization statistics and
+DROID camera clips externally. These cases do not redistribute those assets or
+model weights.
 
 ## LeRobot GR00T N1.7 recorded-observation fixtures
 
@@ -345,5 +372,22 @@ dataset text. Because it contains excerpts of the checkpoint weights, it is
 distributed under the
 [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license)
 of the source checkpoint.
+
+## LFM2 INT4-AWQ smoothing scales
+
+`families/lfm2/awq_scales/lfm2-1.2b-40f3da0d.npz` holds the INT4-AWQ
+activation smoothing scales (`pre_quant_scale`, one fp16 vector per block
+projection) for `LiquidAI/LFM2-1.2B` at revision
+`40f3da0d0164913923aee9462c23077868b816a3`, together with checkpoint identity
+metadata: the float64 sum and sum of squares of `model.embedding_norm.weight`,
+`model.layers.0.operator_norm.weight` and the first 64 values of the first row
+of every block projection weight. It is generated by
+`python -m families.lfm2.calibrate_awq_scales`, which runs ModelOpt
+`INT4_AWQ_CFG` on that checkpoint over chat prompts from
+`nvidia/Nemotron-Post-Training-Dataset-v1` (CC-BY-4.0). The file contains no
+checkpoint weights and no dataset text; like
+`families/lfm2/fp8_activation_scales.json`, it holds statistics of the model's
+activations. The source checkpoint is distributed under the
+[LFM Open License v1.0](https://huggingface.co/LiquidAI/LFM2-1.2B/blob/main/LICENSE).
 
 <!-- Collaborative review anchor: batch 2. -->

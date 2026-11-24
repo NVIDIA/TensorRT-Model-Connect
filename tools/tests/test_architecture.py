@@ -445,6 +445,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/tests/fake_family.cpp",
         "core/runtime/tests/test_bundle_format_v1.cpp",
         "core/runtime/tests/test_byok_shape_spec.cpp",
+        "core/runtime/tests/test_cuda_mem_pool.cpp",
         "core/runtime/tests/test_family_loader.cpp",
         "core/runtime/tests/test_internal_config.cpp",
         "core/runtime/tests/test_task_api.cpp",
@@ -526,6 +527,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/model_benchmark.py",
         "tools/pr_metadata.py",
         "tools/test_impact.py",
+        "tools/variant_coverage.py",
         "tools/ci/__init__.py",
         "tools/ci/__main__.py",
         "tools/ci/container.py",
@@ -555,6 +557,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_pr_metadata.py",
         "tools/tests/test_process_github_files.py",
         "tools/tests/test_public_source_hygiene.py",
+        "tools/tests/test_variant_coverage.py",
     }
     expected_cmake = {
         "cmake/trtmcConfig.cmake.in",
@@ -563,6 +566,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "cmake/edge_llm/0.12/Provider.cmake",
         "cmake/edge_llm/0.12/Prepare.cmake.in",
         "cmake/edge_llm/0.12/InstalledSDK.cmake",
+        "cmake/edge_llm/0.12/PolicySDK.cmake",
         "cmake/edge_llm/CheckNative.cmake",
         "cmake/edge_llm/EdgeLLMConfig.cmake.in",
         "cmake/edge_llm/Install.cmake.in",

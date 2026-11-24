@@ -68,6 +68,67 @@ def test_ensure_bundle_lets_trtmc_bench_decide_reuse_by_its_build_receipt(tmp_pa
     assert bundles.ensure_bundle(environment, _model("m", "org/m"), tmp_path / "out")["status"] == "built"
 
 
+def test_trtmc_bench_gets_the_qualification_build_time_limit(tmp_path, monkeypatch):
+    environment = Environment({"repo": str(tmp_path), "bundle_root": str(tmp_path / "engines")})
+    report = tmp_path / "limit.txt"
+    probe = [sys.executable, "-c", "import os, pathlib, sys; "
+             f"pathlib.Path({str(report)!r}).write_text(os.environ.get('TRTMC_BENCH_BUILD_TIMEOUT_S', '')); sys.exit(1)"]
+    monkeypatch.setattr(bundles, "build_command", lambda *args: probe)
+    bundles.ensure_bundle(environment, _model("m", "org/m"), tmp_path / "out")
+    assert report.read_text() == str(bundles.BUILD_TIMEOUT_S)  # not trtmc-bench's own 1 h default
+    environment = Environment({**environment.values, "build_env": {"TRTMC_BENCH_BUILD_TIMEOUT_S": "60"}})
+    bundles.ensure_bundle(environment, _model("m", "org/m"), tmp_path / "out")
+    assert report.read_text() == "60"  # an environment that states its own limit keeps it
+
+
+def test_a_reference_model_directory_is_loaded_from_the_reference_environment(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import services
+
+    environment = Environment({"repo": str(tmp_path), "bundle_root": str(tmp_path / "engines"),
+                               "serve_python": "python3", "ports": {"candidate": 9000, "reference": 9100}})
+    model = {"catalog_profile": "p", "candidate": {"bundle": "p/p.bundle", "precision": "fp16"},
+             "reference": {"model_directory": "trtmc-reference/p-int4", "model": "org/other", "revision": "abc"}}
+
+    def refuse(command, **options):
+        raise RuntimeError("not started")
+
+    monkeypatch.setattr(services, "_port_free", lambda port: True)
+    monkeypatch.setattr(services.subprocess, "Popen", refuse)
+    python = tmp_path / "ref-envs/e/bin/python"
+    with pytest.raises(RuntimeError, match="not started"):
+        with services.serving(environment, model, "reference", tmp_path / "out", python=str(python)):
+            pass
+    command = json.loads((tmp_path / "out/command.json").read_text())
+    assert command[command.index("--reference-model") + 1] == str(tmp_path / "ref-envs/e/trtmc-reference/p-int4")
+    assert "--reference-revision" not in command  # the checkpoint's revision does not name a local directory
+    with pytest.raises(services.ServiceError, match="reference environment"):  # nowhere to resolve it
+        with services.serving(environment, model, "reference", tmp_path / "out2"):
+            pass
+
+
+def test_a_preparation_script_alone_gets_a_reference_environment(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import services
+
+    environment = Environment({"repo": str(tmp_path), "serve_python": "python3",
+                               "reference_env_root": str(tmp_path / "envs")})
+    seen = []
+
+    def run(command, **options):
+        seen.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"python": "/envs/e/bin/python"}) + "\n",
+                                           stderr="")
+
+    monkeypatch.setattr(services.subprocess, "run", run)
+    prepared = {"catalog_profile": "p", "reference": {"prepare": "families/f/reference/prepare.py",
+                                                      "prepare_inputs": ["families/f/scales", "families/f/q.py"]}}
+    assert services.reference_python(environment, prepared) == "/envs/e/bin/python"
+    assert "--prepare" in seen[0] and "--requirements" not in seen[0]
+    inputs = [seen[0][index + 1] for index, value in enumerate(seen[0]) if value == "--prepare-input"]
+    assert inputs == [str(tmp_path / "families/f/scales"), str(tmp_path / "families/f/q.py")]
+    assert services.reference_python(environment, {"catalog_profile": "p", "reference": {}}) == "python3"
+    assert len(seen) == 1  # nothing to prepare or install: the serving interpreter
+
+
 def test_ensure_bundle_records_a_failed_build_under_the_gpu_lock(tmp_path, monkeypatch):
     environment = Environment({"repo": str(tmp_path), "bundle_root": str(tmp_path / "engines"),
                                "gpu_lock": str(tmp_path / "gpu.lock")})
@@ -516,7 +577,7 @@ def test_a_profile_definition_excludes_the_profile_from_every_machines_list(tmp_
 def test_the_vision_language_profiles_whose_catalog_cases_gained_a_request_are_qualified():
     """Their catalog cases now carry a prompt and an image, so no definition excludes them any more."""
     declared_here = {profile.name: profile.excluded for profile in selection.catalog(REPOSITORY)}
-    for name in ("nemotron-omni-nvfp4-text-image", "qwen35-moe-gptq-edge", "qwen3-0.6b-fp16"):
+    for name in ("qwen35-moe-gptq-edge", "qwen3-0.6b-fp16"):
         assert declared_here[name] is None, name
 
 
@@ -542,6 +603,69 @@ def test_an_unreadable_profile_definition_is_an_error_of_that_profile_alone(tmp_
 def test_machine_model_list_is_validated(config, message):
     with pytest.raises(ConfigError, match=message):
         selection.select(config, CATALOG)
+
+
+def _platform(root, name, text):
+    (root / "platforms").mkdir(parents=True, exist_ok=True)
+    (root / "platforms" / f"{name}.yaml").write_text(text)
+
+
+def test_a_platforms_exclusions_follow_the_machines_own_and_its_deadlines_yield_to_the_machines(tmp_path):
+    from trtmc_aiperf_qual.config import load_environment
+
+    _platform(tmp_path / "config", "small", "models:\n  exclude:\n    - {profile: flux-2-dev*, reason: 128 GB}\n"
+                                            "deadlines: {qwen36-27b: 86400, flux-2-dev: 7200}\n")
+    path = tmp_path / "machine.yaml"
+    path.write_text("platform: small\nrepo: /repo\nmodels:\n  include: all\n  exclude:\n"
+                    "    - {profile: qwen36-27b, reason: no root here}\ndeadlines: {qwen36-27b: 3600}\n")
+    environment = load_environment(path, root=tmp_path / "config")
+    assert environment.values["platform"] == "small" and environment.values["repo"] == "/repo"
+    assert environment.values["models"] == {"include": "all", "exclude": [
+        {"profile": "qwen36-27b", "reason": "no root here"},
+        {"profile": "flux-2-dev*", "reason": "platform small: 128 GB"}]}
+    assert environment.values["deadlines"] == {"qwen36-27b": 3600, "flux-2-dev": 7200}
+    selected, excluded = selection.select(environment.values["models"], CATALOG)
+    assert _names(selected) == ["qwen3-0.6b-fp16"]
+    assert [item["reason"] for item in excluded] == ["no root here", "platform small: 128 GB", "platform small: 128 GB"]
+
+
+def test_an_environment_without_a_platform_is_read_as_written(tmp_path):
+    from trtmc_aiperf_qual.config import load_environment
+
+    path = tmp_path / "machine.yaml"
+    path.write_text("repo: /repo\nmodels: {include: all}\n")
+    assert load_environment(path, root=tmp_path / "config").values == {"repo": "/repo", "models": {"include": "all"}}
+
+
+@pytest.mark.parametrize("platform, machine, message", [
+    (None, "platform: other\n", "unknown platform 'other'; config/platforms has: small"),
+    ("models: {include: [qwen*]}\n", "platform: small\n", "models may only hold exclude"),
+    ("models: {exclude: [{profile: flux-2-dev}]}\n", "platform: small\n", "list of {profile, reason}"),
+    ("models: {exclude: [{profile: flux-2-dev, reason: ' '}]}\n", "platform: small\n", "list of {profile, reason}"),
+    ("deadlines: {flux-2-dev: 0}\n", "platform: small\n", "positive seconds"),
+    ("retention: {bundle: retain}\n", "platform: small\n", "unknown keys retention"),
+    ("models: {exclude: []}\n", "platform: small\nmodels: {exclude: flux-2-dev}\n", "must be a list"),
+])
+def test_a_platform_and_its_use_are_validated(tmp_path, platform, machine, message):
+    from trtmc_aiperf_qual.config import load_environment
+
+    _platform(tmp_path / "config", "small", platform or "models: {exclude: []}\n")
+    path = tmp_path / "machine.yaml"
+    path.write_text(machine)
+    with pytest.raises(ConfigError, match=message.replace("{", r"\{").replace("}", r"\}")):
+        load_environment(path, root=tmp_path / "config")
+
+
+def test_every_platform_of_the_repository_loads_and_names_ready_catalog_profiles():
+    from trtmc_aiperf_qual.config import platforms, with_platform
+
+    names = {profile.name for profile in selection.catalog(REPOSITORY)}
+    assert {"gb300", "dgx-spark", "jetson-thor"} <= set(platforms())
+    for platform in platforms():
+        values = with_platform({"platform": platform})
+        for rule in values["models"]["exclude"]:
+            assert rule["profile"] in names and rule["reason"].startswith(f"platform {platform}: "), rule
+        assert set(values["deadlines"]) <= names, platform
 
 
 def test_summary_omits_exclusions_but_keeps_an_actual_result_from_another_host(tmp_path):

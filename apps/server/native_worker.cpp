@@ -13,6 +13,7 @@
 #include "trtmc/control.hpp"
 #include "trtmc/features.hpp"
 #include "trtmc/image.hpp"
+#include "trtmc/internal/config.h"
 #include "trtmc/language.hpp"
 #include "trtmc/perception.hpp"
 #include "trtmc/runtime/family_loader.h"
@@ -259,6 +260,15 @@ int run_protocol(const Json& ready, const Operations& operations, std::istream& 
                 response = error_response(id, "runtime_error", "native worker operation failed");
                 fatal = true;
             }
+        } catch (const trtmc::internal::ConfigError& error) {
+            // Pre-SDK Tasks run in process, so a request the family rejects,
+            // such as a prompt longer than its KV cache, arrives here instead
+            // of as TRTMC_INVALID_CONFIG. Answer it as the SDK path does. Any
+            // other exception, std::invalid_argument included, still retires
+            // the worker because it can come from a broken runtime.
+            std::cerr << "[trtmc.server.worker] " << error.what() << '\n';
+            response =
+                error_response(id, "invalid_request_error", "request is invalid for this model");
         } catch (const std::exception& error) {
             std::cerr << "[trtmc.server.worker] " << error.what() << '\n';
             response = error_response(id, "runtime_error", "native worker operation failed");

@@ -41,10 +41,12 @@ def build(
     max_sequence_length: int | None = None, tensor_parallel_size: int = 1,
     verbose: bool = False,
     quantization: str | None = None,
+    edge_builder_python: Path | None = None,
     execution_variant: str | None = None, companion: list[str] | tuple[str, ...] = (),
+    spec_draft_top_k: int | None = None,
 ) -> int:
     """Run the declared owner command; help never imports this handler."""
-    execution = execution_inputs(execution_variant, companion)
+    execution = execution_inputs(execution_variant, companion, spec_draft_top_k)
     model_dir = resolve_model(model, revision)
     metadata = load_model_metadata(model_dir)
     resolve_family(metadata, "gemma")
@@ -63,7 +65,7 @@ def build(
         model_dir=model_dir, output_path=output, family="gemma",
         task=task, precision=precision, backend=backend,
         max_sequence_length=max_sequence_length, tensor_parallel_size=tensor_parallel_size,
-        verbose=verbose, quantization=quantization,
+        verbose=verbose, quantization=quantization, edge_builder_python=edge_builder_python,
     )
     if execution is not None:
         request = with_execution(request, execution)

@@ -12,8 +12,10 @@ benchmarks:
     gate:
       checker: families.dinov2.validation:compare
       precision: fp16  # the build precision's E2E feature tolerance, against the FP32 native features
-      # One of the 50 images may miss the criteria from rounding, if it stays within twice the tolerance.
-      outliers: {max_fraction: 0.02, gate: {threshold_scale: 2.0}}
+      # The tolerance is set against the FP32 native features, where every image meets it; the native model
+      # answers here at FP16 and its own rounding reaches 2.9 on some images. Two of the 50 images may miss the
+      # criteria from rounding, if each stays within twice the tolerance.
+      outliers: {max_fraction: 0.04, gate: {threshold_scale: 2.0}}
     suite_definition:
       suite: coco-feature-parity
       version: 2

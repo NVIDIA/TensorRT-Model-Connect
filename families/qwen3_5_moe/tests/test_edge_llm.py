@@ -48,6 +48,12 @@ def test_documented_config_and_source_policy(source):
     from families.qwen3_5_moe.quantization import prepared_format
     config = ModelConfig.from_dir(request.model_dir)
     assert (config.hidden_size, config.intermediate_size, config.head_dim) == (2048, 512, 256)
+    # Missing and null BOS both mean no BOS. Zero remains a valid token ID.
+    text = dict(raw["text_config"])
+    text.pop("bos_token_id", None)
+    for field, expected in (({}, -1), ({"bos_token_id": None}, -1), ({"bos_token_id": 0}, 0)):
+        candidate = {**raw, "text_config": {**text, **field}}
+        assert ModelConfig.from_json(json.dumps(candidate)).bos_token_id == expected
     assert prepared_format(request.model_dir, raw, request.quantization) == policy["weights"]
     assert policy["visual"] == "fp16"
     assert policy["weights"] == ("int4" if kind == "gptq" else "nvfp4")
@@ -359,7 +365,7 @@ def test_consistent_explicit_kv_and_group_modifiers(source):
 
 @pytest.mark.parametrize("task", ["text_generation", "vision_language_generation"])
 @pytest.mark.parametrize("capacity", [None, 1024, 2])
-@pytest.mark.parametrize("variant", [None, "dflash", "dflash_ddtree", "mtp"])
+@pytest.mark.parametrize("variant", [None, "dflash", "dflash_ddtree", "mtp", "jetspec"])
 def test_direct_builder_defaults_complete_components_and_packed_arguments(
     source, monkeypatch, tmp_path, task, capacity, variant
 ):
@@ -397,10 +403,24 @@ def test_direct_builder_defaults_complete_components_and_packed_arguments(
             "dflash_config": {"block_size": 16, "mask_token_id": 248077,
                               "target_layer_ids": [1, 6, 11, 16, 22, 27, 32, 37]},
         }
+        if variant == "jetspec":
+            draft["block_size"] = 16
+            draft["dflash_config"] = {"causal_head": True, "mask_token_id": 248070,
+                                      "target_layer_ids": [1, 10, 19, 28, 37]}
         (draft_dir / "config.json").write_text(json.dumps(draft))
         (draft_dir / "model.safetensors").write_bytes(b"draft fixture")
         execution = execution_inputs(variant, [f"draft={draft_dir}"])
         request = with_execution(request, execution)
+        if variant == "jetspec":
+            if kind == "gptq":
+                with pytest.raises(ValueError, match="NVFP4 target"):
+                    dispatch.validate_execution(request, raw)
+                return
+            invalid = {**draft, "dflash_config": {**draft["dflash_config"], "causal_head": False}}
+            (draft_dir / "config.json").write_text(json.dumps(invalid))
+            with pytest.raises(ValueError, match="causal_head"):
+                dispatch.validate_execution(request, raw)
+            (draft_dir / "config.json").write_text(json.dumps(draft))
         if capacity == 2:
             with pytest.raises(ValueError, match="context"):
                 edge_llm.prepare(request, raw, TARGET, tmp_path / "stage", tmp_path / "build.log")
@@ -425,14 +445,21 @@ def test_direct_builder_defaults_complete_components_and_packed_arguments(
     monkeypatch.setattr(
         edge_llm,
         "installed_package",
-        lambda target: {"python": "edge-python", "plugin": "edge-plugin"},
+        lambda target: {"version": "0.11.0", "revision": "95515c2f87fba8982db5a519f9022277667b3cc9",
+                        "python": "edge-python", "plugin": "edge-plugin"},
     )
+    if variant == "jetspec":
+        with pytest.raises(ValueError, match="0.12.0"):
+            edge_llm.prepare(request, raw, TARGET, tmp_path / "legacy", tmp_path / "legacy.log")
+        monkeypatch.setattr(edge_llm, "installed_package",
+                            lambda target: {"version": "0.12.0", "release_revision": None,
+                                            "python": "edge-python", "plugin": "edge-plugin"})
     checked = []
     monkeypatch.setattr(
         checkpoint,
         "validate_checkpoint",
         lambda path, fmt: (
-            checked.append((path, fmt)) or {"tensor_count": 1, "shard_count": 1, "layout": fmt}
+            checked.append((path, fmt)) or {"tensor_count": 1, "shard_count": 1, "layout": fmt, "text_kv_dtype": "fp16"}
         ),
     )
     commands = []
@@ -442,7 +469,7 @@ def test_direct_builder_defaults_complete_components_and_packed_arguments(
         engine = Path(command[command.index("--engine-dir") + 1])
         engine.mkdir(parents=True)
         for name, value in (
-            ("base_config.json" if variant else "config.json", {"eos_token_id": [248044]}),
+            ("base_config.json" if variant else "config.json", {"eos_token_id": [248044], "kv_cache_dtype": "fp16"}),
             ("tokenizer.json", tokenizer),
             ("tokenizer_config.json", tokconfig),
             ("chat_template.jinja", {}),
@@ -459,7 +486,7 @@ def test_direct_builder_defaults_complete_components_and_packed_arguments(
             (engine / "visual/visual.engine").write_bytes(b"visual")
             (engine / "visual/config.json").write_text("{}")
 
-    monkeypatch.setattr(edge_llm, "builder_python", lambda package, target: package["python"])
+    monkeypatch.setattr(edge_llm, "builder_python", lambda package, target, requested=None: package["python"])
     monkeypatch.setattr(edge_llm.subprocess, "run", builder)
     files, marker = edge_llm.prepare(
         request, raw, TARGET, tmp_path / "stage", tmp_path / "build.log"
@@ -477,8 +504,14 @@ def test_direct_builder_defaults_complete_components_and_packed_arguments(
         assert not (tmp_path / "stage/edge_llm/checkpoint/draft").exists()
     elif variant:
         assert marker["execution_variant"] == variant and marker["dflash_block_size"] == 16
-        assert command[command.index("--spec-type") + 1] == "dflash"
-        assert command[command.index("--max-verify-tree-size") + 1] == "16"
+        if variant == "jetspec":
+            assert marker["jet_draft_top_k"] == 7
+            assert command[command.index("--spec-type") + 1] == "jetspec"
+            assert command[command.index("--max-spec-verify-tokens") + 1] == "16"
+            assert command[command.index("--max-spec-draft-tokens") + 1] == "16"
+        else:
+            assert command[command.index("--spec-type") + 1] == "dflash"
+            assert command[command.index("--max-verify-tree-size") + 1] == "16"
         staged_draft = tmp_path / "stage/edge_llm/checkpoint/draft"
         assert command[command.index("--draft-model-dir") + 1] == str(staged_draft)
         assert (staged_draft / "model.safetensors").read_bytes() == b"draft fixture"
@@ -487,7 +520,7 @@ def test_direct_builder_defaults_complete_components_and_packed_arguments(
         assert "--spec-type" not in command and "execution_variant" not in marker
     assert command[command.index("--dense") + 1] == "auto"
     assert command[command.index("--components") + 1] == (
-        "llm,visual" if task == "vision_language_generation" else "llm"
+        ("all" if variant == "jetspec" else "llm,visual") if task == "vision_language_generation" else "llm"
     )
     assert marker["max_sequence_length"] == (4096 if capacity is None else capacity)
     assert marker["task"] == task and marker["eos_token_ids"] == [248044, 248046]
@@ -521,9 +554,10 @@ def test_missing_direct_builder_artifacts_are_preparation_failures(source, monke
     monkeypatch.setattr(
         edge_llm,
         "installed_package",
-        lambda target: {"python": "edge-python", "plugin": "edge-plugin"},
+        lambda target: {"version": "0.11.0", "revision": "95515c2f87fba8982db5a519f9022277667b3cc9",
+                        "python": "edge-python", "plugin": "edge-plugin"},
     )
-    monkeypatch.setattr(edge_llm, "builder_python", lambda package, target: package["python"])
+    monkeypatch.setattr(edge_llm, "builder_python", lambda package, target, requested=None: package["python"])
     monkeypatch.setattr(edge_llm.subprocess, "run", lambda *args, **kwargs: None)
     with pytest.raises(ValueError, match="required artifact"):
         edge_llm.prepare(request, raw, TARGET, tmp_path / "stage", tmp_path / "build.log")
