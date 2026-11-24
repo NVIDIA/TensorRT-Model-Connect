@@ -46,7 +46,10 @@ class VoiceChatThinkerKvCache : public VoiceChatThinkerInferenceState {
     int32_t num_layers_{0};
     int32_t max_length_{0};
     int32_t kv_dim_{0};
+    // Valid rows, at most max_length_.
     int32_t position_{0};
+    // Ring slot the next row is written to.
+    int32_t write_row_{0};
     cudaStream_t stream_{nullptr};
     std::vector<float> mask_buf_;
 };

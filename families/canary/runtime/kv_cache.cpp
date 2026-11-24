@@ -274,51 +274,33 @@ void CanaryKvCache::advance(int32_t n_tokens) {
 
     auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
 
-    if (position_ < max_length_) {
-        auto offset = static_cast<std::size_t>(position_) * row_bytes;
-        for (int32_t i = 0; i < num_layers_; ++i) {
-            auto li = static_cast<std::size_t>(i);
-            if (uses_batched_layout()) {
-                const auto cache_pitch = static_cast<std::size_t>(max_length_) * row_bytes;
-                cudaMemcpy2DAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset, cache_pitch,
-                                  present_k_[li].data(), row_bytes, row_bytes,
-                                  static_cast<std::size_t>(batch_size_), cudaMemcpyDeviceToDevice,
-                                  stream_);
-                cudaMemcpy2DAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset, cache_pitch,
-                                  present_v_[li].data(), row_bytes, row_bytes,
-                                  static_cast<std::size_t>(batch_size_), cudaMemcpyDeviceToDevice,
-                                  stream_);
-            } else {
-                cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset,
-                                present_k_[li].data(), row_bytes, cudaMemcpyDeviceToDevice,
-                                stream_);
-                cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset,
-                                present_v_[li].data(), row_bytes, cudaMemcpyDeviceToDevice,
-                                stream_);
-            }
-        }
-        ++position_;
-    } else {
+    // Generation stops when the cache is full (the pipeline checks before each
+    // step), so a row that does not fit is a caller error. Dropping the oldest
+    // rows instead would silently discard the prompt.
+    if (position_ >= max_length_)
+        throw std::runtime_error("CanaryKvCache::advance: the KV cache is full");
+
+    auto offset = static_cast<std::size_t>(position_) * row_bytes;
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        auto li = static_cast<std::size_t>(i);
         if (uses_batched_layout()) {
-            throw std::runtime_error(
-                "CanaryKvCache batched decoder exceeded its fixed cache length");
+            const auto cache_pitch = static_cast<std::size_t>(max_length_) * row_bytes;
+            cudaMemcpy2DAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset, cache_pitch,
+                              present_k_[li].data(), row_bytes, row_bytes,
+                              static_cast<std::size_t>(batch_size_), cudaMemcpyDeviceToDevice,
+                              stream_);
+            cudaMemcpy2DAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset, cache_pitch,
+                              present_v_[li].data(), row_bytes, row_bytes,
+                              static_cast<std::size_t>(batch_size_), cudaMemcpyDeviceToDevice,
+                              stream_);
+        } else {
+            cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset,
+                            present_k_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
+            cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset,
+                            present_v_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
         }
-        // Cache full: shift [1..max) → [0..max-1), then write at tail
-        auto shift_bytes = static_cast<std::size_t>(max_length_ - 1) * row_bytes;
-        auto tail_offset = shift_bytes;
-        for (int32_t i = 0; i < num_layers_; ++i) {
-            auto li = static_cast<std::size_t>(i);
-            auto* ck = static_cast<uint8_t*>(cache_k_[li].data());
-            auto* cv = static_cast<uint8_t*>(cache_v_[li].data());
-            cudaMemcpyAsync(ck, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(ck + tail_offset, present_k_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv + tail_offset, present_v_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-        }
-        // position_ stays at max_length_ (cache is full, all slots visible)
     }
+    ++position_;
 }
 
 std::unique_ptr<CanaryInferenceState> CanaryKvCache::create_empty() const {
