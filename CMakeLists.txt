@@ -492,6 +492,13 @@ if(TRTMC_BUILD_TESTS)
   target_compile_options(test_bundle_format_v1 PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME bundle_format_v1 COMMAND test_bundle_format_v1)
 
+  add_executable(test_cuda_mem_pool core/runtime/tests/test_cuda_mem_pool.cpp)
+  target_include_directories(test_cuda_mem_pool PRIVATE ${PROJECT_SOURCE_DIR}/core)
+  target_link_libraries(test_cuda_mem_pool PRIVATE trtmc_core)
+  target_compile_options(test_cuda_mem_pool PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME cuda_mem_pool COMMAND test_cuda_mem_pool)
+  set_tests_properties(cuda_mem_pool PROPERTIES SKIP_RETURN_CODE 77 LABELS gpu)
+
   add_executable(test_task_api core/runtime/tests/test_task_api.cpp)
   target_include_directories(test_task_api PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
   target_compile_options(test_task_api PRIVATE -Wall -Wextra -Wpedantic)

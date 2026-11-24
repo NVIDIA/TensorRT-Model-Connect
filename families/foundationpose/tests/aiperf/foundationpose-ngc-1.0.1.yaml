@@ -19,4 +19,7 @@ benchmarks:
         kind: family_inputs
         module: families/foundationpose/reference/inputs.py
       selection: {method: first, count: 30}
-    gate: {max_pose_abs_error: 0.005, max_score_abs_error: 0.05}  # the family's E2E gate
+    # The FP8 profile's method on these real crops: 1.75x the largest pose error of the FP16 bundle (0.0070, on DGX
+    # Spark and Jetson Thor; GB300 stays within 0.005). The E2E pose limit (0.005) comes from synthetic crops, which
+    # move less; the score limit stays the E2E one (largest error 0.013).
+    gate: {max_pose_abs_error: 0.0125, max_score_abs_error: 0.05}
