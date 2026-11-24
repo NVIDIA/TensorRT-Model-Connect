@@ -659,9 +659,6 @@ class UnigramTokenizer final : public ITokenizer {
         auto& pt = j["pre_tokenizer"];
         std::string ptype = pt.value("type", "");
 
-        if (ptype == "WhitespaceSplit")
-            mWhitespaceSplit = true;
-
         if (ptype == "Metaspace") {
             mAddPrefixSpace = pt.value("add_prefix_space", true);
         } else if (ptype == "Sequence") {
@@ -683,6 +680,8 @@ class UnigramTokenizer final : public ITokenizer {
             }
             if (!metaspace)
                 throw std::runtime_error("Unigram pre-tokenizer sequence requires Metaspace");
+        } else {
+            throw std::runtime_error("Unsupported Unigram pre-tokenizer");
         }
     }
 

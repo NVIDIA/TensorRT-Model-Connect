@@ -196,6 +196,21 @@ int main(int argc, char** argv) {
         }
     }
     auto single_word = added;
+    for (const auto* type : {"WhitespaceSplit", "Digits", "ByteLevel"}) {
+        auto unsupported = added_identity;
+        unsupported["pre_tokenizer"] = {{"type", type}};
+        try {
+            create(unsupported);
+            std::cerr << "Accepted unsupported top-level pre-tokenizer: " << type << '\n';
+            ++failures;
+        } catch (const std::runtime_error&) {
+        }
+    }
+    auto absent = added_identity;
+    absent.erase("pre_tokenizer");
+    create(absent);
+    absent["pre_tokenizer"] = nullptr;
+    create(absent);
     single_word["added_tokens"][3]["single_word"] = true;
     try {
         create(single_word);
