@@ -81,26 +81,35 @@ def _csv_values(values: list[str]) -> set[str]:
     return {item.strip() for value in values for item in str(value).split(",") if item.strip()}
 
 
-def _selection(config) -> set[str]:
-    selected = _csv_values(config.getoption("--e2e-model", default=[]) or [])
-    selected |= _csv_values(config.getoption("--e2e-testcase", default=[]) or [])
+def _selection(config) -> tuple[set[str], set[str]]:
+    """Names selected by --e2e-model or --e2e-models-file, and testcases selected by --e2e-testcase."""
+    models = _csv_values(config.getoption("--e2e-model", default=[]) or [])
     models_file = config.getoption("--e2e-models-file", default=None)
     if models_file:
         path = Path(models_file)
         assert path.is_file(), f"E2E models file does not exist: {path}"
-        selected |= {
+        models |= {
             line.strip()
             for line in path.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         }
-    return selected
+    testcases = _csv_values(config.getoption("--e2e-testcase", default=[]) or [])
+    return models, testcases
 
 
 def _require_selected(case_name: str, manifest: dict, config) -> None:
-    selected = _selection(config)
-    if os.environ.get("TRTMC_E2E") != "1" and not selected:
+    models, testcases = _selection(config)
+    if os.environ.get("TRTMC_E2E") != "1" and not (models or testcases):
         pytest.skip("real family E2E requires TRTMC_E2E=1 or an explicit E2E selection")
-    if selected and not ({_FAMILY, manifest["name"], case_name} & selected):
+    if testcases:
+        if case_name in testcases:
+            return
+        # Testcases narrow an explicit selection of this family; when none of them is one of its cases, the
+        # selection is wrong and must not pass by running every case or none.
+        if {_FAMILY, manifest["name"]} & models and not set(_CASES) & testcases:
+            pytest.fail(f"--e2e-testcase {sorted(testcases)} names no {_FAMILY} testcase: {sorted(_CASES)}")
+        pytest.skip(f"{case_name} was not selected")
+    if models and not ({_FAMILY, manifest["name"], case_name} & models):
         pytest.skip(f"{case_name} was not selected")
 
 
@@ -121,8 +130,19 @@ def _required_environment():
 
 def _checkpoint(manifest: dict) -> Path:
     from huggingface_hub import snapshot_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
 
-    path = Path(snapshot_download(repo_id=manifest["hf_id"], revision=manifest["hf_revision"]))
+    # The pinned snapshot comes from the local Hugging Face cache only. The pre-merge runs offline with a cache that
+    # holds just the snapshot's files, and a lookup that may reach the Hub (for example to list the revision's
+    # files) fails there.
+    hf_id, revision = manifest["hf_id"], manifest["hf_revision"]
+    try:
+        path = Path(snapshot_download(repo_id=hf_id, revision=revision, local_files_only=True))
+    except LocalEntryNotFoundError as error:
+        raise AssertionError(
+            f"{hf_id} at {revision} is not in the Hugging Face cache; download it first "
+            f"(hf download {hf_id} --revision {revision})"
+        ) from error
     assert (path / "config.json").is_file(), path
     return path
 
