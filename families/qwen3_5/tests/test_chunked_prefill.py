@@ -213,5 +213,18 @@ def test_a_text_bundle_whose_second_weight_copy_does_not_fit_fails_to_build() ->
     # 27B FP16 on 128 GB: never fall back to a one-token-at-a-time prompt prefill.
     with pytest.raises(ValueError, match="need about 108 GiB of weights and the GPU has 121 GiB"):
         model._require_two_engines_fit(54 * gib, 121 * gib)
-    weights = {"w": np.zeros((4, 8), dtype=np.float16), "_rows": 4}
-    assert model._host_weight_bytes(weights) == 64
+
+
+def test_the_fit_check_counts_fp32_host_weights_at_the_engine_precision() -> None:
+    weights = {
+        "embedding": np.zeros((4, 8), dtype=np.float32),
+        "layer.1.w_q": np.zeros((2, 2), dtype=np.float32),
+        "layer.10.w_q": np.zeros((2, 2), dtype=np.float32),
+        "layer.1.w_packed": np.zeros(4, dtype=np.int8),
+        "_rows": 4,
+    }
+    # An FP16 build stores the FP32 host tensors as FP16; packed tensors keep their size.
+    assert model._engine_weight_bytes(weights, "fp16") == 32 * 2 + 4 * 2 + 4 * 2 + 4
+    # Requested FP32 layers stay FP32 (layer 1 only, not layer 10).
+    assert model._engine_weight_bytes(weights, "fp16", (1,)) == 32 * 2 + 4 * 4 + 4 * 2 + 4
+    assert model._engine_weight_bytes(weights, "fp32") == 32 * 4 + 4 * 4 + 4 * 4 + 4

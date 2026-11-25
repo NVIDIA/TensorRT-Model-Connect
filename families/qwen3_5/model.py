@@ -2474,8 +2474,20 @@ def _require_two_engines_fit(weight_bytes: int, gpu_bytes: int | None) -> None:
         f"and the GPU has {gpu_bytes / 1024**3:.0f} GiB; use a GPU with more memory or a smaller checkpoint")
 
 
-def _host_weight_bytes(weights) -> int:
-    return sum(value.nbytes for value in weights.values() if isinstance(value, np.ndarray))
+def _engine_weight_bytes(weights, precision: str, fp32_layers=()) -> int:
+    """Bytes of weights that one engine carries.
+
+    TP1 host weights keep unquantized tensors in FP32, but an FP16 build stores them as FP16 constants, except in
+    the requested FP32 layers. Quantized and packed tensors keep their host size.
+    """
+    fp32_prefixes = tuple(f"layer.{int(layer)}." for layer in fp32_layers)
+    total = 0
+    for name, value in weights.items():
+        if not isinstance(value, np.ndarray):
+            continue
+        narrowed = precision == "fp16" and value.dtype == np.float32 and not name.startswith(fp32_prefixes)
+        total += value.size * 2 if narrowed else value.nbytes
+    return total
 
 
 def _gpu_memory_bytes() -> int | None:
@@ -2616,7 +2628,7 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
     nvfp4 = quantization == "nvfp4" or getattr(quant_ctx, "has_nvfp4_weights", False)
     split = not visual and not require_mtp and draft_config is None and not nvfp4
     if split:
-        _require_two_engines_fit(_host_weight_bytes(weights), _gpu_memory_bytes())
+        _require_two_engines_fit(_engine_weight_bytes(weights, precision, request.fp32_layers), _gpu_memory_bytes())
     # Stage the target before building the other engines; do not retain its serialized bytes.
     writer.add_bytes("engine.plan", model.build_engine(
         config,
