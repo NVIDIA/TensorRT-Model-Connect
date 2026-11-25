@@ -42,10 +42,9 @@ from tools.e2e_evidence import evidence_stage, record_evidence
 ROOT = Path(__file__).resolve().parent
 FAMILY = "smolvlm"
 MAX_NEW_TOKENS = 64
-# The repository's Apache-2.0 photograph (ASSET_LICENSES.md), its mirror image and a
+# The case's photograph (the repository's Apache-2.0 one, ASSET_LICENSES.md), its mirror image and a
 # 150 x 382 portrait strip of it. The strip tiles to 2048 x 1024, whose 512 x 512 global
 # view takes Pillow 13's vertical-first resampling order with both passes.
-PHOTO = "test_img.jpeg"
 STRIP_BOX = (300, 0, 450, 382)
 REQUESTS = [
     [{"role": "user", "content": [{"type": "image", "asset": "photo"},
@@ -127,10 +126,10 @@ def _helper(runtime: Path, name: str) -> Path:
     raise AssertionError(f"build the owning {name} CMake target")
 
 
-def _images(directory: Path) -> dict:
+def _images(directory: Path, photo_path: str) -> dict:
     from PIL import Image, ImageOps
 
-    photo = Image.open(ROOT / "data" / PHOTO).convert("RGB")
+    photo = Image.open(ROOT / photo_path).convert("RGB")
     images = {}
     for name, picture in (("photo", photo), ("mirror", ImageOps.mirror(photo)),
                           ("strip", photo.crop(STRIP_BOX))):
@@ -292,7 +291,7 @@ def test_e2e(case_name, request, tmp_path):
     runner, probe = _helper(runtime, "smolvlm_inference_test"), _helper(runtime, "smolvlm_runtime_probe")
     assert (runtime / "libtrtmc_model_smolvlm.so").is_file()
     checkpoint = _checkpoint(manifest)
-    images = _images(tmp_path)
+    images = _images(tmp_path, case["test_image"])
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
         build(BuildRequest(model_dir=checkpoint, output_path=bundle, family=FAMILY, task=manifest["task"],
