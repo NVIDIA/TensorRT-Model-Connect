@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  requirements: families/flux/requirements.txt  # the family's dependencies, layered on the serving interpreter
+
+# FLUX.2-klein base runs true CFG against the empty prompt on both sides, scaled by guidance_scale: 4.0 is the
+# default of TRTMC's bundle and of the Diffusers Flux2KleinPipeline. Neither side reads cfg_scale; it is stated
+# as the same 4.0.
+request: {guidance_scale: 4.0, cfg_scale: 4.0}

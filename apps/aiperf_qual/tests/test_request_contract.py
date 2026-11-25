@@ -22,6 +22,31 @@ def test_image_video_controls_must_be_present_but_do_not_apply_to_text_or_speech
     assert unstated_defaults({"text": "hello"}, "generate_audio") == []
 
 
+def test_a_control_the_configuration_sets_to_null_is_one_the_model_does_not_take(monkeypatch):
+    """A null in config/models ``request`` (Qwen-Image 2.1's guidance_scale) is a control neither side has: no
+    request states it, none is required to, and every request built on the catalog request drops it."""
+    from trtmc_aiperf_qual import suites
+    from trtmc_aiperf_qual.models import _suite
+
+    image = {"num_steps": 40, "cfg_scale": 1.0, "height": 1024, "width": 1024}
+    assert unstated_defaults(image, "generate_image") == ["guidance_scale"]
+    assert unstated_defaults(image, "generate_image", {"guidance_scale": None}) == []
+    assert unstated_defaults(image, "generate_image", {"guidance_scale": 4.0}) == ["guidance_scale"]
+    assert unstated_defaults({**image, "guidance_scale": -1}, "generate_image", {"guidance_scale": None}) == [
+        "guidance_scale"]  # a request still carrying the control leaves it to a default
+
+    catalog = {"prompt": "a capybara", "seed": 42, "num_steps": 40, "guidance_scale": -1.0}
+    definition = _suite({"suite": "t2i", "version": 1, "base": "catalog",
+                         "source": {"kind": "inline", "records": [{"id": "1", "request": {"prompt": "a cat"}}]},
+                         "selection": {"method": "first", "count": 1}},
+                        "qwen-image-2.1", {"guidance_scale": None, "cfg_scale": 1.0, "height": 1024, "width": 1024})
+    monkeypatch.setattr(suites, "_catalog_testcase_records",
+                        lambda source, _environment: [{"id": source["profile"], "request": catalog}])
+    request = suites.build_suite(definition, Environment({})).samples[0]["request"]
+    assert request == {"prompt": "a cat", "seed": 42, "num_steps": 40, "cfg_scale": 1.0, "height": 1024,
+                       "width": 1024}
+
+
 def test_configured_image_profiles_state_every_control_and_new_ones_are_left_out():
     """An image profile with a configuration of its own states every control the pipeline would otherwise choose.
     A catalog profile without one that leaves a control unstated is left out with the controls it leaves, so a
@@ -44,7 +69,9 @@ def test_configured_image_profiles_state_every_control_and_new_ones_are_left_out
         except BenchmarkError:  # no catalog request (svd-xt: no prompt): kept, its run reports what it finds
             assert selection[profile].source != MODELS_SOURCE, profile
             continue
-        missing = unstated_defaults({**resolved.base_request, **model.get("catalog_request", {})}, model["operation"])
+        stated = model.get("catalog_request", {})
+        request = {key: value for key, value in {**resolved.base_request, **stated}.items() if value is not None}
+        missing = unstated_defaults(request, model["operation"], stated)
         assert not (missing and (CONFIG_ROOT / "models" / f"{profile}.yaml").is_file()), (profile, missing)
         if selection[profile].source not in (TASKS_SOURCE, EXCLUSIONS_SOURCE):  # left out earlier for another reason
             assert (selection[profile].source == MODELS_SOURCE) == bool(missing), profile

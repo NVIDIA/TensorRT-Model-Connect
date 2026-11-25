@@ -1,8 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Default TRTMC builds smart-resize images within the 448-square budget (200704 pixels); give the
+# reference the same documented processor limit so both sides receive the same image geometry.
+# qwen25vl-7b-nvfp4 takes this reference: this is its highest-precision sibling.
 reference:
   mode: eager  # torch.compile: generation recompiles past Dynamo's limit
+  options: {processor_kwargs: {max_pixels: 200704}}
 
 # The catalog bundle's KV cache holds an OCRBench prompt but not the prompt plus its 128-token answer, and
 # generation stops when the cache is full, so the answer would be cut short. Reserve up to 256 image tokens (the

@@ -250,7 +250,9 @@ implementation, not the quantization, and its benchmark keeps the unquantized ma
 The Diffusers adapter ties a T5-style text encoder's `encoder.embed_tokens` back to `shared` when loading
 left it zero (Transformers 5.2 does not tie it for `UMT5EncoderModel`, Wan). A timed request that leaves
 `num_steps`, guidance, CFG, or frames at -1 is an error until `config/models` states them, since TRTMC and
-Diffusers apply different defaults.
+Diffusers apply different defaults. A null under `request` names a control the model takes on neither side
+(Qwen-Image 2.1 has no `guidance_scale`): every request built on the catalog request drops it, and none is
+required to state it.
 
 ## Setup
 

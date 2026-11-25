@@ -87,11 +87,12 @@ def _unstated_image_controls(entry: Any, repository: Path, root: Path) -> list[s
 
     try:
         model = resolve_model(entry.name, Environment({"repo": str(repository)}), root)
-        request = {**dict(resolve_case(entry.model, Path(f"{entry.name}.bundle")).request),
-                   **model.get("catalog_request", {})}
+        stated = model.get("catalog_request", {})
+        request = {**dict(resolve_case(entry.model, Path(f"{entry.name}.bundle")).request), **stated}
     except (BenchmarkError, ConfigError):
         return []
-    return unstated_defaults(request, model["operation"])
+    return unstated_defaults({key: value for key, value in request.items() if value is not None},
+                             model["operation"], stated)
 
 
 def checkpoint_gib(profile: Profile) -> float | None:
