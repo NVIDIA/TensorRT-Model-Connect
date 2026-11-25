@@ -15,7 +15,8 @@ trtmc depth dpt-hybrid-midas.bundle --image photo.jpg
 
 The default precision is fp32, the checkpoint's own; `--precision fp16` builds
 an fp16 engine. Batch is 1. The checkpoint ships only `pytorch_model.bin`, so the
-build needs torch; it is read with `weights_only=True`.
+build needs torch 2.10 or later (earlier versions can run code from a crafted file
+even with `weights_only=True`); it is read with `weights_only=True`.
 
 ## Image pipeline
 

@@ -24,6 +24,7 @@ when guessed are taken from the reference:
 
 from __future__ import annotations
 
+import itertools
 import math
 from pathlib import Path
 
@@ -155,11 +156,7 @@ def _vit(network, feature_map, weights: _Weights, cfg, work_np):
         dtype=work_np)
     sequence = network.add_concatenation([cls_token, patches])
     sequence.axis = 1
-    position = weights.get("dpt.embeddings.position_embeddings")
-    if position.shape != (1, tokens, hidden):
-        raise NotImplementedError(
-            f"DPT position embeddings cover {position.shape[1]} tokens; this family builds the "
-            f"checkpoint's native {grid}x{grid} grid ({tokens} tokens) only")
+    position = weights.get("dpt.embeddings.position_embeddings", (1, tokens, hidden))
     states = graph_ops.add_sum(
         network, sequence.get_output(0),
         graph_ops.add_constant(network, (1, tokens, hidden), position, dtype=work_np))
@@ -417,7 +414,8 @@ def build(request, writer) -> None:
     tensors = load_tensors(model_dir)
     # Before any graph is built: a backbone configured wider or narrower than the
     # checkpoint's weights is refused, not built from the weights alone.
-    config_module.check_weight_shapes(tensors, config_module.bit_weight_shapes(cfg))
+    config_module.check_weight_shapes(tensors, itertools.chain(
+        config_module.bit_weight_shapes(cfg), config_module.vit_embedding_shapes(cfg)))
     weights = _Weights(tensors)
     plan = build_engine(weights, cfg, precision=precision, verbose=bool(request.verbose))
 

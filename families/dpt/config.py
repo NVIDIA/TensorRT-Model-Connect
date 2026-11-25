@@ -469,6 +469,14 @@ def resolve(raw: dict, processor: dict) -> dict:
         raise NotImplementedError(
             f"DPT-Hybrid needs BiT's last stage at the patch grid ({grid}); it is "
             f"{stage3['out_side']}")
+    # The depth map is the deepest map after four fusion doublings and the head's, 32
+    # times its side; the runtime returns it at the input side.
+    last = factors[3]
+    deepest = grid if last == 1.0 else (grid + 2 - 3) // int(round(1.0 / last)) + 1
+    if 32 * deepest != image_size:
+        raise NotImplementedError(
+            f"dpt needs the last ViT tap's reassemble factor to give a {image_size // 32}-pixel map "
+            f"(the depth map is 32 times its side); factor {last} gives {deepest}")
     featmap = _integers(values["backbone_featmap_shape"], "backbone_featmap_shape")
     if len(featmap) != 4 or featmap[1] != stage3["out_channels"]:
         raise ValueError(
@@ -522,6 +530,16 @@ def bit_weight_shapes(resolved: dict) -> Iterator[tuple[str, tuple[int, ...]]]:
             prefix = f"{BIT_PREFIX}.encoder.stages.{stage_index}.layers.{layer_index}"
             for module, shape in bit_layer_shapes(stage, layer_index).items():
                 yield f"{prefix}.{module}.weight", shape
+
+
+def vit_embedding_shapes(resolved: dict) -> Iterator[tuple[str, tuple[int, ...]]]:
+    """The hybrid patch embedding's tensors, with the shapes the configuration implies."""
+    hidden = resolved["hidden_size"]
+    tokens = 1 + resolved["patch_grid"] ** 2
+    yield "dpt.embeddings.projection.weight", (hidden, resolved["backbone"]["stages"][-1]["out_channels"], 1, 1)
+    yield "dpt.embeddings.projection.bias", (hidden,)
+    yield "dpt.embeddings.cls_token", (1, 1, hidden)
+    yield "dpt.embeddings.position_embeddings", (1, tokens, hidden)
 
 
 def check_weight_shapes(tensors: dict, expected: Iterable[tuple[str, tuple[int, ...]]]) -> None:

@@ -10,6 +10,9 @@ from pathlib import Path
 import numpy as np
 
 CHECKPOINT = "pytorch_model.bin"
+# Before 2.10.0, torch.load(weights_only=True) can run code from a crafted file
+# (CVE-2026-24747, GHSA-63cw-57p8-fm3p).
+MIN_TORCH = "2.10.0"
 
 
 def tensor_arrays(state, source: str) -> dict[str, np.ndarray]:
@@ -59,6 +62,11 @@ def load_tensors(model_dir: str | Path) -> dict[str, np.ndarray]:
         import torch
     except ImportError as error:
         raise RuntimeError("dpt requires torch in the build environment") from error
+    from packaging.version import Version
+
+    installed = str(torch.__version__).split("+")[0]
+    if Version(installed) < Version(MIN_TORCH):
+        raise RuntimeError(f"dpt reads checkpoints with torch {MIN_TORCH} or later; found {installed}")
     path = Path(model_dir) / CHECKPOINT
     if not path.is_file():
         raise FileNotFoundError(f"dpt requires the checkpoint file {path}")

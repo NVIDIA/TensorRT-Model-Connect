@@ -4,6 +4,7 @@
 """Identity, default task, build-configuration policy and E2E selection for DPT, without a GPU."""
 
 import copy
+import re
 
 import pytest
 
@@ -512,7 +513,16 @@ def test_a_tap_reassemble_factor_must_give_a_stride_within_the_grid(factor):
     # 2**-100 would be a stride of 2**100; 1/48 strides past the 24x24 grid; 0.4 is not 1/n.
     with pytest.raises(NotImplementedError, match="n from 2 to 24"):
         config_module.resolve(_config(reassemble_factors=[1, 1, 1, factor]), _PROCESSOR)
-    assert config_module.resolve(_config(reassemble_factors=[1, 1, 1, 0.25]), _PROCESSOR)
+    # The first tap's map is resized onto the fused one, so any of its strides works.
+    assert config_module.resolve(_config(reassemble_factors=[1, 1, 0.25, 0.5]), _PROCESSOR)
+
+
+@pytest.mark.parametrize(("factor", "side"), [(1.0, 24), (0.25, 6), (1 / 3, 8)])
+def test_the_last_tap_factor_must_give_a_depth_map_of_the_input_size(factor, side):
+    # The depth map is 32 times the deepest map's side: 12 for a 384-pixel input. The
+    # graph would build 768, 192 or 256 pixels instead.
+    with pytest.raises(NotImplementedError, match=re.escape(f"factor {factor} gives {side}")):
+        config_module.resolve(_config(reassemble_factors=[1, 1, 1, factor]), _PROCESSOR)
 
 
 @pytest.mark.parametrize("key", ["size", "image_mean", "image_std"])
@@ -578,11 +588,54 @@ def test_a_checkpoint_is_read_as_float32_with_weights_only(tmp_path):
     from families.dpt import checkpoint
 
     torch.save({"weight": torch.ones(2, dtype=torch.bfloat16)}, tmp_path / checkpoint.CHECKPOINT)
-    arrays = checkpoint.load_tensors(tmp_path)
-    assert arrays["weight"].dtype == np.float32 and arrays["weight"].tolist() == [1.0, 1.0]
-    torch.save([torch.ones(2)], tmp_path / checkpoint.CHECKPOINT)
-    with pytest.raises(ValueError, match="does not hold a state dict"):
-        checkpoint.load_tensors(tmp_path)
+    calls = []
+    load = torch.load
+
+    def spy(*args, **kwargs):
+        calls.append(kwargs)
+        return load(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(torch, "load", spy)
+        arrays = checkpoint.load_tensors(tmp_path)
+        # The loader is restricted to tensors and plain containers, never full pickle.
+        assert [call.get("weights_only") for call in calls] == [True]
+        assert arrays["weight"].dtype == np.float32 and arrays["weight"].tolist() == [1.0, 1.0]
+        torch.save([torch.ones(2)], tmp_path / checkpoint.CHECKPOINT)
+        with pytest.raises(ValueError, match="does not hold a state dict"):
+            checkpoint.load_tensors(tmp_path)
+
+
+@pytest.mark.parametrize("version", ["2.9.1", "2.6.0+cu124", "2.10.0.dev20251201"])
+def test_a_torch_that_can_run_code_from_a_checkpoint_is_refused_before_loading(tmp_path, version):
+    import torch
+
+    from families.dpt import checkpoint
+
+    torch.save({"weight": torch.ones(2)}, tmp_path / checkpoint.CHECKPOINT)
+    calls = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(torch, "__version__", version)
+        patch.setattr(torch, "load", lambda *args, **kwargs: calls.append(kwargs))
+        with pytest.raises(RuntimeError, match="torch 2.10.0 or later"):
+            checkpoint.load_tensors(tmp_path)
+    assert calls == []
+
+
+def test_vit_embeddings_are_checked_before_the_graph():
+    from types import SimpleNamespace
+
+    resolved = config_module.resolve(_config(), _PROCESSOR)
+    shapes = dict(config_module.vit_embedding_shapes(resolved))
+    assert shapes["dpt.embeddings.position_embeddings"] == (1, 577, 768)
+    assert shapes["dpt.embeddings.projection.weight"] == (768, 1024, 1, 1)
+    checkpoint = {name: SimpleNamespace(shape=shape) for name, shape in shapes.items()}
+    config_module.check_weight_shapes(checkpoint, shapes.items())
+    # A rank-one tensor is reported with its shape, not by indexing a missing axis.
+    for wrong in ((577,), (1, 1025, 768)):
+        checkpoint["dpt.embeddings.position_embeddings"] = SimpleNamespace(shape=wrong)
+        with pytest.raises(ValueError, match=re.escape(f"has shape {wrong}")):
+            config_module.check_weight_shapes(checkpoint, config_module.vit_embedding_shapes(resolved))
 
 
 def test_engine_weights_must_fit_their_storage_dtype():
