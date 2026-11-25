@@ -154,13 +154,17 @@ def merge_heads(network, x, tokens, hidden):
 
 
 def add_attention(network, query, key, value, scale):
-    """softmax(Q K^T * scale) V over the token axis of a [1, H, T, D] layout."""
-    scores = network.add_matrix_multiply(
-        query, trt.MatrixOperation.NONE, key, trt.MatrixOperation.TRANSPOSE).get_output(0)
+    """softmax((Q * scale) K^T) V over the token axis of a [1, H, T, D] layout.
+
+    Q is scaled before the product: in fp16 the unscaled Q K^T can pass 65504
+    while the scaled scores fit.
+    """
     scale_t = retype(
         network, add_constant(network, (1, 1, 1, 1), np.array([scale], dtype=np.float32)),
-        scores.dtype)
-    scores = network.add_elementwise(scores, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+        query.dtype)
+    query = network.add_elementwise(query, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
+    scores = network.add_matrix_multiply(
+        query, trt.MatrixOperation.NONE, key, trt.MatrixOperation.TRANSPOSE).get_output(0)
     softmax = network.add_softmax(scores)
     softmax.axes = 1 << 3
     return network.add_matrix_multiply(

@@ -11,7 +11,8 @@ when guessed are taken from the reference:
 
 * Every BiT convolution standardizes its weight per output channel (mean 0,
   biased variance 1, epsilon 1e-8) before convolving. The weights are
-  constants, so the standardization is applied here, in float64, once.
+  constants, so the standardization is applied here, in float64, once, and
+  rounded once to the engine's weight dtype.
 * BiT pads the 7x7 stride-2 stem convolution, the stem max pool and every
   stride-2 3x3 convolution TF-style ("SAME"): asymmetric, extra row and column
   at the bottom and right. The max pool pads with zeros, not -inf.
@@ -62,11 +63,15 @@ class _Weights:
 
 
 def standardize(weight: np.ndarray, eps: float) -> np.ndarray:
-    """BiT weight standardization: per output channel, zero mean and unit biased variance."""
+    """BiT weight standardization: per output channel, zero mean and unit biased variance.
+
+    The result stays float64, so the engine's weight dtype rounds it once: rounding to
+    float32 first would move some fp16 weights to the wrong neighbour.
+    """
     flat = np.asarray(weight, dtype=np.float64).reshape(weight.shape[0], -1)
     mean = flat.mean(axis=1, keepdims=True)
     variance = np.square(flat - mean).mean(axis=1, keepdims=True)
-    return ((flat - mean) / np.sqrt(variance + eps)).reshape(weight.shape).astype(np.float32)
+    return ((flat - mean) / np.sqrt(variance + eps)).reshape(weight.shape)
 
 
 def _ws_conv(network, x, weights: _Weights, name, shape, *, stride=1, padding=(0, 0), work_np,

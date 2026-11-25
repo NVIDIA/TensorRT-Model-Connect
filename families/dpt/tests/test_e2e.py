@@ -375,10 +375,11 @@ def _assert_parity(native, reference, image, case: dict, tmp_path: Path) -> None
     )
     metrics = _depth_metrics(native, reference)
     # Bounds from the manifests (correlation / largest / mean error): fp32 0.999999 /
-    # 1e-4 / 1e-5, fp16 0.99999 / 0.05 / 0.002. Calibrated on 1x B300, TensorRT 11.4:
-    # - healthy fp32, 10 runs (6 builds; the builds are identical): > 0.9999999999996 /
-    #   2.8e-6 - 7.8e-6 / 2.0e-7 - 2.1e-7; healthy fp16, 8 runs (4 builds x 2 cases, each
-    #   build picks other kernels): >= 0.9999977 / 6.2e-3 - 3.0e-2 / 2.5e-4 - 5.7e-4.
+    # 1e-4 / 1e-5, fp16 0.99999 / 0.05 / 0.002. Calibrated on 1x B300 (SXM6, PCIe), TensorRT
+    # 11.4:
+    # - healthy fp32, 14 runs (8 builds): > 0.9999999999995 / 2.4e-6 - 8.8e-6 /
+    #   2.0e-7 - 2.5e-7; healthy fp16, 12 runs (6 builds x 2 cases, each build picks other
+    #   kernels): >= 0.9999977 / 6.2e-3 - 3.0e-2 / 2.5e-4 - 6.1e-4.
     # - defective, 24 runs: 12 porting mistakes injected into the float32 reference, each
     #   on both cases; at best 0.999999993 / 6.3e-4 / 4.9e-5. The fp32 bounds reject all
     #   24. The fp16 bounds reject the 16 whose errors exceed fp16 rounding (resize

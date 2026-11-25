@@ -652,6 +652,30 @@ def test_engine_weights_must_fit_their_storage_dtype():
         as_engine_weights(np.array([np.nan]), np.float32)
 
 
+def test_standardized_bit_weights_are_rounded_once_to_fp16():
+    import numpy as np
+
+    from families.dpt import model as model_module
+    from families.dpt.checkpoint import as_engine_weights
+
+    weight = (np.random.default_rng(0).standard_normal((256, 256, 3, 3)) * 0.02).astype(np.float32)
+    flat = weight.astype(np.float64).reshape(256, -1)
+    mean = flat.mean(axis=1, keepdims=True)
+    variance = np.square(flat - mean).mean(axis=1, keepdims=True)
+    exact = ((flat - mean) / np.sqrt(variance + 1e-8)).reshape(weight.shape)
+    stored = []
+
+    def convolution(network, inp, values, bias, *, dtype, **_):
+        stored.append(as_engine_weights(values, dtype))
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(model_module.graph_ops, "add_conv2d", convolution)
+        model_module._ws_conv(None, None, model_module._Weights({"conv.weight": weight}), "conv",
+                              weight.shape, work_np=np.float16, eps=1e-8)
+    # Through float32 first, about 6e-5 of the values would land one fp16 step off.
+    np.testing.assert_array_equal(stored[0], exact.astype(np.float16))
+
+
 def test_the_image_size_stays_within_the_runtimes_input_limit():
     # The runtime refuses more than INT32_MAX / 4 pixels; 32768 x 32768 is past it.
     with pytest.raises(ValueError, match="runtime's input limit"):

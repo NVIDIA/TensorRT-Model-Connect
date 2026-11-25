@@ -40,16 +40,16 @@ Both are adapted from Pillow and PyTorch; see `NOTICE`.
 float32 on the CPU (`DPTImageProcessor`, `DPTForDepthEstimation`,
 `post_process_depth_estimation`) on the repository's test photograph in
 landscape and in portrait orientation. Errors are relative to the largest
-reference depth. 1x NVIDIA B300, CUDA 13, TensorRT 11.4, six builds of the fp32
-engine and four of the fp16 one:
+reference depth. 1x NVIDIA B300 (SXM6 and PCIe), CUDA 13, TensorRT 11.4, eight
+builds of the fp32 engine and six of the fp16 one:
 
 | Engine | Largest error | Mean error | Correlation | Engine call, batch 1 |
 |---|---|---|---|---|
-| fp32 | 2.8e-6 - 7.8e-6 | 2.0e-7 - 2.1e-7 | > 0.999999999999 | 8.7 ms |
-| fp16 | 6.2e-3 - 3.0e-2 | 2.5e-4 - 5.7e-4 | >= 0.9999977 | 1.7 ms |
+| fp32 | 2.4e-6 - 8.8e-6 | 2.0e-7 - 2.5e-7 | > 0.999999999999 | 8.7 ms (SXM6), 11.6 ms (PCIe) |
+| fp16 | 6.2e-3 - 3.0e-2 | 2.5e-4 - 6.1e-4 | >= 0.9999977 | 1.7 ms (SXM6), 1.8 ms (PCIe) |
 
-The fp32 builds are identical; the fp16 builds pick different kernels, and their
-largest error on the landscape input moves between 1.3e-2 and 3.0e-2. For scale, the official model's
+The fp16 builds pick different kernels, and their largest error on the landscape
+input moves between 1.1e-2 and 3.0e-2. For scale, the official model's
 own float32 run on the GPU differs from its CPU run by up to 5.5e-6, and its
 float16 run by up to 6.2e-3 (mean 2.8e-4 - 5.3e-4, compared on the 384x384
 maps). On those maps the fp16 engine matches the official float16 run up to the
@@ -96,4 +96,6 @@ against torch, with goldens from `tests/cpp/generate_image_ops_goldens.py`.
 malformed `runtime.json`, an engine whose inputs or outputs differ from it, and
 a non-finite depth map. `tests/test_support.py` covers identity, the default
 task, the resolved geometry, every refused configuration value and the E2E case
-selection.
+selection. `tests/test_graph.py` checks on the GPU that the attention scales Q
+before the score product, and runs it in fp16 on scores whose unscaled product
+passes fp16's 65504.
