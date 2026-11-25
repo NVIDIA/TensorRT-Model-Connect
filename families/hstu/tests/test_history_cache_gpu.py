@@ -22,16 +22,14 @@ pytestmark = pytest.mark.gpu
 
 
 @pytest.fixture(scope="module", params=[("fp32", 1), ("fp32", 4), ("bf16", 1), ("bf16", 4)])
-def workload(request):
-    root = os.environ.get("HSTU_E2E_ROOT")
-    runtime = os.environ.get("TRTMC_RUNTIME_ROOT")
-    if not root or not runtime:
-        pytest.skip("select prepared trained-model bundles and their runtime")
+def workload(request, dlrm_root, dlrm_bridge_root):
+    root = dlrm_root
+    runtime = os.environ["TRTMC_RUNTIME_ROOT"]
     precision, batch = request.param
     directory = Path(root) / f"dlrmv3-default-{precision}"
-    return dict(bundle=directory / "model.bundle", runtime_root=runtime), example_inputs(
-        Config.load(directory), batch
-    )
+    return dict(
+        bundle=directory / "model.bundle", runtime_root=runtime, bridge_root=dlrm_bridge_root
+    ), example_inputs(Config.load(directory), batch)
 
 
 def row_bytes(metadata, kv_only=False):
@@ -76,7 +74,7 @@ def test_export_destroy_restore_then_score_skips_history_and_refreshes_candidate
 
     assert (
         snapshot_metadata(snapshot)["bundle_id"]
-        == runtime_metadata(options["bundle"], options["runtime_root"])["bundle_id"]
+        == runtime_metadata(options["bundle"], options["bridge_root"])["bundle_id"]
     )
     with NativeClient(**options, hydration=True, kv_cache_size_bytes=134217728) as consumer:
         handles = consumer.restore_history(snapshot)

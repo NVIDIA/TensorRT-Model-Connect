@@ -24,20 +24,6 @@ CASES = {
 }
 
 
-@pytest.fixture(scope="session")
-def dlrm_root(tmp_path_factory):
-    supplied = os.environ.get("HSTU_E2E_ROOT")
-    if supplied:
-        return Path(supplied)
-    runtime = os.environ.get("TRTMC_RUNTIME_ROOT")
-    assert runtime, "selected DLRMv3 E2E requires TRTMC_RUNTIME_ROOT"
-    temporary = tmp_path_factory.mktemp("trained-hstu")
-    from .prepare import prepare
-
-    prepare(temporary / "prepared", os.environ.get("DLRMV3_CHECKPOINT"), runtime)
-    return temporary / "prepared/output"
-
-
 def pytest_generate_tests(metafunc):
     if "dlrm_case" not in metafunc.fixturenames:
         return
@@ -71,7 +57,7 @@ def pytest_generate_tests(metafunc):
 @pytest.mark.gpu
 @covers_variant(precision="fp32")
 @covers_variant(precision="bf16")
-def test_official_dlrmv3_task_cache_and_profile(dlrm_case, dlrm_root):
+def test_dlrmv3_e2e(dlrm_case, dlrm_root, dlrm_bridge_root):
     manifest, case = CASES[dlrm_case]
     root = dlrm_root
     directory = root / f"dlrmv3-{case['profile']}-{manifest['precision']}"
@@ -84,6 +70,7 @@ def test_official_dlrmv3_task_cache_and_profile(dlrm_case, dlrm_root):
     assert manifest["max_batch_size"] == 4
     assert manifest["tensor_parallel_size"] == manifest["context_parallel_size"] == 1
     assert case["reference_precision"] == "fp32"
+    record_evidence("external_files", manifest["external_files"])
     record_evidence("artifact", dict(bundle=manifest["bundle"], checkpoint=manifest["checkpoint"]))
     oracle = Reference(c, load_weights(directory, c))
     record_evidence("inputs", dict(manifest=manifest, case=case, checkpoint_dir=str(directory)))
@@ -97,6 +84,7 @@ def test_official_dlrmv3_task_cache_and_profile(dlrm_case, dlrm_root):
     with NativeClient(
         directory / "model.bundle",
         runtime,
+        bridge_root=dlrm_bridge_root,
         hydration=True,
         kv_cache_size_bytes=134217728,
         max_entries=8,

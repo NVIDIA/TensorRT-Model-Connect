@@ -95,6 +95,32 @@ its production positional kernel is used because its PyTorch fallback has a
 bucket-count bug. TensorRT controls fusion and tactics; BF16 alone does not
 guarantee a fused HSTU kernel or a speedup.
 
+## Qualification results
+
+TensorRT 11.4.0.106 passed all six precision/profile cases and 20 cache lifecycle
+cases on both GB300 and A100. On synthetic dense inputs, BF16's maximum absolute
+score error was 0.0071, with 100% top-1 agreement. The default profile's top-10
+overlap was at least 98.75%. An additional 16 seeds not used to choose the
+precision policy passed the same gates, with maximum error 0.0034. These are
+numerical checks against FP32, not a dataset accuracy or MLPerf submission.
+
+Diagnostic median latency, milliseconds (`NativeClient.score`, seed 42,
+10 warmups, 50 iterations; includes host copies and synchronization):
+
+| GPU | History / candidates / batch | FP32 | Mixed BF16 |
+|---|---|---:|---:|
+| GB300 | 512 / 128 / 1 | 11.07 | 10.67 |
+| GB300 | 512 / 128 / 4 | 24.58 | 24.65 |
+| GB300 | 32 / 8 / 4 | 6.02 | 5.69 |
+| A100 | 512 / 128 / 1 | 14.09 | 13.86 |
+| A100 | 512 / 128 / 4 | 52.74 | 50.20 |
+| A100 | 32 / 8 / 4 | 5.27 | 5.03 |
+
+The scoring stage has CUDA Graphs enabled on both sides. End-to-end differences
+are small; GB300 batch 4 did not improve in this run. These family API timings
+are not isolated GPU kernel measurements. Reproduce with
+`python -m families.hstu.tests.benchmark --root <prepared>/output --runtime-root <sdk> --output <temporary>/latency.json`.
+
 ## KV budget, metrics and native Triton
 
 Build `trtmc_model_hstu` and `hstu_triton` with the SDK. For the supplied
@@ -117,6 +143,10 @@ four-field factory/six-argument loader ABI. Do not mix it with a main-built
 SDK or assume it applies to another image release. Rebuild serialized engines
 when the TensorRT version or target platform changes.
 
+Building in this image requires matching TensorRT Python bindings. A converted
+checkpoint directory can be passed to `tests.prepare` to avoid installing
+PyTorch in the serving image.
+
 Generated configuration uses `backend: "tensorrt"`, `platform: "model_connect"`.
 Specify **one** parameter: `kv_cache_size_bytes` (positive bytes) or
 `kv_cache_memory_ratio` (finite fraction in (0,1]). Ratio budgets use free GPU
@@ -132,7 +162,12 @@ The native backend publishes seven `hstu_kv_cache_*` metrics at
 Reservation includes profile scratch and any restored entries; used/active
 track in-flight scoring and return to zero at idle. Peak is a high-water mark.
 FP32 K/V storage is `2 × 5 × 4 × (T+1) × 128 × 4` bytes per sequence, including
-the user-context token. Model instances own their caches and metrics separately.
+the user-context token. Model instances own their caches and metrics separately. In the A100 test,
+a 128 MiB cap reported `budget_bytes=134217728`,
+`reserved_bytes=peak_bytes=42024960`, and zero used bytes/active sequences
+at idle. Changing the ratio from 1% to 5% increased the reported budget fivefold.
+Native and hydration endpoints also passed simultaneous-load cache isolation;
+positive allocation failures were exercised through snapshot restore pressure.
 
 ## Restore precomputed history
 
@@ -181,3 +216,11 @@ The supplied image still accepts four malformed configurations: ratio
 `0.05junk`, or byte limits `-1`, `134217728.5` and `134217728junk`. The native
 cache campaign reports these as failures; the family generators and native
 client reject them. Fixing this parser requires a Triton backend change.
+
+CI stages `external_files` from the manifests before offline execution. Set
+`TRTMC_HSTU_MODEL_DIR` to that raw-checkpoint directory (or explicitly set
+`DLRMV3_CHECKPOINT`); selected tests never download weights. CI's
+`TRTMC_NATIVE_BUILD_DIR` locates the transport library while the Task loader
+uses the isolated `TRTMC_RUNTIME_ROOT`. An independent upstream check is
+available through `tests/upstream_check.py` with `DLRMV3_UPSTREAM`,
+`DLRMV3_CHECKPOINT` and `DLRMV3_CONVERTED` set.

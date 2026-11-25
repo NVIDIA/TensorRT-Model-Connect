@@ -32,5 +32,11 @@
       "profile": "short",
       "reference_precision": "fp32"
     }
+  ],
+  "external_files": [
+    {
+      "path": "non_sparse.ckpt",
+      "url": "https://inference.mlcommons-storage.org/dlrmv3_trained_checkpoint/non_sparse.ckpt"
+    }
   ]
 }

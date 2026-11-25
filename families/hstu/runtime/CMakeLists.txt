@@ -33,3 +33,8 @@ endif()
 install(TARGETS hstu_triton LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../NOTICE ${CMAKE_CURRENT_SOURCE_DIR}/../UPSTREAM_LICENSE.txt
   DESTINATION ${CMAKE_INSTALL_DATADIR}/trtmc/families/hstu)
+
+# The family proof consumes this transport while CI isolates the Task DSOs.
+if(TRTMC_BUILD_TESTS)
+  add_dependencies(trtmc_model_hstu hstu_triton)
+endif()

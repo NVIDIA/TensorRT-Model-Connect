@@ -53,6 +53,7 @@ class NativeClient:
         runtime_root,
         *,
         device=0,
+        bridge_root=None,
         hydration=False,
         kv_cache_size_bytes=None,
         kv_cache_memory_ratio=None,
@@ -67,8 +68,9 @@ class NativeClient:
         self.lock = threading.RLock()
         self.stats_lock = threading.Lock()
         self.handle = None
-        self.metadata = runtime_metadata(Path(bundle), runtime_root)
-        self.library = ctypes.CDLL(str(Path(runtime_root) / "libhstu_triton.so"))
+        bridge_root = runtime_root if bridge_root is None else bridge_root
+        self.metadata = runtime_metadata(Path(bundle), bridge_root)
+        self.library = ctypes.CDLL(str(Path(bridge_root) / "libhstu_triton.so"))
         for name, arguments, result in [
             ("hstu_create", [ctypes.c_char_p], ctypes.c_void_p),
             ("hstu_score", [ctypes.c_void_p, ctypes.c_char_p], ctypes.c_char_p),

@@ -16,7 +16,7 @@ from ..config import Config, ServingProfile
 from ..triton.native_repository import generate
 
 
-def prepare(root, checkpoint, runtime_root):
+def prepare(root, checkpoint, runtime_root, *, repositories=True):
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     if checkpoint is None:
@@ -54,26 +54,29 @@ def prepare(root, checkpoint, runtime_root):
                 )
             )
             suffix = f"dlrmv3_{name}_{precision}"
-            generate(bundle, root / "triton-models", "native_" + suffix, runtime_root=runtime_root)
-            subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "families.hstu.triton.generate_repository",
-                    "--bundle",
-                    str(bundle),
-                    "--repository",
-                    str(root / "triton-models"),
-                    "--name",
-                    "hydrated_" + suffix,
-                    "--runtime-root",
-                    str(runtime_root),
-                    "--history-cache",
-                    "--kv-cache-size-bytes",
-                    "134217728",
-                ],
-                check=True,
-            )
+            if repositories:
+                generate(
+                    bundle, root / "triton-models", "native_" + suffix, runtime_root=runtime_root
+                )
+                subprocess.run(
+                    [
+                        sys.executable,
+                        "-m",
+                        "families.hstu.triton.generate_repository",
+                        "--bundle",
+                        str(bundle),
+                        "--repository",
+                        str(root / "triton-models"),
+                        "--name",
+                        "hydrated_" + suffix,
+                        "--runtime-root",
+                        str(runtime_root),
+                        "--history-cache",
+                        "--kv-cache-size-bytes",
+                        "134217728",
+                    ],
+                    check=True,
+                )
 
 
 def main():
