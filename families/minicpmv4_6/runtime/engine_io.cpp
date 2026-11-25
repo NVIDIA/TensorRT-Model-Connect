@@ -143,6 +143,12 @@ void validate_vision_engine(const ITrtModule& module, DType feature_dtype, std::
                                      input.name + " does not admit slices of 16 to " +
                                      std::to_string(max_patches) + " patches");
     }
+    // The module reports its output at the profile's largest inputs: one feature row per 16
+    // patches.
+    if (module.tensor_shape("visual_features") !=
+        std::vector<int64_t>{max_patches / 16, hidden_size})
+        throw std::runtime_error(
+            "MiniCPM-V 4.6 vision engine does not produce one feature row per 16 patches");
 }
 
 std::int32_t prefill_rows(const ITrtModule& prefill, const DecoderGeometry& geometry,
@@ -191,6 +197,17 @@ std::int32_t prefill_rows(const ITrtModule& prefill, const DecoderGeometry& geom
                                          " rows");
         }
     return static_cast<std::int32_t>(most);
+}
+
+void check_prompt_rows(const std::vector<std::int32_t>& token_ids,
+                       const std::vector<std::int32_t>& feature_rows, std::int64_t feature_count,
+                       std::int32_t token_limit) {
+    if (token_ids.empty() || feature_rows.size() != token_ids.size())
+        throw std::invalid_argument("MiniCPM-V 4.6 prompt rows are inconsistent");
+    for (std::size_t i = 0; i < token_ids.size(); ++i)
+        if (token_ids[i] < 0 || token_ids[i] >= token_limit || feature_rows[i] < -1 ||
+            feature_rows[i] >= feature_count)
+            throw std::invalid_argument("MiniCPM-V 4.6 prompt has an invalid token or feature row");
 }
 
 } // namespace trtmc::minicpmv4_6

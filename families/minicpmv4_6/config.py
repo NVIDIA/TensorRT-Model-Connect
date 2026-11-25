@@ -261,16 +261,23 @@ class CheckpointConfig:
         )
 
 
-def generation_ids(model_dir: Path, config: CheckpointConfig) -> list[int]:
+def generation_ids(model_dir: Path, config: CheckpointConfig, token_count: int) -> list[int]:
+    """The end-of-sequence ids: distinct ids of the tokenizer's ``token_count`` tokens.
+
+    Generation samples tokenizer ids only (an embedding table may have more rows), so an end id beyond the tokenizer
+    would never stop it.
+    """
     path = model_dir / "generation_config.json"
-    if not path.is_file():
-        return [config.eos_token_id]
-    generation = load_json(path)
-    value = generation.get("eos_token_id", config.eos_token_id) if isinstance(generation, dict) else None
+    value = config.eos_token_id
+    if path.is_file():
+        generation = load_json(path)
+        value = generation.get("eos_token_id", config.eos_token_id) if isinstance(generation, dict) else None
     ids = [value] if type(value) is int else value
+    limit = min(config.text.vocab_size, token_count)
     if (not isinstance(ids, list) or not ids or len(set(ids)) != len(ids)
-            or any(type(i) is not int or not 0 <= i < config.text.vocab_size for i in ids)):
-        raise ValueError("MiniCPM-V 4.6 generation_config.json eos_token_id must be distinct token ids")
+            or any(type(i) is not int or not 0 <= i < limit for i in ids)):
+        raise ValueError("MiniCPM-V 4.6 eos_token_id (generation_config.json, else config.json) must be distinct "
+                         f"ids below {limit}, the tokens the tokenizer and the embedding table share")
     return ids
 
 

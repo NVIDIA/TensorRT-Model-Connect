@@ -9,6 +9,7 @@
 #include "trtmc/runtime/trt_module.h"
 
 #include <cstdint>
+#include <vector>
 
 namespace trtmc::minicpmv4_6 {
 
@@ -27,5 +28,12 @@ std::int32_t prefill_rows(const ITrtModule& prefill, const DecoderGeometry& geom
 // The per-slice vision engine: patches, grid indices and the projected features.
 void validate_vision_engine(const ITrtModule& module, DType feature_dtype, std::int32_t patch_width,
                             std::int32_t hidden_size, std::int32_t max_patches);
+
+// Prompt rows before any launch: one feature row (or -1) per token id, every id a token of the
+// tokenizer (below `token_limit`; a padded embedding table has rows no token reaches), and every
+// feature row below `feature_count`.
+void check_prompt_rows(const std::vector<std::int32_t>& token_ids,
+                       const std::vector<std::int32_t>& feature_rows, std::int64_t feature_count,
+                       std::int32_t token_limit);
 
 } // namespace trtmc::minicpmv4_6

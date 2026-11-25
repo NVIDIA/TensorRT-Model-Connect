@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -38,8 +39,10 @@ class Tokenizer {
 
 std::unique_ptr<Tokenizer> create_tokenizer(const char* tokenizer_json, std::size_t size);
 
-// The number of code points of UTF-8 text as ICU decodes it (an ill-formed sequence is one U+FFFD).
-std::size_t code_points(std::string_view text);
+// The number of code points of UTF-8 text as ICU decodes it (an ill-formed sequence is one U+FFFD),
+// read only until it exceeds `limit` (the result is then limit + 1).
+std::size_t code_points(std::string_view text,
+                        std::size_t limit = std::numeric_limits<std::size_t>::max());
 
 // Exposed for focused tests.
 std::vector<std::string> pre_tokenize(std::string_view text);

@@ -23,12 +23,13 @@ struct SamplingOptions {
 SamplingOptions sampling_options(double temperature, std::int64_t top_k, double top_p,
                                  std::int64_t seed);
 
-// Greedy argmax when top_k <= 1 (the default) or the temperature is zero;
-// otherwise temperature, top-k and top-p filtering with a seeded xorshift draw.
+// Greedy argmax when top_k == 1 (the default) or the temperature is zero; otherwise temperature,
+// top-k (0 keeps the whole vocabulary) and top-p filtering with a seeded xorshift draw.
 class Sampler {
   public:
     explicit Sampler(const SamplingOptions& options);
-    std::int32_t sample(const std::vector<float>& logits);
+    // A token id below `limit` (the tokenizer's vocabulary; an embedding table may have more rows).
+    std::int32_t sample(const std::vector<float>& logits, std::int32_t limit);
 
   private:
     SamplingOptions options_;

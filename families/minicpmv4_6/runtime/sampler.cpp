@@ -41,21 +41,26 @@ Sampler::Sampler(const SamplingOptions& options) : options_(options) {
                                     "top_p in (0, 1] and seed >= -1");
     // top_k == 0 keeps the whole vocabulary; top_k == 1 is greedy.
     greedy_ = options.temperature == 0.0F || options.top_k == 1;
-    const auto seed = options.seed >= 0 ? static_cast<std::uint64_t>(options.seed) : 42ULL;
-    state_ = seed == 0 ? 1 : seed;
+    // SplitMix64 spreads small seeds over the whole state: xorshift started from a small value
+    // would draw small numbers first.
+    std::uint64_t mixed = (options.seed >= 0 ? static_cast<std::uint64_t>(options.seed) : 42ULL) +
+                          0x9E3779B97F4A7C15ULL;
+    mixed = (mixed ^ (mixed >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    mixed = (mixed ^ (mixed >> 27)) * 0x94D049BB133111EBULL;
+    mixed ^= mixed >> 31;
+    state_ = mixed == 0 ? 1 : mixed;
 }
 
-std::int32_t Sampler::sample(const std::vector<float>& logits) {
-    if (logits.empty())
-        throw std::invalid_argument("MiniCPM-V 4.6 sampler received no logits");
+std::int32_t Sampler::sample(const std::vector<float>& logits, std::int32_t limit) {
+    if (limit <= 0 || static_cast<std::size_t>(limit) > logits.size())
+        throw std::invalid_argument("MiniCPM-V 4.6 sampler received fewer logits than tokens");
+    const auto end = logits.begin() + limit;
     // NaN breaks both the argmax and the sort's ordering; infinity breaks the probabilities.
-    if (std::any_of(logits.begin(), logits.end(),
-                    [](float value) { return !std::isfinite(value); }))
+    if (std::any_of(logits.begin(), end, [](float value) { return !std::isfinite(value); }))
         throw std::runtime_error("MiniCPM-V 4.6 decoder produced nonfinite logits");
     if (greedy_)
-        return static_cast<std::int32_t>(std::max_element(logits.begin(), logits.end()) -
-                                         logits.begin());
-    const auto vocab = static_cast<std::int32_t>(logits.size());
+        return static_cast<std::int32_t>(std::max_element(logits.begin(), end) - logits.begin());
+    const std::int32_t vocab = limit;
     const std::int32_t k = options_.top_k == 0 ? vocab : std::min(options_.top_k, vocab);
     std::vector<std::int32_t> order(static_cast<std::size_t>(vocab));
     std::iota(order.begin(), order.end(), 0);
@@ -84,7 +89,8 @@ std::int32_t Sampler::sample(const std::vector<float>& logits) {
     state_ ^= state_ << 13;
     state_ ^= state_ >> 7;
     state_ ^= state_ << 17;
-    const double draw = static_cast<double>(state_ & 0xFFFFFFFFULL) / 4294967296.0 * kept;
+    // The top 53 bits as a uniform double in [0, 1).
+    const double draw = static_cast<double>(state_ >> 11) * 0x1.0p-53 * kept;
     double cumulative = 0.0;
     for (std::int32_t i = 0; i < keep; ++i) {
         cumulative += probabilities[i];

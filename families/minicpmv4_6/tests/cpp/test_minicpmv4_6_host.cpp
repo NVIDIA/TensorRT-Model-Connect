@@ -510,8 +510,15 @@ void engine_contracts() {
     vision.add("position_ids", DType::kInt32, {-1}, true, {16}, {64});
     vision.add("window_index", DType::kInt32, {-1}, true, {16}, {64});
     vision.add("merge_index", DType::kInt32, {-1}, true, {4}, {16});
-    vision.add("visual_features", DType::kFloat16, {-1, 4}, false);
+    // Outputs sized for the largest inputs: 64 patches give 4 feature rows.
+    vision.add("visual_features", DType::kFloat16, {-1, 4}, false, {}, {4, 4});
     validate_vision_engine(vision, DType::kFloat16, 12, 4, 64);
+    for (const std::vector<int64_t>& rows : {std::vector<int64_t>{8, 4}, std::vector<int64_t>{}}) {
+        auto engine = vision;
+        engine.tensors["visual_features"].maximum = rows;
+        check(fails([&] { validate_vision_engine(engine, DType::kFloat16, 12, 4, 64); }),
+              "a vision engine without one feature row per 16 patches is rejected");
+    }
     auto bad_index = vision;
     bad_index.tensors["window_index"].dtype = DType::kFloat32;
     check(fails([&] { validate_vision_engine(bad_index, DType::kFloat16, 12, 4, 64); }),
@@ -577,17 +584,47 @@ void metadata_parsing() {
 void sampling() {
     SamplingOptions options;
     Sampler greedy(options);
-    check(greedy.sample({0.5F, 2.0F, 1.0F}) == 1, "greedy picks the argmax");
+    check(greedy.sample({0.5F, 2.0F, 1.0F}, 3) == 1, "greedy picks the argmax");
     const float nan = std::numeric_limits<float>::quiet_NaN();
     const float inf = std::numeric_limits<float>::infinity();
-    check(fails([&] { greedy.sample({0.5F, nan, 1.0F}); }), "NaN logits are rejected");
-    check(fails([&] { greedy.sample({0.5F, inf, 1.0F}); }), "infinite logits are rejected");
+    check(fails([&] { greedy.sample({0.5F, nan, 1.0F}, 3); }), "NaN logits are rejected");
+    check(fails([&] { greedy.sample({0.5F, inf, 1.0F}, 3); }), "infinite logits are rejected");
+    // Rows beyond the tokenizer's vocabulary (a padded embedding table) are never chosen.
+    check(greedy.sample({0.5F, 2.0F, 9.0F}, 2) == 1, "greedy stays inside the vocabulary");
+    check(greedy.sample({0.5F, 2.0F, nan}, 2) == 1, "padding rows are not read");
+    for (const std::int32_t limit : {0, 4})
+        check(fails([&] { greedy.sample({0.5F, 2.0F, 1.0F}, limit); }),
+              "a token limit outside the logits is rejected");
     options.top_k = 0;
     options.seed = 7;
     Sampler drawing(options);
-    check(fails([&] { drawing.sample({nan, 0.0F}); }), "NaN logits are rejected when sampling");
+    check(fails([&] { drawing.sample({nan, 0.0F}, 2); }), "NaN logits are rejected when sampling");
+    for (int draw = 0; draw < 20; ++draw)
+        check(drawing.sample({0.0F, 0.0F, 50.0F}, 2) < 2, "sampling stays inside the vocabulary");
     options.seed = -2;
     check(rejects([&] { Sampler invalid(options); }), "a seed below -1 is rejected");
+
+    // The first draw of small seeds covers the distribution: with probabilities 0.9 / 0.1, about
+    // 6 of 64 seeds pick the second token (an unmixed xorshift state picked it for none).
+    SamplingOptions two;
+    two.top_k = 2;
+    int second = 0;
+    for (std::int64_t seed = 0; seed < 64; ++seed) {
+        two.seed = seed;
+        Sampler first(two);
+        second += first.sample({std::log(9.0F), 0.0F}, 2) == 1;
+    }
+    check(second >= 2 && second <= 16,
+          "small seeds draw the second token " + std::to_string(second) + " times in 64");
+    SamplingOptions fixed;
+    fixed.top_k = 0;
+    Sampler a(fixed), b(fixed);
+    std::vector<std::int32_t> draws_a, draws_b;
+    for (int draw = 0; draw < 16; ++draw) {
+        draws_a.push_back(a.sample({0.0F, 0.1F, 0.2F, 0.3F}, 4));
+        draws_b.push_back(b.sample({0.0F, 0.1F, 0.2F, 0.3F}, 4));
+    }
+    check(draws_a == draws_b, "the default seed is reproducible");
 
     // Request values are checked before FP32 narrows them.
     const auto valid = sampling_options(0.7, 40, 0.9, 7);
@@ -856,6 +893,89 @@ void bpe_merges() {
     check(fails([&] { load(fractional_added); }), "a fractional added-token id is rejected");
 }
 
+std::string utf8(std::uint32_t c) {
+    std::string out;
+    if (c < 0x80) {
+        out.push_back(static_cast<char>(c));
+    } else if (c < 0x800) {
+        out.push_back(static_cast<char>(0xC0 | (c >> 6)));
+        out.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+    } else if (c < 0x10000) {
+        out.push_back(static_cast<char>(0xE0 | (c >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xF0 | (c >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((c >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((c >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+    }
+    return out;
+}
+
+void stripped_length() {
+    // is_strip_space and strip() agree on every code point.
+    std::uint32_t disagreements = 0;
+    for (std::uint32_t c = 0; c <= 0x10FFFF; ++c) {
+        if (c >= 0xD800 && c <= 0xDFFF)
+            continue;
+        const auto text = "a" + utf8(c) + "b";
+        const bool stripped = strip(utf8(c)).empty();
+        disagreements += (stripped != is_strip_space(c)) || strip(text) != text;
+    }
+    check(disagreements == 0, "is_strip_space agrees with strip()");
+    // Leading and trailing white space are not counted; inner white space is, once text follows.
+    StrippedContent kept;
+    check(kept.add(std::string(1000, ' '), 3) && kept.kept() == 0,
+          "leading spaces are not counted");
+    check(kept.add("ab", 3) && kept.kept() == 2, "text is counted");
+    check(kept.add("\n \xe3\x80\x80", 3) && kept.kept() == 2, "trailing white space waits");
+    check(!kept.add("c", 3), "white space followed by text counts");
+    StrippedContent fits;
+    check(fits.add("\t\t  xy  \n", 2) && fits.kept() == 2 && fits.take() == "xy",
+          "a message at the limit fits");
+    StrippedContent invalid;
+    check(invalid.add("\x80", 0) == false, "an ill-formed byte is kept as U+FFFD");
+    // White space beyond the limit is not held: only text could keep it, and that text is refused.
+    StrippedContent spaced, refused;
+    bool accepted = spaced.add("abc", 5) && refused.add("abc", 5);
+    for (int part = 0; part < 1000; ++part)
+        accepted = spaced.add("  ", 5) && refused.add("  ", 5) && accepted;
+    check(accepted && spaced.pending_pieces() <= 1, "white space beyond the limit is not held");
+    check(spaced.take() == "abc", "white space beyond the limit is still stripped");
+    check(!refused.add("x", 5), "text after white space beyond the limit is refused");
+
+    // The content is strip() of the joined parts, without copying the white space strip() drops.
+    const std::string huge(std::size_t{1} << 24, ' ');
+    StrippedContent padded;
+    check(padded.add(huge, 8) && padded.add("a b", 8) && padded.add(huge, 8) && padded.kept() == 3,
+          "16 MiB of surrounding white space is not counted");
+    check(padded.take() == "a b", "16 MiB of surrounding white space is not copied");
+    const std::vector<std::string> pieces{" ",    "\t", "\n", "\xc2\x85",     "\xe3\x80\x80",
+                                          "\x80", "a",  "bc", "\xe4\xbd\xa0", "  x",
+                                          "y  "};
+    std::uint64_t state = 12345;
+    std::uint32_t mismatches = 0;
+    for (int trial = 0; trial < 2000; ++trial) {
+        // The parts outlive the builder's pending views, as a request's texts do.
+        std::vector<std::string> parts(6);
+        for (auto& text : parts)
+            for (int i = 0; i < 4; ++i) {
+                state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+                text += pieces[(state >> 33) % pieces.size()];
+            }
+        StrippedContent built;
+        std::string joined;
+        for (const auto& text : parts) {
+            built.add(text, 1000);
+            joined += text;
+        }
+        const auto expected = strip(joined);
+        mismatches += built.kept() != code_points(expected) || built.take() != expected;
+    }
+    check(mismatches == 0, "the assembled content equals strip() of the joined parts");
+}
+
 void bounded_encoding() {
     const auto tokenizer = load(small_tokenizer());
     // The longest entry is the added token "<|end|>": 7 code points, 28 per id.
@@ -867,12 +987,32 @@ void bounded_encoding() {
           "a text longer than the limit can stand for is refused");
     check(!tokenizer->encode(std::string(std::size_t{1} << 26, 'x'), 4096),
           "a 64 MiB text is refused against a 4096-id limit");
+    // Counting stops once the limit is exceeded; a text at the limit is counted whole.
+    check(code_points("abc", 2) == 3 && code_points("ab", 2) == 2 && code_points("", 0) == 0,
+          "a bounded count reports the limit plus one when exceeded");
+    check(code_points(std::string(std::size_t{1} << 26, 'x'), 10) == 11,
+          "a bounded count stops early on a long text");
     // Code points as ICU decodes UTF-8: each maximal ill-formed subpart is one U+FFFD.
     check(code_points("a\x80\x80"
                       "b") == 4,
           "stray continuation bytes count one each");
     check(code_points("\xE4\xBD") == 1, "a truncated sequence counts once");
     check(code_points("\xE4\xBD\xA0\xC3\xA9") == 2, "well-formed text counts its code points");
+}
+
+void prompt_rows() {
+    // 259 tokenizer ids; a padded embedding table may hold more rows, which no prompt may use.
+    check(!rejects([] { check_prompt_rows({1, 258}, {-1, 0}, 1, 259); }),
+          "prompt rows within the tokenizer");
+    check(rejects([] { check_prompt_rows({1, 259}, {-1, -1}, 0, 259); }),
+          "a prompt id among the padded embedding rows is rejected");
+    check(rejects([] { check_prompt_rows({-1}, {-1}, 0, 259); }),
+          "a negative prompt id is rejected");
+    check(rejects([] { check_prompt_rows({1, 2}, {-1, 1}, 1, 259); }),
+          "a feature row beyond the features is rejected");
+    check(rejects([] { check_prompt_rows({}, {}, 0, 259); }), "an empty prompt is rejected");
+    check(rejects([] { check_prompt_rows({1}, {}, 0, 259); }),
+          "rows without feature indices are rejected");
 }
 
 } // namespace
@@ -894,6 +1034,8 @@ int main() {
         planned_image_rows();
         bpe_merges();
         bounded_encoding();
+        stripped_length();
+        prompt_rows();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: unexpected exception: " << error.what() << '\n';
         return 1;

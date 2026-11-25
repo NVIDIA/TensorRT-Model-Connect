@@ -104,6 +104,7 @@ def add_rms_norm(
     output_dtype = inp.dtype
     if need_cast:
         inp = network.add_cast(inp, trt.float32).get_output(0)
+    if eps_tensor.dtype != trt.float32:
         eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
     sq = network.add_elementwise(inp, inp, trt.ElementWiseOperation.PROD)
     mean = network.add_reduce(sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
@@ -147,6 +148,7 @@ def add_rms_norm_per_head(
     reshaped = reshape_in.get_output(0)
     if need_cast:
         reshaped = network.add_cast(reshaped, trt.float32).get_output(0)
+    if eps_tensor.dtype != trt.float32:
         eps_tensor = network.add_cast(eps_tensor, trt.float32).get_output(0)
     eps_3d = network.add_shuffle(eps_tensor)
     eps_3d.reshape_dims = (1, 1, 1)
@@ -220,25 +222,66 @@ def add_l2_norm(
 
 
 def add_softplus(network: trt.INetworkDefinition, inp: trt.ITensor) -> trt.ITensor:
-    """FP32 softplus without overflow: max(x, 0) + log(1 + exp(-|x|)).
+    """FP32 softplus as the reference's log1p(exp(x)): max(x, 0) + log1p(exp(-|x|)).
 
-    The direct log(1 + exp(x)) reaches infinity for x above about 88 in FP32.
+    The direct log(1 + exp(x)) reaches infinity for x above about 88, and 1 + exp(x) rounds to 1
+    for x below about -16, which would zero the tail. log1p(y) uses Kahan's form
+    log(u) * y / (u - 1) with u = 1 + y, and y itself where u rounds to 1.
     """
     if inp.dtype != trt.float32:
         raise ValueError("softplus expects an FP32 tensor")
     rank = len(inp.shape)
-    one = add_constant(network, (1,) * rank, np.array([1.0], dtype=np.float32), dtype=np.float32)
+
+    def scalar(value):
+        return add_constant(network, (1,) * rank, np.array([value], dtype=np.float32), dtype=np.float32)
+
+    def ew(a, b, op):
+        return network.add_elementwise(a, b, op).get_output(0)
+
     magnitude = network.add_unary(inp, trt.UnaryOperation.ABS).get_output(0)
     negative = network.add_unary(magnitude, trt.UnaryOperation.NEG).get_output(0)
-    tail = network.add_unary(
-        network.add_elementwise(
-            network.add_unary(negative, trt.UnaryOperation.EXP).get_output(0), one,
-            trt.ElementWiseOperation.SUM,
-        ).get_output(0),
-        trt.UnaryOperation.LOG,
-    ).get_output(0)
+    small = network.add_unary(negative, trt.UnaryOperation.EXP).get_output(0)  # y in (0, 1]
+    u = ew(small, scalar(1.0), trt.ElementWiseOperation.SUM)
+    u_minus_one = ew(u, scalar(1.0), trt.ElementWiseOperation.SUB)
+    kahan = ew(
+        network.add_unary(u, trt.UnaryOperation.LOG).get_output(0),
+        ew(small, u_minus_one, trt.ElementWiseOperation.DIV),
+        trt.ElementWiseOperation.PROD,
+    )
+    rounds_to_one = ew(u_minus_one, scalar(0.0), trt.ElementWiseOperation.EQUAL)
+    tail = network.add_select(rounds_to_one, small, kahan).get_output(0)
     positive = network.add_activation(inp, trt.ActivationType.RELU).get_output(0)
-    return network.add_elementwise(positive, tail, trt.ElementWiseOperation.SUM).get_output(0)
+    return ew(positive, tail, trt.ElementWiseOperation.SUM)
+
+
+def add_silu_gate(network: trt.INetworkDefinition, values: trt.ITensor, gate: trt.ITensor,
+                  out_dtype) -> trt.ITensor:
+    """``values * silu(gate)`` in FP32, cast to ``out_dtype`` (the reference's gated RMSNorm)."""
+    def fp32(tensor):
+        return tensor if tensor.dtype == trt.float32 else network.add_cast(tensor, trt.float32).get_output(0)
+
+    gate = fp32(gate)
+    silu = network.add_elementwise(
+        gate, network.add_activation(gate, trt.ActivationType.SIGMOID).get_output(0),
+        trt.ElementWiseOperation.PROD,
+    ).get_output(0)
+    gated = network.add_elementwise(fp32(values), silu, trt.ElementWiseOperation.PROD).get_output(0)
+    return gated if out_dtype == trt.float32 else network.add_cast(gated, out_dtype).get_output(0)
+
+
+def add_conv_step(network: trt.INetworkDefinition, window: trt.ITensor, weight: np.ndarray,
+                  out_dtype) -> trt.ITensor:
+    """One depthwise convolution output ``[C, 1]`` of a ``[C, K]`` window, accumulated in FP32.
+
+    Products of FP16 operands can overflow before the taps cancel; the reference convolution
+    accumulates in FP32 and rounds only its output.
+    """
+    if window.dtype != trt.float32:
+        window = network.add_cast(window, trt.float32).get_output(0)
+    taps = add_constant(network, tuple(weight.shape), weight, dtype=np.float32)
+    products = network.add_elementwise(window, taps, trt.ElementWiseOperation.PROD).get_output(0)
+    total = network.add_reduce(products, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True).get_output(0)
+    return total if out_dtype == trt.float32 else network.add_cast(total, out_dtype).get_output(0)
 
 
 def add_rms_norm_last_axis(network: trt.INetworkDefinition, inp: trt.ITensor, eps: float) -> trt.ITensor:
@@ -257,19 +300,50 @@ def add_rms_norm_last_axis(network: trt.INetworkDefinition, inp: trt.ITensor, ep
     return network.add_elementwise(inp, recip.get_output(0), trt.ElementWiseOperation.PROD).get_output(0)
 
 
+def add_sigmoid(network: trt.INetworkDefinition, inp: trt.ITensor) -> trt.ITensor:
+    """FP32 ``sigmoid(inp)``: in FP16 it rounds to zero below about -17."""
+    if inp.dtype != trt.float32:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
+    return network.add_activation(inp, trt.ActivationType.SIGMOID).get_output(0)
+
+
+def add_sigmoid_product(network: trt.INetworkDefinition, values: trt.ITensor, gate: trt.ITensor,
+                        out_dtype) -> trt.ITensor:
+    """``values * sigmoid(gate)`` in FP32, rounded once to ``out_dtype``.
+
+    An FP16 sigmoid would drop the product where it is still representable (``values * 1.5e-8`` at -18).
+    """
+    if values.dtype != trt.float32:
+        values = network.add_cast(values, trt.float32).get_output(0)
+    product = network.add_elementwise(values, add_sigmoid(network, gate), trt.ElementWiseOperation.PROD).get_output(0)
+    return product if out_dtype == trt.float32 else network.add_cast(product, out_dtype).get_output(0)
+
+
+def add_tied_lm_head(network: trt.INetworkDefinition, hidden_state: trt.ITensor, table: trt.ITensor) -> trt.ITensor:
+    """FP32 logits ``hidden_state @ table^T`` for ``[rows, hidden]`` states and the FP32 ``[vocab, hidden]`` table.
+
+    The product runs in FP32 at both precisions: in FP16 a logit, or a cancellation of large terms that leaves a small
+    logit, can overflow where the FP32 logit is exact.
+    """
+    if table.dtype != trt.float32:
+        raise ValueError("the tied LM head expects the FP32 embedding table")
+    if hidden_state.dtype != trt.float32:
+        hidden_state = network.add_cast(hidden_state, trt.float32).get_output(0)
+    return network.add_matrix_multiply(
+        hidden_state, trt.MatrixOperation.NONE, table, trt.MatrixOperation.TRANSPOSE).get_output(0)
+
+
 def add_activation(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
     activation_type: str,
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
-    """SiLU, the activation of the DeltaNet convolution, gate and MLP."""
+    """SiLU in FP32, rounded once to the input's dtype: the DeltaNet convolution's and the MLP's activation."""
     del dtype
     if activation_type != "silu":
         raise ValueError(f"Unsupported activation: {activation_type}")
-    sigmoid = network.add_activation(inp, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(inp, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-    return swish.get_output(0)
+    return add_sigmoid_product(network, inp, inp, inp.dtype)
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,9 @@ import tensorrt as trt
 
 # Static size of the padded triangular solve; it bounds the prefill rows.
 SOLVE_ROWS = 64
+# exp() of any sum that includes a log-decay at or below this floor is 0 in FP32, and 64 of them
+# still sum to a finite value.
+LOG_DECAY_FLOOR = -1.0e4
 # Diagonal blocks of this size are inverted with a Neumann product.
 _SOLVE_LEAF = 8
 
@@ -181,28 +184,29 @@ def add_chunked_delta_rule(
     Returns ``(outputs [H, S, D_v], final state [H, D_k, D_v])``.
     """
     sum_op, prod_op = trt.ElementWiseOperation.SUM, trt.ElementWiseOperation.PROD
+    # A finite rate times a large softplus can reach -inf in FP32, and the masked products below
+    # would turn it into NaN (0 * inf). The floor changes no decay (see LOG_DECAY_FLOOR).
+    g = _ew(network, g, _const(network, np.full((1, 1), LOG_DECAY_FLOOR, np.float32)), trt.ElementWiseOperation.MAX)
     rows = row_count(network, _shuffle(network, g, transpose=(1, 0)))
 
     axis = network.add_constant((), np.array(1, dtype=np.int32)).get_output(0)
-    # Pairwise decays come from FP32 cumulative sums within the chunk, as the reference's chunked rule
-    # (transformers' torch_chunk_gated_delta_rule, 64-row chunks) forms them.
-    gamma = network.add_cumulative(g, axis, trt.CumulativeOperation.SUM, False, False).get_output(0)
-    gamma_rows = _shuffle(network, gamma, reshape=(0, 0, 1))  # [H, S, 1]
-    gamma_cols = _shuffle(network, gamma, reshape=(0, 1, -1))  # [H, 1, S]
-    # exp(gamma_i - gamma_j) for j <= i; the exponent is clamped at zero so the
-    # masked upper triangle cannot overflow before it is multiplied by zero.
-    diff = _ew(network, gamma_rows, gamma_cols, trt.ElementWiseOperation.SUB)
-    diff = _ew(
-        network,
-        diff,
-        _const(network, np.zeros((1, 1, 1), np.float32)),
-        trt.ElementWiseOperation.MIN,
-    )
-    decay = network.add_unary(diff, trt.UnaryOperation.EXP).get_output(0)
+    zero = _const(network, np.zeros((1, 1, 1), np.float32))
 
     def mask(offset: int) -> trt.ITensor:
         full = np.tril(np.ones((SOLVE_ROWS, SOLVE_ROWS), np.float32), offset)[None]
         return dynamic_slice(network, _const(network, full), (0, 0, 0), (1, rows, rows))
+
+    # Every decay over an interval of rows sums the log-decays of that interval only. The
+    # difference of two prefix sums would cancel: with g = [-2^24, -0.5] both FP32 prefixes are
+    # -2^24, and the second row would keep the first row's update undecayed. All g are <= 0, so
+    # these sums of same-signed terms stay accurate.
+    gamma = network.add_cumulative(g, axis, trt.CumulativeOperation.SUM, False, False).get_output(0)
+    gamma_rows = _shuffle(network, gamma, reshape=(0, 0, 1))  # [H, S, 1]: sum of g_0..g_i
+    # interval[i, j] = sum of g_t over j < t <= i, as L @ G with L[i, t] = [t <= i] and
+    # G[t, j] = g_t [t > j]; the exponent is clamped at zero, and the masks drop j >= i.
+    after = _ew(network, _shuffle(network, g, reshape=(0, 0, 1)), mask(-1), prod_op)
+    interval = _ew(network, _mm(network, mask(0), after), zero, trt.ElementWiseOperation.MIN)
+    decay = network.add_unary(interval, trt.UnaryOperation.EXP).get_output(0)
 
     decay_strict = _ew(network, decay, mask(-1), prod_op)
     decay_inclusive = _ew(network, decay, mask(0), prod_op)
@@ -248,27 +252,15 @@ def add_chunked_delta_rule(
         sum_op,
     )
 
-    # gamma_S is the last cumulative sum, not a separate reduction: summed in
-    # another order it can exceed gamma_i by many ulps at large |g|, and
-    # exp(gamma_S - gamma_i) would then overflow. A float running sum of
-    # non-positive terms never increases, and the clamp keeps the exponent at
-    # most zero regardless.
+    # The decay after row i sums the later log-decays (an exclusive reverse cumulative sum), not
+    # gamma_S - gamma_i; the whole chunk's decay is the last prefix sum.
     last = _ew(network, rows, _i64(network, [1]), trt.ElementWiseOperation.SUB)
     total = dynamic_slice(network, gamma, (_i64(network, [0]), last), (num_heads, 1))  # [H, 1]
+    later = network.add_cumulative(g, axis, trt.CumulativeOperation.SUM, True, True).get_output(0)
     tail = network.add_unary(
-        _ew(
-            network,
-            _ew(
-                network,
-                _shuffle(network, total, reshape=(0, 0, 1)),
-                gamma_rows,
-                trt.ElementWiseOperation.SUB,
-            ),
-            _const(network, np.zeros((1, 1, 1), np.float32)),
-            trt.ElementWiseOperation.MIN,
-        ),
+        _ew(network, _shuffle(network, later, reshape=(0, 0, 1)), zero, trt.ElementWiseOperation.MIN),
         trt.UnaryOperation.EXP,
-    ).get_output(0)  # exp(gamma_S - gamma_i): [H, S, 1]
+    ).get_output(0)  # exp(sum of g_t over t > i): [H, S, 1]
     carried = _ew(
         network,
         network.add_unary(
@@ -300,7 +292,7 @@ def add_short_conv_rows(
     The history holds the last ``kernel`` inputs (newest last). Output column
     ``t`` is ``sum_j weight[:, j] * window[:, t + j]`` over
     ``window = [history[:, 1:], columns]``; the new history is the last
-    ``kernel`` columns of the window. Returns ``(outputs [C, S], history)``.
+    ``kernel`` columns of the window. Returns ``(outputs [C, S] in FP32, history)``.
     """
     rows = row_count(network, _shuffle(network, columns, transpose=(1, 0)))
     if kernel > 1:
@@ -310,10 +302,16 @@ def add_short_conv_rows(
         window = window.get_output(0)
     else:
         window = columns
+    # Products and sums in FP32: FP16 products can overflow before the taps cancel, and the
+    # reference convolution accumulates in FP32. The history keeps the window's dtype.
+    def fp32(tensor):
+        return tensor if tensor.dtype == trt.float32 else network.add_cast(tensor, trt.float32).get_output(0)
+
+    window32, weight32 = fp32(window), fp32(weight)
     total = None
     for tap in range(kernel):
-        tap_weight = network.add_slice(weight, (0, tap), (channels, 1), (1, 1)).get_output(0)
-        shifted = dynamic_slice(network, window, (0, tap), (channels, rows))
+        tap_weight = network.add_slice(weight32, (0, tap), (channels, 1), (1, 1)).get_output(0)
+        shifted = dynamic_slice(network, window32, (0, tap), (channels, rows))
         term = _ew(network, shifted, tap_weight, trt.ElementWiseOperation.PROD)
         total = term if total is None else _ew(network, total, term, trt.ElementWiseOperation.SUM)
     last = _ew(network, rows, _i64(network, [1]), trt.ElementWiseOperation.SUB)

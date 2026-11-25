@@ -36,8 +36,11 @@ class Decoder {
     Decoder(std::unique_ptr<ITrtModule> decoder, std::unique_ptr<ITrtModule> prefill,
             const DecoderGeometry& geometry, std::int32_t vocab_size, std::int32_t hidden_size);
 
+    // Generated ids stay below `token_limit`, the tokenizer's vocabulary (the logits may have
+    // more rows: a padded embedding table).
     Generation generate(const PromptRows& prompt, std::int32_t max_new_tokens,
-                        const std::vector<std::int32_t>& eos_ids, Sampler& sampler);
+                        const std::vector<std::int32_t>& eos_ids, std::int32_t token_limit,
+                        Sampler& sampler);
     std::int32_t capacity() const { return state_.capacity(); }
     DType precision() const { return dtype_; }
 

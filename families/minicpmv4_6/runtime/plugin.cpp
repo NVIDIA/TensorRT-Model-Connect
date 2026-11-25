@@ -153,7 +153,6 @@ class Model final : public internal::IModel,
         if (json_int32(vision_, "capacity", 1) != geometry.capacity ||
             json_int32(vision_, "hidden_size", 1) != hidden)
             throw std::runtime_error("MiniCPM-V 4.6 vision.json disagrees with runtime.json");
-        eos_ids_ = json_token_ids(runtime, "eos_token_id", vocab);
 
         settings_.patch_size = json_int32(vision_, "patch_size", 1);
         settings_.positions_per_side = json_int32(vision_, "positions_per_side", 1);
@@ -169,6 +168,8 @@ class Model final : public internal::IModel,
         const auto tokenizer_json = section(bundle, "tokenizer.json");
         tokenizer_ = create_tokenizer(tokenizer_json.data(), tokenizer_json.size());
         check_vocabulary(tokenizer_->vocabulary_size(), vocab);
+        // Generation samples tokenizer ids only, so an end id must be one of them to stop it.
+        eos_ids_ = json_token_ids(runtime, "eos_token_id", tokenizer_->vocabulary_size());
         const auto& ids = vision_.at("token_ids");
         if (!ids.is_object() || ids.size() != 7)
             throw std::runtime_error(
@@ -218,7 +219,8 @@ class Model final : public internal::IModel,
         std::vector<PreparedImage> images;
         const std::int64_t budget = prompt_budget(options);
         // Every message renders at least its start marker, and the prompt's text may not exceed
-        // what the budget's ids can stand for: both are checked before anything is copied.
+        // what the budget's ids can stand for: both are checked before anything is copied. The
+        // template strips each message, so only the code points that strip() keeps count.
         if (request.messages.size() > static_cast<std::size_t>(budget))
             prompt_too_long();
         const std::size_t max_points =
@@ -230,24 +232,24 @@ class Model final : public internal::IModel,
             item.role = role(message.role);
             if (message.parts.empty())
                 throw std::invalid_argument("MiniCPM-V 4.6 messages must have content");
+            StrippedContent content;
+            const auto append = [&](std::string_view text) {
+                if (!content.add(text, max_points - points))
+                    prompt_too_long();
+            };
             bool first = true;
             for (const auto& part : message.parts) {
                 // The provider template joins content parts with newlines and
                 // renders each image as one placeholder.
-                if (!first) {
-                    if (++points > max_points)
-                        prompt_too_long();
-                    item.content += "\n";
-                }
+                if (!first)
+                    append("\n");
                 first = false;
                 std::visit(
                     [&](const auto& value) {
                         using T = std::decay_t<decltype(value)>;
                         if constexpr (std::is_same_v<T, api::TextPartView>) {
-                            points += code_points(value.text);
-                            if (points > max_points)
-                                prompt_too_long();
-                            item.content += checked_text(value.text);
+                            check_text(value.text);
+                            append(value.text);
                         } else if constexpr (std::is_same_v<T, api::ImageView>) {
                             if (item.role == Role::System)
                                 throw std::invalid_argument(
@@ -261,7 +263,7 @@ class Model final : public internal::IModel,
                                     std::to_string(decoder_->capacity()) +
                                     "-token capacity leaves after max_new_tokens");
                             images.push_back(prepare_image(settings_, value));
-                            item.content += kImagePad;
+                            append(kImagePad);
                         } else {
                             throw std::invalid_argument(
                                 "MiniCPM-V 4.6 maps text and image parts only");
@@ -269,6 +271,8 @@ class Model final : public internal::IModel,
                     },
                     part);
             }
+            points += content.kept();
+            item.content = content.take();
             messages.push_back(std::move(item));
         }
         auto text = format_conversation(recipe(options), messages);
@@ -306,12 +310,20 @@ class Model final : public internal::IModel,
         const auto budget = static_cast<std::size_t>(prompt_budget(options));
         PromptRows prompt;
         if (const auto* text = std::get_if<std::string_view>(&request.prefix)) {
-            if (code_points(*text) > tokenizer_->max_code_points(budget))
-                prompt_too_long();
-            std::string formatted(*text);
-            if (options.use_chat_template)
-                formatted =
-                    format_conversation(recipe(options), {{Role::User, checked_text(*text)}});
+            // The template strips the message; a plain prefix is encoded as given.
+            const std::size_t max_points = tokenizer_->max_code_points(budget);
+            std::string formatted;
+            if (options.use_chat_template) {
+                check_text(*text);
+                StrippedContent content;
+                if (!content.add(*text, max_points))
+                    prompt_too_long();
+                formatted = format_conversation(recipe(options), {{Role::User, content.take()}});
+            } else {
+                if (code_points(*text, max_points) > max_points)
+                    prompt_too_long();
+                formatted.assign(text->data(), text->size());
+            }
             auto ids = tokenizer_->encode(formatted, budget);
             if (!ids)
                 prompt_too_long();
@@ -362,13 +374,11 @@ class Model final : public internal::IModel,
     }
 
     // Placeholder spellings in text would be expanded as images by the provider processor.
-    static std::string checked_text(std::string_view text) {
-        std::string value(text);
-        if (value.find(kImagePad) != std::string::npos ||
-            value.find(kVideoPad) != std::string::npos)
+    static void check_text(std::string_view text) {
+        if (text.find(kImagePad) != std::string_view::npos ||
+            text.find(kVideoPad) != std::string_view::npos)
             throw std::invalid_argument(
                 "MiniCPM-V 4.6 text parts cannot contain media placeholders");
-        return value;
     }
 
     const Json& recipe(const Options& options) const {
@@ -399,8 +409,8 @@ class Model final : public internal::IModel,
 
     TextResult generate(const PromptRows& prompt, const Options& options) {
         Sampler sampler(options.sampling);
-        const auto generation =
-            decoder_->generate(prompt, options.max_new_tokens, eos_ids_, sampler);
+        const auto generation = decoder_->generate(prompt, options.max_new_tokens, eos_ids_,
+                                                   tokenizer_->vocabulary_size(), sampler);
         TextResult result(tokenizer_->decode(generation.token_ids), generation.token_ids,
                           generation.prefill_ms, generation.decode_ms);
         return result;

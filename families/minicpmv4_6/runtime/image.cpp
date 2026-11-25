@@ -313,8 +313,9 @@ std::vector<std::uint8_t> resize_rgb8(const std::uint8_t* pixels, std::int32_t h
                                       std::int32_t out_width) {
     if (height <= 0 || width <= 0 || out_height <= 0 || out_width <= 0)
         throw std::invalid_argument("MiniCPM-V 4.6 resize dimensions must be positive");
-    std::vector<std::uint8_t> current(pixels,
-                                      pixels + static_cast<std::size_t>(height) * width * 3);
+    // Each pass reads its input in place; only a resize of neither axis copies the source.
+    const std::uint8_t* current = pixels;
+    std::vector<std::uint8_t> horizontal;
     std::int32_t current_width = width;
     if (out_width != width) {
         const auto taps = antialias_taps(width, out_width);
@@ -333,7 +334,8 @@ std::vector<std::uint8_t> resize_rgb8(const std::uint8_t* pixels, std::int32_t h
                         clamp_pixel(sum, taps.precision);
                 }
             }
-        current = std::move(next);
+        horizontal = std::move(next);
+        current = horizontal.data();
         current_width = out_width;
     }
     if (out_height != height) {
@@ -352,9 +354,12 @@ std::vector<std::uint8_t> resize_rgb8(const std::uint8_t* pixels, std::int32_t h
                         clamp_pixel(sum, taps.precision);
                 }
         }
-        current = std::move(next);
+        return next;
     }
-    return current;
+    if (current == pixels)
+        return std::vector<std::uint8_t>(pixels,
+                                         pixels + static_cast<std::size_t>(height) * width * 3);
+    return horizontal;
 }
 
 std::vector<std::int32_t> bucket_position_ids(std::int32_t height, std::int32_t width,
@@ -437,19 +442,22 @@ PreparedImage prepare_image(const ImageSettings& settings, const internal::Image
     check_patches(plan.source_height, plan.source_width);
     if (plan.rows > 0)
         check_patches(plan.refine_height / plan.rows, plan.refine_width / plan.cols);
-    // Only an image whose slices fit is copied and converted.
-    const auto pixels = rgb8(image);
+    // Only an image whose slices fit is read: RGB8 in place, float pixels after conversion.
+    std::vector<std::uint8_t> converted;
+    const std::uint8_t* pixels = static_cast<const std::uint8_t*>(image.data);
+    if (image.format != internal::ImageFormat::UInt8) {
+        converted = rgb8(image);
+        pixels = converted.data();
+    }
     PreparedImage result;
     result.rows = plan.rows;
     result.cols = plan.cols;
-    const auto source =
-        resize_rgb8(pixels.data(), height, width, plan.source_height, plan.source_width);
+    const auto source = resize_rgb8(pixels, height, width, plan.source_height, plan.source_width);
     result.slices.push_back(make_slice(settings, source, plan.source_width, 0, 0,
                                        plan.source_height, plan.source_width));
     if (plan.rows == 0)
         return result;
-    const auto refined =
-        resize_rgb8(pixels.data(), height, width, plan.refine_height, plan.refine_width);
+    const auto refined = resize_rgb8(pixels, height, width, plan.refine_height, plan.refine_width);
     const std::int32_t slice_height = plan.refine_height / plan.rows;
     const std::int32_t slice_width = plan.refine_width / plan.cols;
     for (std::int32_t row = 0; row < plan.rows; ++row)

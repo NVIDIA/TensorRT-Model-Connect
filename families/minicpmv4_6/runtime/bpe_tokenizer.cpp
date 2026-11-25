@@ -320,7 +320,8 @@ class BpeTokenizer final : public Tokenizer {
 
     std::optional<std::vector<std::int32_t>> encode(std::string_view text,
                                                     std::size_t limit) const override {
-        if (code_points(text) > max_code_points(limit))
+        const std::size_t most = max_code_points(limit);
+        if (code_points(text, most) > most)
             return std::nullopt;
         std::vector<std::int32_t> result;
         for (const auto& segment : split_added_tokens(text)) {
@@ -632,11 +633,13 @@ std::string utf8_lossy(std::string_view bytes) {
     return lossy_utf8(bytes);
 }
 
-std::size_t code_points(std::string_view text) {
+std::size_t code_points(std::string_view text, std::size_t limit) {
     const auto* bytes = reinterpret_cast<const std::uint8_t*>(text.data());
     const auto length = static_cast<std::int64_t>(text.size());
     std::size_t count = 0;
     for (std::int64_t position = 0; position < length; ++count) {
+        if (count == limit)
+            return limit + 1;
         UChar32 value = 0;
         // Advances past one code point, or past the maximal ill-formed subpart that ICU's UTF-8
         // conversion replaces with one U+FFFD.

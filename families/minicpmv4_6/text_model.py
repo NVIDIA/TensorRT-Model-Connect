@@ -31,7 +31,7 @@ import tensorrt as trt
 from . import deltanet_rows
 from . import graph_blocks
 from . import graph_ops
-from .checkpoint_mapper import WeightDict, _has_tensor, _load_tensor, decay_rates
+from .checkpoint_mapper import WeightDict, _has_tensor, _load_tensor, decay_rates, narrowed
 from .config import TextConfig
 from .rope import rope_positions, rope_tables
 
@@ -113,7 +113,6 @@ def load_text_weights(readers, config: TextConfig) -> WeightDict:
     # The checkpoint ties the LM head to the input embedding.
     if _has_tensor(readers, "lm_head.weight"):
         raise ValueError("MiniCPM-V 4.6 ties lm_head to the input embedding; found a separate lm_head")
-    weights["w_lm_head"] = np.ascontiguousarray(embedding.T, dtype=np.float32)
 
     for index, layer_type in enumerate(config.layer_types):
         prefix = f"layer.{index}"
@@ -195,6 +194,11 @@ def text_runtime_config(config: TextConfig) -> dict:
         "conv_dim": 2 * config.linear_num_key_heads * config.linear_key_head_dim
         + config.linear_num_value_heads * config.linear_value_head_dim,
     }
+
+
+def rms_eps_tensor(network: trt.INetworkDefinition, eps: float) -> trt.ITensor:
+    """The RMSNorm epsilon as an FP32 constant: every norm runs in FP32, as the reference adds it."""
+    return graph_ops.add_constant(network, (1, 1), np.array([eps], dtype=np.float32), dtype=np.float32)
 
 
 def build_text_engine(
@@ -317,16 +321,21 @@ def build_text_engine(
     )
 
     # --- Shared constants ---
-    embedding_table = graph_ops.add_constant(network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype)
-    eps_tensor = graph_ops.add_constant(
-        network, (1, 1), np.array([config.rms_norm_eps], dtype=work_np_dtype), dtype=work_np_dtype
-    )
+    # The table is FP32 at both precisions: the tied LM head multiplies by it in FP32, and gathered rows are rounded to
+    # the work precision, so every row must fit that precision (checked in blocks, before the build).
+    embedding_table = graph_ops.add_constant(network, (vocab, hidden), weights["embedding"], dtype=np.float32)
+    if work_np_dtype != np.float32:
+        for start in range(0, vocab, 16384):
+            narrowed(weights["embedding"][start:start + 16384], work_np_dtype, "token embeddings")
+    eps_tensor = rms_eps_tensor(network, config.rms_norm_eps)
     cos_half, sin_half = rope_tables(config, attention_window)
     cos_half_tensor = graph_ops.add_constant(network, cos_half.shape, cos_half, dtype=work_np_dtype)
     sin_half_tensor = graph_ops.add_constant(network, sin_half.shape, sin_half, dtype=work_np_dtype)
 
     # --- Embedding ---
     hidden_state = network.add_gather(embedding_table, token_id, 0).get_output(0)
+    if hidden_state.dtype != work_trt_dtype:
+        hidden_state = network.add_cast(hidden_state, work_trt_dtype).get_output(0)
     if prefill_rows:
         use_visual = network.add_cast(selector, trt.bool).get_output(0)
         hidden_state = network.add_select(use_visual, visual, hidden_state).get_output(0)
@@ -410,11 +419,8 @@ def build_text_engine(
     hidden_state = graph_ops.add_rms_norm(
         network, hidden_state, hidden, weights["final_norm"], eps_tensor, dtype=work_np_dtype
     )
-    logits = graph_ops.add_matmul_rhs_constant(
-        network, hidden_state, hidden, vocab, weights["w_lm_head"], dtype=work_np_dtype
-    )
-    if logits.dtype != trt.float32:
-        logits = network.add_cast(logits, trt.float32).get_output(0)
+    # The LM head is tied: multiply by the embedding table itself, transposed.
+    logits = graph_ops.add_tied_lm_head(network, hidden_state, embedding_table)
     logits.name = "logits"
     network.mark_output(logits)
 
@@ -556,21 +562,13 @@ def _add_deltanet_layer(
     normed_output = network.add_elementwise(
         norm_flat.get_output(0), gamma_t, trt.ElementWiseOperation.PROD
     )
-    normed_output_tensor = normed_output.get_output(0)
-    if normed_output_tensor.dtype != norm_output_dtype:
-        normed_output_tensor = network.add_cast(normed_output_tensor, norm_output_dtype).get_output(
-            0
-        )
-
-    # Gate: multiply by silu(z)
-    z_activated = graph_ops.add_activation(network, z, "silu", dtype=dtype)
-    gated = network.add_elementwise(
-        normed_output_tensor, z_activated, trt.ElementWiseOperation.PROD
-    )
+    # Gate: silu(z) and the product in FP32, rounded once to the projection dtype (the reference's
+    # gated RMSNorm multiplies by silu(gate.float()) and casts the result).
+    gated = graph_ops.add_silu_gate(network, normed_output.get_output(0), z, norm_output_dtype)
 
     # ===== 11. Output projection + residual =====
     out = _projection(
-        network, gated.get_output(0), d_inner, hidden_size, weights, f"{prefix}.deltanet_out_proj", dtype=dtype
+        network, gated, d_inner, hidden_size, weights, f"{prefix}.deltanet_out_proj", dtype=dtype
     )
 
     residual = network.add_elementwise(hidden, out, trt.ElementWiseOperation.SUM)
@@ -644,14 +642,10 @@ def _add_deltanet_mixer_step(
     else:
         present_conv = qkv_col.get_output(0)
 
-    conv_w = graph_ops.add_constant(
-        network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"], dtype=dtype
+    conv_sum = graph_ops.add_conv_step(
+        network, present_conv, weights[f"{prefix}.conv1d_weight"], present_conv.dtype
     )
-    conv_prod = network.add_elementwise(present_conv, conv_w, trt.ElementWiseOperation.PROD)
-    conv_sum = network.add_reduce(
-        conv_prod.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=True
-    )
-    conv_flat = network.add_shuffle(conv_sum.get_output(0))
+    conv_flat = network.add_shuffle(conv_sum)
     conv_flat.reshape_dims = (1, conv_dim)
     conv_out = graph_ops.add_bias_sum(
         network, conv_flat.get_output(0), conv_dim, weights[f"{prefix}.conv1d_bias"], dtype=dtype
@@ -756,9 +750,9 @@ def _add_deltanet_mixer_step(
 
     # ===== 8. Compute beta: sigmoid(b) per head =====
     # b_raw: [1, num_heads]
-    beta = network.add_activation(b_raw, trt.ActivationType.SIGMOID)
+    beta = graph_ops.add_sigmoid(network, b_raw)
     # [1, num_heads] -> [num_heads, 1]
-    beta_reshaped = network.add_shuffle(recurrent_cast(beta.get_output(0)))
+    beta_reshaped = network.add_shuffle(recurrent_cast(beta))
     beta_reshaped.reshape_dims = (num_heads, 1)
 
     # ===== 9. Delta rule state update =====
@@ -870,7 +864,7 @@ def _add_deltanet_mixer_rows(
         return tensor if tensor.dtype == trt.float32 else network.add_cast(tensor, trt.float32).get_output(0)
 
     conv_w = graph_ops.add_constant(
-        network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"], dtype=dtype
+        network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"], dtype=np.float32
     )
     conv_columns, present_conv = deltanet_rows.add_short_conv_rows(
         network,
@@ -880,9 +874,11 @@ def _add_deltanet_mixer_rows(
         channels=conv_dim,
         kernel=d_conv,
     )
+    conv_rows = shuffle(conv_columns, transpose=(1, 0))
+    if conv_rows.dtype != qkv.dtype:
+        conv_rows = network.add_cast(conv_rows, qkv.dtype).get_output(0)
     conv_out = graph_ops.add_bias_sum(
-        network, shuffle(conv_columns, transpose=(1, 0)), conv_dim,
-        weights[f"{prefix}.conv1d_bias"], dtype=dtype,
+        network, conv_rows, conv_dim, weights[f"{prefix}.conv1d_bias"], dtype=dtype,
     )
     activated = graph_ops.add_activation(network, conv_out, "silu", dtype=dtype)
     rows = deltanet_rows.row_count(network, activated)
@@ -929,7 +925,7 @@ def _add_deltanet_mixer_rows(
     biased = network.add_elementwise(fp32(a_raw), dt_bias, trt.ElementWiseOperation.SUM).get_output(0)
     softplus = graph_ops.add_softplus(network, biased)
     decay = network.add_elementwise(a_const, softplus, trt.ElementWiseOperation.PROD).get_output(0)
-    beta = fp32(network.add_activation(b_raw, trt.ActivationType.SIGMOID).get_output(0))
+    beta = graph_ops.add_sigmoid(network, b_raw)
 
     outputs, present_ssm = deltanet_rows.add_chunked_delta_rule(
         network,
@@ -1082,11 +1078,7 @@ def _add_full_attention_layer(
             f"{prefix}.w_gate_attn",
             dtype=dtype,
         )
-        gate_sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-        gated = network.add_elementwise(
-            attn_out, gate_sigmoid.get_output(0), trt.ElementWiseOperation.PROD
-        )
-        attn_out = gated.get_output(0)
+        attn_out = graph_ops.add_sigmoid_product(network, attn_out, gate, attn_out.dtype)
 
     # Output projection (AFTER gate)
     attn_out = _projection(

@@ -15,6 +15,7 @@ import pytest
 
 from families.minicpmv4_6 import config as cfg
 from families.minicpmv4_6 import prompt
+from families.minicpmv4_6.tests.tokenizer_fixture import minimal_tokenizer as _tokenizer
 
 _PROCESSOR = {
     "image_processor_type": "MiniCPMV4_6ImageProcessor",
@@ -115,6 +116,10 @@ def test_the_capacity_defaults_only_when_unset():
     assert cfg.capacity_rows(2, 262144) == 2
 
 
+# The pinned checkpoint: 248320 embedding rows, of which the tokenizer uses the first 248094.
+_TOKENS = 248094
+
+
 def _checkpoint(vocab_size=248320, eos_token_id=248044):
     return SimpleNamespace(text=SimpleNamespace(vocab_size=vocab_size), eos_token_id=eos_token_id)
 
@@ -122,19 +127,28 @@ def _checkpoint(vocab_size=248320, eos_token_id=248044):
 @pytest.mark.parametrize("generation", [
     {"eos_token_id": [248046, 248046]}, {"eos_token_id": None}, {"eos_token_id": [248320]},
     {"eos_token_id": [1.0]}, {"eos_token_id": True}, {"eos_token_id": []}, [248046],
+    {"eos_token_id": [248044, _TOKENS]},  # an embedding row no tokenizer id reaches
 ])
 def test_generation_end_ids_must_be_distinct_token_ids(tmp_path, generation):
     _write(tmp_path, "generation_config.json", generation)
     with pytest.raises(ValueError, match="eos_token_id"):
-        cfg.generation_ids(tmp_path, _checkpoint())
+        cfg.generation_ids(tmp_path, _checkpoint(), _TOKENS)
+
+
+def test_the_configs_end_id_must_be_a_tokenizer_id_too(tmp_path):
+    # Generation samples only tokenizer ids, so an end id among the padding rows could never stop it.
+    with pytest.raises(ValueError, match="eos_token_id"):
+        cfg.generation_ids(tmp_path, _checkpoint(eos_token_id=_TOKENS), _TOKENS)
+    with pytest.raises(ValueError, match="eos_token_id"):
+        cfg.generation_ids(tmp_path, _checkpoint(vocab_size=248000), _TOKENS)
 
 
 def test_generation_end_ids_default_to_the_config(tmp_path):
-    assert cfg.generation_ids(tmp_path, _checkpoint()) == [248044]
+    assert cfg.generation_ids(tmp_path, _checkpoint(), _TOKENS) == [248044]
     _write(tmp_path, "generation_config.json", {"eos_token_id": 248046})
-    assert cfg.generation_ids(tmp_path, _checkpoint()) == [248046]
-    _write(tmp_path, "generation_config.json", {"eos_token_id": [248046, 248044]})
-    assert cfg.generation_ids(tmp_path, _checkpoint()) == [248046, 248044]
+    assert cfg.generation_ids(tmp_path, _checkpoint(), _TOKENS) == [248046]
+    _write(tmp_path, "generation_config.json", {"eos_token_id": [248046, _TOKENS - 1]})
+    assert cfg.generation_ids(tmp_path, _checkpoint(), _TOKENS) == [248046, _TOKENS - 1]
 
 
 def test_the_checkpoint_processor_settings_are_accepted(tmp_path):
@@ -197,25 +211,6 @@ def test_same_value_compares_json_types_inside_objects():
     assert cfg.same_value({"a": [True, "x"]}, {"a": [True, "x"]})
     assert not cfg.same_value({"a": 1}, {"a": True})
     assert not cfg.same_value({"a": True, "b": None}, {"a": True})
-
-
-def _tokenizer():
-    """The smallest tokenizer.json of the layout the native tokenizer loads (as the host test's)."""
-    vocab = {character: index for index, character in enumerate(prompt._byte_alphabet())}
-    vocab.update({"xy": 256, "xyx": 257})
-    byte_level = {"type": "ByteLevel", "add_prefix_space": False, "trim_offsets": False, "use_regex": False}
-    split = {"type": "Split", "pattern": {"Regex": prompt._SPLIT_PATTERN}, "behavior": "Isolated", "invert": False}
-    return {
-        "version": "1.0", "truncation": None, "padding": None,
-        "added_tokens": [{"id": 258, "content": "<|end|>", "single_word": False, "lstrip": False, "rstrip": False,
-                          "normalized": False, "special": True}],
-        "normalizer": {"type": "NFC"},
-        "pre_tokenizer": {"type": "Sequence", "pretokenizers": [split, dict(byte_level)]},
-        "post_processor": dict(byte_level), "decoder": dict(byte_level),
-        "model": {"type": "BPE", "dropout": None, "unk_token": None, "continuing_subword_prefix": "",
-                  "end_of_word_suffix": "", "fuse_unk": False, "byte_fallback": False, "ignore_merges": False,
-                  "vocab": vocab, "merges": [["xy", "x"], ["x", "y"]]},
-    }
 
 
 def test_the_supported_tokenizer_layout_is_accepted():
@@ -294,3 +289,108 @@ _TEXT = {
 def test_layer_types_must_be_a_json_array_of_names(layer_types):
     with pytest.raises(ValueError, match="layer_types"):
         cfg.TextConfig.from_dict({**_TEXT, "layer_types": layer_types})
+
+
+class _Backend:
+    """A backend tokenizer: its JSON, and one id per character."""
+
+    def __init__(self, root: dict):
+        self._json = json.dumps(root)
+
+    def to_str(self):
+        return self._json
+
+    def encode(self, text, add_special_tokens=True):
+        return SimpleNamespace(ids=[ord(character) for character in text])
+
+    def decode(self, ids, skip_special_tokens=True):
+        return "".join(chr(index) for index in ids)
+
+
+class _LoadedTokenizer:
+    """What the builder reads of a Transformers tokenizer: the backend, and the wrapper's encode() and decode()."""
+
+    def __init__(self, backend: dict, encoded=lambda ids: ids, decoded=lambda text: text):
+        self.backend_tokenizer = _Backend(backend)
+        self._encoded, self._decoded = encoded, decoded
+
+    def check(self, root: dict):
+        prompt.check_effective_tokenizer(self, _Backend(root), root)
+
+    def encode(self, text, add_special_tokens=True):
+        return self._encoded(self.backend_tokenizer.encode(text).ids)
+
+    def decode(self, ids, skip_special_tokens=False):
+        return self._decoded(self.backend_tokenizer.decode(ids, skip_special_tokens))
+
+
+def test_the_loaded_tokenizer_may_equal_tokenizer_json():
+    root = _tokenizer()
+    _LoadedTokenizer(_tokenizer()).check(root)
+    assert prompt.token_count(root) == 259
+
+
+_TEMPLATE = {"type": "TemplateProcessing", "single": [{"SpecialToken": {"id": "<|end|>", "type_id": 0}},
+                                                      {"Sequence": {"id": "A", "type_id": 0}}],
+             "pair": [{"Sequence": {"id": "A", "type_id": 0}}, {"Sequence": {"id": "B", "type_id": 1}}],
+             "special_tokens": {"<|end|>": {"id": "<|end|>", "ids": [258], "tokens": ["<|end|>"]}}}
+
+
+@pytest.mark.parametrize(("path", "value"), [
+    (("added_tokens",), [*_tokenizer()["added_tokens"], {  # extra_special_tokens adds a token
+        "id": 259, "content": "<|custom|>", "single_word": False, "lstrip": False, "rstrip": False,
+        "normalized": False, "special": True}]),
+    (("added_tokens", 0, "id"), 300),  # an added token at another id
+    (("added_tokens", 0, "special"), False),  # added_tokens_decoder changes a flag
+    (("added_tokens", 0, "rstrip"), True),
+    (("added_tokens", 0, "lstrip"), True),
+    (("added_tokens", 0, "normalized"), True),
+    (("added_tokens", 0, "single_word"), True),
+    (("post_processor",), _TEMPLATE),  # add_bos_token rebuilds the post-processor in some tokenizer classes
+    (("normalizer",), {"type": "NFKC"}),
+    (("pre_tokenizer", "pretokenizers", 0, "pattern", "Regex"), r"\s+|\S+"),
+    (("decoder", "trim_offsets"), True),
+    (("model", "vocab", "xyx"), 300),
+    (("model", "merges"), [["x", "y"]]),
+    (("truncation",), {"max_length": 8}),
+])
+def test_a_tokenizer_config_that_changes_the_loaded_tokenizer_is_rejected(path, value):
+    root, loaded = _tokenizer(), _tokenizer()
+    _set(loaded, path, value)
+    with pytest.raises(ValueError, match="changes the tokenizer of tokenizer.json"):
+        _LoadedTokenizer(loaded).check(root)
+
+
+def test_a_loaded_tokenizer_without_a_token_of_tokenizer_json_is_rejected():
+    root, loaded = _tokenizer(), _tokenizer()
+    del loaded["model"]["vocab"]["xyx"]
+    with pytest.raises(ValueError, match="changes the tokenizer"):
+        _LoadedTokenizer(loaded).check(root)
+
+
+@pytest.mark.parametrize("encoded", [
+    lambda ids: [258, *ids],  # add_bos_token in a tokenizer class that adds it in Python
+    lambda ids: [*ids, 258],  # add_eos_token
+])
+def test_a_wrapper_that_encodes_differently_from_tokenizer_json_is_rejected(encoded):
+    with pytest.raises(ValueError, match="changes how Transformers encodes"):
+        _LoadedTokenizer(_tokenizer(), encoded=encoded).check(_tokenizer())
+
+
+def test_backend_state_that_its_json_does_not_show_is_rejected():
+    # split_special_tokens=True: Transformers sets encode_special_tokens on its backend, whose JSON stays the same,
+    # so the wrapper and its backend both split a special token; a tokenizer read from tokenizer.json alone does not.
+    loaded = _LoadedTokenizer(_tokenizer())
+    loaded.backend_tokenizer.encode = lambda text, add_special_tokens=True: SimpleNamespace(
+        ids=[ord(character) for character in text][1:])
+    with pytest.raises(ValueError, match="changes how Transformers encodes"):
+        loaded.check(_tokenizer())
+
+
+def test_a_wrapper_that_decodes_differently_from_tokenizer_json_is_rejected():
+    # clean_up_tokenization_spaces=True: Transformers decodes "here ," as "here,"; the native runtime keeps the space.
+    def cleaned(text):
+        return text.replace(" ,", ",").replace(" .", ".")
+
+    with pytest.raises(ValueError, match="changes how Transformers decodes"):
+        _LoadedTokenizer(_tokenizer(), decoded=cleaned).check(_tokenizer())

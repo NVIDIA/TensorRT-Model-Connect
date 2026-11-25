@@ -72,11 +72,17 @@ def add_swiglu_mlp(
     gate = matmul(inp, hidden_size, mlp_size, weights[f"{prefix}.w_gate"], f"{_lp}.w_gate")
     up = matmul(inp, hidden_size, mlp_size, weights[f"{prefix}.w_up"], f"{_lp}.w_up")
 
-    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
-
-    mlp_out = matmul(
-        gated.get_output(0), mlp_size, hidden_size, weights[f"{prefix}.w_down"], f"{_lp}.w_down"
+    # silu(gate) * up and the down projection in FP32, rounded once: in FP16 the product, or the projection of a row
+    # that mixes large and small products, can overflow or underflow where the result is representable.
+    work = gate.dtype
+    if up.dtype != trt.float32:
+        up = network.add_cast(up, trt.float32).get_output(0)
+    product = network.add_elementwise(
+        graph_ops.add_sigmoid_product(network, gate, gate, trt.float32), up, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    mlp_out = graph_ops.add_matmul_rhs_constant(
+        network, product, mlp_size, hidden_size, weights[f"{prefix}.w_down"], dtype=np.float32
     )
+    if work != trt.float32:
+        mlp_out = network.add_cast(mlp_out, work).get_output(0)
     return mlp_out

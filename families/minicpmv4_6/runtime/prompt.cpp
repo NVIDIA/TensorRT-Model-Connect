@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <stdexcept>
+#include <unicode/utf8.h>
 
 namespace trtmc::minicpmv4_6 {
 namespace {
@@ -92,6 +93,58 @@ void validate_recipe(const nlohmann::json& recipe) {
             (void)value(recipe.at(kind), "reasoning_suffix");
         }
     }
+}
+
+bool is_strip_space(std::uint32_t c) {
+    return (c >= 0x09 && c <= 0x0D) || (c >= 0x1C && c <= 0x20) || c == 0x85 || c == 0xA0 ||
+           c == 0x1680 || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 ||
+           c == 0x202F || c == 0x205F || c == 0x3000;
+}
+
+bool StrippedContent::add(std::string_view text, std::size_t limit) {
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(text.data());
+    const auto length = static_cast<std::int64_t>(text.size());
+    std::int64_t run = 0; // start of the current run of white space or of text
+    bool space_run = false;
+    const auto close_run = [&](std::int64_t end) {
+        const auto piece =
+            text.substr(static_cast<std::size_t>(run), static_cast<std::size_t>(end - run));
+        if (piece.empty())
+            return;
+        if (!space_run) {
+            for (const auto pending : pending_)
+                content_.append(pending);
+            pending_.clear();
+            content_.append(piece);
+        } else if (started_ && kept_ + pending_points_ <= limit) {
+            pending_.push_back(piece);
+        } else {
+            pending_.clear(); // only text could keep it, and that text would exceed the limit
+        }
+    };
+    for (std::int64_t position = 0; position < length;) {
+        const std::int64_t start = position;
+        UChar32 c = 0;
+        U8_NEXT(bytes, position, length, c);
+        // An ill-formed sequence is one U+FFFD, which strip() keeps.
+        const bool space = c >= 0 && is_strip_space(static_cast<std::uint32_t>(c));
+        if (space != space_run) {
+            close_run(start);
+            run = start;
+            space_run = space;
+        }
+        if (space) {
+            pending_points_ += started_ ? 1 : 0;
+            continue;
+        }
+        kept_ += pending_points_ + 1;
+        pending_points_ = 0;
+        started_ = true;
+        if (kept_ > limit)
+            return false;
+    }
+    close_run(length);
+    return true;
 }
 
 std::string format_conversation(const nlohmann::json& recipe,

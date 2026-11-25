@@ -12,6 +12,7 @@ the recipe cannot reproduce is rejected at build time.
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 
@@ -313,14 +314,54 @@ def check_tokenizer_layout(root: object) -> None:
         seen.add(tuple(merge))
 
 
-def image_metadata(model_dir: Path, config, capacity: int, precision: str, max_patches: int) -> dict:
-    """Validated image-processor settings, markup token ids and prompt recipes (``vision.json``)."""
+def token_count(root: dict) -> int:
+    """Tokens of a checked tokenizer.json: the vocabulary, then the added tokens numbered after it."""
+    return len(root["model"]["vocab"]) + len(root["added_tokens"])
+
+
+# Text on which the Transformers wrapper can differ from its backend: special tokens (added around a text, or split
+# with ``split_special_tokens``) and spaces before punctuation (``clean_up_tokenization_spaces`` drops them).
+_WRAPPER_PROBE = "<|im_start|>user\nIt 's here , isn't it ? Yes . ( 1 ) !<|im_end|>\n"
+
+
+def check_effective_tokenizer(tokenizer, reference, root: dict) -> None:
+    """The tokenizer Transformers loads must encode and decode as tokenizer.json, all the native runtime reads.
+
+    ``reference`` is a ``tokenizers.Tokenizer`` read from tokenizer.json alone, ``root`` that file parsed.
+    tokenizer_config.json can add tokens (``extra_special_tokens``), change an added token's flags
+    (``added_tokens_decoder``), or set options of the Python wrapper (``add_bos_token``, ``split_special_tokens``,
+    ``clean_up_tokenization_spaces``), some of them as backend state that its JSON does not show. So the loaded
+    backend must serialize to tokenizer.json, every component included, and the wrapper must encode and decode a
+    probe text exactly as ``reference`` does.
+    """
+    loaded = json.loads(tokenizer.backend_tokenizer.to_str())
+    changed = [key for key in sorted(set(root) | set(loaded)) if loaded.get(key) != root.get(key)]
+    if changed:
+        raise ValueError("MiniCPM-V 4.6 tokenizer_config.json changes the tokenizer of tokenizer.json, which the "
+                         f"native runtime reads alone (changed: {', '.join(changed)})")
+    ids = reference.encode(_WRAPPER_PROBE, add_special_tokens=False).ids
+    if tokenizer.encode(_WRAPPER_PROBE) != ids:
+        raise ValueError("MiniCPM-V 4.6 tokenizer_config.json changes how Transformers encodes (special tokens added "
+                         "or split); the native runtime encodes as tokenizer.json")
+    for skip in (False, True):
+        if tokenizer.decode(ids, skip_special_tokens=skip) != reference.decode(ids, skip_special_tokens=skip):
+            raise ValueError("MiniCPM-V 4.6 tokenizer_config.json changes how Transformers decodes (for example "
+                             "clean_up_tokenization_spaces); the native runtime decodes as tokenizer.json")
+
+
+def image_metadata(model_dir: Path, config, tokenizer_json: dict, capacity: int, precision: str,
+                   max_patches: int) -> dict:
+    """Validated image-processor settings, markup token ids and prompt recipes (``vision.json``).
+
+    ``tokenizer_json`` is the checkpoint's parsed tokenizer.json, its layout already checked.
+    """
+    from tokenizers import Tokenizer
     from transformers import AutoTokenizer
 
     processor = processor_settings(model_dir, config.vision.patch_size, max_patches)
-    check_tokenizer_layout(load_json(model_dir / "tokenizer.json"))
-
     tokenizer = AutoTokenizer.from_pretrained(str(model_dir), local_files_only=True, trust_remote_code=False)
+    reference = Tokenizer.from_str(json.dumps(tokenizer_json))
+    check_effective_tokenizer(tokenizer, reference, tokenizer_json)
     check_vocabulary(tokenizer.get_vocab(), len(tokenizer), config.text.vocab_size)
     token_ids = {}
     for name, text in MARKUP_TOKENS.items():

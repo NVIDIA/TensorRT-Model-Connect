@@ -115,11 +115,16 @@ void Decoder::step(std::int32_t token, std::vector<float>& logits) {
 }
 
 Generation Decoder::generate(const PromptRows& prompt, std::int32_t max_new_tokens,
-                             const std::vector<std::int32_t>& eos_ids, Sampler& sampler) {
+                             const std::vector<std::int32_t>& eos_ids, std::int32_t token_limit,
+                             Sampler& sampler) {
+    if (token_limit <= 0 || token_limit > vocab_size_)
+        throw std::invalid_argument("MiniCPM-V 4.6 token limit must be in 1..vocab_size");
     const auto count = prompt.token_ids.size();
     const auto row_bytes = static_cast<std::size_t>(hidden_size_) * dtype_size(dtype_);
-    if (count == 0 || prompt.feature_rows.size() != count || prompt.features.size() % row_bytes)
+    if (prompt.features.size() % row_bytes)
         throw std::invalid_argument("MiniCPM-V 4.6 prompt rows are inconsistent");
+    check_prompt_rows(prompt.token_ids, prompt.feature_rows,
+                      static_cast<std::int64_t>(prompt.features.size() / row_bytes), token_limit);
     if (max_new_tokens <= 0)
         throw std::invalid_argument("MiniCPM-V 4.6 max_new_tokens must be positive");
     if (static_cast<std::int64_t>(count) + max_new_tokens > state_.capacity())
@@ -127,11 +132,6 @@ Generation Decoder::generate(const PromptRows& prompt, std::int32_t max_new_toke
                                     " tokens plus " + std::to_string(max_new_tokens) +
                                     " new tokens exceeds the bundle's " +
                                     std::to_string(state_.capacity()) + "-token capacity");
-    const auto feature_count = static_cast<std::int64_t>(prompt.features.size() / row_bytes);
-    for (std::size_t i = 0; i < count; ++i)
-        if (prompt.token_ids[i] < 0 || prompt.token_ids[i] >= vocab_size_ ||
-            prompt.feature_rows[i] < -1 || prompt.feature_rows[i] >= feature_count)
-            throw std::invalid_argument("MiniCPM-V 4.6 prompt has an invalid token or feature row");
 
     Generation result;
     std::vector<float> logits;
@@ -143,7 +143,7 @@ Generation Decoder::generate(const PromptRows& prompt, std::int32_t max_new_toke
     state_.bind_decoder(*decoder_);
     try {
         for (std::int32_t index = 0; index < max_new_tokens; ++index) {
-            const std::int32_t token = sampler.sample(logits);
+            const std::int32_t token = sampler.sample(logits, token_limit);
             result.token_ids.push_back(token);
             if (std::find(eos_ids.begin(), eos_ids.end(), token) != eos_ids.end() ||
                 index + 1 == max_new_tokens)

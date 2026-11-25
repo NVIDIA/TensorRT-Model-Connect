@@ -21,8 +21,8 @@ import gc
 from pathlib import Path
 
 from .checkpoint_mapper import _open_safetensors
-from .config import CheckpointConfig, capacity_rows, generation_ids, positive_when_stored
-from .prompt import image_metadata
+from .config import CheckpointConfig, capacity_rows, generation_ids, load_json, positive_when_stored
+from .prompt import check_tokenizer_layout, image_metadata, token_count
 from .rope import rope_positions, rope_tables
 from .text_model import PREFILL_MAX_ROWS, build_text_engine, load_text_weights, text_runtime_config
 from .vision import MAX_PATCHES, build_vision_engine, load_vision_weights
@@ -64,11 +64,18 @@ def build(request, writer) -> None:
     config = CheckpointConfig.from_dir(model_dir)
     capacity = capacity_rows(request.max_sequence_length, config.text.max_position_embeddings)
     precision = request.precision
-    # The decoder's RMSNorm epsilon is a constant of the work dtype.
-    if not positive_when_stored(config.text.rms_norm_eps, "e" if precision == "fp16" else "f"):
-        raise ValueError(f"minicpmv4_6 rms_norm_eps {config.text.rms_norm_eps} vanishes in {precision}")
+    # Everything a bundle needs is checked before the first engine build. The RMSNorm epsilon is
+    # an FP32 constant at both precisions.
+    if not positive_when_stored(config.text.rms_norm_eps, "f"):
+        raise ValueError(f"minicpmv4_6 rms_norm_eps {config.text.rms_norm_eps} vanishes in FP32")
     rope_tables(config.text, rope_positions(capacity))  # finite angles for every cached position
-    metadata = image_metadata(model_dir, config, capacity, precision, MAX_PATCHES)
+    for name in _BUNDLE_FILES:
+        if not (model_dir / name).is_file():
+            raise FileNotFoundError(f"MiniCPM-V 4.6 checkpoint is missing {name}")
+    tokenizer_json = load_json(model_dir / "tokenizer.json")
+    check_tokenizer_layout(tokenizer_json)
+    eos_token_ids = generation_ids(model_dir, config, token_count(tokenizer_json))
+    metadata = image_metadata(model_dir, config, tokenizer_json, capacity, precision, MAX_PATCHES)
     verbose = request.verbose
 
     writer.set_header(family="minicpmv4_6", task=request.task, backend=request.backend)
@@ -90,10 +97,7 @@ def build(request, writer) -> None:
         **text_runtime_config(config.text),
         "precision": precision,
         "max_cache_length": capacity,
-        "eos_token_id": generation_ids(model_dir, config),
+        "eos_token_id": eos_token_ids,
     })
     for name in _BUNDLE_FILES:
-        path = model_dir / name
-        if not path.is_file():
-            raise FileNotFoundError(f"MiniCPM-V 4.6 checkpoint is missing {name}")
-        writer.add_bytes(name, path.read_bytes())
+        writer.add_bytes(name, (model_dir / name).read_bytes())
