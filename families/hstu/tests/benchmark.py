@@ -76,6 +76,8 @@ def main():
                         bundle=str(directory / "model.bundle"),
                         bundle_id=task.metadata["bundle_id"],
                         cuda_graphs=task.metadata["cuda_graphs"],
+                        bf16_policy=task.metadata.get("bf16_policy", "conservative"),
+                        bf16_extra_ops=task.metadata.get("bf16_extra_ops", []),
                         fp32_block_indices=list(range(5))
                         if precision == "fp32"
                         else config.fp32_block_indices,

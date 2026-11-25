@@ -97,11 +97,18 @@ the history and itself, and never another candidate. All candidates in one
 request share `query_timestamp`. Embeddings must be finite; timestamps are
 nonnegative and bounded by 2^40. Runtime metadata contains the exact schema.
 
-FP32 is the reference mode. BF16 keeps sensitive blocks 0–2 in FP32 and runs
-blocks 3–4 with BF16 projections and attention. Normalization, residual state,
-preprocessing and the prediction head stay FP32. `fp32_block_indices` makes this
-policy explicit; changing it requires rebuilding and requalification. Each
-block runs once, with no duplicate FP32 attention/head computation.
+FP32 is the reference mode. The default `bf16_policy: "expanded"` runs block
+3–4 projections and attention, all five candidate AV products, the item MLP's
+two matrix multiplies, the timestamp projection and the hidden prediction
+projection in BF16. History blocks 0–2 and their candidate projections/QK/SiLU
+remain FP32. Normalization, residuals, input preprocessing, biases and the
+final prediction projection/sigmoid remain FP32. Each block runs once.
+
+`bf16_policy: "conservative"` restores the previous policy: blocks 3–4 use
+BF16, with the other operations in FP32. `fp32_block_indices` selects the
+protected history/projection/QK blocks for both policies; expanded candidate
+AV products are explicit exceptions. `runtime.json` records the effective
+policy and extra BF16 operations. Changes require rebuilding and qualification.
 `tests/thresholds/` declares score and ranking gates before qualification.
 The original MLCommons model independently validates the full-sequence oracle;
 its production positional kernel is used because its PyTorch fallback has a
@@ -110,29 +117,60 @@ guarantee a fused HSTU kernel or a speedup.
 
 ## Qualification results
 
-TensorRT 11.4.0.106 passed all six precision/profile cases and 20 cache lifecycle
-cases on both GB300 and A100. On synthetic dense inputs, BF16's maximum absolute
-score error was 0.0071, with 100% top-1 agreement. The default profile's top-10
-overlap was at least 98.75%. An additional 16 seeds not used to choose the
-precision policy passed the same gates, with maximum error 0.0034. These are
-numerical checks against FP32, not a dataset accuracy or MLPerf submission.
+The expanded policy passed all six precision/profile cases and 20 cache lifecycle
+cases on GB300/SM103 with TensorRT 11.4.0.106. In addition to eight qualification
+seeds, 32 held-out seeds per serving case passed the unchanged score/ranking
+gates. On those held-out inputs, maximum absolute score error was 0.0162,
+aggregate top-1 agreement was at least 96.875% and top-10 overlap at least 99.14%.
+These are numerical checks on synthetic dense inputs, not dataset AUC/NE or
+MLPerf compliance. Moving whole early blocks to BF16, the FP16 fallback,
+additional early BF16 output projections and enabling TF32 failed score checks
+and were rejected. TF32 remains disabled in both FP32 and BF16 builds.
 
-Diagnostic median latency, milliseconds (`NativeClient.score`, seed 42,
-10 warmups, 50 iterations; includes host copies and synchronization):
+GB300 diagnostic latency, milliseconds: median of three rounds' P50 values,
+20 warmups and 100 measured calls per round, seed 42, rotated measurement order.
+All columns use the same updated runtime and scoring-stage CUDA Graphs.
 
-| GPU | History / candidates / batch | FP32 | Mixed BF16 |
-|---|---|---:|---:|
-| GB300 | 512 / 128 / 1 | 11.07 | 10.67 |
-| GB300 | 512 / 128 / 4 | 24.58 | 24.65 |
-| GB300 | 32 / 8 / 4 | 6.02 | 5.69 |
-| A100 | 512 / 128 / 1 | 14.09 | 13.86 |
-| A100 | 512 / 128 / 4 | 52.74 | 50.20 |
-| A100 | 32 / 8 / 4 | 5.27 | 5.03 |
+| History / candidates / batch | FP32 | Conservative BF16 | Expanded BF16 | Expanded reduction vs FP32 |
+|---|---:|---:|---:|---:|
+| 512 / 128 / 1 | 7.19 | 6.86 | 6.90 | 4.1% |
+| 512 / 128 / 4 | 10.00 | 9.40 | 9.26 | 7.3% |
+| 32 / 8 / 4, fixed | 4.95 | 4.79 | 4.76 | 3.8% |
 
-The scoring stage has CUDA Graphs enabled on both sides. End-to-end differences
-are small; GB300 batch 4 did not improve in this run. These family API timings
-are not isolated GPU kernel measurements. Reproduce with
-`python -m families.hstu.tests.benchmark --root <prepared>/output --runtime-root <sdk> --output <temporary>/latency.json`.
+Wider BF16 coverage adds only 1.4% at default batch 4 and 0.7% on the short
+profile; batch 1 has no gain. Differences are small relative to run variation.
+Nsight confirmed 20 BF16 GEMM launches per default-profile request, up from 13.
+The runtime also moves JSON bounds lookup out of the per-float validation loop,
+preserving all finite/range checks. A matched before/after BF16 comparison at
+default batch 4 improved from 24.07 to 9.26 ms; most of this 61.5% reduction is
+CPU work, rather than the extra BF16 operations. FP32 benefits from the same fix.
+
+The measurement boundary is `NativeClient.score`, including host copies,
+validation and synchronization, excluding Triton transport. Reproduce with
+`python -m families.hstu.tests.benchmark --root <prepared>/output --runtime-root <sdk> --warmup 20 --iterations 100 --output <temporary>/latency.json`.
+The earlier conservative policy passed 26 cases on A100; its expanded policy
+and the updated runtime have not been requalified on A100 in this tuning round.
+
+### HSTU attention and fusion
+
+Attention is `SiLU(QKᵀ / sqrt(128)) / (T+C+1)`, multiplied by the mask and V.
+It is expressed as decomposed TensorRT operations; TensorRT selects fusion.
+Engine inspection and Nsight Systems execution traces on GB300 distinguish:
+
+| BF16 serving profile | Fused attention kernels per request |
+|---|---:|
+| 512 / 128, dynamic batch 1–4, executed B4 | 0 |
+| 512 / 128, fixed batch 4 | 2 |
+| 32 / 8, fixed batch 4 | 2 |
+
+The fixed-profile kernels are `_gemm_mha_v2` HSTU prefix-attention cores in
+candidate blocks 3–4; the self contribution remains separate. The previous
+conservative short profile also fuses, so wider BF16 coverage did not introduce
+that fusion. No compiler debug flags were used. The fixed 512/128 profile
+passed the same 40-seed checks and reduced BF16 P50 from 9.26 to 8.95 ms, but
+P95 increased from 9.70 to 10.04 ms. This compares complete static/dynamic builds,
+rather than isolating fusion alone. To use it, set `serving.batching` to `fixed`,
+build with `max_batch_size=4`, and send exactly four rows per request.
 
 ## KV budget, metrics and native Triton
 

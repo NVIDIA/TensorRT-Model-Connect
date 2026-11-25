@@ -108,14 +108,13 @@ TensorMap validate_inputs(const std::vector<FeatureTensor>& inputs, const nlohma
             }
         }
         if (input.dtype == DType::kFloat32) {
-            if (input.dtype != DType::kFloat32)
-                throw std::invalid_argument("invalid floating bounds contract");
+            const bool bounded = spec.contains("value_min");
+            const float minimum = bounded ? spec.at("value_min").get<float>() : 0;
+            const float maximum = bounded ? spec.at("value_max").get<float>() : 0;
             for (std::size_t i = 0; i < input.bytes.size() / sizeof(float); ++i) {
                 float value;
                 std::memcpy(&value, input.bytes.data() + i * sizeof(value), sizeof(value));
-                if (!std::isfinite(value) ||
-                    (spec.contains("value_min") && (value < spec.at("value_min").get<float>() ||
-                                                    value > spec.at("value_max").get<float>())))
+                if (!std::isfinite(value) || (bounded && (value < minimum || value > maximum)))
                     throw std::invalid_argument("feature value out of range: " + name);
             }
         }

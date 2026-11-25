@@ -37,10 +37,13 @@ class Config:
     serving: ServingProfile = field(default_factory=ServingProfile)
     cuda_graphs: bool = True
     fp32_block_indices: tuple[int, ...] = (0, 1, 2)
+    bf16_policy: str = "expanded"
 
     def __post_init__(self):
         if self.model_type != "dlrmv3_hstu" or type(self.cuda_graphs) is not bool:
             raise ValueError("expected the official DLRMv3 dense checkpoint")
+        if self.bf16_policy not in ("conservative", "expanded"):
+            raise ValueError("BF16 policy must be conservative or expanded")
 
         indices = tuple(self.fp32_block_indices)
         if len(set(indices)) != len(indices) or any(
@@ -62,7 +65,11 @@ class Config:
         s = self.serving
         if precision not in ("fp32", "bf16"):
             raise ValueError("precision must be fp32 or bf16")
-        if precision == "bf16" and len(self.fp32_block_indices) == 5:
+        if (
+            precision == "bf16"
+            and self.bf16_policy == "conservative"
+            and len(self.fp32_block_indices) == 5
+        ):
             raise ValueError("BF16 requires a reduced-precision HSTU block")
         minimum = batch if s.batching == "fixed" else s.min_batch_size
         optimum = batch if s.batching == "fixed" else s.opt_batch_size
@@ -108,6 +115,10 @@ class Config:
             fp32_block_indices=list(self.fp32_block_indices)
             if precision == "bf16"
             else list(range(5)),
+            bf16_policy=self.bf16_policy if precision == "bf16" else "fp32",
+            bf16_extra_ops=["candidate_av", "item_mlp", "time_projection", "prediction_hidden"]
+            if precision == "bf16" and self.bf16_policy == "expanded"
+            else [],
             min_batch_size=minimum,
             opt_batch_size=optimum,
             max_batch_size=batch,

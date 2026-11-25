@@ -77,6 +77,18 @@ int main() {
         malformed = valid;
         malformed[1] = feature("bounded", DType::kFloat32, std::numeric_limits<float>::quiet_NaN());
         reject([&] { validate_inputs(malformed, config); });
+        for (float value : {0.0F, 51.0F, std::numeric_limits<float>::infinity(),
+                            -std::numeric_limits<float>::infinity()}) {
+            malformed[1] = feature("bounded", DType::kFloat32, value);
+            reject([&] { validate_inputs(malformed, config); });
+        }
+        auto unbounded = config;
+        unbounded["inputs"][1].erase("value_min");
+        unbounded["inputs"][1].erase("value_max");
+        malformed[1] = feature("bounded", DType::kFloat32, -1.0e30F);
+        check(validate_inputs(malformed, unbounded).size() == 2, "finite unbounded input rejected");
+        malformed[1] = feature("bounded", DType::kFloat32, std::numeric_limits<float>::infinity());
+        reject([&] { validate_inputs(malformed, unbounded); });
         auto integer_config = config;
         integer_config["inputs"][0]["integer_min"] = 1;
         integer_config["inputs"][0]["integer_max"] = 2;

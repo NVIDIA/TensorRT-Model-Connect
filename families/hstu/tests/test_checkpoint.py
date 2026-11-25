@@ -51,3 +51,22 @@ def test_larger_profile_preserves_official_architecture():
 def test_converter_rejects_partial_models():
     with pytest.raises(ValueError, match="86"):
         validate_weights({})
+
+
+def test_unknown_bf16_policy_is_rejected():
+    with pytest.raises(ValueError, match="BF16 policy"):
+        Config(bf16_policy="unknown")
+
+
+def test_bf16_policy_keeps_reduced_operations_explicit():
+    config = Config(fp32_block_indices=tuple(range(5)), bf16_policy="conservative")
+    with pytest.raises(ValueError, match="reduced-precision"):
+        config.runtime(4, "bf16")
+    config = Config(fp32_block_indices=tuple(range(5)), bf16_policy="expanded")
+    assert config.runtime(4, "bf16")["bf16_extra_ops"] == [
+        "candidate_av",
+        "item_mlp",
+        "time_projection",
+        "prediction_hidden",
+    ]
+    assert config.runtime(4, "fp32")["bf16_extra_ops"] == []

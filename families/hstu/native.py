@@ -90,7 +90,13 @@ class Network:
     def dense(self, x, prefix):
         weight = self.const(self.w[prefix + "weight"])
         weight = self.reshape(weight, (1,) * (len(x.shape) - 2) + tuple(weight.shape))
-        return self.add(self.mm(x, weight, transpose=True), self.const(self.w[prefix + "bias"]))
+        low = self.expanded() and (
+            prefix.startswith("_item_embedding_mlp.")
+            or prefix in (POST + "_time_feature_combiner.", HEAD + "0.")
+        )
+        return self.add(
+            self.mm(x, weight, low=low, transpose=True), self.const(self.w[prefix + "bias"])
+        )
 
     def swish_ln(self, x, prefix):
         return self.mul(
@@ -134,6 +140,9 @@ class Network:
 
     def reduced(self, layer):
         return self.precision == "bf16" and layer not in self.c.fp32_block_indices
+
+    def expanded(self):
+        return self.precision == "bf16" and self.c.bf16_policy == "expanded"
 
     def project(self, x, layer):
         p = BLOCK + str(layer) + "."
@@ -324,7 +333,7 @@ class Network:
             self_logit = self.reduce(self.mul(q, self_key), "SUM", 3)
             self_weight = self.weights(self_logit, self.const([1], np.float32), layer)
             attended = self.add(
-                self.mm(weights, val, low=self.reduced(layer)),
+                self.mm(weights, val, low=self.reduced(layer) or self.expanded()),
                 self.mul(self.cast(self_weight, trt.float32), self_val),
             )
             x = self.finish(x, u, attended, layer)
