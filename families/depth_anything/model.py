@@ -31,7 +31,7 @@ from safetensors import safe_open
 
 from . import config as config_module
 from . import graph as graph_ops
-from .quantization import calibrate_depth_anything
+from .quantization import calibrate_depth_anything, check_nvfp4_model_config
 
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -71,7 +71,7 @@ def _require(tensors: dict, name: str) -> np.ndarray:
 
 
 def _project(network, x, tensors, name, work_np, quant=None):
-    """One backbone projection ``name`` (checkpoint name without ``.weight``), FP8 when ``quant`` says so."""
+    """One backbone projection (checkpoint name without ``.weight``), quantized if ``quant`` says."""
     matmul = None if quant is None else quant.matmul(name)
     weight = None if matmul is not None else _require(tensors, f"{name}.weight")
     return graph_ops.add_linear(
@@ -81,7 +81,7 @@ def _project(network, x, tensors, name, work_np, quant=None):
 def _backbone(network, image, tensors, cfg, work_np, quant=None):
     """DINOv2 ViT. Returns the hidden states at the configured tap layers.
 
-    ``quant`` (a ``DepthAnythingQuantContext``) routes its projections through FP8 Q/DQ.
+    ``quant`` (a ``DepthAnythingQuantContext``) routes its projections through FP8 or NVFP4 Q/DQ.
     """
     hidden = cfg["hidden_size"]
     heads = cfg["num_attention_heads"]
@@ -381,9 +381,10 @@ def build(request, writer) -> None:
         raise NotImplementedError("depth_anything does not support context parallelism")
     if request.video_num_frames is not None:
         raise NotImplementedError("depth_anything does not support video_num_frames")
-    if request.quantization not in {None, "none", "fp8"}:
+    if request.quantization not in {None, "none", "fp8", "nvfp4"}:
         raise NotImplementedError(
-            f"depth_anything supports quantization fp8 or none; got {request.quantization!r}")
+            "depth_anything supports quantization fp8, nvfp4 or none; "
+            f"got {request.quantization!r}")
     if request.fp32_layers:
         raise NotImplementedError("depth_anything does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -405,6 +406,9 @@ def build(request, writer) -> None:
             raise NotImplementedError(
                 f"depth_anything builds the checkpoint's native {label} only; its "
                 "position embeddings are not interpolated")
+    if request.quantization == "nvfp4":
+        # Before the checkpoint is read: nvfp4 is for the Base and Large model configs only.
+        check_nvfp4_model_config(cfg)
 
     tensors = _load_tensors(model_dir)
     # The checkpoint states the layer count outright; the config may not.
@@ -414,11 +418,11 @@ def build(request, writer) -> None:
     if max(cfg["out_layer_indices"]) >= counted:
         raise ValueError(
             f"Depth Anything out_indices name a layer past the checkpoint's {counted}")
-    # fp8: the backbone projections are quantized from the original checkpoint, one at a
-    # time, with the stored activation scales. FP8 weights are never stored.
+    # fp8 / nvfp4: the backbone projections are quantized from the original checkpoint, one
+    # at a time, with the stored activation scales. Quantized weights are never stored.
     quant_ctx = None
-    if request.quantization == "fp8":
-        quant_ctx = calibrate_depth_anything(tensors, cfg, "fp8")
+    if request.quantization in {"fp8", "nvfp4"}:
+        quant_ctx = calibrate_depth_anything(tensors, cfg, request.quantization)
     plan = build_engine(tensors, cfg, precision=precision, verbose=bool(request.verbose),
                         quant_ctx=quant_ctx)
 

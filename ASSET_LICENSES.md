@@ -27,6 +27,7 @@ The following paths contain byte-identical copies of an original photograph
 provided by the project maintainer who took the photograph and authorized its
 inclusion and redistribution in this repository under the Apache License 2.0:
 
+- `families/chinese_clip/tests/data/test_img.jpeg`
 - `families/idefics3/tests/data/test_img.jpeg`
 - `families/detr/tests/data/test_img.jpeg`
 - `families/vjepa2/tests/data/test_img.jpeg`
@@ -64,9 +65,17 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 `families/timm_resnet/tests/data/test_img_car.jpeg`, a crop of the same
 photograph, and is distributed under the same terms.
 
+- `families/siglip2/tests/data/test_img.png` is a lossless PNG encoding of the same
+  photograph, pixel-identical to `families/detr/tests/data/test_img.jpeg` decoded by
+  Pillow, and is distributed under the same terms.
+
 `families/swinv2/tests/data/test_img.png` is the same photograph decoded to RGB
 and saved losslessly as PNG (its pixels equal Pillow's decode of the
 `test_img.jpeg` copies listed above) and is distributed under the same terms.
+
+Byte-identical copies of that PNG are stored at:
+
+- `families/minicpmv4_7/tests/data/test_img.png`
 
 `families/timm_resnet/tests/data/test_img_car.jpeg` is a crop of the same
 photograph (columns 260 to 639, rows 60 to 381, saved again as JPEG) and is
@@ -205,6 +214,7 @@ International license:
 - `families/hubert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/mimi/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/qwen3_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/vibevoice_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/wav2vec2_bert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/wavlm/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav`

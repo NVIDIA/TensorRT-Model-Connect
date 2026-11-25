@@ -1,0 +1,20 @@
+{
+  "name": "chinese-clip-vit-base-patch16",
+  "hf_id": "OFA-Sys/chinese-clip-vit-base-patch16",
+  "hf_revision": "36e679e65c2a2fead755ae21162091293ad37834",
+  "bundle": "chinese-clip-vit-base-patch16.bundle",
+  "family": "chinese_clip",
+  "task": "text_image_to_relevance",
+  "precision": "fp32",
+  "max_sequence_length": 64,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "chinese-clip-vit-base-patch16",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg",
+      "query": "一辆汽车",
+      "negative_query": "一只猫"
+    }
+  ]
+}

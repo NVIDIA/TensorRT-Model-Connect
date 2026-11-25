@@ -62,6 +62,28 @@ def load_environment(path: Path, root: Path = CONFIG_ROOT) -> Environment:
 
 
 PLATFORM_KEYS = {"models", "deadlines"}
+EXCLUSIONS = "exclusions.yaml"
+
+
+def exclusion_rules(rules: Any, where: str) -> list[dict[str, str]]:
+    """The format of every exclusion list (config/exclusions.yaml, a platform's and a machine's ``models.exclude``):
+    ``[{profile: <name or glob pattern>, reason: <why>}]``."""
+    if not isinstance(rules, list) or not all(
+            isinstance(rule, Mapping) and set(rule) == {"profile", "reason"} and isinstance(rule["profile"], str)
+            and rule["profile"] and isinstance(rule["reason"], str) and rule["reason"].strip() for rule in rules):
+        raise ConfigError(f"{where} must be a list of {{profile, reason}}")
+    return [{"profile": rule["profile"], "reason": rule["reason"].strip()} for rule in rules]
+
+
+def exclusions(root: Path = CONFIG_ROOT) -> list[dict[str, str]]:
+    """The profiles no machine runs (config/exclusions.yaml): ones the qualification cannot qualify as cataloged."""
+    path = root / EXCLUSIONS
+    if not path.is_file():
+        return []
+    value = _load(path)
+    if set(value) != {"exclude"}:
+        raise ConfigError(f"{path} holds only exclude")
+    return exclusion_rules(value["exclude"] or [], f"{EXCLUSIONS}: exclude")
 
 
 def platforms(root: Path = CONFIG_ROOT) -> list[str]:
@@ -71,7 +93,8 @@ def platforms(root: Path = CONFIG_ROOT) -> list[str]:
 
 def with_platform(values: Mapping[str, Any], root: Path = CONFIG_ROOT) -> dict[str, Any]:
     """The environment with its platform's defaults: the models the platform cannot run follow the machine's own
-    exclusions (their reasons name the platform), and the machine's deadlines override the platform's."""
+    exclusions (their reasons name the platform, their ``source`` its file), and the machine's deadlines override
+    the platform's."""
     name = values["platform"]
     known = platforms(root)
     if not isinstance(name, str) or name not in known:
@@ -84,11 +107,7 @@ def with_platform(values: Mapping[str, Any], root: Path = CONFIG_ROOT) -> dict[s
     defaults = platform.get("models") or {}
     if not isinstance(defaults, Mapping) or set(defaults) - {"exclude"}:
         raise ConfigError(f"{where}: models may only hold exclude")
-    rules = defaults.get("exclude") or []
-    if not isinstance(rules, list) or not all(
-            isinstance(rule, Mapping) and set(rule) == {"profile", "reason"} and isinstance(rule["profile"], str)
-            and rule["profile"] and isinstance(rule["reason"], str) and rule["reason"].strip() for rule in rules):
-        raise ConfigError(f"{where}: models.exclude must be a list of {{profile, reason}}")
+    rules = exclusion_rules(defaults.get("exclude") or [], f"{where}: models.exclude")
     deadlines = platform.get("deadlines") or {}
     if not isinstance(deadlines, Mapping) or not all(
             isinstance(seconds, int) and not isinstance(seconds, bool) and seconds > 0 for seconds in deadlines.values()):
@@ -98,7 +117,8 @@ def with_platform(values: Mapping[str, Any], root: Path = CONFIG_ROOT) -> dict[s
     own_deadlines = values.get("deadlines") or {}
     if not isinstance(own, list) or not isinstance(own_deadlines, Mapping):
         raise ConfigError("environment: models.exclude must be a list and deadlines a mapping")
-    exclude = [*own, *({"profile": rule["profile"], "reason": f"{where}: {rule['reason'].strip()}"} for rule in rules)]
+    exclude = [*own, *({"profile": rule["profile"], "reason": f"{where}: {rule['reason'].strip()}",
+                        "source": f"config/platforms/{name}.yaml"} for rule in rules)]
     return {**values, "models": {**machine, "exclude": exclude}, "deadlines": {**deadlines, **own_deadlines}}
 
 

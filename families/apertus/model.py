@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from .config import ApertusConfig, load_config
 from .graph import PREFILL_CHUNK_TOKENS, build_engine
+from .quantization import FORMATS, build_quant_context
 from .weights import load_weights
 
 if TYPE_CHECKING:
@@ -112,10 +113,13 @@ def build(request, writer: "BundleWriter") -> None:
         raise NotImplementedError(f"{FAMILY} supports only max_batch_size=1")
     if request.tensor_parallel_size != 1 or request.context_parallel_size != 1:
         raise NotImplementedError(f"{FAMILY} runs on one GPU without tensor or context parallelism")
-    if request.quantization not in (None, "none"):
+    quantization = None if request.quantization in (None, "none") else request.quantization
+    if quantization is not None and quantization not in FORMATS:
         raise NotImplementedError(
-            f"{FAMILY} does not support quantization={request.quantization!r}"
+            f"{FAMILY} quantization must be one of {('none', *FORMATS)}, got {quantization!r}"
         )
+    if quantization is not None and precision != "bf16":
+        raise ValueError(f"{FAMILY} quantization={quantization} requires precision bf16")
     if request.fp32_layers:
         raise NotImplementedError(f"{FAMILY} does not support per-layer precision overrides")
     if request.dynamic_kv_cache:
@@ -130,15 +134,17 @@ def build(request, writer: "BundleWriter") -> None:
         )
     tokenizer_bytes = (model_dir / "tokenizer.json").read_bytes()
     runtime = _runtime_config(config, precision, max_cache_length, json.loads(tokenizer_bytes))
-    weights = load_weights(model_dir, config, precision)
+    weights = load_weights(model_dir, config, precision, quantized=quantization is not None)
+    quant = None if quantization is None else build_quant_context(config, weights, quantization)
     plan = build_engine(
         config,
         weights,
         precision=precision,
         max_cache_length=max_cache_length,
         verbose=bool(request.verbose),
+        quant=quant,
     )
-    del weights
+    del weights, quant
     writer.set_header(family="apertus", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
     writer.add_json("runtime.json", runtime)

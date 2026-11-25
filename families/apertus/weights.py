@@ -85,6 +85,9 @@ class _Reader:
         self._storage = storage
         self._used: set[str] = set()
 
+    def names(self) -> list[str]:
+        return list(self._readers)
+
     def tensor(
         self, name: str, shape: tuple[int, ...], dtype: np.dtype | None = None
     ) -> np.ndarray:
@@ -113,9 +116,16 @@ class _Reader:
             )
 
 
-def load_weights(model_dir: Path, config: ApertusConfig, precision: str) -> ApertusWeights:
+def load_weights(
+    model_dir: Path, config: ApertusConfig, precision: str, *, quantized: bool = False
+) -> ApertusWeights:
+    """Read every tensor of the graph; ``quantized`` builds refuse a quantized checkpoint."""
     storage = {"bf16": np.dtype(ml_dtypes.bfloat16), "fp32": np.dtype(np.float32)}[precision]
     reader = _Reader(model_dir, storage)
+    if quantized:
+        from .quantization import reject_quantized_checkpoint
+
+        reject_quantized_checkpoint(model_dir, reader.names())
     hidden, kv, attention = config.hidden_size, config.kv_size, config.attention_size
     mlp, head_dim = config.intermediate_size, config.head_dim
     layers = []

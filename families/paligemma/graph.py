@@ -177,18 +177,26 @@ def build_vision(config: ModelConfig, weights, *, precision: str, verbose: bool 
 
 
 def build_decoder(config: ModelConfig, weights, max_sequence_length: int, *, precision: str,
-                  verbose: bool = False) -> bytes:
+                  verbose: bool = False, quantization=None) -> bytes:
     """Gemma prefill/decode over a fixed cache; return the new K/V rows and last-row logits.
 
     ``attention_mask`` is [1, rows, cache + rows]; cache slots that hold no
     token yet are masked by the caller, so an empty-cache prefill needs no
-    zero-sized tensors.
+    zero-sized tensors. ``quantization`` (a ``quantization.DecoderQuantization``)
+    routes the projections it lists through FP8 or NVFP4 Q/DQ matmuls.
     """
     text = config.text
     if not 1 <= max_sequence_length <= text.max_position_embeddings:
         raise ValueError("PaliGemma sequence capacity exceeds the Gemma context")
     g = _Graph(precision, verbose)
+    if quantization is not None:
+        quantization.configure(g.config)
     n, width, d = g.network, text.hidden_size, text.head_dim
+
+    def project(value, prefix):
+        quantized = None if quantization is None else quantization.matmul(g, value, weights, prefix)
+        return g.linear(value, weights, prefix) if quantized is None else quantized
+
     capacity = max_sequence_length
     x = n.add_input("inputs_embeds", g.dtype, (-1, width))
     cos = n.add_input("rope_cos", trt.float32, (-1, d))
@@ -216,7 +224,7 @@ def build_decoder(config: ModelConfig, weights, max_sequence_length: int, *, pre
     for layer in range(text.num_hidden_layers):
         prefix = f"text.layers.{layer}"
         norm = g.rms_norm(x, weights, prefix + ".input_layernorm", text.rms_norm_eps)
-        q, k, v = [g.reshape(g.linear(norm, weights, f"{prefix}.self_attn.{kind}_proj"),
+        q, k, v = [g.reshape(project(norm, f"{prefix}.self_attn.{kind}_proj"),
                              (-1, heads, d), (1, 0, 2))
                    for kind, heads in (("q", text.num_attention_heads),
                                        ("k", text.num_key_value_heads),
@@ -233,11 +241,11 @@ def build_decoder(config: ModelConfig, weights, max_sequence_length: int, *, pre
             cached.append(n.add_gather(joined.get_output(0), repeat, 0).get_output(0))
         attended = g.merge_heads(g.attention(q, cached[0], cached[1], d, mask),
                                  text.num_attention_heads * d)
-        x = g.add(x, g.linear(attended, weights, prefix + ".self_attn.o_proj"))
+        x = g.add(x, project(attended, prefix + ".self_attn.o_proj"))
         norm = g.rms_norm(x, weights, prefix + ".post_attention_layernorm", text.rms_norm_eps)
-        gate = g.gelu_tanh(g.linear(norm, weights, prefix + ".mlp.gate_proj"))
-        up = g.linear(norm, weights, prefix + ".mlp.up_proj")
-        x = g.add(x, g.linear(g.mul(gate, up), weights, prefix + ".mlp.down_proj"))
+        gate = g.gelu_tanh(project(norm, prefix + ".mlp.gate_proj"))
+        up = project(norm, prefix + ".mlp.up_proj")
+        x = g.add(x, project(g.mul(gate, up), prefix + ".mlp.down_proj"))
     x = g.rms_norm(x, weights, "text.norm", text.rms_norm_eps)
     rows = n.add_shape(x).get_output(0)
     first = n.add_slice(rows, (0,), (1,), (1,)).get_output(0)

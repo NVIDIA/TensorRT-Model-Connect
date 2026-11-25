@@ -1,0 +1,23 @@
+{
+  "name": "depth-anything-v2-base-nvfp4",
+  "hf_id": "depth-anything/Depth-Anything-V2-Base-hf",
+  "hf_revision": "b1958afc87fb45a9e3746cb387596094de553ed8",
+  "bundle": "depth-anything-v2-base-nvfp4.bundle",
+  "family": "depth_anything",
+  "task": "monocular_depth",
+  "precision": "fp16",
+  "quantization": "nvfp4",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "depth-anything-v2-base-nvfp4",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg",
+      "reference_precision": "fp32",
+      "min_depth_correlation": 0.9995,
+      "max_depth_relative_error": 0.01
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

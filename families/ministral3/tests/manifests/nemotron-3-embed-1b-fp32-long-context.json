@@ -1,0 +1,30 @@
+{
+  "name": "nemotron-3-embed-1b-fp32-long-context",
+  "hf_id": "nvidia/Nemotron-3-Embed-1B-BF16",
+  "hf_revision": "c0c9fea93ea424587517f2c59e20db9f1d6bf615",
+  "family": "ministral3",
+  "task": "text_to_embedding",
+  "bundle": "nemotron-3-embed-1b-fp32-long-context.bundle",
+  "precision": "fp32",
+  "max_sequence_length": 20480,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "nemotron-3-embed-1b-fp32-long-context",
+      "queries": [
+        "How should fresh basil be stored so that it does not wilt?"
+      ],
+      "documents": [
+        "During a storm the keeper trimmed the wick, wound the clockwork that turned the lens, sounded the fog signal and logged every passing ship until the weather cleared.",
+        "def reverse_words(sentence):\n    words = sentence.split()\n    return \" \".join(reversed(words))\n\n\nprint(reverse_words(\"the quick brown fox\"))",
+        "Neptune has the fastest winds measured on any planet: gusts in its upper atmosphere exceed two thousand kilometres per hour, far stronger than any storm on Earth."
+      ],
+      "repeated_documents": [
+        {
+          "text": "Basil is a warm-weather herb that dislikes the cold of a refrigerator, where its leaves darken within a day. Treat the bunch like cut flowers instead: trim a centimetre from each stem, remove the lowest leaves, and stand the stems in a jar with a few centimetres of water. Keep the jar on the kitchen counter, out of direct sunlight, and change the water every second day. A loose plastic bag over the leaves slows wilting without trapping too much moisture. Picked this way, basil stays fragrant for about a week.",
+          "count": 160
+        }
+      ]
+    }
+  ]
+}

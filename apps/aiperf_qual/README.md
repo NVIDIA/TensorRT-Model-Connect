@@ -18,15 +18,16 @@ Accuracy and performance qualification of every ready catalog model against its 
 |---|---|---|
 | Execution | One workload recorder, with native and TRTMC servers running separately and speaking the same `/v1/tasks/{operation}` protocol: TRTMC (`trtmc-perf-serve --backend trtmc`, later `trtmc-server`) and the native reference (`--backend reference`: the generic adapter of the operation, or a family's own pipeline, `families/<family>/reference/adapter.py`). AIPerf sends every request. | No (adapters: per family) |
 | Task | `config/tasks.yaml`: per catalog Task, its benchmarks (`absolute`) and checks (`supplementary`), and Perf settings. | No |
-| Model | Derived from the catalog entry and its Task. `families/<family>/tests/aiperf/<profile>.yaml` owns exceptions and benchmark definitions; legacy `config/models/<profile>.yaml` remains supported. | Per family |
+| Model | Derived from the catalog entry and its Task; `config/models/<profile>.yaml` holds the profile's own settings (reference, benchmarks, requests, candidate build). The families hold no AIPerf settings. | Per profile |
 
 `trtmc-aiperf-qual plan` prints the derived configuration of every model; `trtmc-aiperf-qual matrix`
 writes the execution matrix (native path, environment, workloads, checks, and whether each profile is
 executable).
 
-Family definitions are merged after Task defaults and legacy overrides. They may declare local
-`benchmarks` and select them through `absolute`, so model-specific requests, native adapters and
-conversion criteria stay with their family. RT-DETR v2 keeps the bundle's fixed score threshold of
+A profile's own settings (`config/models/<profile>.yaml`) are merged after the Task defaults. They may declare
+local `benchmarks` and select them through `absolute`, so model-specific requests and conversion criteria are
+stated per profile; a family's own native pipeline and inputs are named there and stay in the family
+(`families/<family>/reference/`). RT-DETR v2 keeps the bundle's fixed score threshold of
 0.3 on both sides. BiRefNet Lite compares binary foreground masks on 50 pinned COCO images against
 its official native model, using the unchanged family E2E IoU threshold of 0.90 for every image.
 This is conversion parity, not ADE20K semantic-segmentation accuracy. Acc and task-call P50 use the
@@ -126,10 +127,10 @@ public Task's 448x448 image size, with image decode before timing and preparatio
   comparison: a Task without an Acc check), Red (Acc worse than
   native beyond its margin), Yellow (an Acc difference not shown either way), Green (quality passes with available
   benchmark timings). Historical fixed-workload reports retain their original performance lights.
-  Profiles excluded by the machine model list remain in `excluded.json` for audit and do not contribute
-  report rows, totals, White counts, or pass-rate denominators. A measured result from another host still counts.
-  Catalog profiles without Task test defaults remain in `plan.json` for coverage audit, outside those
-  statistics too. Invalid configurations of supported tests still appear as White errors.
+  Profiles a run excludes (see "Model selection", including those whose Task has no defaults) remain in
+  `excluded.json` with their reason and source for audit and do not contribute report rows, totals, White counts,
+  or pass-rate denominators. A measured result from another host still counts. Invalid configurations of
+  supported tests still appear as White errors.
 
 ### Performance
 
@@ -321,10 +322,30 @@ outputs side by side, Perf lights with labelled p50 values and reasons, L2, evid
 reproduction command), fetching logs next to it. `--baseline ROOT` notes TRTMC
 p50 regressions (> 5%) against a previous run.
 
-### Per-machine model list
+### Model selection
 
-GPU memory decides which models a machine can run. `models` in its environment file selects them
-for `run-all` and `plan` (an explicit `--profile` overrides it):
+Two questions are answered in different places. How a profile runs is derived: its catalog entry, its Task's
+defaults (`config/tasks.yaml`), and its own configuration (`config/models/<profile>.yaml`). Whether it runs is
+decided by the exclusions below, in this order; the first that applies is the reason, and its `source` names the
+file to change:
+
+| Source | Decides | Applies to |
+|---|---|---|
+| `config/tasks.yaml` | the profile's Task has no defaults (no entry, no exclusion to write) | every machine |
+| `config/exclusions.yaml` | the qualification cannot qualify the profile as cataloged | every machine |
+| `environment` | not in the machine's `models.include`, or in its `models.exclude` | one machine |
+| `config/platforms/<platform>.yaml` | what the hardware cannot run | one kind of hardware |
+| `environment` | a checkpoint above the machine's `models.max_checkpoint_gib` | one machine |
+
+The scope is every ready catalog profile (L0 smoke and regression variants aside). `run-all`, `plan`, `assign`
+and `matrix` take the machine's list; `--profile` (names or glob patterns, in the order given) replaces its
+`include` and is held to the same exclusions, `run --profile` too. `--ignore-exclusions` runs the named profiles
+anyway, for a diagnostic run. `plan` prints each excluded profile with its reason and source, then the derived
+configuration of each selected one. Excluded profiles are written to `<out-root>/excluded.json` (a fragment's
+exclusions count as its answer for those profiles in `merge-check --manifest`) and stay out of `summary` unless
+another result root holds a result for them.
+
+The machine's list (`models` in its environment file):
 
 ```yaml
 models:
@@ -334,8 +355,8 @@ models:
   max_checkpoint_gib: 30          # optional: also exclude larger checkpoints (unknown sizes are kept)
 ```
 
-Excluded profiles are written to `<out-root>/excluded.json` and appear in `summary` as `excluded`
-with their reason, unless another result root holds a result for them.
+`config/exclusions.yaml`, a platform's `models.exclude` and the machine's use the same `{profile, reason}`
+entries. A change that lets a profile run removes its entry in the same pull request.
 
 ### Platform defaults
 
@@ -447,13 +468,12 @@ A suite with media and neither `media_root` nor `hf_datasets_cache` configured i
   `benchmarks`, scored by `gold_metrics.py` or an AIPerf grader) and the Perf output check
   (`output_grader`, a comparator in `plugins/trtmc_aiperf_plugins/accuracy.py`).
 - Task renamed by a Task SDK migration (same operation and output): an alias of its old entry in
-  `config/tasks.yaml` (`text_to_pooled_features: *encode`). A ready profile whose Task has no entry is a
-  configuration error that only `plan.json` lists: reports leave it out.
+  `config/tasks.yaml` (`text_to_pooled_features: *encode`). A ready profile whose Task has no entry is excluded
+  (source `config/tasks.yaml`).
 - Model needing a different input or reference option: `config/models/<profile>.yaml`.
-- Model that cannot be qualified as cataloged (for example a catalog testcase without a prompt):
-  `exclude: <reason>` in the profile's definition (`families/<family>/tests/aiperf/<profile>.yaml`, or its legacy
-  `config/models/<profile>.yaml`). Every machine's model list then excludes it, and the run's `excluded.json`
-  keeps the reason; `run-all --profile` still runs it.
+- Model that cannot be qualified as cataloged (for example a catalog testcase without a prompt): an entry in
+  `config/exclusions.yaml`. Every run then leaves it out, and the run's `excluded.json` keeps the reason;
+  `--ignore-exclusions` still runs it.
 - Model whose native pipeline the generic adapters cannot run: `families/<family>/reference/adapter.py`
   (an `Adapter(spec, host)` with `invoke(request, artifact_base)`; it imports nothing from the applications and
   reaches the serving mechanics through `host`), named by `reference.adapter`.
@@ -589,7 +609,7 @@ Use `--tokenizer /path/to/prepared-tokenizer` when its files live separately;
 `--tokenizer-revision` pins an explicitly selected Hugging Face tokenizer.
 Hub overrides require a full commit SHA. Local tokenizer directories are
 fingerprinted before and after profiling, including their file contents.
-Lance and Phi4 provide `families/<family>/tests/aiperf/prepare_tokenizer.py`
+Lance and Phi4 provide `families/<family>/reference/prepare_tokenizer.py`
 to export their existing tokenizers into a standalone client directory.
 Source identity is captured after acquiring the GPU lock, including content
 fingerprints for tracked changes and untracked files. Generated run output is

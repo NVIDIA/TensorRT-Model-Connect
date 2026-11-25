@@ -115,6 +115,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"family {family!r} does not support task {task!r}; "
             f"choose one of: {', '.join(support.tasks)}"
         )
+    from .device_memory import use_full_size_memory_pool
+
+    use_full_size_memory_pool()
     build(
         BuildRequest(
             model_dir=model_dir,

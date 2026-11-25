@@ -19,6 +19,14 @@ namespace trtmc {
 
 namespace {
 
+// The next decode step would store one more K/V row. A full cache ends the
+// generation, as max_new_tokens does, instead of dropping the prompt's rows.
+// A state without a length limit (max_length() < 0) never fills.
+bool kv_cache_full(const InternvlInferenceState& state) {
+    const int32_t max_length = state.max_length();
+    return max_length >= 0 && state.position() >= max_length;
+}
+
 void validate_pipeline_components(const ITrtModule* text_decoder,
                                   const InternvlInferenceState* state, const ITrtModule* prefill) {
     if (text_decoder == nullptr || !text_decoder->ok())
@@ -487,6 +495,8 @@ std::vector<int32_t> InternVlPipeline::generate_from_ids(const std::vector<int32
         output.push_back(result.token_id);
         if (result.is_eos)
             break;
+        if (kv_cache_full(*state_))
+            break;
         run_text_step(result.token_id, logits);
     }
 
@@ -590,6 +600,8 @@ void InternVlPipeline::run_vl_decode_loop(InternVlISampler* sampler,
         InternVlSampleResult result = sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
         if (result.is_eos)
+            break;
+        if (kv_cache_full(*state_))
             break;
         run_text_step(result.token_id, logits);
     }
