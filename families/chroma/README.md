@@ -15,7 +15,7 @@
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `negative_prompt` | `""` | classifier-free guidance prompt, used when `guidance_scale > 1` |
-| `num_inference_steps` | 35 | flow-matching Euler steps (1 to 1000) |
+| `num_steps` | 35 | flow-matching Euler steps (1 to 1000) |
 | `guidance_scale` | 5.0 | classifier-free guidance scale |
 | `seed` | 0 | noise seed; not combined with initial latents |
 | `height`, `width` | bundle size | fixed by the bundle |

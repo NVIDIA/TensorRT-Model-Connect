@@ -108,7 +108,7 @@ ChromaPipeline::ChromaPipeline(const ModuleLoader& loader, T5Tokenizer tokenizer
     fields_ = {
         {"negative_prompt", ConfigKind::String, internal::ConfigValue{kEmpty},
          "Classifier-free guidance negative prompt (used when guidance_scale > 1)"},
-        {"num_inference_steps", ConfigKind::I64, internal::ConfigValue{config_.default_steps},
+        {"num_steps", ConfigKind::I64, internal::ConfigValue{config_.default_steps},
          "Flow-matching Euler steps, 1 to 1000"},
         {"guidance_scale", ConfigKind::F64, internal::ConfigValue{config_.default_guidance},
          "Classifier-free guidance scale; values <= 1 run the prompt only"},
@@ -131,9 +131,9 @@ ChromaPipeline::Settings ChromaPipeline::resolve(internal::ConfigView config, bo
     Settings settings;
     settings.negative_prompt =
         std::string(*internal::config_get<std::string_view>(config, fields, "negative_prompt"));
-    const auto steps = *internal::config_get<std::int64_t>(config, fields, "num_inference_steps");
+    const auto steps = *internal::config_get<std::int64_t>(config, fields, "num_steps");
     if (steps < 1 || steps > kMaxSteps)
-        throw ConfigError("Chroma num_inference_steps must be in [1, 1000]");
+        throw ConfigError("Chroma num_steps must be in [1, 1000]");
     settings.steps = static_cast<std::int32_t>(steps);
     const auto guidance = *internal::config_get<double>(config, fields, "guidance_scale");
     if (!std::isfinite(guidance) || guidance < 0.0 || guidance > 100.0)
