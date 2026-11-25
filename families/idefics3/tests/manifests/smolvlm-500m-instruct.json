@@ -11,6 +11,8 @@
   "testcases": [
     {
       "name": "smolvlm-500m-instruct",
+      "test_image": "data/test_img.jpeg",
+      "prompt": "What type of vehicle is shown?",
       "premerge": true,
       "max_new_tokens": 32,
       "questions": [

@@ -12,6 +12,8 @@
   "testcases": [
     {
       "name": "gemma-3n-e4b-bf16",
+      "test_image": "data/test_img.jpeg",
+      "prompt": "Describe this image in one sentence.",
       "premerge": true,
       "reference_precision": "fp32",
       "reference_backend": "hf_transformers",
