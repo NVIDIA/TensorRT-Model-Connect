@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-FileCopyrightText: Copyright (c) Meta Platforms, Inc. and affiliates.
 # SPDX-License-Identifier: Apache-2.0
+
+# Copyright (c) Meta Platforms, Inc. and affiliates.
 
 """Full-sequence FP32 NumPy oracle for the official DLRMv3 dense model.
 

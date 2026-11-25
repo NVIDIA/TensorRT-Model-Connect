@@ -15,6 +15,12 @@ Scores represent candidate relevance probabilities; this model was trained on
 the benchmark's synthetic streaming data. Numerical parity tests below do not
 establish production recommendation quality or full MLPerf accuracy.
 
+The tested serving interface is the supplied Triton prototype's structured-ranking
+C++ API and this family's native transport. **Current main's C Task SDK is not
+wired for this family**: it requires an `internal::IModel` implementation and a
+shared Task contract for these mixed named tensors. That API migration remains
+a prerequisite for general C Task SDK support; this contribution remains a draft.
+
 ## Build and change the serving profile
 
 Keep downloaded weights, bundles, build products and test results outside the
