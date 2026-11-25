@@ -8,12 +8,28 @@
 #include "runtime/tensorrt/trt_module_impl.h"
 
 #include <NvInfer.h>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cuda_runtime_api.h>
+#include <dlfcn.h>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+
+namespace {
+std::atomic<bool> reject_next_download{false};
+}
+
+// Inject a transfer failure at the real backend's CUDA boundary.
+extern "C" cudaError_t CUDARTAPI cudaMemcpy(void* destination, const void* source,
+                                            std::size_t bytes, cudaMemcpyKind kind) {
+    if (kind == cudaMemcpyDeviceToHost && reject_next_download.exchange(false))
+        return cudaErrorInvalidValue;
+    using Copy = cudaError_t(CUDARTAPI*)(void*, const void*, std::size_t, cudaMemcpyKind);
+    static const auto copy = reinterpret_cast<Copy>(dlsym(RTLD_NEXT, "cudaMemcpy"));
+    return copy ? copy(destination, source, bytes, kind) : cudaErrorUnknown;
+}
 
 namespace trtmc {
 
@@ -316,6 +332,33 @@ void test_short_external_static_upload_preserves_its_tail(nvinfer1::ICudaEngine&
     cudaFree(external);
 }
 
+void test_failed_download_never_returns_previous_output(nvinfer1::ICudaEngine& engine,
+                                                        cudaStream_t stream) {
+    for (bool graph : {false, true}) {
+        trtmc::TrtModuleImpl module(&engine, engine.createExecutionContext(), stream);
+        if (graph)
+            module.enable_cuda_graph();
+        float first[] = {1, 2, 3, 4}, next[] = {5, 6, 7, 8};
+        (void)module.forward({{"input", trtmc::Tensor{first, {4}, trtmc::DType::kFloat32}}});
+        reject_next_download = true;
+        bool rejected = false;
+        try {
+            (void)module.forward({{"input", trtmc::Tensor{next, {4}, trtmc::DType::kFloat32}}});
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("output transfer failed for output") !=
+                       std::string::npos;
+        }
+        check(!reject_next_download, "download failure injection reached CUDA copy");
+        reject_next_download = false;
+        check(rejected, "failed download throws instead of returning stale output");
+        const auto result =
+            module.forward({{"input", trtmc::Tensor{next, {4}, trtmc::DType::kFloat32}}});
+        const auto* values = static_cast<const float*>(result.at("output").data);
+        check(result.at("output").numel() == 4 && values[0] == 5 && values[3] == 8,
+              "successful request after failed download returns current output");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -344,6 +387,7 @@ int main() {
     test_rejected_shape_fails_without_poisoning_the_next_request(*engine, stream);
     test_short_static_upload_does_not_keep_the_previous_input(*static_engine, stream);
     test_short_external_static_upload_preserves_its_tail(*static_engine, stream);
+    test_failed_download_never_returns_previous_output(*static_engine, stream);
     cudaStreamDestroy(stream);
     return failures;
 }

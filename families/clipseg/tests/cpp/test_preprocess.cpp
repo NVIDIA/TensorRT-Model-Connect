@@ -1,0 +1,218 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include "families/clipseg/runtime/image_preprocess_seam.h"
+#include "families/clipseg/runtime/tokenizer.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <iostream>
+#include <limits>
+#include <new>
+#include <stdexcept>
+#include <vector>
+
+namespace {
+std::size_t allocation_limit = std::numeric_limits<std::size_t>::max();
+struct AllocationBound {
+    explicit AllocationBound(std::size_t limit) { allocation_limit = limit; }
+    ~AllocationBound() { allocation_limit = std::numeric_limits<std::size_t>::max(); }
+};
+} // namespace
+
+void* operator new(std::size_t bytes) {
+    if (bytes > allocation_limit)
+        throw std::bad_alloc();
+    if (void* pointer = std::malloc(bytes ? bytes : 1))
+        return pointer;
+    throw std::bad_alloc();
+}
+void operator delete(void* pointer) noexcept {
+    std::free(pointer);
+}
+void operator delete(void* pointer, std::size_t) noexcept {
+    std::free(pointer);
+}
+
+namespace {
+
+int g_failures = 0;
+
+void check(bool condition, const char* name) {
+    if (!condition) {
+        std::cerr << "FAIL: " << name << '\n';
+        ++g_failures;
+    }
+}
+
+void check_close(float actual, float expected, float tolerance, const char* name) {
+    if (!std::isfinite(actual) || !std::isfinite(expected) ||
+        !(std::fabs(actual - expected) <= tolerance)) {
+        std::cerr << "FAIL: " << name << " actual=" << actual << " expected=" << expected << '\n';
+        ++g_failures;
+    }
+}
+
+trtmc::ClipsegPreprocessConfig base_config() {
+    trtmc::ClipsegPreprocessConfig config;
+    config.input_image_h = 224;
+    config.input_image_w = 224;
+    return config;
+}
+
+void test_resize_preserves_the_full_rectangular_source() {
+    const auto config = base_config();
+    for (const auto shape : {trtmc::compute_clipseg_resize_shape(300, 400, config),
+                             trtmc::compute_clipseg_resize_shape(400, 300, config),
+                             trtmc::compute_clipseg_resize_shape(224, 224, config)}) {
+        check(shape.height == 224 && shape.width == 224, "direct resize uses both target axes");
+    }
+}
+
+void test_resize_matches_pillow_bilinear_pixels() {
+    auto config = base_config();
+    config.input_image_h = config.input_image_w = 3;
+    config.image_mean = {0, 0, 0};
+    config.image_std = {1, 1, 1};
+    std::vector<float> source(24);
+    for (std::size_t index = 0; index < source.size(); ++index)
+        source[index] = static_cast<float>(index * 10) / 255.0F;
+    // Pillow RGB resize of the 2x4 source to 3x3, BILINEAR; planar channel order.
+    const std::vector<int> expected = {9,  45, 81,  69, 105, 141, 129, 165, 201,
+                                       19, 55, 91,  79, 115, 151, 139, 175, 211,
+                                       29, 65, 101, 89, 125, 161, 149, 185, 221};
+    const auto result = trtmc::preprocess_clipseg_image(source.data(), 2, 4, config);
+    check(result.size() == expected.size(), "Pillow golden output shape");
+    for (std::size_t index = 0; index < expected.size(); ++index)
+        check_close(result[index], static_cast<float>(expected[index]) / 255.0F, 1e-7F,
+                    "direct bilinear resize matches Pillow");
+}
+
+void test_normalisation_is_per_channel() {
+    // A flat image cannot tell interleaved from planar, so each channel gets
+    // its own value and its own statistics.
+    auto config = base_config();
+    config.input_image_h = 224;
+    config.input_image_w = 224;
+    config.image_mean = {0.1F, 0.2F, 0.3F};
+    config.image_std = {0.5F, 0.25F, 0.125F};
+    std::vector<float> pixels(static_cast<std::size_t>(224) * 224 * 3);
+    for (std::size_t pixel = 0; pixel < 224U * 224U; ++pixel) {
+        pixels[pixel * 3] = 0.6F;
+        pixels[pixel * 3 + 1] = 0.4F;
+        pixels[pixel * 3 + 2] = 0.8F;
+    }
+    const auto values = trtmc::preprocess_clipseg_image(pixels.data(), 224, 224, config);
+    const std::size_t plane = 224U * 224U;
+    check_close(values[0], (0.6F - 0.1F) / 0.5F, 2e-2F, "red channel normalised");
+    check_close(values[plane], (0.4F - 0.2F) / 0.25F, 2e-2F, "green channel normalised");
+    check_close(values[2 * plane], (0.8F - 0.3F) / 0.125F, 2e-2F, "blue channel normalised");
+}
+
+void test_invalid_input_is_refused() {
+    auto config = base_config();
+    bool threw = false;
+    try {
+        trtmc::preprocess_clipseg_image(nullptr, 224, 224, config);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check(threw, "a null image is refused");
+
+    threw = false;
+    config.image_std = {1.0F, 0.0F, 1.0F};
+    std::vector<float> pixels(3U * 4U * 4U, 0.5F);
+    try {
+        trtmc::preprocess_clipseg_image(pixels.data(), 4, 4, config);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check(threw, "a zero standard deviation is refused");
+}
+
+void test_unicode_tokenizer_normalization() {
+    // Golden token IDs from Hugging Face tokenizers 0.22.2, using the checkpoint's
+    // normalizer/CLIP split and a minimal byte vocabulary without merges.
+    constexpr const char* fixture =
+        R"json({"version":"1.0","truncation":null,"padding":null,"added_tokens":[],"normalizer":{"type":"Sequence","normalizers":[{"type":"NFC"},{"type":"Replace","pattern":{"Regex":"\\s+"},"content":" "},{"type":"Lowercase"}]},"pre_tokenizer":{"type":"Sequence","pretokenizers":[{"type":"Split","pattern":{"Regex":"<\\|startoftext\\|>|<\\|endoftext\\|>|'s|'t|'re|'ve|'m|'ll|'d|[\\p{L}]+|[\\p{N}]|[^\\s\\p{L}\\p{N}]+"},"behavior":"Removed","invert":true},{"type":"ByteLevel","add_prefix_space":false,"trim_offsets":true,"use_regex":true}]},"post_processor":null,"decoder":{"type":"ByteLevel","add_prefix_space":true,"trim_offsets":true,"use_regex":true},"model":{"type":"BPE","dropout":null,"unk_token":null,"continuing_subword_prefix":null,"end_of_word_suffix":"</w>","fuse_unk":false,"byte_fallback":false,"vocab":{"a":0,"c":1,"f":2,"i":3,"©":4,"¿":5,"Ã":6,"Ì":7,"Î":8,"Ï":9,"ĥ":10,"ĩ":11,"a</w>":12,"c</w>":13,"f</w>":14,"i</w>":15,"©</w>":16,"¿</w>":17,"Ã</w>":18,"Ì</w>":19,"Î</w>":20,"Ï</w>":21,"ĥ</w>":22,"ĩ</w>":23},"merges":[]}})json";
+    const auto tokenizer = trtmc::CreateBpeTokenizer(fixture, std::strlen(fixture), false);
+    check(tokenizer->encode("CAFÉ") == std::vector<int32_t>{1, 0, 2, 6, 16},
+          "Unicode normalization matches reference token IDs");
+    check(tokenizer->encode("café") == std::vector<int32_t>{1, 0, 2, 6, 16},
+          "Unicode normalization matches reference token IDs");
+    check(tokenizer->encode("café") == std::vector<int32_t>{1, 0, 2, 6, 16},
+          "Unicode normalization matches reference token IDs");
+    check(tokenizer->encode("ΟΣ") == std::vector<int32_t>{8, 5, 9, 22},
+          "Unicode normalization matches reference token IDs");
+    check(tokenizer->encode("İ") == std::vector<int32_t>{15, 7, 23},
+          "Unicode normalization matches reference token IDs");
+}
+
+void test_resize_pass_order_matches_pillow13() {
+    struct Case {
+        int height, width, output;
+        std::vector<int> expected;
+    };
+    // Independent Pillow 13 RGB goldens for ((index * 29 + 7) % 256) bytes.
+    const std::vector<Case> cases{
+        {513, 257, 2, {128, 128, 127, 127, 128, 128, 127, 127, 128, 128, 127, 127}},
+        {17, 5, 3, {114, 122, 119, 131, 122, 139, 115, 121, 121, 138, 138, 144, 120, 117,
+                    127, 144, 133, 150, 134, 128, 114, 133, 132, 130, 129, 117, 115}},
+        {5, 17, 3, {107, 119, 123, 138, 140, 114, 111, 122, 131, 136, 148, 135, 119, 125,
+                    124, 140, 151, 132, 125, 141, 117, 127, 134, 126, 125, 127, 113}},
+    };
+    for (const auto& item : cases) {
+        auto config = base_config();
+        config.input_image_h = config.input_image_w = item.output;
+        config.image_mean = {0, 0, 0};
+        config.image_std = {1, 1, 1};
+        std::vector<float> pixels(static_cast<std::size_t>(item.height) * item.width * 3);
+        for (std::size_t index = 0; index < pixels.size(); ++index)
+            pixels[index] = static_cast<float>((index * 29 + 7) % 256) / 255.0F;
+        const auto result =
+            trtmc::preprocess_clipseg_image(pixels.data(), item.height, item.width, config);
+        check(result.size() == item.expected.size(), "Pillow 13 resize shape");
+        if (result.size() != item.expected.size())
+            continue;
+        for (std::size_t index = 0; index < result.size(); ++index)
+            check_close(result[index], static_cast<float>(item.expected[index]) / 255.0F, 1e-7F,
+                        "Pillow 13 resize pass order and rounding");
+    }
+}
+
+void test_tall_image_has_bounded_resize_allocations() {
+    auto config = base_config();
+    config.image_mean = {0, 0, 0};
+    config.image_std = {1, 1, 1};
+    std::vector<float> pixels(65536U * 3U, 0.25F);
+    try {
+        AllocationBound bound(16U * 1024U * 1024U);
+        const auto result = trtmc::preprocess_clipseg_image(pixels.data(), 65536, 1, config);
+        check(result.size() ==
+                  static_cast<std::size_t>(config.input_image_h) * config.input_image_w * 3,
+              "tall image output shape");
+        for (float value : result)
+            check_close(value, 64.0F / 255.0F, 1e-7F, "tall constant image value");
+    } catch (const std::bad_alloc&) {
+        check(false, "resize must not allocate a source-height by output-width intermediate");
+    }
+}
+
+} // namespace
+
+int main() {
+    test_resize_pass_order_matches_pillow13();
+    test_tall_image_has_bounded_resize_allocations();
+    test_resize_preserves_the_full_rectangular_source();
+    test_resize_matches_pillow_bilinear_pixels();
+    test_normalisation_is_per_channel();
+    test_invalid_input_is_refused();
+    test_unicode_tokenizer_normalization();
+    if (g_failures == 0)
+        std::cout << "clipseg image preprocess seam: all checks passed\n";
+    return g_failures == 0 ? 0 : 1;
+}

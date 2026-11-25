@@ -91,7 +91,7 @@ For a local tokenizer, omit `--tokenizer-revision` and add
 prepared family environment:
 
 ```bash
-python families/lance/tests/aiperf/prepare_tokenizer.py \
+python families/lance/reference/prepare_tokenizer.py \
   --model-dir /path/to/Lance --output-dir /tmp/lance-tokenizer
 ```
 
@@ -99,7 +99,7 @@ Then use `--tokenizer /tmp/lance-tokenizer`. The automated `endpoint-profile`
 runner accepts the same option and pins the default tokenizer to the manifest's
 checkpoint revision.
 
-For Phi4, use `families/phi4_multimodal/tests/aiperf/prepare_tokenizer.py` with
+For Phi4, use `families/phi4_multimodal/reference/prepare_tokenizer.py` with
 the same flags, then pass its output directory with `--tokenizer`.
 
 The endpoint accepts one user message containing text and one embedded RGB

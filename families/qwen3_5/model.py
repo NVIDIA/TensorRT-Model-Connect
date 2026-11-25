@@ -2460,25 +2460,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 _TWO_ENGINE_MEMORY_FRACTION = 0.8
 
 
-def _two_engines_fit(weight_bytes: int, gpu_bytes: int | None) -> bool:
-    """Whether the prefill engine, which carries its own copy of every weight, fits beside the decode engine.
+def _require_two_engines_fit(engine_bytes: int, gpu_bytes: int | None) -> None:
+    """Fail the build when the prefill engine does not fit beside the decode engine.
 
-    Without it, prompts run through the decode engine one token at a time (the bundle stays loadable). An
-    unknown GPU capacity keeps that single-engine layout, which every earlier bundle had.
+    ``engine_bytes`` is the serialized decode engine; the prefill engine carries the same weights. Prompts never
+    fall back to the decode engine one token at a time to save memory. An unknown GPU capacity builds both engines.
     """
-    if gpu_bytes is None:
-        print("Skipping the prefill engine: the GPU memory could not be queried", file=sys.stderr)
-        return False
-    if 2 * weight_bytes <= gpu_bytes * _TWO_ENGINE_MEMORY_FRACTION:
-        return True
-    print(f"Skipping the prefill engine: the decode and prefill engines need about {2 * weight_bytes / 1024**3:.0f} "
-          f"GiB of weights and the GPU has {gpu_bytes / 1024**3:.0f} GiB; prompts run through the decode engine",
-          file=sys.stderr)
-    return False
-
-
-def _host_weight_bytes(weights) -> int:
-    return sum(value.nbytes for value in weights.values() if isinstance(value, np.ndarray))
+    if gpu_bytes is None or 2 * engine_bytes <= gpu_bytes * _TWO_ENGINE_MEMORY_FRACTION:
+        return
+    raise ValueError(
+        f"qwen3_5: the decode and prefill engines need about {2 * engine_bytes / 1024**3:.0f} GiB "
+        f"and the GPU has {gpu_bytes / 1024**3:.0f} GiB; use a GPU with more memory or a smaller checkpoint")
 
 
 def _gpu_memory_bytes() -> int | None:
@@ -2617,10 +2609,9 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
     # TensorRT 11.4 cannot lower NVFP4 dynamic activation quantization over a
     # runtime row count, so NVFP4 bundles keep the token loop.
     nvfp4 = quantization == "nvfp4" or getattr(quant_ctx, "has_nvfp4_weights", False)
-    split = (not visual and not require_mtp and draft_config is None and not nvfp4
-             and _two_engines_fit(_host_weight_bytes(weights), _gpu_memory_bytes()))
+    split = not visual and not require_mtp and draft_config is None and not nvfp4
     # Stage the target before building the other engines; do not retain its serialized bytes.
-    writer.add_bytes("engine.plan", model.build_engine(
+    target = model.build_engine(
         config,
         weights,
         max_sequence_length,
@@ -2631,8 +2622,14 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
         quant_ctx=quant_ctx,
         export_hidden_state=require_mtp,
         feature_layers=() if draft_config is None else draft_config.feature_layers,
-    ))
+    )
+    target_bytes = target.nbytes
+    writer.add_bytes("engine.plan", target)
+    del target
     if split:
+        # Measured on the built target rather than estimated from host weights, whose storage differs from the
+        # engine's (FP32 host copies, quantized payloads held outside the weight dict).
+        _require_two_engines_fit(target_bytes, _gpu_memory_bytes())
         writer.add_bytes("prefill.plan", model.build_engine(
             config, weights, max_sequence_length, precision=precision,
             verbose=bool(request.verbose), quant_ctx=quant_ctx,

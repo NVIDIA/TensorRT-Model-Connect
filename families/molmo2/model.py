@@ -73,12 +73,16 @@ def validate_request(
         or context_parallel_size != 1
         or fp32_layers
         or mtp_seq_len is not None
-        or quantization not in {None, "none"}
+        or quantization not in {None, "none", "fp8"}
         or image_height is not None
         or image_width is not None
         or video_num_frames is not None
     ):
-        raise ValueError("molmo2 supports unquantized single-device, single-image requests")
+        raise ValueError(
+            "molmo2 supports single-device, single-image requests with quantization none or fp8"
+        )
+    if quantization == "fp8" and precision != "bf16":
+        raise ValueError("molmo2 quantization=fp8 requires precision=bf16")
     if config["vit_config"]["image_default_input_size"] != [378, 378]:
         raise ValueError("molmo2 requires the checkpoint's 378x378 image crops")
 
@@ -137,11 +141,16 @@ def validate_image_contract(root, config):
         raise ValueError("unsupported Molmo2 image prompt framing")
 
 
-def build_decoder(config, weights, precision, maximum, verbose=False):
+def build_decoder(config, weights, precision, maximum, verbose=False, quantization=None):
     from .graph import Graph
     import tensorrt as trt
 
     g = Graph(precision, verbose)
+
+    def project(y, weight, prefix):
+        quantized = None if quantization is None else quantization.linear(g, y, weight, prefix)
+        return g.linear(y, weight) if quantized is None else quantized
+
     t = config["text_config"]
     hidden, heads, kv, dim = (
         t[k] for k in ("hidden_size", "num_attention_heads", "num_key_value_heads", "head_dim")
@@ -192,9 +201,9 @@ def build_decoder(config, weights, precision, maximum, verbose=False):
         norm = g.rms(x, weights(p + "attn_norm.weight"), t["layer_norm_eps"])
         fused = weights(p + "self_attn.att_proj.weight")
         q_w, k_w, v_w = np.split(fused, [heads * dim, (heads + kv) * dim])
-        q = g.reshape(g.linear(norm, q_w), (-1, heads, dim))
-        k = g.reshape(g.linear(norm, k_w), (-1, kv, dim))
-        v = g.linear(norm, v_w)
+        q = g.reshape(project(norm, q_w, p + "self_attn.att_proj"), (-1, heads, dim))
+        k = g.reshape(project(norm, k_w, p + "self_attn.att_proj"), (-1, kv, dim))
+        v = project(norm, v_w, p + "self_attn.att_proj")
         q = rotary(g.rms(q, weights(p + "self_attn.q_norm.weight"), t["layer_norm_eps"]))
         k = g.reshape(
             rotary(g.rms(k, weights(p + "self_attn.k_norm.weight"), t["layer_norm_eps"])),
@@ -209,19 +218,23 @@ def build_decoder(config, weights, precision, maximum, verbose=False):
         q = g.transpose(q, (1, 0, 2))
         attended = g.attention(q, k, v, mask)
         attended = g.reshape(g.transpose(attended, (1, 0, 2)), (-1, heads * dim))
-        x = g.add(x, g.linear(attended, weights(p + "self_attn.attn_out.weight")))
+        x = g.add(
+            x, project(attended, weights(p + "self_attn.attn_out.weight"), p + "self_attn.attn_out")
+        )
         norm = g.rms(x, weights(p + "ff_norm.weight"), t["layer_norm_eps"])
         # Molmo2 stores [up, gate], unlike Qwen's usual gate/up ordering.
         up_w, gate_w = np.split(weights(p + "mlp.ff_proj.weight"), 2)
-        ff = g.mul(g.silu(g.linear(norm, gate_w)), g.linear(norm, up_w))
-        x = g.add(x, g.linear(ff, weights(p + "mlp.ff_out.weight")))
+        ff = g.mul(
+            g.silu(project(norm, gate_w, p + "mlp.ff_proj")), project(norm, up_w, p + "mlp.ff_proj")
+        )
+        x = g.add(x, project(ff, weights(p + "mlp.ff_out.weight"), p + "mlp.ff_out"))
     x = g.rms(x, weights("model.transformer.ln_f.weight"), t["layer_norm_eps"])
     shape = g.cast(g.net.add_shape(x).get_output(0), trt.int32)
     length = g.gather(shape, g.constant(np.array([0], np.int32)), 0)
     last = g.ew(length, g.constant(np.array([1], np.int32)), trt.ElementWiseOperation.SUB)
     x = g.gather(x, last, 0)
     g.output(g.linear(x, weights("lm_head.weight")), "logits", trt.float32)
-    return g.finish()
+    return g.finish(None if quantization is None else quantization.configure)
 
 
 def build_vision(config, weights, precision, verbose=False):
@@ -334,8 +347,16 @@ def build(request, writer):
     writer.add_bytes(
         "vision.plan", build_vision(config, weights, request.precision, request.verbose)
     )
+    quantization = None
+    if request.quantization == "fp8":
+        from .quantization import decoder_quantization
+
+        quantization = decoder_quantization(config, weights, "fp8")
     writer.add_bytes(
-        "engine.plan", build_decoder(config, weights, request.precision, maximum, request.verbose)
+        "engine.plan",
+        build_decoder(
+            config, weights, request.precision, maximum, request.verbose, quantization=quantization
+        ),
     )
     embedding = np.concatenate(
         [weights("model.transformer.wte.embedding"), weights("model.transformer.wte.new_embedding")]

@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Imagenette's class prompts are English: the Chinese text tower still ranks them, and the benchmark compares TRTMC
+# with the native model on the same prompts (its gate is the regression against native, not an absolute accuracy).
+reference:
+  adapter: families/chinese_clip/reference/adapter.py  # the runtime's relevance logit (scale x cosine)

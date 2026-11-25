@@ -75,6 +75,11 @@ The test converts the limited-range video to the original RGB values before
 resizing. Its 15 × 32 float32 noise draw uses the manifest's NumPy seed.
 Unlike LIBERO, DROID includes the state in the prompt. The comparison covers
 all 15 × 8 robot-unit actions from the independent FP32 policy.
+TensorRT selects different FP16 kernels from one build to the next. Over five builds on one
+GB300 with TensorRT 11.4, 1 − cosine against the FP32 policy ranged from 6.0e-6 to 1.13e-5, and
+max abs error from 2.3e-3 to 3.8e-3. The minimum cosine, 0.99995, allows about four times the
+largest 1 − cosine, the margin the mean abs error limit has. That is still half the error the
+bfloat16 cases allow.
 See the [fixture provenance](../../ASSET_LICENSES.md#lerobot-pi-05-recorded-observation-fixtures);
 the repository does not redistribute the DROID videos or model weights.
 

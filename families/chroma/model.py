@@ -17,6 +17,8 @@ from pathlib import Path
 from .checkpoint import ChromaCheckpoint, SafetensorsDirectory, load_checkpoint
 
 PRECISIONS = ("bf16", "fp32")
+# "none" builds as stored; "fp8" and "nvfp4" quantize the DiT of a BF16 build (quantization.py).
+QUANTIZATIONS = ("none", "fp8", "nvfp4")
 DEFAULT_IMAGE_SIZE = 1024
 # Up to 4096 px the 2x2-patch positions (at most 256) are exact in BF16, as the pipeline's position ids are.
 MAX_IMAGE_SIZE = 4096
@@ -67,7 +69,8 @@ def _runtime_config(checkpoint: ChromaCheckpoint, precision: str, height: int, w
 
 
 def _write_components(writer, checkpoint: ChromaCheckpoint, precision: str, verbose: bool,
-                      height: int, width: int, length: int) -> None:
+                      height: int, width: int, length: int, quantized: dict | None = None) -> None:
+    """``quantized``: the DiT projections to quantize (``quantization.quantized_projections``), or None."""
     from .text_encoder_builder import build_text_encoder_network
     from .transformer_builder import build_transformer_network
     from .vae_builder import build_vae_decoder_network
@@ -78,7 +81,8 @@ def _write_components(writer, checkpoint: ChromaCheckpoint, precision: str, verb
          lambda graph, weights: build_text_encoder_network(graph, weights, checkpoint.text_encoder, length)),
         ("transformer.plan", "transformer", "transformer",
          lambda graph, weights: build_transformer_network(
-             graph, weights, checkpoint.transformer, length, height // (2 * scale), width // (2 * scale))),
+             graph, weights, checkpoint.transformer, length, height // (2 * scale), width // (2 * scale),
+             quantized)),
         ("vae_decoder.plan", "VAE decoder", "vae",
          lambda graph, weights: build_vae_decoder_network(
              graph, weights, checkpoint.vae, height // scale, width // scale)),
@@ -114,8 +118,9 @@ def build(request, writer) -> None:
         raise NotImplementedError("chroma does not support context parallelism")
     if request.video_num_frames is not None:
         raise NotImplementedError("chroma does not support video_num_frames")
-    if request.quantization is not None:
-        raise NotImplementedError("chroma does not support quantization")
+    quantization = request.quantization or "none"
+    if quantization not in QUANTIZATIONS:
+        raise NotImplementedError(f"chroma supports quantization none, fp8 or nvfp4, not {quantization}")
     if request.fp32_layers:
         raise NotImplementedError("chroma does not support fp32_layers")
     if request.mtp_seq_len is not None:
@@ -127,12 +132,28 @@ def build(request, writer) -> None:
     length = request.max_sequence_length or MAX_TEXT_LENGTH
     if not 1 <= length <= MAX_TEXT_LENGTH:
         raise ValueError(f"chroma max_sequence_length must be in [1, {MAX_TEXT_LENGTH}]")
+    if quantization != "none":
+        from .quantization import MAX_IMAGE_SIZE as QUANTIZED_MAX, MIN_IMAGE_SIZE as QUANTIZED_MIN
+
+        if request.precision != "bf16":
+            raise ValueError(f"chroma quantization={quantization} needs precision bf16")
+        if not (QUANTIZED_MIN <= height <= QUANTIZED_MAX and QUANTIZED_MIN <= width <= QUANTIZED_MAX):
+            raise ValueError(f"chroma quantization={quantization} supports image sides from {QUANTIZED_MIN} to "
+                             f"{QUANTIZED_MAX} (the calibrated range)")
 
     checkpoint = load_checkpoint(Path(request.model_dir))
+    quantized = None
+    if quantization != "none":
+        from .quantization import quantized_projections
+
+        # Refuses a quantized checkpoint and checkpoints without packaged scales before any build.
+        quantized = quantized_projections(
+            quantization, checkpoint.transformer, SafetensorsDirectory(checkpoint.root / "transformer")
+        )
     from .tokenizer_asset import tokenizer_json
 
     tokenizer = tokenizer_json(checkpoint.root)
     writer.set_header(family="chroma", task=request.task, backend=request.backend)
     writer.add_json("runtime.json", _runtime_config(checkpoint, request.precision, height, width, length))
     writer.add_bytes("tokenizer.json", tokenizer)
-    _write_components(writer, checkpoint, request.precision, request.verbose, height, width, length)
+    _write_components(writer, checkpoint, request.precision, request.verbose, height, width, length, quantized)

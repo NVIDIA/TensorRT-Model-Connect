@@ -18,6 +18,34 @@ def test_layer_type_aliases_are_normalized() -> None:
     ) == ["deltanet", "attention", "deltanet", "attention", "custom"]
 
 
+def _section_writer():
+    """A Mock bundle writer that records each streamed section as an add_bytes call."""
+    from contextlib import contextmanager
+    from io import BytesIO
+    from unittest.mock import Mock
+
+    writer = Mock()
+
+    @contextmanager
+    def open_section(name):
+        buffer = BytesIO()
+        yield buffer
+        writer.add_bytes(name, buffer.getvalue())
+
+    writer.open_section = open_section
+    return writer
+
+
+def _streamed(plan: bytes):
+    """An engine-builder stand-in that writes ``plan`` into its plan_stream, as the real builders do."""
+    from unittest.mock import Mock
+
+    def build(*_args, plan_stream, **_kwargs) -> None:
+        plan_stream.write(plan)
+
+    return Mock(side_effect=build)
+
+
 def test_required_native_mtp_cannot_publish_base_only_bundle(monkeypatch, tmp_path) -> None:
     import pytest
     from families.qwen3_8 import model
@@ -62,13 +90,13 @@ def test_ordinary_native_build_does_not_add_unrequested_mtp_engines(monkeypatch,
     monkeypatch.setattr(model.ModelConfig, "from_dir", lambda _: config)
     monkeypatch.setattr(model.Qwen38Model, "load_weights",
                         lambda *_args, **_kwargs: {"mtp_layer.fc": object()})
-    monkeypatch.setattr(model.Qwen38Model, "build_engine", lambda *_args, **_kwargs: b"target")
-    prefill = Mock(return_value=b"prefill")
+    monkeypatch.setattr(model.Qwen38Model, "build_engine", _streamed(b"target"))
+    prefill = _streamed(b"prefill")
     mtp_prefill = Mock(return_value=b"mtp-prefill")
     monkeypatch.setattr(model.Qwen38Model, "build_engine_prefill", prefill)
     monkeypatch.setattr(model.Qwen38Model, "build_mtp_prefill_engine", mtp_prefill)
     monkeypatch.setattr(model, "_runtime_config", lambda *_args, **kwargs: kwargs)
-    writer = Mock()
+    writer = _section_writer()
     request = BuildRequest(tmp_path, tmp_path / "out", "qwen3_8", "text_generation", "fp16")
     model._build_native(request, writer)
     assert {call.args for call in writer.add_bytes.call_args_list} == {
@@ -107,7 +135,7 @@ def test_ordinary_native_build_does_not_add_unrequested_mtp_engines(monkeypatch,
                         lambda *_args: (SimpleNamespace(merge=2), {"max_tokens": 8}))
     monkeypatch.setattr(vision, "load_vision_weights", lambda *_args, **_kwargs: ({}, None))
     monkeypatch.setattr(vision, "build_vision_engine", lambda *_args, **_kwargs: b"visual")
-    target = Mock(return_value=b"target")
+    target = _streamed(b"target")
     monkeypatch.setattr(model.Qwen38Model, "build_engine", target)
     writer.reset_mock()
     prefill.reset_mock()
@@ -515,21 +543,65 @@ def test_native_tp_broadcast_requires_none_enum_and_root_zero() -> None:
     assert network.add_dist_collective.return_value.num_ranks == 2
 
 
-def test_default_prefill_engine_is_dropped_only_when_two_weight_copies_do_not_fit(tmp_path) -> None:
-    from dataclasses import replace
+def test_a_checkpoint_that_fits_once_ships_only_the_prefill_engine() -> None:
+    from families.qwen3_8 import model
 
+    gib = 1024**3
+    # A 27B FP16 checkpoint (about 54 GiB) on a 121 GiB unified-memory GPU: one engine, the chunked one.
+    assert model._decoder_engine_layout(128, 54 * gib, 121 * gib, has_mtp=False) == "chunked"
+    # An 8B checkpoint fits twice, as does the 27B checkpoint on a large discrete GPU.
+    assert model._decoder_engine_layout(128, 16 * gib, 121 * gib, has_mtp=False) == "single"
+    assert model._decoder_engine_layout(128, 54 * gib, 275 * gib, has_mtp=False) == "single"
+    # No device to query, no chunked graph (media, drafts, FP8 KV) or MTP: the decode engine stays.
+    assert model._decoder_engine_layout(128, 54 * gib, None, has_mtp=False) == "single"
+    assert model._decoder_engine_layout(0, 54 * gib, 121 * gib, has_mtp=False) == "single"
+    assert model._decoder_engine_layout(128, 54 * gib, 121 * gib, has_mtp=True) == "single"
+
+
+def test_a_chunked_bundle_builds_no_decode_engine(monkeypatch, tmp_path) -> None:
     from families.qwen3_8 import model
     from families.qwen3_8.build_request import BuildRequest
 
-    request = BuildRequest(tmp_path, tmp_path / "out", "qwen3_8", "text_generation", "fp16")
-    gib = 1024**3
-    # A 27B FP16 checkpoint (about 54 GiB) on a 121 GiB unified-memory GPU: decode engine only.
-    assert model._fit_prefill_engine(request, 128, 54 * gib, 121 * gib) == 0
-    # An 8B checkpoint fits twice, as does the 27B checkpoint on a large discrete GPU.
-    assert model._fit_prefill_engine(request, 128, 16 * gib, 121 * gib) == 128
-    assert model._fit_prefill_engine(request, 128, 54 * gib, 275 * gib) == 128
-    # No device to query, a single-token build, or an explicit chunk length is kept as is.
-    assert model._fit_prefill_engine(request, 128, 54 * gib, None) == 128
-    assert model._fit_prefill_engine(request, 0, 54 * gib, 121 * gib) == 0
-    explicit = replace(request, prefill_chunk_len=128)
-    assert model._fit_prefill_engine(explicit, 128, 54 * gib, 121 * gib) == 128
+    config = _tiny_load_weights_config()
+    config.raw["text_config"]["output_gate_type"] = "swish"
+    monkeypatch.setattr(model.ModelConfig, "from_dir", lambda _: config)
+    monkeypatch.setattr(model.Qwen38Model, "load_weights", lambda *_args, **_kwargs: {})
+    decode = _streamed(b"target")
+    prefill = _streamed(b"prefill")
+    monkeypatch.setattr(model.Qwen38Model, "build_engine", decode)
+    monkeypatch.setattr(model.Qwen38Model, "build_engine_prefill", prefill)
+    monkeypatch.setattr(model, "_runtime_config", lambda *_args, **kwargs: kwargs)
+    monkeypatch.setattr(model, "_decoder_engine_layout", lambda *_args, **_kwargs: "chunked")
+    writer = _section_writer()
+    model._build_native(
+        BuildRequest(tmp_path, tmp_path / "out", "qwen3_8", "text_generation", "fp16"), writer)
+    decode.assert_not_called()
+    assert [call.args for call in writer.add_bytes.call_args_list] == [("prefill_engine.plan", b"prefill")]
+    runtime = writer.add_json.call_args.args[1]
+    assert runtime["decoder_engine_layout"] == "chunked"
+    assert runtime["prefill_chunk_len"] == prefill.call_args.args[3] >= 2
+
+
+def test_a_streamed_plan_goes_into_the_section_and_never_returns() -> None:
+    import io
+
+    import pytest
+
+    class Builder:
+        result = True
+
+        def build_serialized_network_to_stream(self, network, config, writer) -> bool:
+            assert (network, config) == ("network", "config")
+            writer.write(b"plan")
+            return self.result
+
+        def build_serialized_network(self, network, config):
+            return b"in-memory plan"
+
+    builder, stream = Builder(), io.BytesIO()
+    assert engine_builder._serialize(builder, "network", "config", "prefill engine", stream) is None
+    assert stream.getvalue() == b"plan"
+    assert bytes(engine_builder._serialize(builder, "network", "config", "engine")) == b"in-memory plan"
+    builder.result = False
+    with pytest.raises(RuntimeError, match="TensorRT prefill engine build failed"):
+        engine_builder._serialize(builder, "network", "config", "prefill engine", io.BytesIO())

@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The build fetches the Qwen2.5 tokenizer the checkpoint names through huggingface_hub,
+# a core dependency. The tests' official reference and oracle: Transformers' VibeVoice
+# (not in the repository's transformers 5.2.0), its diffusers noise scheduler, WAV I/O
+# and the resampling before Whisper.
+transformers==5.22.2
+tokenizers==0.23.3
+# transformers 5.22.2 and diffusers 0.42.1 also accept huggingface-hub 2.x, which pip
+# would pick on top of an environment with an older hub; the family is validated on 1.x.
+huggingface-hub==1.33.0
+diffusers==0.42.1
+soundfile==0.14.0
+scipy==1.18.1

@@ -614,7 +614,11 @@ TensorMap TrtModuleImpl::forward(const TensorMap& inputs) {
         }
 
         auto& staging = host_output_staging_[name];
-        cudaMemcpy(staging.data(), entry.d_ptr, runtime_nbytes, cudaMemcpyDeviceToHost);
+        const auto status =
+            cudaMemcpy(staging.data(), entry.d_ptr, runtime_nbytes, cudaMemcpyDeviceToHost);
+        if (status != cudaSuccess)
+            throw std::runtime_error("TensorRT output transfer failed for " + name + ": " +
+                                     cudaGetErrorString(status));
 
         Tensor t;
         t.data = staging.data();

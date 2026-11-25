@@ -18,15 +18,16 @@ Accuracy and performance qualification of every ready catalog model against its 
 |---|---|---|
 | Execution | One workload recorder, with native and TRTMC servers running separately and speaking the same `/v1/tasks/{operation}` protocol: TRTMC (`trtmc-perf-serve --backend trtmc`, later `trtmc-server`) and the native reference (`--backend reference`: the generic adapter of the operation, or a family's own pipeline, `families/<family>/reference/adapter.py`). AIPerf sends every request. | No (adapters: per family) |
 | Task | `config/tasks.yaml`: per catalog Task, its benchmarks (`absolute`) and checks (`supplementary`), and Perf settings. | No |
-| Model | Derived from the catalog entry and its Task. `families/<family>/tests/aiperf/<profile>.yaml` owns exceptions and benchmark definitions; legacy `config/models/<profile>.yaml` remains supported. | Per family |
+| Model | Derived from the catalog entry and its Task; `config/models/<profile>.yaml` holds the profile's own settings (reference, benchmarks, requests, candidate build). The families hold no AIPerf settings. | Per profile |
 
 `trtmc-aiperf-qual plan` prints the derived configuration of every model; `trtmc-aiperf-qual matrix`
 writes the execution matrix (native path, environment, workloads, checks, and whether each profile is
 executable).
 
-Family definitions are merged after Task defaults and legacy overrides. They may declare local
-`benchmarks` and select them through `absolute`, so model-specific requests, native adapters and
-conversion criteria stay with their family. RT-DETR v2 keeps the bundle's fixed score threshold of
+A profile's own settings (`config/models/<profile>.yaml`) are merged after the Task defaults. They may declare
+local `benchmarks` and select them through `absolute`, so model-specific requests and conversion criteria are
+stated per profile; a family's own native pipeline and inputs are named there and stay in the family
+(`families/<family>/reference/`). RT-DETR v2 keeps the bundle's fixed score threshold of
 0.3 on both sides. BiRefNet Lite compares binary foreground masks on 50 pinned COCO images against
 its official native model, using the unchanged family E2E IoU threshold of 0.90 for every image.
 This is conversion parity, not ADE20K semantic-segmentation accuracy. Acc and task-call P50 use the
@@ -249,7 +250,9 @@ implementation, not the quantization, and its benchmark keeps the unquantized ma
 The Diffusers adapter ties a T5-style text encoder's `encoder.embed_tokens` back to `shared` when loading
 left it zero (Transformers 5.2 does not tie it for `UMT5EncoderModel`, Wan). A timed request that leaves
 `num_steps`, guidance, CFG, or frames at -1 is an error until `config/models` states them, since TRTMC and
-Diffusers apply different defaults.
+Diffusers apply different defaults. A null under `request` names a control the model takes on neither side
+(Qwen-Image 2.1 has no `guidance_scale`): every request built on the catalog request drops it, and none is
+required to state it.
 
 ## Setup
 
@@ -324,8 +327,7 @@ p50 regressions (> 5%) against a previous run.
 ### Model selection
 
 Two questions are answered in different places. How a profile runs is derived: its catalog entry, its Task's
-defaults (`config/tasks.yaml`), and its own configuration (`config/models/<profile>.yaml`, merged with the
-family's `tests/aiperf/<profile>.yaml` where one remains). Whether it runs is
+defaults (`config/tasks.yaml`), and its own configuration (`config/models/<profile>.yaml`). Whether it runs is
 decided by the exclusions below, in this order; the first that applies is the reason, and its `source` names the
 file to change:
 
@@ -333,9 +335,14 @@ file to change:
 |---|---|---|
 | `config/tasks.yaml` | the profile's Task has no defaults (no entry, no exclusion to write) | every machine |
 | `config/exclusions.yaml` | the qualification cannot qualify the profile as cataloged | every machine |
+| `config/models` | an image-generation request leaves a size, step or guidance control to the pipeline's default, so each side would choose its own; state it under `request` in `config/models/<profile>.yaml` | every machine |
 | `environment` | not in the machine's `models.include`, or in its `models.exclude` | one machine |
 | `config/platforms/<platform>.yaml` | what the hardware cannot run | one kind of hardware |
 | `environment` | a checkpoint above the machine's `models.max_checkpoint_gib` | one machine |
+
+A family that adds a profile the qualification cannot run yet does not change this application: the
+`config/tasks.yaml` and `config/models` rows leave the profile out on their own, and `plan` shows it with its
+reason.
 
 The scope is every ready catalog profile (L0 smoke and regression variants aside). `run-all`, `plan`, `assign`
 and `matrix` take the machine's list; `--profile` (names or glob patterns, in the order given) replaces its
@@ -609,7 +616,7 @@ Use `--tokenizer /path/to/prepared-tokenizer` when its files live separately;
 `--tokenizer-revision` pins an explicitly selected Hugging Face tokenizer.
 Hub overrides require a full commit SHA. Local tokenizer directories are
 fingerprinted before and after profiling, including their file contents.
-Lance and Phi4 provide `families/<family>/tests/aiperf/prepare_tokenizer.py`
+Lance and Phi4 provide `families/<family>/reference/prepare_tokenizer.py`
 to export their existing tokenizers into a standalone client directory.
 Source identity is captured after acquiring the GPU lock, including content
 fingerprints for tracked changes and untracked files. Generated run output is

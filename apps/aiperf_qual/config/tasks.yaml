@@ -132,8 +132,11 @@ benchmarks:
   token_score_parity: {suite: token-score-parity, suite_definition: uniref50-test-200, metric: vector_parity,
                        truncate_tokens: 254, gate: {field: logits, min_cosine: 0.999, max_relative_l2: 0.02}}
   # Relative monocular depth (Depth Anything) against the native map on 50 COCO images: the family's E2E gate.
+  # A quantized (NVFP4) candidate carries its weight error on every image: about twice the worst one measured on
+  # this suite (correlation 0.9946, relative error 0.0174), as the robot-model gates are derived.
   depth_parity: {suite: depth-parity, suite_definition: coco-val2017-depth-50, metric: depth_parity,
-                 gate: {min_correlation: 0.998, max_relative_error: 0.01}}
+                 gate: {min_correlation: 0.998, max_relative_error: 0.01},
+                 quantized_gate: {min_correlation: 0.989, max_relative_error: 0.035}}
   # Point-cloud semantic segmentation (PointNet): S3DIS Area 5 blocks, class mIoU of the per-point classes over the
   # corpus against the S3DIS annotation.
   s3dis_area5: {suite: s3dis-area5-miou, suite_definition: s3dis-area5-blocks-300, metric: point_miou,
@@ -177,7 +180,7 @@ benchmarks:
   action_parity: {suite: action-parity, suite_definition: lerobot-act-observations-50, metric: action_parity,
                   gate: {max_error_of_range: 0.001}}
   # LeRobot action chunks (GR00T, pi0.5) on recorded LIBERO observations with the family's fixed flow noise on
-  # both sides (each family states its suite and its precision's gate: tests/aiperf), every observation.
+  # both sides (each profile states its suite and its precision's gate: config/models), every observation.
   action_chunk_parity: {suite: action-chunk-parity, metric: action_parity, gate: {max_error_of_range: 0.001}}
   # Structure prediction from the same noise as the native model (the family's suite): lDDT, aligned RMSD, pLDDT
   # and confidence against the native structure, the family's E2E gate.
@@ -202,6 +205,7 @@ tasks:
   text_generation: &generate_text
     absolute: [mmlu]
     performance: {output_grader: parity_token_exact, output_grader_params: {min_prefix: 8, accept_equal_text: true}}
+  conditional_text_generation: *generate_text
   text_continuation: *generate_text  # the Task SDK name of the migrated decoder LMs (qwen3, #1558)
 
   vision_language_generation:
@@ -237,7 +241,7 @@ tasks:
   # otherwise or needs a query/document role state `exclude`.
   text_to_embedding: *embed
 
-  # Features have no gold answer: each family states its conversion-parity benchmark (tests/aiperf).
+  # Features have no gold answer: each profile states its conversion-parity benchmark (config/models).
   image_features: &image_features
     performance: {output_grader: parity_numeric, output_grader_params: {min_cosine: 0.99}}
   image_to_token_and_pooled_features: *image_features
@@ -250,7 +254,7 @@ tasks:
   image_to_boxes:
     absolute: [{name: coco, request: {score_threshold: null}}]
     performance: {output_grader: parity_boxes}
-  # Open-vocabulary detection: the family states coco_prompted with its thresholds (tests/aiperf).
+  # Open-vocabulary detection: the profile states coco_prompted with its thresholds (config/models).
   image_text_to_boxes:
     absolute: [coco_prompted]
     performance: {output_grader: parity_boxes}
@@ -271,7 +275,7 @@ tasks:
   transcription_streaming:
     <<: *transcribe
     absolute: [librispeech_streaming]
-  speech_transcription: *transcribe  # a non-English model states its own test set (tests/aiperf)
+  speech_transcription: *transcribe  # a non-English model states its own test set (config/models)
 
   # Generative media are slow per request: fewer requests per run, still three runs for the CI.
   audio_generation: &generate_audio
@@ -297,14 +301,15 @@ tasks:
     # both sides (latent replay), which makes them comparable pixel by pixel: how much further TRTMC is
     # from the native fp32 render of the first 10 prompts than the native half-precision run.
     supplementary: [{check: replay_parity, suite: partiprompts-30, informational: true, video_samples: 3,
-                     latent_replay_families: [flux, pixart, qwen_image, z_image, wan_t2v],
+                     latent_replay_families: [flux, pixart, qwen_image, qwen_image2_1, z_image, chroma, wan_t2v],
                      parity_floor_samples: 10, max_psnr_gap_db: 3.0, max_ssim_gap: 0.05,
                      quantized_gap: {max_psnr_gap_db: 6.0, max_ssim_gap: 0.1},
                      fallback_min: {psnr_db: 19.0, ssim: 0.8}, min_pass_rate: 0.9},
                     # Text-to-image with caller latents when supported: GenEval-style (all 553 prompts over its six
                     # tags, OWLv2 detections and CLIP colors, exact counts), paired right/wrong per prompt, margin 5 points.
-                    {check: geneval, suite: geneval-full, only_families: [flux, pixart, qwen_image, z_image, stable_diffusion, chroma],
-                     latent_replay_families: [flux, pixart, qwen_image, z_image, stable_diffusion],
+                    {check: geneval, suite: geneval-full,
+                     only_families: [flux, pixart, qwen_image, z_image, stable_diffusion, chroma, qwen_image2_1],
+                     latent_replay_families: [flux, pixart, qwen_image, qwen_image2_1, z_image, stable_diffusion, chroma],
                      detector: google/owlv2-base-patch16-ensemble,
                      detector_revision: cfd3195ba4ea9592eec887ded089f4c08eff231d,
                      clip_model: openai/clip-vit-large-patch14, clip_revision: 32bd64288804d66eefd0ccbe215aa642df71cc41,
@@ -357,7 +362,8 @@ tasks:
     # The catalog testcases are a few values, not the models' context: Perf times the first ETTh1 window.
     performance: {suite: {from_benchmark: etth1-mse}, output_grader: parity_numeric}
   series_to_point_forecast: *forecast
-  # Tasks whose native reference is the family's own Transformers model (tests/aiperf: reference.adapter).
+  series_to_quantile_forecast: *forecast  # Chronos-Bolt: scored on its median quantile
+  # Tasks whose native reference is the family's own Transformers model (config/models: reference.adapter).
   audio_to_class_scores:
     absolute: [audioset]
     performance: {output_grader: parity_top1}

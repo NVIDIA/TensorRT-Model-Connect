@@ -774,11 +774,18 @@ def mean_percent(units: Sequence[float]) -> float:
 
 def point_forecast(observation: Mapping[str, Any] | None, length: int) -> list[float]:
     """The point forecast of an output with ``length`` values: the values themselves, or the median
-    row of a quantile forecast ([1, quantiles, horizon], e.g. Chronos-Bolt's nine)."""
+    quantile of a quantile forecast: the ``series_to_quantile_forecast`` Task's [quantile, horizon, channel]
+    (the 0.5 level, else the middle one), or a pipeline's [1, quantiles, horizon] (e.g. Chronos-Bolt's nine)."""
     values = [float(value) for value in (observation or {}).get("values") or []]
     if len(values) == length:
         return values
     shape = (observation or {}).get("shape") or []
+    if list((observation or {}).get("axes") or []) == ["quantile", "horizon", "channel"]:
+        if len(shape) != 3 or shape[1] * shape[2] != length or len(values) != shape[0] * length:
+            return []
+        levels = [float(level) for level in (observation or {}).get("quantile_levels") or []]
+        middle = levels.index(0.5) if 0.5 in levels else shape[0] // 2
+        return values[middle * length:(middle + 1) * length]
     if len(shape) == 3 and len(values) == shape[1] * shape[2] and shape[2] == length:
         middle = shape[1] // 2
         return values[middle * length:(middle + 1) * length]

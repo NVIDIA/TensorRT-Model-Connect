@@ -589,7 +589,9 @@ jobs:
     name: Community CPU / Unit / C++ and Python
     needs: authorize
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 65
+    env:
+      CPP_BUILD_TIMEOUT: 45m
     permissions:
       contents: read
     steps:
@@ -608,6 +610,42 @@ jobs:
       - name: Run hardened source-only units
         run: python3 -m tools.community_ci unit
 
+  # The AIPerf qualification application, in its own environment: its pinned AIPerf and its plugins.
+  aiperf-qual:
+    name: Community CPU / AIPerf qualification
+    needs: authorize
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact PR merge
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ needs.authorize.outputs.merge_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: Install the application and its AIPerf plugins
+        run: |
+          set -euo pipefail
+          python -m pip install --requirement apps/aiperf_qual/requirements.txt \
+            "$(grep -x 'pytest==.*' requirements/community-ci.txt)"
+          python -m pip install --no-deps apps/aiperf_qual/plugins
+
+      - name: Test the application
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+          HF_HUB_OFFLINE: "1"
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTHONPATH: apps/aiperf_qual:apps/aiperf_qual/plugins:core/builder:apps/benchmark:.
+        run: python -m pytest apps/aiperf_qual/tests -q -m "not gpu and not trt" -p no:cacheprovider
+
   required:
     name: Community CPU / Required
     if: ${{ !cancelled() && (github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot != '')) }}
@@ -617,6 +655,7 @@ jobs:
       - docs
       - ownership-impact
       - unit
+      - aiperf-qual
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions: {}
@@ -627,17 +666,20 @@ jobs:
           DOCS_RESULT: ${{ needs.docs.result }}
           OWNERSHIP_IMPACT_RESULT: ${{ needs.ownership-impact.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
+          AIPERF_QUAL_RESULT: ${{ needs.aiperf-qual.result }}
         run: |
           set -euo pipefail
           printf '%s\n' \
             "Source quality: $SOURCE_QUALITY_RESULT" \
             "Docs: $DOCS_RESULT" \
             "Ownership and impact: $OWNERSHIP_IMPACT_RESULT" \
-            "Unit / C++ and Python: $UNIT_RESULT"
+            "Unit / C++ and Python: $UNIT_RESULT" \
+            "AIPerf qualification: $AIPERF_QUAL_RESULT"
           test "$SOURCE_QUALITY_RESULT" = success
           test "$DOCS_RESULT" = success
           test "$OWNERSHIP_IMPACT_RESULT" = success
           test "$UNIT_RESULT" = success
+          test "$AIPERF_QUAL_RESULT" = success
 
   gpu-authorize:
     name: Community GPU / Authorize

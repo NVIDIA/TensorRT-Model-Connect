@@ -62,13 +62,13 @@ def test_official_source_dependencies_are_family_owned() -> None:
         if line.strip() and not line.startswith("#")
     }
     assert {
-        "flash-linear-attention>=0.4.2",
-        "imageio[ffmpeg,pyav]",
+        "flash-linear-attention==0.5.2",
+        "imageio[ffmpeg,pyav]==2.38.2",
         "mmcv==1.7.2",
-        "pyrallis",
-        "pytz",
-        "qwen-vl-utils",
-        "termcolor",
+        "pyrallis==0.3.1",
+        "pytz==2026.6",
+        "qwen-vl-utils==0.0.14",
+        "termcolor==3.3.0",
     } <= requirements
 
 

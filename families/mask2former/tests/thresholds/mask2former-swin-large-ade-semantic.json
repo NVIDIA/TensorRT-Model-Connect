@@ -1,0 +1,6 @@
+{
+  "threshold_overrides": {
+    "pixel_accuracy": 0.999,
+    "mIoU": 0.98
+  }
+}

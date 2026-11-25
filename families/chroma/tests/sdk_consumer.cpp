@@ -33,18 +33,18 @@ int main(int argc, char** argv) {
         std::set<std::string> names;
         for (const auto& field : task.config_fields())
             names.insert(std::string(field.name));
-        for (const char* name : {"negative_prompt", "num_inference_steps", "guidance_scale", "seed",
-                                 "height", "width"})
+        for (const char* name :
+             {"negative_prompt", "num_steps", "guidance_scale", "seed", "height", "width"})
             if (names.count(name) == 0)
                 throw std::runtime_error(std::string("missing Config field ") + name);
 
-        const trtmc::Config config{{"num_inference_steps", std::int64_t{2}},
+        const trtmc::Config config{{"num_steps", std::int64_t{2}},
                                    {"guidance_scale", 3.0},
                                    {"negative_prompt", std::string("blurry")}};
-        const auto first = task.run({"A lighthouse at dusk", {}},
-                                    trtmc::Config{{"num_inference_steps", std::int64_t{2}},
-                                                  {"guidance_scale", 3.0},
-                                                  {"seed", std::int64_t{11}}});
+        const auto first =
+            task.run({"A lighthouse at dusk", {}}, trtmc::Config{{"num_steps", std::int64_t{2}},
+                                                                 {"guidance_scale", 3.0},
+                                                                 {"seed", std::int64_t{11}}});
         if (first.channels() != 3 ||
             first.pixels().size() != std::size_t{first.height()} * first.width() * 3)
             throw std::runtime_error("text_to_image returned an invalid image");
@@ -66,14 +66,19 @@ int main(int argc, char** argv) {
         std::cout << "text_to_image: " << first.width() << "x" << first.height()
                   << ", replay deterministic\n";
 
-        bool rejected = false;
-        try {
-            (void)task.run({"x", view}, trtmc::Config{{"seed", std::int64_t{1}}});
-        } catch (const std::exception&) {
-            rejected = true;
+        // Initial latents decide the noise: a seed given with them is unused.
+        const auto seeded = task.run({"A lighthouse at dusk", view},
+                                     trtmc::Config{{"num_steps", std::int64_t{2}},
+                                                   {"guidance_scale", 3.0},
+                                                   {"negative_prompt", std::string("blurry")},
+                                                   {"seed", std::int64_t{1}}});
+        const auto c = seeded.pixels();
+        if (c.size() != a.size())
+            throw std::runtime_error("a seed changed the replayed image size");
+        for (std::size_t index = 0; index < a.size(); ++index) {
+            if (c[index] != a[index])
+                throw std::runtime_error("a seed changed the replayed image");
         }
-        if (!rejected)
-            throw std::runtime_error("seed together with initial latents was accepted");
     } catch (const std::exception& error) {
         std::cerr << "chroma C++ SDK consumer error: " << error.what() << "\n";
         return 1;

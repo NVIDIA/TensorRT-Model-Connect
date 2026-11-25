@@ -27,11 +27,12 @@ The following paths contain byte-identical copies of an original photograph
 provided by the project maintainer who took the photograph and authorized its
 inclusion and redistribution in this repository under the Apache License 2.0:
 
+- `families/clipseg/tests/data/test_img.jpeg`
 - `families/chinese_clip/tests/data/test_img.jpeg`
 - `families/idefics3/tests/data/test_img.jpeg`
 - `families/detr/tests/data/test_img.jpeg`
+- `families/vitmatte/tests/data/test_img.jpeg`
 - `families/vjepa2/tests/data/test_img.jpeg`
-
 - `families/layoutlmv3/tests/data/test_img.jpeg`
 - `families/dinov3/tests/data/test_img.jpeg`
 - `families/gemma3n/tests/data/test_img.jpeg`
@@ -51,6 +52,7 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 - `families/sam3/tests/data/test_img.jpeg`
 - `families/segformer/tests/data/test_img.jpeg`
 - `families/smolvlm/tests/data/test_img.jpeg`
+- `families/stable_video_diffusion/tests/data/test_img.jpeg`
 - `families/timm_densenet/tests/data/test_img.jpeg`
 - `families/timm_efficientnet/tests/data/test_img.jpeg`
 - `families/timm_inception/tests/data/test_img.jpeg`
@@ -75,6 +77,7 @@ and saved losslessly as PNG (its pixels equal Pillow's decode of the
 
 Byte-identical copies of that PNG are stored at:
 
+- `families/mask2former/tests/data/test_img.png`
 - `families/minicpmv4_7/tests/data/test_img.png`
 
 `families/timm_resnet/tests/data/test_img_car.jpeg` is a crop of the same
@@ -174,6 +177,11 @@ content in all three model families:
 `probe_02_clean_16k_mono_no_resample.wav` and is distributed under the same
 terms.
 
+Byte-identical copies of `probe_02_clean_16k_mono_no_resample.wav` are also
+stored at:
+
+- `families/nemotron3_diarization/tests/data/maintainer-recording-16k-mono.wav`
+
 The PersonaPlex fixture contains the same maintainer-owned spoken recording,
 converted to mono 24 kHz float32 for official-reference regression tests:
 
@@ -213,6 +221,7 @@ International license:
 - `families/higgs_audio_v2_tokenizer/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/hubert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/mimi/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/nemotron3_diarization/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/qwen3_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/vibevoice_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/wav2vec2_bert/tests/data/librispeech-test-clean-6930-75918-0003.wav`

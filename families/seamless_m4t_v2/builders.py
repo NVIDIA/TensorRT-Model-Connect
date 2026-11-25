@@ -9,7 +9,7 @@ from . import graph as g
 
 
 class Graph:
-    def __init__(self, weights, verbose):
+    def __init__(self, weights, verbose, quant=None):
         self.logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         self.builder = trt.Builder(self.logger)
         self.net = self.builder.create_network(
@@ -19,6 +19,9 @@ class Graph:
         self.options.builder_optimization_level = 3
         self.options.clear_flag(trt.BuilderFlag.TF32)
         self.weights = weights
+        self.quant = quant
+        if quant is not None:
+            quant.configure(self.options)
 
     def const(self, x):
         x = np.ascontiguousarray(x, dtype=np.float32)
@@ -36,9 +39,14 @@ class Graph:
         return self.net.add_elementwise(a, b, trt.ElementWiseOperation.PROD).get_output(0)
 
     def linear(self, x, name):
-        return g.add_linear(
-            self.net, x, self.weights[name + ".weight"], self.weights.get(name + ".bias")
-        )
+        weight = self.weights[name + ".weight"]
+        matmul = None
+        if self.quant is not None and self.quant.covers(name):
+
+            def matmul(network, value):
+                return self.quant.matmul(network, value, name, weight)
+
+        return g.add_linear(self.net, x, weight, self.weights.get(name + ".bias"), matmul=matmul)
 
     def norm(self, x, name, eps):
         return g.add_layer_norm(

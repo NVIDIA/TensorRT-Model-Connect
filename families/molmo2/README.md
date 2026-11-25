@@ -89,7 +89,8 @@ For a manually prepared reference environment, set
 must preserve its virtual environment.
 By default E2E builds a fresh bundle and runs the independent reference. For
 an explicitly prepared bundle/reference run, the test accepts
-`TRTMC_MOLMO2_BUNDLE` and `TRTMC_MOLMO2_REFERENCE_RESULTS`.
+`TRTMC_MOLMO2_BUNDLE` and `TRTMC_MOLMO2_REFERENCE_RESULTS`; select the cases of
+one manifest with them.
 Before generation, qualification checks the builder-recorded Hub identity and
 all recorded build settings against the selected manifest, including the
 2,048-token sequence limit. Use a checkpoint path resolving to the pinned Hub
@@ -97,6 +98,71 @@ snapshot so the builder can record its identity. Bundles with missing or
 mismatched provenance are rejected; the recorded identity remains metadata
 and does not authenticate the contents of supplied local files.
 
-Video, multiple images, batching, parallel execution, quantization, FP16,
-sampling, system prompts, and LoRA are outside this initial path. FP32 graph
+Video, multiple images, batching, parallel execution, NVFP4 quantization,
+FP16, sampling, system prompts, and LoRA are outside this initial path. FP32 graph
 construction is implemented but has not been qualified on the full checkpoint.
+
+## Quantization
+
+`--quantization fp8` (BF16 builds only; the default stays `none`) quantizes
+the text decoder of `allenai/Molmo2-8B` at build time. No ModelOpt FP8 or NVFP4
+checkpoint of Molmo2 exists, so the original checkpoint is quantized one
+projection at a time and FP8 weights are never stored:
+
+| Part | Precision |
+| --- | --- |
+| `att_proj` (q, k, v), `attn_out`, `ff_proj` (up, gate), `ff_out` of all 36 decoder layers | FP8 W8A8: weight scale `amax / 448`, static per-tensor input scale |
+| `ff_out` of layers 6, 16 and 35 | BF16 (input scale 126, 65 and 36 times the median of its kind) |
+| SigLIP tower, pooling attention, image projector, embeddings, `lm_head`, norms, attention core | BF16 (unchanged) |
+
+The input scales in `fp8_activation_scales.json` were calibrated once with
+ModelOpt `FP8_DEFAULT_CFG` (max) on 384 COCO images with questions and
+teacher-forced news / Wikipedia answers (`calibrate_scales.py`, run in the
+reference environment). They are tied to the pinned checkpoint: another
+decoder config or another checkpoint of the same config raises and points to
+the calibration tool. The attention is explicit (FP32 scores), so `attn_out`
+can be FP8. FP8 builds turn the fused gate/up GEMM off: TensorRT 11.1 can fail
+to compile it in front of an FP8 Quantize, and on TensorRT 11.4 the build
+without it is faster on B200 and about 6% slower on B300.
+
+```bash
+PYTHONPATH=core/builder:. python -m tensorrt_model_connect build \
+  allenai/Molmo2-8B \
+  --revision e28fa28597e5ec5e0cca2201dd8ab33d48bc4a1b \
+  --precision bf16 --quantization fp8 --max-sequence-length 2048 \
+  -o molmo2-8b-fp8.bundle
+```
+
+Measured with TensorRT 11.4 (decoder engines driven like the native runtime;
+a 768-row prompt with a five-crop COCO image; request = vision engine, prompt
+and 64 decode steps; medians of 9 interleaved rounds):
+
+| GPU | Engine | Decoder plan (MiB) | Decode step at row 808 / 1900 (ms) | Prompt (ms) | Request (ms) |
+| --- | --- | --- | --- | --- | --- |
+| B200 | BF16 | 14454 | 11.26 / 14.74 | 30.6 | 775 |
+| B200 | FP8 | 7986 | 7.29 / 11.03 (1.54x / 1.34x) | 25.8 | 517 (1.50x) |
+| B300 | BF16 | 14454 | 10.80 / 14.20 | 29.1 | 744 |
+| B300 | FP8 | 7984 | 7.40 / 10.96 (1.46x / 1.30x) | 25.1 | 523 (1.42x) |
+
+Quality against the upstream BF16 model (transformers, teacher-forced) on 26
+held-out COCO images with 6776 answer tokens (up to about 1470 cache rows): KL mean
+0.0081 (p99 0.052) and top-1 agreement 0.949 for FP8, against KL 0.0003 and
+top-1 0.990 for the BF16 engine; the same on B200 and B300. No non-finite
+logit in the teacher-forced runs, in 14 greedy captions, or in noise, black
+and white images decoded until the 2048-row cache is full. The vision engine
+is 3% to 4% of a request and stays BF16. The `molmo2-8b-fp8` E2E manifest
+runs the three BF16 requests on an FP8 bundle and requires the same tokens as
+the upstream BF16 model.
+
+NVFP4 (W4A4, block 16, `add_dynamic_quantize`) was measured and is not
+shipped. All layouts build and run without non-finite values on TensorRT 11.4,
+and decode is 1.02x to 1.14x of FP8, but the loss is 6 to 11 times that of FP8
+(the limit is about 2 times):
+
+| Layout (TensorRT 11.4) | Decoder plan (MiB) | Decode B200 / B300 (ms) | KL mean | Top-1 |
+| --- | --- | --- | --- | --- |
+| FP8, all projections (fused gate/up on) | 7983 | 8.17 / 7.68 | 0.0081 | 0.950 |
+| NVFP4 all projections | 5148 | 7.40 / 6.96 | 0.090 | 0.845 |
+| NVFP4 MLP, FP8 attention | 5778 | 7.14 / 7.15 | 0.064 | 0.862 |
+| NVFP4 MLP except layers 0, 1, 34, 35 (FP8), FP8 attention | 6010 | 7.16 / 7.26 | 0.051 | 0.882 |
+

@@ -312,9 +312,9 @@ def test_models_are_derived_from_the_catalog_and_task_defaults():
         assert resolve_model("sana-wm-bidirectional", environment, root=root)["reference"]["backend"] == "unsupported"
 
 
-def test_a_family_definition_is_merged_over_config_models(tmp_path):
-    """sana-wm-bidirectional: its native adapter in config/models, its reference build policy in the family's own
-    definition (families/sana_wm/tests/aiperf). The resolved reference has both."""
+def test_config_models_is_the_only_definition_of_a_profile(tmp_path):
+    """sana-wm-bidirectional: its native adapter and its reference build policy both come from config/models; without
+    that file the profile has its Task defaults alone (a family holds no AIPerf settings)."""
     import shutil
 
     from trtmc_aiperf_qual.config import CONFIG_ROOT
@@ -326,7 +326,7 @@ def test_a_family_definition_is_merged_over_config_models(tmp_path):
     shutil.copytree(CONFIG_ROOT, root)
     (root / "models/sana-wm-bidirectional.yaml").unlink()
     alone = resolve_model("sana-wm-bidirectional", _environment(), root=root)["reference"]
-    assert "adapter" not in alone and alone["build_isolation"] is False
+    assert "adapter" not in alone and "build_isolation" not in alone
 
 
 def test_task_sdk_migrations_keep_their_tasks_qualification():
@@ -426,20 +426,19 @@ def test_profiles_whose_only_native_reference_is_vllm_are_excluded():
     assert "nemotron-omni-nvfp4-native" not in profiles  # the catalog does not mark it ready
 
 
-def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
-    """A ready profile whose Task has no defaults is excluded (config/tasks.yaml), so a Task SDK rename would leave
-    its profiles out of every run: alias the old entry in config/tasks.yaml, or state the gap here."""
+def test_every_task_entry_serves_a_catalog_task():
+    """A Task SDK rename leaves the old entry of config/tasks.yaml serving no catalog profile, and the renamed
+    profiles without defaults (left out: no Task defaults): alias the old entry under the new name. A Task new to the
+    catalog has no entry yet, and its profiles are left out with that reason."""
     import yaml
 
+    from trtmc_benchmark.catalog import ManifestCatalog
     from trtmc_aiperf_qual.config import CONFIG_ROOT
-    from trtmc_aiperf_qual.selection import catalog
 
-    not_qualified: dict[str, str] = {  # Task -> why no generic native reference or benchmark serves it yet
-        "images_text_to_text": "not every family of this Task declares the OCRBench suite's template controls yet",
-        "text_to_head_scores": "no generic native adapter or reference for per-token head scores",
-    }
     tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
-    assert {profile.task for profile in catalog(REPOSITORY)} - set(tasks) == set(not_qualified)
+    used = {entry.model.task for entry in ManifestCatalog(REPOSITORY / "families").entries() if entry.model} & set(tasks)
+    # An alias is the same entry: the old name stays as its YAML anchor.
+    assert not [name for name, entry in tasks.items() if not any(entry is tasks[task] for task in used)]
 
 
 def test_top1_near_tie_tolerance_is_opt_in():
@@ -789,11 +788,11 @@ def test_rwkv_qualification_build_and_selection_use_the_same_capacity():
 
 
 def test_timing_reference_precision_can_differ_from_the_candidate_precision():
-    from trtmc_aiperf_qual.models import resolve_model
     from trtmc_aiperf_qual.runner import timing_precisions
 
-    z_image = resolve_model("z-image-turbo", _environment())["reference"]
-    assert z_image["perf_precision"] == "fp16" and timing_precisions(z_image) == ["bf16"]
+    # A native model with no valid output at the candidate precision is timed at the declared one alone.
+    declared = {"perf_precision": "fp16", "precision": "fp32", "timing_precision": "bf16"}
+    assert timing_precisions(declared) == ["bf16"]
     assert timing_precisions({"perf_precision": "fp16", "precision": "fp32"}) == ["fp16", "fp32"]
 
 
@@ -1129,15 +1128,15 @@ def test_reports_label_a_timing_normalized_per_audio_second(tmp_path):
     assert "40.000 per audio second</td><td>90.000 per audio second" in report_html._performance([item])
 
 
-def test_a_family_file_adds_an_outlier_allowance_to_a_shared_benchmark_gate(tmp_path):
+def test_a_profile_configuration_adds_an_outlier_allowance_to_a_shared_benchmark_gate(tmp_path):
     from trtmc_aiperf_qual.models import deep_merge, profile_override
 
-    family_file = tmp_path / "families" / "fam" / "tests" / "aiperf" / "enc.yaml"
-    family_file.parent.mkdir(parents=True)
-    family_file.write_text("benchmarks:\n  encoder_parity:\n"
-                           "    gate: {outliers: {max_fraction: 0.01, gate: {max_relative_l2: 0.04}}}\n")
+    definition = tmp_path / "config" / "models" / "enc.yaml"
+    definition.parent.mkdir(parents=True)
+    definition.write_text("benchmarks:\n  encoder_parity:\n"
+                          "    gate: {outliers: {max_fraction: 0.01, gate: {max_relative_l2: 0.04}}}\n")
     shared = {"encoder_parity": {"metric": "vector_parity", "gate": {"min_cosine": 0.999, "max_relative_l2": 0.02}}}
-    override = profile_override("enc", "fam", tmp_path, root=tmp_path / "config")
+    override = profile_override("enc", root=tmp_path / "config")
     gate = deep_merge(shared, override["benchmarks"])["encoder_parity"]["gate"]
     assert gate == {"min_cosine": 0.999, "max_relative_l2": 0.02,
                     "outliers": {"max_fraction": 0.01, "gate": {"max_relative_l2": 0.04}}}

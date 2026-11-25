@@ -47,6 +47,10 @@ def test_audio_tokens_and_depth_requests_name_their_one_input(tmp_path):
     assert depth.request == {"image_path": str(tmp_path / "scene.jpeg")}
     tokens = resolve_task_case("masked_text_to_token_scores", {"prompt": "MKT<mask>V"}, tmp_path)
     assert tokens.request == {"prompt": "MKT<mask>V"}
+    text = resolve_task_case("masked_text_to_token_scores", {"text": "Paris is [MASK]."}, tmp_path)
+    assert text.request == {"prompt": "Paris is [MASK]."}
+    with pytest.raises(BenchmarkError):
+        resolve_task_case("masked_text_to_token_scores", {"prompt": "a", "text": "b"}, tmp_path)
 
 
 def test_point_cloud_requests_carry_the_points_file_and_its_shape(tmp_path):
@@ -94,6 +98,12 @@ def test_image_to_video_requests_send_only_the_stated_controls_and_an_optional_i
     assert flagged.request == {"prompt": "waves", "seed": 42, "num_steps": 50, "guidance_scale": 5.0}
     pictured = resolve_task_case("initial_image_text_to_video", {**case, "image": "start.png"}, tmp_path)
     assert pictured.request["image_path"] == str(tmp_path / "start.png")
+    # an image-only model's testcase (Stable Video Diffusion): no prompt, its steps named num_steps
+    image_only = resolve_task_case("initial_image_text_to_video", {"image": "start.png", "seed": 42, "num_steps": 25},
+                                   tmp_path)
+    assert image_only.request == {"prompt": "", "seed": 42, "num_steps": 25, "image_path": str(tmp_path / "start.png")}
+    with pytest.raises(BenchmarkError):
+        resolve_task_case("initial_image_text_to_video", {**case, "num_steps": 25}, tmp_path)
 
 
 def test_structure_requests_name_the_document_and_only_stated_sampling_controls(tmp_path):
