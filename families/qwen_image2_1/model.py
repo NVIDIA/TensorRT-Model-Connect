@@ -27,6 +27,9 @@ from .bundle_config import (
     scheduler_settings,
 )
 
+# "none" builds as before; "fp8" and "nvfp4" quantize the denoiser (quantization.py).
+QUANTIZATIONS = ("none", "fp8", "nvfp4")
+
 if TYPE_CHECKING:
     from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
@@ -50,8 +53,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("qwen_image2_1 does not support tensor parallelism")
     if request.context_parallel_size != 1:
         raise NotImplementedError("qwen_image2_1 does not support context parallelism")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("qwen_image2_1 does not support quantization")
+    quantization = request.quantization or "none"
+    if quantization not in QUANTIZATIONS:
+        raise NotImplementedError(
+            f"qwen_image2_1 supports quantization none, fp8 or nvfp4, not {quantization}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("qwen_image2_1 does not support fp32_layers")
     if request.mtp_seq_len is not None:
@@ -101,6 +107,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     del text_weights
 
     denoiser_config, denoiser_weights = load_denoiser(model_dir / "transformer")
+    quantized = None
+    if quantization != "none":
+        from .quantization import quantized_projections
+
+        # Refuses a quantized checkpoint and checkpoints without packaged scales.
+        quantized = quantized_projections(quantization, denoiser_config, denoiser_weights)
     if denoiser_config.context_dim != text_config.hidden:
         raise ValueError("transformer context width does not match the text encoder")
     if denoiser_config.in_channels != vae_config.z_dim:
@@ -116,6 +128,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             latent_width=geometry.latent_width,
             text_tokens=geometry.text_tokens,
             verbose=verbose,
+            quantized=quantized,
         )
     del denoiser_weights
 
