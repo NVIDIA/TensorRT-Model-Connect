@@ -20,4 +20,5 @@ if(TRTMC_BUILD_TESTS)
     trtmc_model_jina_embeddings_v3 nlohmann_json::nlohmann_json)
   set_target_properties(test_jina_embeddings_v3_tokenizer PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  add_test(NAME test_jina_embeddings_v3_tokenizer COMMAND test_jina_embeddings_v3_tokenizer)
 endif()

@@ -8,6 +8,9 @@ from pathlib import Path
 import numpy as np
 import tensorrt as trt
 
+from tensorrt_model_connect.model_support import ModelMetadata
+from .support import describe
+
 
 def build_engine(weights, adapters, cfg, length, verbose=False):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -177,6 +180,13 @@ def build_engine(weights, adapters, cfg, length, verbose=False):
     return bytes(plan)
 
 
+def _validate_identity(cfg):
+    if describe(ModelMetadata(cfg, {})) is None:
+        raise ValueError("Expected a Jina embeddings v3 checkpoint")
+    if cfg["hidden_act"] != "gelu":
+        raise ValueError("Jina embeddings v3 requires the GELU activation")
+
+
 def build(request, writer):
     if request.task != "text_to_embedding" or request.backend != "trt":
         raise ValueError("Jina embeddings requires text_to_embedding and backend=trt")
@@ -199,8 +209,7 @@ def build(request, writer):
     directory = Path(request.model_dir)
     cfg = json.loads((directory / "config.json").read_text())
     length = request.max_sequence_length or 256
-    if cfg["model_type"] != "jina_embeddings_v3" or cfg["hidden_act"] != "gelu":
-        raise ValueError("Expected Jina embeddings v3 GELU encoder")
+    _validate_identity(cfg)
     if not 2 <= length <= min(8192, cfg["max_position_embeddings"]):
         raise ValueError("Jina embedding requires a sequence profile in [2, 8192]")
     from safetensors import safe_open

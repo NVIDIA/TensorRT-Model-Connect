@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from functools import cache
 from pathlib import Path
 
@@ -15,6 +16,8 @@ import pytest
 
 from tensorrt_model_connect import BuildRequest, build
 from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
+
+from ._checkpoint import checkpoint_record
 
 FAMILY = "jina_embeddings_v3"
 TASKS = frozenset({"text_to_embedding"})
@@ -239,14 +242,6 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
     record_evidence(
-        "checkpoint",
-        {
-            "repo_id": manifest["hf_id"],
-            "revision": manifest["hf_revision"],
-            "precision": manifest["precision"],
-        },
-    )
-    record_evidence(
         "thresholds",
         {
             key: value
@@ -264,12 +259,19 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                     record_evidence("inputs", {asset_key: asset_path})
                     break
     import numpy as np
-    import torch
-    from transformers import AutoModel, AutoTokenizer
+    from transformers import AutoTokenizer
 
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
         directory = _model_dir(manifest)
+        record_evidence(
+            "checkpoint",
+            checkpoint_record(
+                directory,
+                manifest,
+                local_override=bool(os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")),
+            ),
+        )
     binary, runtime_root = _runtime()
     with evidence_stage("reference"):
         tokenizer = AutoTokenizer.from_pretrained(directory)
@@ -299,32 +301,29 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     with evidence_stage("build"):
         _build(directory, bundle, manifest)
     record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
+    reference_input = tmp_path / "reference-input.json"
+    reference_output = tmp_path / "reference-output.npz"
+    reference_input.write_text(json.dumps(case))
     with evidence_stage("reference"):
-        model = (
-            AutoModel.from_pretrained(directory, dtype=torch.float32, attn_implementation="eager")
-            .eval()
-            .to("cuda")
+        completed = subprocess.run(
+            [
+                os.environ.get("TRTMC_JINA_EMBEDDINGS_V3_REFERENCE_PYTHON", sys.executable),
+                str(TEST_ROOT / "reference.py"),
+                str(directory),
+                str(reference_input),
+                str(reference_output),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=int(case.get("runtime_timeout_s", 3600)),
         )
-    for name in ("retrieval_query", "retrieval_passage"):
-        model.load_adapter(str(directory / name), adapter_name=name)
-    model.eval()
+        assert completed.returncode == 0, completed.stderr + completed.stdout
+        with np.load(reference_output, allow_pickle=False) as archive:
+            reference_values = {name: archive[name] for name in archive.files}
     roles = {}
-    for item in case["inputs"]:
-        if item["role"] == "default":
-            model.disable_adapters()
-        else:
-            model.enable_adapters()
-            model.set_adapter(
-                {"query": "retrieval_query", "document": "retrieval_passage"}[item["role"]]
-            )
-        inputs = tokenizer(item["text"], return_tensors="pt").to("cuda")
-        with evidence_stage("reference"), torch.no_grad():
-            hidden = model(**inputs).last_hidden_state
-            valid = inputs["attention_mask"].unsqueeze(-1)
-            mean = (hidden * valid).sum(dim=1) / valid.sum(dim=1)
-            expected = torch.nn.functional.normalize(mean, dim=-1)[0].cpu().numpy()
+    for index, item in enumerate(case["inputs"]):
+        expected = reference_values[f"embedding_{index}"]
         payload = _run_json(
             binary,
             runtime_root,
@@ -343,7 +342,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         with evidence_stage("comparison"):
             assert payload["pooling"] == "mean" and payload["normalization"] == "l2"
         actual = np.asarray(payload["values"], dtype=np.float32)
-        record_evidence("inputs", {"input": item, "token_ids": inputs["input_ids"].cpu().numpy()})
+        record_evidence(
+            "inputs", {"input": item, "token_ids": reference_values[f"token_ids_{index}"]}
+        )
         record_evidence(
             "thresholds",
             {"cosine_min": 0.99999, "embedding_atol": 1e-4, "embedding_rtol": 0, "norm_atol": 1e-5},

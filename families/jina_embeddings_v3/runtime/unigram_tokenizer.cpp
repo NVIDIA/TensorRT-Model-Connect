@@ -257,6 +257,11 @@ std::vector<int32_t> viterbi_encode(const std::string& text, const Trie& trie, i
     }
 
     std::reverse(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end(),
+                          [unk_id](int32_t left, int32_t right) {
+                              return left == unk_id && right == unk_id;
+                          }),
+              ids.end());
     return ids;
 }
 
@@ -287,7 +292,7 @@ class UnigramTokenizer final : public ITokenizer {
         std::vector<int32_t> ids;
         for (size_t i = 0; i < words.size(); ++i) {
             // Metaspace: prepend ▁ to each word
-            std::string processed = kMetaspaceChar + words[i];
+            std::string processed = (mAddPrefixSpace ? kMetaspaceChar : "") + words[i];
             auto word_ids = viterbi_encode(processed, mTrie, mUnkId, mUnkScore);
             ids.insert(ids.end(), word_ids.begin(), word_ids.end());
         }
@@ -379,6 +384,12 @@ class UnigramTokenizer final : public ITokenizer {
 
         if (!model.contains("vocab") || !model["vocab"].is_array())
             throw std::runtime_error("Invalid tokenizer.json: model.vocab must be an array");
+        for (std::size_t i = 0; i < model.at("vocab").size(); ++i) {
+            const auto& row = model.at("vocab").at(i);
+            if (!row.is_array() || row.size() != 2 || !row.at(0).is_string() ||
+                !row.at(1).is_number() || !std::isfinite(row.at(1).get<double>()))
+                throw std::runtime_error("Invalid tokenizer vocabulary row " + std::to_string(i));
+        }
     }
 
     void parse_vocab(const nlohmann::json& j) {
@@ -388,8 +399,8 @@ class UnigramTokenizer final : public ITokenizer {
 
         for (size_t i = 0; i < vocab.size(); ++i) {
             auto& entry = vocab[i];
-            std::string token = entry[0].get<std::string>();
-            float score = entry[1].get<float>();
+            std::string token = entry.at(0).get<std::string>();
+            float score = entry.at(1).get<float>();
 
             mIdToToken[i] = token;
             mTokenToId[token] = static_cast<int32_t>(i);
@@ -442,6 +453,18 @@ class UnigramTokenizer final : public ITokenizer {
         apply_normalizer_config(norm);
     }
 
+    void configure_metaspace(const nlohmann::json& pt) {
+        const auto policy =
+            pt.value("prepend_scheme", pt.value("add_prefix_space", true) ? "always" : "never");
+        if (policy != "always" && policy != "never")
+            throw std::runtime_error("Unsupported Jina Metaspace prepend policy: " + policy);
+        mAddPrefixSpace = policy == "always";
+        if (pt.value("replacement", kMetaspaceChar) != kMetaspaceChar ||
+            (pt.contains("add_prefix_space") &&
+             pt.at("add_prefix_space").get<bool>() != mAddPrefixSpace))
+            throw std::runtime_error("Unsupported or conflicting Jina Metaspace options");
+    }
+
     void parse_pre_tokenizer(const nlohmann::json& j) {
         if (!j.contains("pre_tokenizer") || j["pre_tokenizer"].is_null())
             return;
@@ -449,13 +472,13 @@ class UnigramTokenizer final : public ITokenizer {
         std::string ptype = pt.value("type", "");
 
         if (ptype == "Metaspace") {
-            mAddPrefixSpace = pt.value("add_prefix_space", true);
+            configure_metaspace(pt);
         } else if (ptype == "Sequence") {
             // Look for Metaspace inside the sequence
             if (pt.contains("pretokenizers")) {
                 for (auto& sub : pt["pretokenizers"]) {
                     if (sub.value("type", "") == "Metaspace") {
-                        mAddPrefixSpace = sub.value("add_prefix_space", true);
+                        configure_metaspace(sub);
                         break;
                     }
                 }

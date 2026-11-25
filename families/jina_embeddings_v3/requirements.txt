@@ -1,3 +1,1 @@
 torch>=2.6
-transformers==5.20.0
-peft==0.21.2
