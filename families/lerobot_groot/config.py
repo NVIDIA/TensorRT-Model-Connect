@@ -216,6 +216,11 @@ def _isaac_libero(model_dir: Path, raw: dict[str, Any]) -> GrootConfig:
                  "use_alternate_vl_dit": True, "use_vlln": True, "use_vl_self_attention": True,
                  "use_future_tokens": False, "action_space_prompt": False, "reproject_vision": False,
                  "num_timestep_buckets": 1000, "num_inference_timesteps": 4, "action_horizon": 40})
+    # Isaac supplies these defaults when absent. The native DiT fixes both values.
+    if "attend_text_every_n_blocks" in raw:
+        expect(raw, {"attend_text_every_n_blocks": 2})
+    if "norm_eps" in raw["diffusion_model_cfg"]:
+        expect(raw["diffusion_model_cfg"], {"norm_eps": 1e-5})
     expect(raw["diffusion_model_cfg"], {"attention_head_dim": 48, "num_attention_heads": 32,
                                          "num_layers": 32, "output_dim": 1024, "norm_type": "ada_norm",
                                          "interleave_self_attention": True, "positional_embeddings": None})
