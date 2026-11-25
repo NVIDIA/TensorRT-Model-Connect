@@ -173,6 +173,11 @@ content in all three model families:
 `probe_02_clean_16k_mono_no_resample.wav` and is distributed under the same
 terms.
 
+Byte-identical copies of `probe_02_clean_16k_mono_no_resample.wav` are also
+stored at:
+
+- `families/nemotron3_diarization/tests/data/maintainer-recording-16k-mono.wav`
+
 The PersonaPlex fixture contains the same maintainer-owned spoken recording,
 converted to mono 24 kHz float32 for official-reference regression tests:
 
@@ -212,6 +217,7 @@ International license:
 - `families/higgs_audio_v2_tokenizer/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/hubert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/mimi/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/nemotron3_diarization/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/qwen3_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/wav2vec2_bert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/wavlm/tests/data/librispeech-test-clean-6930-75918-0003.wav`
