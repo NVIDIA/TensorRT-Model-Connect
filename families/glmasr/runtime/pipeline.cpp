@@ -20,6 +20,14 @@ namespace trtmc {
 
 namespace {
 
+// The next decode step would store one more K/V row. A full cache ends the
+// transcript, as max_new_tokens does, instead of dropping the audio prompt.
+// A state without a length limit (max_length() < 0) never fills.
+bool kv_cache_full(const GlmAsrInferenceState& state) {
+    const int32_t max_length = state.max_length();
+    return max_length >= 0 && state.position() >= max_length;
+}
+
 std::vector<float> resample_linear(const float* samples, int32_t count, int32_t from_rate,
                                    int32_t to_rate) {
     if (from_rate <= 0 || to_rate <= 0 || count <= 0)
@@ -268,6 +276,10 @@ std::vector<int32_t> GlmAsrPipeline::run_decoder(const std::vector<int32_t>& inp
         // Keep the generated stop token in the result, as Native does. The
         // tokenizer hides special tokens from text; work counts include EOS.
         if (config_.is_eos_token(next_token))
+            break;
+        // The last requested token is never fed back: its logits would go
+        // unread, and the step would need one more cache row.
+        if (step + 1 == max_new_tokens || kv_cache_full(*state_))
             break;
         next_token = run_decode_step(next_token);
     }
