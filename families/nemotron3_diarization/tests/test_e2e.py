@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import record_evidence
 
 FAMILY = "nemotron3_diarization"
 TASKS = frozenset({"audio_to_timed_labels"})
@@ -379,13 +380,62 @@ def _native_frames(intervals) -> list[tuple[int, int, int]]:
     return _frames(intervals)
 
 
+def _check(name: str, label: str, actual, operator: str, expected) -> dict:
+    """One row of a reference_comparison record, with the verdict its values state."""
+    passed = actual <= expected if operator == "<=" else actual == expected
+    return {"name": name, "label": label, "scope": "independent_reference", "actual": actual,
+            "operator": operator, "expected": expected, "passed": bool(passed)}
+
+
+def _timeline(path: Path, native_active, reference_active) -> tuple[Path, int]:
+    """A PNG of who is active when: per speaker, the native row above the reference row.
+
+    Returns the file and the frames one pixel column covers. Written with zlib,
+    so the report needs no plotting package.
+    """
+    import struct
+    import zlib
+
+    import numpy as np
+
+    frames = native_active.shape[0]
+    speakers = [speaker for speaker in range(native_active.shape[1])
+                if native_active[:, speaker].any() or reference_active[:, speaker].any()]
+    step = max(1, -(-frames // 1200))
+    columns = max(1, -(-frames // step))
+    lane, gap = 10, 6
+    image = np.full((max(1, len(speakers)) * (2 * lane + gap), columns, 3), 255, dtype=np.uint8)
+    for row, speaker in enumerate(speakers):
+        for offset, active, color in ((0, native_active, (31, 119, 180)),
+                                      (lane, reference_active, (255, 127, 14))):
+            padded = np.zeros(columns * step, dtype=bool)
+            padded[:frames] = active[:, speaker]
+            on = padded.reshape(columns, step).any(axis=1)
+            top = row * (2 * lane + gap) + offset
+            band = image[top:top + lane - 1]
+            band[:, ~on] = (230, 230, 230)
+            band[:, on] = color
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+
+    rows = b"".join(b"\x00" + line.tobytes() for line in image)
+    header = struct.pack(">IIBBBBB", columns, image.shape[0], 8, 2, 0, 0, 0)
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header)
+                     + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
+    return path, step
+
+
 def _first_chunk_frames(model_dir: Path) -> int:
     """Spectrogram frames of the first offline chunk, which runs before any cache state."""
     config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     return int(config["chunk_length"]) * int(config["audio_config"]["subsampling_factor"])
 
 
-def _assert_parity(native: dict, reference, segments, case: dict, first_chunk: int) -> None:
+def _assert_parity(native: dict, reference, segments, case: dict, first_chunk: int,
+                   evidence: tuple[Path, Path] | None = None) -> None:
+    """The native result against the reference; `evidence` names the retained native and
+    reference logits files, next to which the comparison records keep their interval tables."""
     import numpy as np
 
     assert native["labels"] == [f"speaker_{index}" for index in range(8)]
@@ -411,6 +461,18 @@ def _assert_parity(native: dict, reference, segments, case: dict, first_chunk: i
     print(f"{case['name']}: {logits.shape[0]} frames, worst logit gap {gap[worst]:.3e} at "
           f"frame {worst[0]} speaker {worst[1]}, mean gap {gap.mean():.3e}, first chunk "
           f"{first:.3e}")
+    if evidence is not None:
+        record_evidence("reference_comparison", {
+            "label": "Frame logits against the Transformers reference",
+            "scope": "independent_reference", "enforced": True,
+            "native": evidence[0], "reference": evidence[1],
+            "checks": [
+                _check("first_chunk_logit_gap", "First chunk: max |native - reference| logit",
+                       first, "<=", float(tolerance)),
+                _check("logit_gap", "All frames and speakers: max |native - reference| logit",
+                       float(gap[worst]), "<=", float(tolerance)),
+            ],
+        })
     # The first chunk sees no speaker-cache state, so a gap there is the front
     # end, the engines or the step input, never the cache.
     assert first <= tolerance, f"first-chunk logit gap {first:.3e} exceeds {tolerance}"
@@ -427,21 +489,41 @@ def _assert_parity(native: dict, reference, segments, case: dict, first_chunk: i
         "first step, the padding mask and the frames the speaker cache kept")
 
     native_active, reference_active = _active(logits), _active(reference)
-    assert _native_frames((item["start_seconds"], item["end_seconds"], item["label"])
-                          for item in native["intervals"]) == _runs(native_active), (
+    native_frames = _native_frames((item["start_seconds"], item["end_seconds"], item["label"])
+                                   for item in native["intervals"])
+    reference_frames = _frames(segments)
+    assert native_frames == _runs(native_active), (
         "native intervals are not the runs of its own frame decisions")
-    assert _frames(segments) == _runs(reference_active), (
+    assert reference_frames == _runs(reference_active), (
         "the reference segments are not the runs of its frame decisions")
     # A decision may differ only where the reference itself sits within the
     # logit tolerance of the threshold; anywhere else it is a defect.
     flipped = np.argwhere(native_active != reference_active)
+    if evidence is not None:
+        directory = evidence[0].parent
+        tables = (directory / "native_intervals.npy", directory / "reference_intervals.npy")
+        for table, frames in zip(tables, (native_frames, reference_frames)):
+            np.save(table, np.asarray(frames, dtype=np.int64).reshape(-1, 3))
+        beyond = sum(1 for frame, speaker in flipped if abs(reference[frame, speaker]) > tolerance)
+        checks = [_check("decisions_flipped_beyond_tolerance",
+                         "Frame decisions that differ where |reference logit| exceeds the tolerance",
+                         beyond, "==", 0)]
+        if not len(flipped):
+            differing = len(set(native_frames) ^ set(reference_frames))
+            checks.append(_check("intervals_differing",
+                                 "Intervals, as [start frame, end frame, speaker], not in both results",
+                                 differing, "==", 0))
+        record_evidence("reference_comparison", {
+            "label": "Speaker intervals against the Transformers reference segments",
+            "scope": "independent_reference", "enforced": True,
+            "native": tables[0], "reference": tables[1], "checks": checks,
+        })
     for frame, speaker in flipped:
         assert abs(reference[frame, speaker]) <= tolerance, (
             f"frame {frame} speaker {speaker} flipped with reference logit "
             f"{reference[frame, speaker]:.4f}")
     if not len(flipped):
-        assert _native_frames((item["start_seconds"], item["end_seconds"], item["label"])
-                              for item in native["intervals"]) == _frames(segments)
+        assert native_frames == reference_frames
     speakers = sorted({speaker for _, _, speaker in segments})
     print(f"{case['name']}: {len(native['intervals'])} intervals, reference speakers {speakers}, "
           f"{len(flipped)} near-threshold decisions differ; setup {native['setup_ms']:.1f} ms, "
@@ -464,6 +546,11 @@ def test_e2e(tmp_path: Path, case_name: str, request) -> None:
     import numpy as np
 
     wav, samples = _input_audio(case, tmp_path)
+    record_evidence("inputs", {
+        "case": case, "audio": wav, "sample_rate": SAMPLE_RATE,
+        "seconds": round(len(samples) / SAMPLE_RATE, 3),
+        "checkpoint": f"{manifest['hf_id']}@{manifest['hf_revision']}",
+    })
     native = _native(binary, runtime_root, bundle, wav)
     # The consumers print float32 scores with nine digits, the CLI with the
     # double that holds them; both name the same float32 values exactly.
@@ -474,7 +561,31 @@ def test_e2e(tmp_path: Path, case_name: str, request) -> None:
         assert np.array_equal(np.asarray(sdk["frame_scores"], dtype=np.float32), native_scores), (
             "the public SDK frame scores differ from the CLI's")
     reference, segments = _official_reference(model_dir, samples)
-    _assert_parity(native, reference, segments, case, _first_chunk_frames(model_dir))
+    native_file, reference_file = tmp_path / "native_logits.npy", tmp_path / "reference_logits.npy"
+    np.save(native_file, native_scores)
+    np.save(reference_file, reference)
+    timeline, step = _timeline(tmp_path / "speaker_timeline.png", _active(native_scores),
+                               _active(reference))
+    record_evidence("native", {
+        "intervals": native["intervals"], "labels": native["labels"],
+        "frame_seconds": native["frame_seconds"], "score_kind": native["score_kind"],
+        "frame_scores": native_file, "timeline": timeline,
+        "setup_ms": native["setup_ms"], "inference_ms": native["inference_ms"],
+    })
+    record_evidence("reference", {
+        "mode": "hf_transformers", "logits": reference_file,
+        "segments": [{"start_seconds": float(start), "end_seconds": float(end),
+                      "speaker": int(speaker)} for start, end, speaker in segments],
+    })
+    record_evidence("thresholds", {
+        "logit_tolerance": _manifest_value(case, "logit_tolerance", (int, float))})
+    record_evidence("views", [{
+        "title": "Speaker timeline",
+        "caption": "One row pair per active speaker: native above (blue), reference below "
+                   f"(orange); a pixel column covers {step * 10} ms.",
+    }])
+    _assert_parity(native, reference, segments, case, _first_chunk_frames(model_dir),
+                   evidence=(native_file, reference_file))
 
 
 def test_parity_refuses_native_endpoints_off_the_frame_grid() -> None:
