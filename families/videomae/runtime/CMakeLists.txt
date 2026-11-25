@@ -72,5 +72,9 @@ if(TRTMC_BUILD_TESTS)
     set_tests_properties(videomae_sdk_${_language}_refuses_an_oversized_clip PROPERTIES
       LABELS "cpu" PASS_REGULAR_EXPRESSION "clip size overflows host storage"
     )
+    # Fresh CTest discovery uses the case name before its executable exists.
+    add_custom_target(test_videomae_sdk_${_language}_refuses_an_oversized_clip
+      DEPENDS test_videomae_sdk_${_language}
+    )
   endforeach()
 endif()
