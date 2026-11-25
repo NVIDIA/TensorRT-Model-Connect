@@ -196,6 +196,28 @@ def load_model_metadata(model_dir: str | Path) -> ModelMetadata:
     return ModelMetadata(config=config, model_index=model_index, files=files)
 
 
+def checkpoint_identity(model_dir: object) -> dict[str, str] | None:
+    """Return the Hugging Face repository and commit of a cache snapshot."""
+
+    if model_dir is None:
+        return None
+    try:
+        path = Path(model_dir).resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    repository = path.parent.parent.name
+    if (
+        path.parent.name != "snapshots"
+        or re.fullmatch(r"[0-9a-f]{40}", path.name) is None
+        or not repository.startswith("models--")
+    ):
+        return None
+    return {
+        "hf_id": repository.removeprefix("models--").replace("--", "/"),
+        "revision": path.name,
+    }
+
+
 def resolve_model(model: str, revision: str | None = None) -> Path:
     """Resolve a local directory or download one explicit checkpoint revision."""
     local = Path(model)

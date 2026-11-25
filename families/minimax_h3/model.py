@@ -255,7 +255,9 @@ class _MiniMaxH3Model:
         }
 
 
-def build(request: "BuildRequest", writer: "BundleWriter") -> None:
+def build(
+    request: "BuildRequest", writer: "BundleWriter", *, first_block_cache: bool = False
+) -> None:
     """Build one MiniMax-H3 image-generation bundle."""
     if request.dynamic_kv_cache:
         raise NotImplementedError("minimax_h3 does not support dynamic_kv_cache")
@@ -287,7 +289,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if int(request.video_num_frames or 124) != 124:
         raise ValueError("MiniMax-H3 requires video_num_frames=124")
 
-    config = SimpleNamespace(raw={})
+    config = SimpleNamespace(raw={"first_block_cache": first_block_cache})
     model_dir = Path(request.model_dir)
     model = _MiniMaxH3Model()
     weights = model.load_weights(str(model_dir), config)
@@ -300,13 +302,15 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         quantization=request.quantization,
     )
     profile = components["profile"]
-    if profile.first_block_cache:
-        raise RuntimeError("MiniMax-H3 minimal build uses the monolithic denoiser profile")
 
     writer.set_header(family="minimax_h3", task=request.task, backend=request.backend)
     writer.add_bytes("text_encoder.plan", components["text_encoder"])
     writer.add_bytes("adaln.plan", components["adaln_precompute"])
-    writer.add_bytes("denoiser.plan", components["denoiser"])
+    if profile.first_block_cache:
+        for part in ("head", "tail", "finish"):
+            writer.add_bytes(f"denoiser.{part}.plan", components[f"denoiser_{part}"])
+    else:
+        writer.add_bytes("denoiser.plan", components["denoiser"])
     writer.add_bytes("vae.plan", components["vae_decoder"])
     writer.add_bytes("tokenizer.json", components["tokenizer_json"])
     writer.add_json(
@@ -318,8 +322,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "fps": 24,
             "num_inference_steps": 50,
             "seed": 0,
-            "first_block_cache": False,
-            "denoiser_cache_mode": "monolithic",
+            "first_block_cache": profile.first_block_cache,
+            "denoiser_cache_mode": "first_block" if profile.first_block_cache else "monolithic",
             "first_block_cache_threshold": 0.025,
             "text_rows": profile.text_rows,
             "text_rows_min": profile.min_text_rows,

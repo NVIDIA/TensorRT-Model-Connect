@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build-trt",
+      "help": "Build the original fixed-profile TensorRT denoiser or its FirstBlockCache variant",
+      "executor": "python",
+      "handler": "cli_rtx:build_trt",
+      "arguments": [
+        {"name": "model", "type": "string", "help": "Hugging Face model ID or local checkpoint directory"},
+        {"name": "output", "flags": ["-o", "--output"], "type": "path", "required": true},
+        {"name": "revision", "flags": ["--revision"], "type": "string"},
+        {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false},
+        {"name": "quantization", "flags": ["--quantization"], "type": "string", "default": "none", "choices": ["none", "fp8"]},
+        {"name": "first_block_cache", "flags": ["--first-block-cache"], "type": "bool", "action": "store_true", "default": false}
+      ]
+    },
+    {
+      "name": "build-rtx",
+      "help": "Build the dynamic TensorRT-RTX audiovisual bundle with optional Turbo LoRA",
+      "executor": "python",
+      "handler": "cli_rtx:build_rtx",
+      "arguments": [
+        {"name": "model", "type": "string", "help": "MiniMaxAI/MiniMax-H3 or a local auxiliary checkpoint directory"},
+        {"name": "output", "flags": ["-o", "--output"], "type": "path", "required": true},
+        {"name": "revision", "flags": ["--revision"], "type": "string", "help": "The remote always uses the pinned MiniMax-H3 revision. For a local snapshot, require this cache commit."},
+        {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false},
+        {"name": "image_height", "flags": ["--image-height"], "type": "int"},
+        {"name": "image_width", "flags": ["--image-width"], "type": "int"},
+        {"name": "video_num_frames", "flags": ["--video-num-frames"], "type": "int"},
+        {"name": "super_resolution", "flags": ["--super-resolution"], "type": "bool", "action": "store_true"},
+        {"name": "super_resolution_model", "flags": ["--super-resolution-model"], "type": "path"},
+        {"name": "super_resolution_weak_model", "flags": ["--super-resolution-weak-model"], "type": "path"},
+        {"name": "first_block_cache", "flags": ["--first-block-cache"], "type": "bool"},
+        {"name": "first_block_cache_threshold", "flags": ["--first-block-cache-threshold"], "type": "float"},
+        {"name": "ref2va_first_block_cache", "flags": ["--ref2va-first-block-cache"], "type": "bool"},
+        {"name": "ref2va_first_block_cache_threshold", "flags": ["--ref2va-first-block-cache-threshold"], "type": "float"},
+        {"name": "quantized_transformer", "flags": ["--quantized-transformer"], "type": "path"},
+        {"name": "quantized_ref_transformer", "flags": ["--quantized-ref-transformer"], "type": "path"},
+        {"name": "quantized_text_encoder", "flags": ["--quantized-text-encoder"], "type": "path"},
+        {"name": "turbo", "flags": ["--turbo"], "type": "bool", "action": "store_true"},
+        {"name": "turbo_base_precision", "flags": ["--turbo-base-precision"], "type": "string", "choices": ["bf16", "int8"]},
+        {"name": "turbo_transformer", "flags": ["--turbo-transformer"], "type": "path"},
+        {"name": "turbo_ref_transformer", "flags": ["--turbo-ref-transformer"], "type": "path"},
+        {"name": "turbo_text_encoder", "flags": ["--turbo-text-encoder"], "type": "path"},
+        {"name": "turbo_lora", "flags": ["--turbo-lora"], "type": "path"}
+      ]
+    }
+  ]
+}

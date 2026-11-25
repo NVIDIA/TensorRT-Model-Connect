@@ -5,6 +5,7 @@
 
 #include "cli/family_cli.h"
 
+#include "runtime/platform/dynamic_library.h"
 #include "trtmc/internal/cli.h"
 
 #include <algorithm>
@@ -12,7 +13,6 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <dlfcn.h>
 #include <fstream>
 #include <map>
 #include <nlohmann/json.hpp>
@@ -21,7 +21,11 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#if defined(_WIN32)
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 #include <vector>
 
 namespace trtmc::cli {
@@ -371,22 +375,54 @@ void write_error(void* context, const char* data, std::size_t size) {
     }
 }
 
+#if defined(_WIN32)
+// The CRT spawn functions concatenate argv into a Windows command line.
+std::wstring quoted_python_argument(std::string_view value) {
+    std::wstring quoted = L"\"";
+    std::size_t slashes = 0;
+    for (const auto c : fs::u8path(value).wstring()) {
+        if (c == L'\\') {
+            ++slashes;
+            continue;
+        }
+        quoted.append(c == L'"' ? 2 * slashes + 1 : slashes, L'\\');
+        quoted += c;
+        slashes = 0;
+    }
+    quoted.append(2 * slashes, L'\\');
+    return quoted + L'"';
+}
+#endif
+
 int invoke(const fs::path& executable, const std::string& family, const Json& command,
            const Json& values, int argc, char** argv, std::ostream& output, std::ostream& error) {
     if (command.at("executor") == "python") {
+#if defined(_WIN32)
+        std::vector<std::wstring> storage{L"python", L"-m", L"tensorrt_model_connect"};
+        for (int i = 1; i < argc; ++i)
+            storage.push_back(quoted_python_argument(argv[i]));
+        std::vector<const wchar_t*> arguments;
+        for (const auto& argument : storage)
+            arguments.push_back(argument.c_str());
+        arguments.push_back(nullptr);
+        const auto status = _wspawnvp(_P_WAIT, arguments.front(), arguments.data());
+        if (status != -1)
+            return static_cast<int>(status);
+#else
         std::vector<char*> arguments{const_cast<char*>("python3"), const_cast<char*>("-m"),
                                      const_cast<char*>("tensorrt_model_connect")};
         for (int i = 1; i < argc; ++i)
             arguments.push_back(argv[i]);
         arguments.push_back(nullptr);
         execvp(arguments.front(), arguments.data());
+#endif
         throw std::runtime_error("cannot execute Python family command: " +
                                  std::string(std::strerror(errno)));
     }
     const auto directory = executable.parent_path();
     fs::path library;
     for (const auto& root : {directory, directory / "../lib", directory / "../lib64"}) {
-        auto candidate = root / ("libtrtmc_cli_" + family + ".so");
+        auto candidate = root / internal::dynamic_library_filename("trtmc_cli_" + family);
         if (fs::is_regular_file(candidate)) {
             library = fs::absolute(candidate).lexically_normal();
             break;
@@ -394,21 +430,23 @@ int invoke(const fs::path& executable, const std::string& family, const Json& co
     }
     if (library.empty())
         throw std::runtime_error("family CLI library is not installed: " + family);
-    void* handle = dlopen(library.c_str(), RTLD_NOW | RTLD_LOCAL);
+    std::string loader_error;
+    auto handle = internal::open_dynamic_library(library, internal::DynamicLibraryVisibility::local,
+                                                 &loader_error);
     if (handle == nullptr)
-        throw std::runtime_error("cannot load family CLI: " + std::string(dlerror()));
+        throw std::runtime_error("cannot load family CLI: " + loader_error);
     struct Close {
         void* handle;
-        ~Close() { dlclose(handle); }
+        ~Close() { internal::close_dynamic_library(handle); }
     } close{handle};
-    dlerror();
-    auto dispatch = reinterpret_cast<trtmc_family_cli_fn_v1>(dlsym(handle, "trtmc_family_cli_v1"));
-    if (const char* reason = dlerror(); reason != nullptr || dispatch == nullptr)
+    auto dispatch = reinterpret_cast<trtmc_family_cli_fn_v1>(
+        internal::dynamic_library_symbol(handle, "trtmc_family_cli_v1"));
+    if (dispatch == nullptr)
         throw std::runtime_error("family does not provide trtmc_family_cli_v1: " + family);
     Sinks sinks{output, error};
     const auto result =
         dispatch(command.at("handler").get<std::string>().c_str(), values.dump().c_str(),
-                 library.parent_path().c_str(), &sinks, write_output, write_error);
+                 library.parent_path().u8string().c_str(), &sinks, write_output, write_error);
     if (sinks.failed || !output || !error)
         throw std::runtime_error("failed to write family CLI output");
     return result;
@@ -418,7 +456,7 @@ int invoke(const fs::path& executable, const std::string& family, const Json& co
 std::optional<int> run_family_cli(int argc, char** argv, std::ostream& output, std::ostream& error,
                                   const fs::path& executable_override) {
     try {
-        const auto executable = executable_override.empty() ? fs::read_symlink("/proc/self/exe")
+        const auto executable = executable_override.empty() ? internal::current_executable_path()
                                                             : fs::absolute(executable_override);
         const std::string family = argc < 2 ? "--help" : argv[1];
         if (family == "--help" || family == "-h" || family == "help") {

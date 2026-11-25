@@ -1,11 +1,19 @@
 # MiniMax-H3
 
-This family builds `MiniMaxAI/MiniMax-H3` for text to video with audio (the
-`t2va` workflow) at one fixed profile: 1344x768, 124 frames, 50 denoising
-steps. The bundle holds a text encoder engine, an adaLN precompute engine, the
-DiT denoiser (50 blocks, hidden size 5376, 38,247 packed text, audio and video
-rows, one call per step) and a VAE tile decoder. Builds are bf16. An optional
-first-block-cache profile splits the denoiser into three engines.
+The standard TensorRT build uses the original `MiniMaxAI/MiniMax-H3`
+checkpoint at 1344×768, 124 frames and 50 steps. Its native runtime returns
+video frames. The family command accepts a local Diffusers checkpoint directory
+and can build either a monolithic BF16 denoiser or the split FirstBlockCache
+engines.
+
+```bash
+python -m tensorrt_model_connect minimax_h3 build-trt /path/to/checkpoint -o original.bundle
+python -m tensorrt_model_connect minimax_h3 build-trt /path/to/checkpoint -o cached.bundle --first-block-cache
+```
+
+The TensorRT-RTX audiovisual workflow uses a different checkpoint layout.
+See the [RTX recipe](../../website/docs/models-recipes/minimax-h3.md) for the ordinary
+staged build and the [Turbo LoRA recipe](TURBO.md) for the pinned eight-step adapter.
 
 ## Quantization
 

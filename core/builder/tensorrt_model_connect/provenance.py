@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .model_support import checkpoint_identity
+
 CORE_SECTION_PREFIX = "trtmc."
 PROVENANCE_SECTION = "trtmc.provenance.json"
 PROVENANCE_VERSION = 1
@@ -50,28 +52,6 @@ def collect(request: Any) -> dict[str, Any]:
         "checkpoint": checkpoint_identity(getattr(request, "model_dir", None)),
         "build": _build_inputs(request),
         "toolchain": _toolchain(),
-    }
-
-
-def checkpoint_identity(model_dir: object) -> dict[str, str] | None:
-    """Return the Hugging Face repository and commit of a cache snapshot."""
-
-    if model_dir is None:
-        return None
-    try:
-        path = Path(model_dir).resolve()
-    except (OSError, RuntimeError, TypeError, ValueError):
-        return None
-    repository = path.parent.parent.name
-    if (
-        path.parent.name != "snapshots"
-        or _COMMIT.fullmatch(path.name) is None
-        or not repository.startswith("models--")
-    ):
-        return None
-    return {
-        "hf_id": repository.removeprefix("models--").replace("--", "/"),
-        "revision": path.name,
     }
 
 

@@ -40,6 +40,11 @@ def _validate_nonempty_string(field: str, value: object) -> str:
     return value
 
 
+def _file_identity(path: Path) -> tuple[int, int, int, int]:
+    info = path.stat()
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
 class BundleWriter:
     """Stage named sections and atomically publish one bundle."""
 
@@ -52,6 +57,7 @@ class BundleWriter:
         self._header: dict[str, Any] | None = None
         self._sections: list[tuple[str, Path]] = []
         self._section_names: set[str] = set()
+        self._borrowed_files: dict[str, tuple[int, int, int, int]] = {}
         self._staging_dir: Path | None = None
         self._open_sections = 0
         self._failed_section = False
@@ -102,10 +108,7 @@ class BundleWriter:
         self._ensure_writable()
         self._build_request = request
 
-    @contextmanager
-    def open_section(self, name: str) -> Iterator[BinaryIO]:
-        """Open one file-backed section for incremental binary writes."""
-
+    def _validate_section_name(self, name: str) -> str:
         self._ensure_writable()
         name = _validate_nonempty_string("section name", name)
         if name.startswith(provenance.CORE_SECTION_PREFIX):
@@ -113,7 +116,13 @@ class BundleWriter:
                 f"section names starting with {provenance.CORE_SECTION_PREFIX!r} "
                 "are reserved for the core"
             )
-        with self._stage_section(name) as section:
+        return name
+
+    @contextmanager
+    def open_section(self, name: str) -> Iterator[BinaryIO]:
+        """Open one file-backed section for incremental binary writes."""
+
+        with self._stage_section(self._validate_section_name(name)) as section:
             yield section
 
     @contextmanager
@@ -121,7 +130,6 @@ class BundleWriter:
         self._ensure_writable()
         if name in self._section_names:
             raise ValueError(f"duplicate bundle section name: {name!r}")
-
         section_path = self._ensure_staging_dir() / f"section-{len(self._sections)}"
         self._section_names.add(name)
         self._sections.append((name, section_path))
@@ -134,6 +142,33 @@ class BundleWriter:
             raise
         finally:
             self._open_sections -= 1
+
+    def add_file(self, name: str, path: str | Path) -> None:
+        """Borrow an existing file without copying it into section staging.
+
+        The caller must keep the file unchanged until finish or abort. The
+        writer only reads it; cleanup never removes borrowed source files.
+        """
+
+        name = self._validate_section_name(name)
+        if name in self._section_names:
+            raise ValueError(f"duplicate bundle section name: {name!r}")
+        source = Path(path).absolute()
+        if not source.is_file():
+            raise FileNotFoundError(f"bundle section source is not a file: {source}")
+        resolved = source.resolve()
+        if resolved == self._destination.resolve() or (
+            self._staging_dir is not None and self._staging_dir.resolve() in resolved.parents
+        ):
+            raise ValueError("borrowed bundle section must be outside writer-owned paths")
+        self._borrowed_files[name] = _file_identity(source)
+        self._section_names.add(name)
+        self._sections.append((name, source))
+
+    def _check_borrowed_file(self, name: str, path: Path) -> None:
+        identity = self._borrowed_files.get(name)
+        if identity is not None and _file_identity(path) != identity:
+            raise RuntimeError(f"borrowed bundle section source changed: {name!r}")
 
     def add_bytes(self, name: str, data: bytes | memoryview) -> None:
         """Add a complete in-memory binary section.
@@ -173,6 +208,7 @@ class BundleWriter:
         section_table: dict[str, dict[str, int]] = {}
         offset = 0
         for name, path in self._sections:
+            self._check_borrowed_file(name, path)
             length = path.stat().st_size
             if length > _MAX_UINT64 - offset:
                 raise OverflowError("bundle section table exceeds uint64 range")
@@ -196,9 +232,11 @@ class BundleWriter:
                 output.write(BUNDLE_MAGIC)
                 output.write(struct.pack("<Q", len(header_bytes)))
                 output.write(header_bytes)
-                for _, section_path in self._sections:
+                for name, section_path in self._sections:
+                    self._check_borrowed_file(name, section_path)
                     with section_path.open("rb") as section:
                         shutil.copyfileobj(section, output)
+                    self._check_borrowed_file(name, section_path)
             os.replace(temporary_path, self._destination)
             temporary_path = None
         finally:

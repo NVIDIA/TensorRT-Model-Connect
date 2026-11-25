@@ -26,26 +26,23 @@ constexpr float kUniformScale = 1.0F / 16777216.0F;
 constexpr double kPi = 3.14159265358979323846;
 constexpr uint32_t kSchedulerBlockSize = 256;
 constexpr uint32_t kSchedulerMaxBlocks = 4096;
-constexpr int32_t kVaeTileRows = 4;
-constexpr int32_t kVaeTileColumns = 7;
-constexpr int32_t kVaeTileCount = kVaeTileRows * kVaeTileColumns;
 constexpr int32_t kVaeLatentChannels = 24;
 constexpr int32_t kVaeTileInputFrames = 7;
 constexpr int32_t kVaeTileLatentSize = 16;
 constexpr int32_t kVaePatchHeight = 2;
 constexpr int32_t kVaePatchWidth = 2;
 constexpr int32_t kVaePatchDim = 96;
-constexpr int32_t kVaeLatentHeight = 48;
-constexpr int32_t kVaeLatentWidth = 84;
 constexpr int32_t kVaeTileFrames = 28;
 constexpr int32_t kVaeTileSize = 256;
+constexpr int32_t kVaeTileMinOverlap = 64;
+constexpr int32_t kVaeSpatialCompression = 16;
+constexpr int32_t kVaeMaxTileCount = 33;
 constexpr int32_t kVaeOutputChannels = 3;
-constexpr int32_t kVaeOutputHeight = 768;
-constexpr int32_t kVaeOutputWidth = 1344;
 constexpr int32_t kVaeChunkFrames = 17;
 constexpr int32_t kVaeTemporalOverlapFrames = 5;
 constexpr int32_t kVaeTemporalPrePadding = 3;
 constexpr int32_t kVaeTrailingOverlapStart = 23;
+constexpr int32_t kVaeMaxClipCount = 20;
 
 // This is PyTorch's at::mt19937 engine, not std::mt19937. The state transition
 // and low-24-bit uniform mapping are part of torch.Generator CPU determinism.
@@ -122,80 +119,34 @@ __global__ void scheduler_step_kernel(float* sample, const float* velocity, int6
     }
 }
 
-__device__ __forceinline__ int32_t latent_y_start(int32_t tile_y) {
-    switch (tile_y) {
-    case 0:
+__host__ __device__ __forceinline__ int32_t axis_extra_steps(int32_t length, int32_t tile_count) {
+    return (kVaeTileSize * tile_count - kVaeTileMinOverlap * (tile_count - 1) - length) /
+           kVaeSpatialCompression;
+}
+
+__host__ __device__ __forceinline__ int32_t axis_overlap(int32_t length, int32_t tile_count,
+                                                         int32_t boundary) {
+    const int32_t boundaries = tile_count - 1;
+    const int32_t steps = axis_extra_steps(length, tile_count);
+    return kVaeTileMinOverlap +
+           kVaeSpatialCompression * (steps / boundaries + (boundary < steps % boundaries ? 1 : 0));
+}
+
+__host__ __device__ __forceinline__ int32_t axis_start(int32_t length, int32_t tile_count,
+                                                       int32_t tile) {
+    if (tile == 0)
         return 0;
-    case 1:
-        return 10;
-    case 2:
-        return 21;
-    default:
-        return 32;
-    }
-}
-
-__device__ __forceinline__ int32_t latent_x_start(int32_t tile_x) {
-    switch (tile_x) {
-    case 0:
-        return 0;
-    case 1:
-        return 11;
-    case 2:
-        return 22;
-    case 3:
-        return 33;
-    case 4:
-        return 44;
-    case 5:
-        return 56;
-    default:
-        return 68;
-    }
-}
-
-__device__ __forceinline__ int32_t output_y_start(int32_t tile_y) {
-    switch (tile_y) {
-    case 0:
-        return 0;
-    case 1:
-        return 160;
-    case 2:
-        return 336;
-    default:
-        return 512;
-    }
-}
-
-__device__ __forceinline__ int32_t output_x_start(int32_t tile_x) {
-    switch (tile_x) {
-    case 0:
-        return 0;
-    case 1:
-        return 176;
-    case 2:
-        return 352;
-    case 3:
-        return 528;
-    case 4:
-        return 704;
-    case 5:
-        return 896;
-    default:
-        return 1088;
-    }
-}
-
-__device__ __forceinline__ int32_t height_overlap(int32_t boundary) {
-    return boundary == 0 ? 96 : 80;
-}
-
-__device__ __forceinline__ int32_t width_overlap(int32_t boundary) {
-    return boundary < 4 ? 80 : 64;
+    const int32_t boundaries = tile_count - 1;
+    const int32_t steps = axis_extra_steps(length, tile_count);
+    const int32_t partial = tile < steps % boundaries ? tile : steps % boundaries;
+    const int32_t extra_before = tile * (steps / boundaries) + partial;
+    return tile * (kVaeTileSize - kVaeTileMinOverlap) - extra_before * kVaeSpatialCompression;
 }
 
 __global__ void extract_vae_tiles_kernel(const float* video_rows, float* latent_tiles,
-                                         int32_t clip_index, VaeLatentNormalization normalization,
+                                         int32_t clip_index, int32_t output_height,
+                                         int32_t output_width, int32_t tile_rows,
+                                         int32_t tile_columns, VaeLatentNormalization normalization,
                                          int64_t count) {
     const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
     for (int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -211,11 +162,16 @@ __global__ void extract_vae_tiles_kernel(const float* video_rows, float* latent_
         const int32_t tile = static_cast<int32_t>(remaining / kVaeLatentChannels);
 
         const int32_t latent_frame = clip_index * kVaeTemporalOverlapFrames + frame;
-        const int32_t latent_y = latent_y_start(tile / kVaeTileColumns) + y;
-        const int32_t latent_x = latent_x_start(tile % kVaeTileColumns) + x;
+        const int32_t latent_height = output_height / kVaeSpatialCompression;
+        const int32_t latent_width = output_width / kVaeSpatialCompression;
+        const int32_t latent_y =
+            axis_start(output_height, tile_rows, tile / tile_columns) / kVaeSpatialCompression + y;
+        const int32_t latent_x =
+            axis_start(output_width, tile_columns, tile % tile_columns) / kVaeSpatialCompression +
+            x;
         const int32_t patch_row =
-            ((latent_frame * (kVaeLatentHeight / kVaePatchHeight) + latent_y / kVaePatchHeight) *
-                 (kVaeLatentWidth / kVaePatchWidth) +
+            ((latent_frame * (latent_height / kVaePatchHeight) + latent_y / kVaePatchHeight) *
+                 (latent_width / kVaePatchWidth) +
              latent_x / kVaePatchWidth);
         const int32_t patch_column = channel * kVaePatchHeight * kVaePatchWidth +
                                      (latent_y % kVaePatchHeight) * kVaePatchWidth +
@@ -226,30 +182,14 @@ __global__ void extract_vae_tiles_kernel(const float* video_rows, float* latent_
     }
 }
 
-__device__ __forceinline__ int32_t output_tile_y(int32_t y) {
-    if (y < 160)
-        return 0;
-    if (y < 336)
-        return 1;
-    if (y < 512)
-        return 2;
-    return 3;
-}
-
-__device__ __forceinline__ int32_t output_tile_x(int32_t x) {
-    if (x < 176)
-        return 0;
-    if (x < 352)
-        return 1;
-    if (x < 528)
-        return 2;
-    if (x < 704)
-        return 3;
-    if (x < 896)
-        return 4;
-    if (x < 1088)
-        return 5;
-    return 6;
+__device__ __forceinline__ int32_t output_tile(int32_t coordinate, int32_t length,
+                                               int32_t tile_count) {
+    int32_t result = 0;
+    for (int32_t tile = 1; tile < tile_count; ++tile) {
+        if (coordinate >= axis_start(length, tile_count, tile))
+            result = tile;
+    }
+    return result;
 }
 
 __device__ __forceinline__ float decoded_tile_value(const float* decoded_tiles, int32_t tile,
@@ -264,27 +204,28 @@ __device__ __forceinline__ float decoded_tile_value(const float* decoded_tiles, 
     return decoded_tiles[index];
 }
 
-__device__ __forceinline__ float spatially_stitched_value(const float* decoded_tiles,
-                                                          int32_t channel, int32_t frame,
-                                                          int32_t output_y, int32_t output_x) {
-    const int32_t tile_y = output_tile_y(output_y);
-    const int32_t tile_x = output_tile_x(output_x);
-    const int32_t tile = tile_y * kVaeTileColumns + tile_x;
-    const int32_t y = output_y - output_y_start(tile_y);
-    const int32_t x = output_x - output_x_start(tile_x);
+__device__ __forceinline__ float
+spatially_stitched_value(const float* decoded_tiles, int32_t channel, int32_t frame,
+                         int32_t output_y, int32_t output_x, int32_t output_height,
+                         int32_t output_width, int32_t tile_rows, int32_t tile_columns) {
+    const int32_t tile_y = output_tile(output_y, output_height, tile_rows);
+    const int32_t tile_x = output_tile(output_x, output_width, tile_columns);
+    const int32_t tile = tile_y * tile_columns + tile_x;
+    const int32_t y = output_y - axis_start(output_height, tile_rows, tile_y);
+    const int32_t x = output_x - axis_start(output_width, tile_columns, tile_x);
     float value = decoded_tile_value(decoded_tiles, tile, channel, frame, y, x);
 
     // Match stitch_one_spatial_tile exactly: vertical ownership/blend first,
     // followed by the horizontal blend from the left tile.
-    if (tile_y > 0 && y < height_overlap(tile_y - 1)) {
-        const int32_t overlap = height_overlap(tile_y - 1);
+    if (tile_y > 0 && y < axis_overlap(output_height, tile_rows, tile_y - 1)) {
+        const int32_t overlap = axis_overlap(output_height, tile_rows, tile_y - 1);
         const float weight_b = static_cast<float>(y) / overlap;
-        const float upper = decoded_tile_value(decoded_tiles, tile - kVaeTileColumns, channel,
-                                               frame, kVaeTileSize - overlap + y, x);
+        const float upper = decoded_tile_value(decoded_tiles, tile - tile_columns, channel, frame,
+                                               kVaeTileSize - overlap + y, x);
         value = upper * (1.0F - weight_b) + value * weight_b;
     }
-    if (tile_x > 0 && x < width_overlap(tile_x - 1)) {
-        const int32_t overlap = width_overlap(tile_x - 1);
+    if (tile_x > 0 && x < axis_overlap(output_width, tile_columns, tile_x - 1)) {
+        const int32_t overlap = axis_overlap(output_width, tile_columns, tile_x - 1);
         const float weight_b = static_cast<float>(x) / overlap;
         const float left = decoded_tile_value(decoded_tiles, tile - 1, channel, frame, y,
                                               kVaeTileSize - overlap + x);
@@ -305,26 +246,29 @@ __device__ __forceinline__ float normalize_pixel(float value, int32_t channel,
 
 __global__ void assemble_vae_chunk_kernel(const float* decoded_tiles, const float* overlap,
                                           float* frame_major_rgb, int32_t clip_index,
+                                          int32_t output_height, int32_t output_width,
+                                          int32_t tile_rows, int32_t tile_columns,
                                           VaePixelNormalization normalization, int64_t count) {
     const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
     for (int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
          linear < count; linear += stride) {
         int64_t remaining = linear;
-        const int32_t output_x = static_cast<int32_t>(remaining % kVaeOutputWidth);
-        remaining /= kVaeOutputWidth;
-        const int32_t output_y = static_cast<int32_t>(remaining % kVaeOutputHeight);
-        remaining /= kVaeOutputHeight;
+        const int32_t output_x = static_cast<int32_t>(remaining % output_width);
+        remaining /= output_width;
+        const int32_t output_y = static_cast<int32_t>(remaining % output_height);
+        remaining /= output_height;
         const int32_t frame = static_cast<int32_t>(remaining % kVaeChunkFrames);
         const int32_t channel = static_cast<int32_t>(remaining / kVaeChunkFrames);
 
-        float value = spatially_stitched_value(decoded_tiles, channel,
-                                               kVaeTemporalPrePadding + frame, output_y, output_x);
+        float value = spatially_stitched_value(
+            decoded_tiles, channel, kVaeTemporalPrePadding + frame, output_y, output_x,
+            output_height, output_width, tile_rows, tile_columns);
         if (clip_index > 0 && frame < kVaeTemporalOverlapFrames) {
             const int64_t overlap_index =
                 (((static_cast<int64_t>(channel) * kVaeTemporalOverlapFrames + frame) *
-                      kVaeOutputHeight +
+                      output_height +
                   output_y) *
-                     kVaeOutputWidth +
+                     output_width +
                  output_x);
             const float weight_b = static_cast<float>(frame) / kVaeTemporalOverlapFrames;
             value = overlap[overlap_index] * (1.0F - weight_b) + value * weight_b;
@@ -332,7 +276,7 @@ __global__ void assemble_vae_chunk_kernel(const float* decoded_tiles, const floa
         value = normalize_pixel(value, channel, normalization);
         const int32_t output_frame = clip_index * kVaeChunkFrames + frame;
         const int64_t output_index =
-            (((static_cast<int64_t>(output_frame) * kVaeOutputHeight + output_y) * kVaeOutputWidth +
+            (((static_cast<int64_t>(output_frame) * output_height + output_y) * output_width +
               output_x) *
                  kVaeOutputChannels +
              channel);
@@ -342,26 +286,29 @@ __global__ void assemble_vae_chunk_kernel(const float* decoded_tiles, const floa
 
 __global__ void update_vae_overlap_kernel(const float* decoded_tiles, float* overlap,
                                           float* frame_major_rgb, int32_t clip_index,
-                                          VaePixelNormalization normalization, int64_t count) {
+                                          int32_t clip_count, int32_t output_height,
+                                          int32_t output_width, int32_t tile_rows,
+                                          int32_t tile_columns, VaePixelNormalization normalization,
+                                          int64_t count) {
     const int64_t stride = static_cast<int64_t>(blockDim.x) * gridDim.x;
     for (int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
          linear < count; linear += stride) {
         int64_t remaining = linear;
-        const int32_t output_x = static_cast<int32_t>(remaining % kVaeOutputWidth);
-        remaining /= kVaeOutputWidth;
-        const int32_t output_y = static_cast<int32_t>(remaining % kVaeOutputHeight);
-        remaining /= kVaeOutputHeight;
+        const int32_t output_x = static_cast<int32_t>(remaining % output_width);
+        remaining /= output_width;
+        const int32_t output_y = static_cast<int32_t>(remaining % output_height);
+        remaining /= output_height;
         const int32_t frame = static_cast<int32_t>(remaining % kVaeTemporalOverlapFrames);
         const int32_t channel = static_cast<int32_t>(remaining / kVaeTemporalOverlapFrames);
 
         const float value = spatially_stitched_value(
-            decoded_tiles, channel, kVaeTrailingOverlapStart + frame, output_y, output_x);
+            decoded_tiles, channel, kVaeTrailingOverlapStart + frame, output_y, output_x,
+            output_height, output_width, tile_rows, tile_columns);
         overlap[linear] = value;
-        if (clip_index == 6) {
-            const int32_t output_frame = kVaeChunkFrames * 7 + frame;
+        if (clip_index + 1 == clip_count) {
+            const int32_t output_frame = kVaeChunkFrames * clip_count + frame;
             const int64_t output_index =
-                (((static_cast<int64_t>(output_frame) * kVaeOutputHeight + output_y) *
-                      kVaeOutputWidth +
+                (((static_cast<int64_t>(output_frame) * output_height + output_y) * output_width +
                   output_x) *
                      kVaeOutputChannels +
                  channel);
@@ -380,6 +327,27 @@ void check_kernel_launch(const char* label) {
     const cudaError_t status = cudaGetLastError();
     if (status != cudaSuccess)
         throw std::runtime_error(std::string(label) + " failed: " + cudaGetErrorString(status));
+}
+
+int32_t tile_count_for_axis(int32_t length) {
+    if (length <= kVaeTileSize)
+        return 1;
+    int32_t count = length / kVaeTileSize + (length % kVaeTileSize != 0 ? 1 : 0);
+    while (kVaeTileSize * count - kVaeTileMinOverlap * (count - 1) < length)
+        ++count;
+    return count;
+}
+
+void validate_vae_canvas(int32_t output_height, int32_t output_width, int32_t tile_rows,
+                         int32_t tile_columns) {
+    if (output_height <= kVaeTileSize || output_width <= kVaeTileSize ||
+        output_height % (kVaeSpatialCompression * kVaePatchHeight) != 0 ||
+        output_width % (kVaeSpatialCompression * kVaePatchWidth) != 0 || tile_rows <= 1 ||
+        tile_columns <= 1 || tile_rows != tile_count_for_axis(output_height) ||
+        tile_columns != tile_count_for_axis(output_width) ||
+        static_cast<int64_t>(tile_rows) * tile_columns > kVaeMaxTileCount) {
+        throw std::invalid_argument("MiniMax-H3 CUDA VAE canvas/tile geometry is invalid");
+    }
 }
 
 } // namespace
@@ -433,36 +401,44 @@ void scheduler_step_cuda_async(float* sample, const float* velocity, std::size_t
 }
 
 void extract_vae_tiles_cuda_async(const float* video_rows, float* latent_tiles, int32_t clip_index,
+                                  int32_t clip_count, int32_t output_height, int32_t output_width,
+                                  int32_t tile_rows, int32_t tile_columns,
                                   VaeLatentNormalization normalization, cudaStream_t stream) {
     if (video_rows == nullptr || latent_tiles == nullptr || stream == nullptr || clip_index < 0 ||
-        clip_index >= 7)
+        clip_count <= 0 || clip_count > kVaeMaxClipCount || clip_index >= clip_count)
         throw std::invalid_argument("MiniMax-H3 CUDA VAE extraction received invalid inputs");
-    constexpr std::size_t count = static_cast<std::size_t>(kVaeTileCount) * kVaeLatentChannels *
-                                  kVaeTileInputFrames * kVaeTileLatentSize * kVaeTileLatentSize;
+    validate_vae_canvas(output_height, output_width, tile_rows, tile_columns);
+    const std::size_t count = static_cast<std::size_t>(tile_rows) * tile_columns *
+                              kVaeLatentChannels * kVaeTileInputFrames * kVaeTileLatentSize *
+                              kVaeTileLatentSize;
     extract_vae_tiles_kernel<<<launch_grid(count), kSchedulerBlockSize, 0, stream>>>(
-        video_rows, latent_tiles, clip_index, normalization, static_cast<int64_t>(count));
+        video_rows, latent_tiles, clip_index, output_height, output_width, tile_rows, tile_columns,
+        normalization, static_cast<int64_t>(count));
     check_kernel_launch("MiniMax-H3 CUDA VAE extraction launch");
 }
 
 void assemble_vae_clip_cuda_async(const float* decoded_tiles, float* overlap,
-                                  float* frame_major_rgb, int32_t clip_index,
-                                  VaePixelNormalization normalization, cudaStream_t stream) {
+                                  float* frame_major_rgb, int32_t clip_index, int32_t clip_count,
+                                  int32_t output_height, int32_t output_width, int32_t tile_rows,
+                                  int32_t tile_columns, VaePixelNormalization normalization,
+                                  cudaStream_t stream) {
     if (decoded_tiles == nullptr || overlap == nullptr || frame_major_rgb == nullptr ||
-        stream == nullptr || clip_index < 0 || clip_index >= 7)
+        stream == nullptr || clip_index < 0 || clip_count <= 0 || clip_count > kVaeMaxClipCount ||
+        clip_index >= clip_count)
         throw std::invalid_argument("MiniMax-H3 CUDA VAE assembly received invalid inputs");
-    constexpr std::size_t chunk_count = static_cast<std::size_t>(kVaeOutputChannels) *
-                                        kVaeChunkFrames * kVaeOutputHeight * kVaeOutputWidth;
+    validate_vae_canvas(output_height, output_width, tile_rows, tile_columns);
+    const std::size_t chunk_count = static_cast<std::size_t>(kVaeOutputChannels) * kVaeChunkFrames *
+                                    output_height * output_width;
     assemble_vae_chunk_kernel<<<launch_grid(chunk_count), kSchedulerBlockSize, 0, stream>>>(
-        decoded_tiles, overlap, frame_major_rgb, clip_index, normalization,
-        static_cast<int64_t>(chunk_count));
+        decoded_tiles, overlap, frame_major_rgb, clip_index, output_height, output_width, tile_rows,
+        tile_columns, normalization, static_cast<int64_t>(chunk_count));
     check_kernel_launch("MiniMax-H3 CUDA VAE chunk assembly launch");
 
-    constexpr std::size_t overlap_count = static_cast<std::size_t>(kVaeOutputChannels) *
-                                          kVaeTemporalOverlapFrames * kVaeOutputHeight *
-                                          kVaeOutputWidth;
+    const std::size_t overlap_count = static_cast<std::size_t>(kVaeOutputChannels) *
+                                      kVaeTemporalOverlapFrames * output_height * output_width;
     update_vae_overlap_kernel<<<launch_grid(overlap_count), kSchedulerBlockSize, 0, stream>>>(
-        decoded_tiles, overlap, frame_major_rgb, clip_index, normalization,
-        static_cast<int64_t>(overlap_count));
+        decoded_tiles, overlap, frame_major_rgb, clip_index, clip_count, output_height,
+        output_width, tile_rows, tile_columns, normalization, static_cast<int64_t>(overlap_count));
     check_kernel_launch("MiniMax-H3 CUDA VAE overlap assembly launch");
 }
 

@@ -48,6 +48,7 @@ module.exports = {
       items: [
         'models-recipes/cosmos3-edge-llm',
         'models-recipes/hunyuan-edge-llm',
+        'models-recipes/minimax-h3',
         'models-recipes/mistral-edge-llm',
         'models-recipes/nemotron-omni-edge-llm',
         'models-recipes/pi05-edge-llm',
