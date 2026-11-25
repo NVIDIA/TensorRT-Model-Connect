@@ -18,21 +18,45 @@ def test_image_video_controls_must_be_present_but_do_not_apply_to_text_or_speech
     assert unstated_defaults({"text": "hello"}, "generate_audio") == []
 
 
-def test_all_configured_image_profiles_resolve_complete_catalog_requests():
+def test_configured_image_profiles_state_every_control_and_new_ones_are_left_out():
+    """An image profile with a configuration of its own states every control the pipeline would otherwise choose.
+    A catalog profile without one that leaves a control unstated is left out with the controls it leaves, so a
+    family adding an image profile does not configure its qualification."""
     from trtmc_perf_serving.profiles import resolve_profile
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+    from trtmc_aiperf_qual.selection import EXCLUSIONS_SOURCE, MODELS_SOURCE, TASKS_SOURCE, catalog
 
     root = Path(__file__).resolve().parents[3]
     environment = Environment({"repo": str(root), "bundle_root": "/tmp/bundles"})
+    selection = {profile.name: profile for profile in catalog(root)}
     profiles = [entry.name for entry in catalog_profiles(root) if entry.operation == "generate_image"]
     assert profiles
-    failures = []
     for profile in profiles:
         model = resolve_model(profile, environment)
         resolved = resolve_profile(profile, manifest_root=root / "families")
-        request = {**resolved.base_request, **model.get("catalog_request", {})}
-        if missing := unstated_defaults(request, model["operation"]):
-            failures.append((profile, missing))
-    assert not failures
+        missing = unstated_defaults({**resolved.base_request, **model.get("catalog_request", {})}, model["operation"])
+        assert not (missing and (CONFIG_ROOT / "models" / f"{profile}.yaml").is_file()), (profile, missing)
+        if selection[profile].source not in (TASKS_SOURCE, EXCLUSIONS_SOURCE):  # left out earlier for another reason
+            assert (selection[profile].source == MODELS_SOURCE) == bool(missing), profile
+            assert not missing or ", ".join(missing) in selection[profile].excluded
+
+
+def test_a_configured_image_profile_that_stops_stating_a_control_is_left_out(tmp_path):
+    import shutil
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+    from trtmc_aiperf_qual.selection import MODELS_SOURCE, catalog
+
+    root = Path(__file__).resolve().parents[3]
+    config = tmp_path / "config"
+    shutil.copytree(CONFIG_ROOT, config)
+    flux = config / "models/flux-schnell.yaml"
+    flux.write_text("".join(line for line in flux.read_text().splitlines(True) if not line.startswith("request:")))
+    before, after = ({profile.name: profile for profile in catalog(root, path)}["flux-schnell"]
+                     for path in (CONFIG_ROOT, config))
+    assert before.excluded is None
+    assert after.source == MODELS_SOURCE and "guidance_scale" in after.excluded
 
 
 def test_newly_covered_task_profiles_resolve_their_benchmarks():

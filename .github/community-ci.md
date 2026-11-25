@@ -8,7 +8,7 @@ SPDX-License-Identifier: Apache-2.0
 ## Current rollout
 
 Stable keeps the existing Community CI behavior: every pull request runs the
-four parallel CPU stages, and automatic GPU execution remains disabled.
+five parallel CPU stages, and automatic GPU execution remains disabled.
 Maintainers can still request the existing experimental GPU smoke test manually.
 The Internal CI bridge, required status, and maintainer trigger are unchanged.
 
@@ -20,7 +20,7 @@ Both branches use one workflow file, `.github/workflows/community-ci.yml`, named
 **Community CI**. There is no separate Community premerge workflow.
 
 ```text
-Stable: source quality / docs / ownership / C++ and Python units → CPU result
+Stable: source quality / docs / ownership / C++ and Python units / AIPerf qualification → CPU result
 Dev:    source quality / docs / ownership / C++ and Python units → Brev GPU → result
 ```
 

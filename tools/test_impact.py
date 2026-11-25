@@ -35,6 +35,17 @@ SHARED_PREFIXES = (
     "third_party/",
     "tools/",
 )
+# Applications that no family, core code or other application depends on (validate() enforces it). A change
+# confined to one selects no family E2E: the Community CPU unit stage runs the application's own tests.
+ISOLATED_APPS = ("apps/aiperf_qual",)
+# Roots whose files family E2E builds, imports or reads, and the text files there that can name an application.
+DEPENDENT_ROOTS = ("families", "core", "apps")
+DEPENDENT_SUFFIXES = frozenset(
+    {
+        ".c", ".cc", ".cfg", ".cmake", ".cpp", ".cu", ".cuh", ".h", ".hpp", ".ini", ".json", ".py",
+        ".sh", ".toml", ".txt", ".yaml", ".yml",
+    }
+)
 SHARED_FILES = {
     ".clang-format",
     ".coderabbit.yaml",
@@ -89,11 +100,15 @@ def classify(repo: Path, files: Sequence[str]) -> Impact:
     selected: set[str] = set()
     shared = False
     docs = False
+    application = False
     unknown: list[str] = []
 
     for path in changed:
         if path == "families/__init__.py":
             shared = True
+            continue
+        if any(path.startswith(f"{app}/") for app in ISOLATED_APPS):
+            application = True
             continue
         parts = PurePosixPath(path).parts
         if len(parts) >= 2 and parts[0] == "families":
@@ -128,7 +143,7 @@ def classify(repo: Path, files: Sequence[str]) -> Impact:
         return Impact("all", tuple(sorted(known)), direct_families, changed, True, docs)
     if selected:
         return Impact("families", direct_families, direct_families, changed, True, docs)
-    return Impact("docs" if docs else "none", (), (), changed, False, docs)
+    return Impact("docs" if docs else "none", (), (), changed, application, docs)
 
 
 def changed_files(repo: Path, base: str, head: str) -> list[str]:
@@ -149,8 +164,23 @@ def changed_files(repo: Path, base: str, head: str) -> list[str]:
     return [line for line in output.splitlines() if line]
 
 
+def _isolated_app_dependents(repo: Path) -> list[str]:
+    """Files that name an isolated application (its directory or `trtmc_<name>` package) outside it."""
+    names = {app: PurePosixPath(app).name.encode() for app in ISOLATED_APPS}
+    violations = []
+    for root in DEPENDENT_ROOTS:
+        for path in sorted((repo / root).rglob("*")):
+            relative = path.relative_to(repo).as_posix()
+            if path.suffix not in DEPENDENT_SUFFIXES or "__pycache__" in path.parts or not path.is_file():
+                continue
+            others = [app for app in ISOLATED_APPS if not relative.startswith(f"{app}/")]
+            source = path.read_bytes() if others else b""
+            violations.extend(f"{relative} depends on isolated {app}" for app in others if names[app] in source)
+    return violations
+
+
 def validate(repo: Path) -> None:
-    violations: list[str] = []
+    violations: list[str] = _isolated_app_dependents(repo)
     if any(path.is_file() for path in (repo / "tests/cpp/models").glob("**/*")):
         violations.append("central tests/cpp/models is forbidden")
     family_names = set(inventory(repo))

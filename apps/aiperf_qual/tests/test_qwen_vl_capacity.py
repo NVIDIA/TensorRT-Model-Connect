@@ -15,7 +15,7 @@ import pytest
 
 yaml = pytest.importorskip("yaml")
 
-AIPERF = Path(__file__).resolve().parents[2] / "config" / "models"  # the profiles' AIPerf settings
+AIPERF = Path(__file__).resolve().parents[1] / "config" / "models"  # the profiles' AIPerf settings
 MAX_PIXELS = 200704  # the image budget both sides use (the reference's processor_kwargs)
 MERGE = 2
 ANSWER_TOKENS = 128  # OCRBench's max_new_tokens
