@@ -66,14 +66,19 @@ int main(int argc, char** argv) {
         std::cout << "text_to_image: " << first.width() << "x" << first.height()
                   << ", replay deterministic\n";
 
-        bool rejected = false;
-        try {
-            (void)task.run({"x", view}, trtmc::Config{{"seed", std::int64_t{1}}});
-        } catch (const std::exception&) {
-            rejected = true;
+        // Initial latents decide the noise: a seed given with them is unused.
+        const auto seeded = task.run({"A lighthouse at dusk", view},
+                                     trtmc::Config{{"num_steps", std::int64_t{2}},
+                                                   {"guidance_scale", 3.0},
+                                                   {"negative_prompt", std::string("blurry")},
+                                                   {"seed", std::int64_t{1}}});
+        const auto c = seeded.pixels();
+        if (c.size() != a.size())
+            throw std::runtime_error("a seed changed the replayed image size");
+        for (std::size_t index = 0; index < a.size(); ++index) {
+            if (c[index] != a[index])
+                throw std::runtime_error("a seed changed the replayed image");
         }
-        if (!rejected)
-            throw std::runtime_error("seed together with initial latents was accepted");
     } catch (const std::exception& error) {
         std::cerr << "chroma C++ SDK consumer error: " << error.what() << "\n";
         return 1;

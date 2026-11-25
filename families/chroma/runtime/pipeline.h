@@ -68,7 +68,7 @@ class ChromaPipeline final : public internal::IModel, public internal::ITextToIm
         std::vector<float> mask;
     };
 
-    Settings resolve(internal::ConfigView config, bool replay) const;
+    Settings resolve(internal::ConfigView config) const;
     EncodedText encode(std::string_view text);
     std::vector<float> denoise(const std::vector<float>& latents, const EncodedText& text,
                                const std::array<float, 16>& features);
