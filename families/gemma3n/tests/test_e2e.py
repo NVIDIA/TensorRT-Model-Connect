@@ -96,12 +96,12 @@ def _native_build_dir() -> Path:
     return native
 
 
-def _images(directory: Path):
-    """The test photographs as decoded RGB arrays, raw files and lossless PNGs."""
+def _images(directory: Path, photo: str):
+    """The case's photograph and the car photograph as decoded RGB arrays, raw files and lossless PNGs."""
     from PIL import Image
 
     result = {}
-    for name in ("test_img.jpeg", "test_img_car.jpeg"):
+    for name in (Path(photo).name, "test_img_car.jpeg"):
         image = Image.open(ROOT / "data" / name).convert("RGB")
         pixels = np.asarray(image)
         raw, png = directory / f"{name}.rgb", directory / f"{name}.png"
@@ -115,7 +115,7 @@ def _images(directory: Path):
 
 def _conversations(images, max_new_tokens):
     """(name, messages) with image parts as {"image": name} placeholders."""
-    first, second = "test_img.jpeg", "test_img_car.jpeg"
+    first, second = images
     return [
         ("describe", [{"role": "user", "parts": [{"image": first}, {"text": PROMPTS["describe"]}]}]),
         ("system", [{"role": "system", "parts": [{"text": "You answer as briefly as possible."}]},
@@ -311,9 +311,9 @@ def test_e2e(case_name, request, tmp_path):
     # The end-of-sequence ids the builder writes into the bundle.
     stop_ids = validate_processing(checkpoint, ModelConfig.from_dir(checkpoint))["eos_token_ids"]
     max_new_tokens = int(case["max_new_tokens"])
-    images = _images(tmp_path)
+    images = _images(tmp_path, case["test_image"])
     conversations = _conversations(images, max_new_tokens)
-    record_evidence("inputs", {"prompt": PROMPTS["describe"], "image": ROOT / "data" / "test_img.jpeg",
+    record_evidence("inputs", {"prompt": PROMPTS["describe"], "image": ROOT / case["test_image"],
                                "conversations": [_summary(name, messages)
                                                  for name, messages in conversations]})
     margin = None
