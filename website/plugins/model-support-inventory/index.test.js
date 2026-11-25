@@ -12,8 +12,9 @@ const test = require('node:test');
 const modelSupportInventoryPlugin = require('./index');
 const {collectModelSupportInventory} = modelSupportInventoryPlugin;
 
-test('structured ranking exposes a local recipe without unsupported CLI or HF claims', () => {
+test('structured ranking exposes a local recipe without unsupported CLI or HF claims', context => {
   const root = repository();
+  context.after(() => fs.rmSync(root, {recursive: true, force: true}));
   addTaskManifest(root, 'structured_ranking');
   const recipe = collectModelSupportInventory(root).taskRecipes.find(row => row.task === 'structured_ranking');
   assert.equal(recipe.label, 'Structured ranking');

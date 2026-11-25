@@ -67,10 +67,6 @@ def main():
             target = out / source.name
             shutil.copyfile(source, target)
             receipts[source.name] = source.stat().st_size
-    # Retain the image's other families when this directory becomes the loader root.
-    for source in sdk.glob("libtrtmc_model_*.so*"):
-        shutil.copyfile(source, out / source.name)
-        receipts[source.name] = source.stat().st_size
     include = [
         out / "sdk-compat",
         root,

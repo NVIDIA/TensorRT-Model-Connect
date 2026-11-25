@@ -215,7 +215,13 @@ def test_expiry_and_concurrent_stats(workload):
         def poll():
             while not stop.wait(0.001):
                 try:
-                    samples.append(consumer.stats())
+                    value = consumer.stats()
+                    scratch = consumer.metadata["max_batch_size"] * kv_bytes(consumer.metadata)
+                    assert (
+                        value["reserved_bytes"]
+                        == scratch + value["resident_bytes"] + value["restoring_bytes"]
+                    )
+                    samples.append(value)
                 except Exception as error:
                     failures.append(str(error))
 
@@ -232,6 +238,9 @@ def test_expiry_and_concurrent_stats(workload):
                 consumer.score_with_history(
                     handles, snapshot_metadata(snapshot)["revisions"], request
                 )
+            for _ in range(10):
+                consumer.release_history(handles)
+                handles = consumer.restore_history(snapshot)
         finally:
             stop.set()
             thread.join()

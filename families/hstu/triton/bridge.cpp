@@ -190,7 +190,7 @@ const char* hstu_cache_stats(void* pointer) noexcept {
                     {"active_sequences", s.active_sequences},
                     {"allocation_failures", s.allocation_failures}};
         if (handle.history && handle.history->history_supported())
-            result.update(handle.history->history_stats());
+            result = handle.history->cache_snapshot();
         reply = result.dump();
         return reply.c_str();
     } catch (const std::exception& exception) {

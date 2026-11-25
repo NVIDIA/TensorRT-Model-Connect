@@ -200,9 +200,98 @@ def test_python_transport_requires_each_named_tensor(monkeypatch):
     from ..triton.model import TritonPythonModel
 
     transport = TritonPythonModel()
+    transport.batch_min, transport.batch_max = 1, 4
     with pytest.raises(ValueError, match="history_lengths"):
         transport.arrays({}, ["history_lengths"])
     tensor = types.SimpleNamespace(as_numpy=lambda: np.array([[1]], dtype=np.int32))
     arrays, descriptors = transport.arrays({"history_lengths": tensor}, ["history_lengths"])
     assert descriptors[0]["dtype"] == "int32" and descriptors[0]["shape"] == [1, 1]
     assert descriptors[0]["pointer"] == arrays[0].ctypes.data
+
+
+def test_native_generation_failure_is_retryable(tmp_path, monkeypatch):
+    bundle = tmp_path / "input.bundle"
+    bundle.write_bytes(b"bundle")
+    monkeypatch.setattr(
+        native_repository, "runtime_metadata", lambda *_: Config().runtime(4, "fp32")
+    )
+    copy = native_repository.shutil.copyfile
+
+    def fail_copy(*_args):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(native_repository.shutil, "copyfile", fail_copy)
+    with pytest.raises(OSError, match="disk full"):
+        native_repository.generate(bundle, tmp_path / "models", "ranking")
+    assert list((tmp_path / "models").iterdir()) == []
+    monkeypatch.setattr(native_repository.shutil, "copyfile", copy)
+    assert native_repository.generate(bundle, tmp_path / "models", "ranking").is_dir()
+
+
+def test_explicit_dot_runtime_uses_exact_bridge(tmp_path, monkeypatch):
+    import types
+    from ..triton import generate_repository
+
+    loaded = []
+    library = types.SimpleNamespace(
+        hstu_runtime_metadata=lambda _: b'{"task":"structured_ranking"}',
+        hstu_last_error=lambda: b"unused",
+    )
+    monkeypatch.setattr(
+        generate_repository.ctypes, "CDLL", lambda path: loaded.append(path) or library
+    )
+    monkeypatch.chdir(tmp_path)
+    assert generate_repository.runtime_metadata("model.bundle", ".")["task"] == "structured_ranking"
+    assert loaded == [str(tmp_path / "libhstu_triton.so")]
+
+
+def test_python_transport_checks_batch_before_copy(monkeypatch):
+    import types
+    from ..triton import model
+
+    monkeypatch.setattr(
+        model, "pb", types.SimpleNamespace(get_input_tensor_by_name=lambda r, n: r[n])
+    )
+    transport = model.TritonPythonModel()
+    transport.batch_min, transport.batch_max = 1, 4
+
+    def unexpected_copy(_value):
+        raise AssertionError("copied an invalid batch")
+
+    monkeypatch.setattr(model.np, "ascontiguousarray", unexpected_copy)
+    request = {"x": types.SimpleNamespace(as_numpy=lambda: np.zeros((5, 2), np.float32))}
+    with pytest.raises(ValueError, match="batch"):
+        transport.arrays(request, ["x"])
+
+
+def test_metric_failure_preserves_inference_result_and_error(monkeypatch):
+    import types
+    from ..triton import model
+
+    errors = []
+    monkeypatch.setattr(
+        model,
+        "pb",
+        types.SimpleNamespace(
+            Logger=types.SimpleNamespace(log_error=errors.append),
+            InferenceResponse=lambda **kwargs: kwargs,
+            TritonError=str,
+        ),
+    )
+    transport = model.TritonPythonModel()
+    transport.hydration = True
+
+    def fail_metrics():
+        raise RuntimeError("metric unavailable")
+
+    transport.publish = fail_metrics
+    transport.history_execute = lambda _: ["committed handles"]
+    request = types.SimpleNamespace(is_cancelled=lambda: False)
+    assert transport.execute([request])[0]["output_tensors"] == ["committed handles"]
+
+    def fail_request(_request):
+        raise ValueError("invalid snapshot")
+
+    transport.history_execute = fail_request
+    assert transport.execute([request])[0]["error"] == "invalid snapshot"
+    assert len(errors) == 2

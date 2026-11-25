@@ -30,7 +30,7 @@ adapter; the model graph, cache implementation and tensor schema are shared.
 ## Build and change the serving profile
 
 Keep downloaded weights, bundles, build products and test results outside the
-checkout. Conversion requires PyTorch; building requires TensorRT and NumPy.
+checkout. Conversion requires PyTorch 2.10 or newer; building requires TensorRT and NumPy.
 
 ```bash
 export PYTHONPATH="$PWD/core/builder:$PWD"
@@ -212,6 +212,18 @@ SDK DSOs unchanged. It accounts for that prototype's INT64 ordinal and
 four-field factory/six-argument loader ABI. Do not mix it with a main-built
 SDK or assume it applies to another image release. Rebuild serialized engines
 when the TensorRT version or target platform changes.
+
+The helper stages HSTU and common SDK libraries. For an image serving other
+families, install only its two HSTU libraries into the image's existing SDK
+directory during image assembly, and use that SDK directory as `--runtime-root`:
+
+```bash
+install -m 755 /tmp/dlrmv3/deploy/libtrtmc_model_hstu.so \
+  /tmp/dlrmv3/deploy/libhstu_triton.so /usr/lib/x86_64-linux-gnu/
+```
+
+This retains the image's other family plugins in their original installation.
+Use the original SDK library search path when serving from that directory.
 
 The native serving path loads `libtrtmc_model_hstu.so` directly through the
 image's backend. `native_repository.py` generates its configuration;

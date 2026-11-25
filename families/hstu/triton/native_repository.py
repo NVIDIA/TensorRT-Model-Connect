@@ -8,6 +8,7 @@ import json
 import math
 from pathlib import Path
 import shutil
+import tempfile
 from .generate_repository import runtime_metadata
 
 
@@ -36,11 +37,22 @@ def generate(bundle, repository, name, *, parameters=None, instances=1, runtime_
         ):
             raise ValueError("KV ratio must be finite and in (0,1]")
     runtime = runtime_metadata(bundle, runtime_root)
-    fixed = runtime.get("batching") == "fixed"
-    batch = runtime["max_batch_size"]
     target = Path(repository) / name
     if target.exists():
         raise FileExistsError(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".{name}-", dir=target.parent) as temporary:
+        staged = Path(temporary)
+        _write_entry(bundle, staged, name, runtime, parameters, instances)
+        if target.exists():
+            raise FileExistsError(target)
+        staged.rename(target)
+    return target
+
+
+def _write_entry(bundle, target, name, runtime, parameters, instances):
+    fixed = runtime.get("batching") == "fixed"
+    batch = runtime["max_batch_size"]
     (target / "1").mkdir(parents=True)
     shutil.copyfile(bundle, target / "1/model.bundle")
     lines = [
@@ -75,7 +87,6 @@ def generate(bundle, repository, name, *, parameters=None, instances=1, runtime_
             + " } }"
         )
     (target / "config.pbtxt").write_text("\n".join(lines) + "\n")
-    return target
 
 
 def main():

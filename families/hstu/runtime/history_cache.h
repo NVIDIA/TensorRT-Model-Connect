@@ -27,5 +27,6 @@ class IHistoryCache {
     virtual nlohmann::json history_info(const std::string& handle) = 0;
     virtual void release_history(const std::vector<std::string>& handles) = 0;
     virtual nlohmann::json history_stats() const = 0;
+    virtual nlohmann::json cache_snapshot() const = 0;
 };
 } // namespace trtmc::hstu

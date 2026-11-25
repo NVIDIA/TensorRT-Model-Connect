@@ -30,11 +30,15 @@ def test_original_dense_model_matches_full_sequence_reference():
         gate = json.loads(
             (Path(__file__).parent / "thresholds" / f"dlrmv3-fp32-{profile}-b4.json").read_text()
         )["threshold_overrides"]
-        for seed in (42, 43, 250, 1000):
+        for seed in (42, 43, 250, 1000, 1001):
             inputs = example_inputs(config, 4, seed=seed)
             if seed in (42, 43):
                 inputs["history_lengths"][:2, 0] = [0, 18]
                 inputs["num_candidates"][:2, 0] = [1, 2]
+            if seed == 1000:
+                inputs["query_timestamp"].fill(1700009984)
+            if seed == 1001:
+                inputs["query_timestamp"].fill(206587478016)
             original = score_original(model, config, inputs)
             actual = Reference(config, weights).score(inputs)["scores"]
             np.testing.assert_allclose(

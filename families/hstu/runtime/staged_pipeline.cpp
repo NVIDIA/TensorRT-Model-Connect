@@ -152,16 +152,27 @@ std::vector<FeatureTensor> StagedPipeline::run_step(std::int64_t batch) {
     step_->forward_device_async({});
     increment("decode_step_calls_total");
     std::vector<FeatureTensor> outputs;
+    outputs.reserve(config_.at("outputs").size());
     for (const auto& spec : config_.at("outputs")) {
         auto shape = spec.at("shape").get<std::vector<std::int64_t>>();
         shape.at(0) = batch;
         FeatureTensor output{spec.at("name"), parse_dtype(spec.at("dtype")), shape, {}};
         output.bytes.resize(checked_bytes(shape, output.dtype));
-        check(cudaMemcpyAsync(output.bytes.data(), step_->device_ptr(output.name),
-                              output.bytes.size(), cudaMemcpyDeviceToHost, stream));
         outputs.push_back(std::move(output));
     }
+    struct CopyFence {
+        cudaStream_t stream;
+        bool pending{true};
+        ~CopyFence() {
+            if (pending)
+                cudaStreamSynchronize(stream);
+        }
+    } fence{stream};
+    for (auto& output : outputs)
+        check(cudaMemcpyAsync(output.bytes.data(), step_->device_ptr(output.name),
+                              output.bytes.size(), cudaMemcpyDeviceToHost, stream));
     check(cudaStreamSynchronize(stream));
+    fence.pending = false;
     return outputs;
 }
 
@@ -172,6 +183,18 @@ void StagedPipeline::increment(const char* key, std::uint64_t amount) {
 nlohmann::json StagedPipeline::history_stats() const {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     return history_stats_;
+}
+nlohmann::json StagedPipeline::cache_snapshot() const {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    auto result = history_stats_;
+    result.update({{"supported", stats_.supported},
+                   {"budget_bytes", stats_.budget_bytes},
+                   {"reserved_bytes", stats_.reserved_bytes},
+                   {"used_bytes", stats_.used_bytes},
+                   {"peak_bytes", stats_.peak_bytes},
+                   {"active_sequences", stats_.active_sequences},
+                   {"allocation_failures", stats_.allocation_failures}});
+    return result;
 }
 void StagedPipeline::require_history(bool enabled) const {
     if (!request_)

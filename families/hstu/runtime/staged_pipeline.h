@@ -41,6 +41,7 @@ class StagedPipeline final : public trtmc::IStructuredRanking,
     nlohmann::json history_info(const std::string&) override;
     void release_history(const std::vector<std::string>&) override;
     nlohmann::json history_stats() const override;
+    nlohmann::json cache_snapshot() const override;
 
   private:
     std::unique_ptr<ITrtModule> prepare_, step_, request_;

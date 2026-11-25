@@ -337,29 +337,7 @@ class Network:
                 self.mul(self.cast(self_weight, trt.float32), self_val),
             )
             x = self.finish(x, u, attended, layer)
-        timestamp = self.cast(self.reshape(inp["query_timestamp_b"], (-1, 1, 1)), trt.float32)
-        units = self.n.add_unary(
-            self.op(timestamp, self.const(self.w[POST + "_period_units"].reshape(1, 1, 2)), "DIV"),
-            trt.UnaryOperation.FLOOR,
-        ).get_output(0)
-        periods = self.const(self.w[POST + "_units_per_period"].reshape(1, 1, 2))
-        remainder = self.op(
-            units,
-            self.mul(
-                self.n.add_unary(
-                    self.op(units, periods, "DIV"), trt.UnaryOperation.FLOOR
-                ).get_output(0),
-                periods,
-            ),
-            "SUB",
-        )
-        phase = self.mul(self.op(remainder, periods, "DIV"), self.const([2 * 3.14], np.float32))
-        cos = self.n.add_unary(phase, trt.UnaryOperation.COS).get_output(0)
-        sin = self.n.add_unary(phase, trt.UnaryOperation.SIN).get_output(0)
-        features = self.reshape(
-            self.concat([self.reshape(cos, (-1, 1, 2, 1)), self.reshape(sin, (-1, 1, 2, 1))], 3),
-            (-1, 1, 4),
-        )
+        features = self.timestamp_features(inp["query_timestamp_b"])
         features = self.add(
             self.mul(self.slice_last(x, 0, 4), self.const([0], np.float32)), features
         )
@@ -384,11 +362,48 @@ class Network:
             )
         ]
 
-    def define(self, stage):
-        batch = max(self.c.serving.min_batch_size, self.c.serving.opt_batch_size)
-        schema = next(
-            s for s in self.c.runtime(batch, self.precision)["stages"] if s["name"] == stage
+    def timestamp_features(self, query_timestamp):
+        timestamp = self.cast(self.reshape(query_timestamp, (-1, 1, 1)), trt.float32)
+        # Upstream uses div(..., rounding_mode="floor"), whose fmod-based
+        # correction differs from floor(a / b) at FP32 timestamp boundaries.
+        integer_time = self.cast(timestamp, trt.int64)
+        divisor = self.const(self.w[POST + "_period_units"].astype(np.int64).reshape(1, 1, 2))
+        modulo = self.op(
+            integer_time, self.mul(self.op(integer_time, divisor, "FLOOR_DIV"), divisor), "SUB"
         )
+        division = self.op(
+            self.op(timestamp, self.cast(modulo, trt.float32), "SUB"),
+            self.const(self.w[POST + "_period_units"].reshape(1, 1, 2)),
+            "DIV",
+        )
+        floored = self.n.add_unary(division, trt.UnaryOperation.FLOOR).get_output(0)
+        units = self.select(
+            self.op(self.op(division, floored, "SUB"), self.const([0.5], np.float32), "GREATER"),
+            self.add(floored, self.const([1], np.float32)),
+            floored,
+        )
+        integer_units = self.cast(units, trt.int64)
+        periods = self.const(self.w[POST + "_units_per_period"].reshape(1, 1, 2))
+        integer_periods = self.cast(periods, trt.int64)
+        remainder = self.cast(
+            self.op(
+                integer_units,
+                self.mul(self.op(integer_units, integer_periods, "FLOOR_DIV"), integer_periods),
+                "SUB",
+            ),
+            trt.float32,
+        )
+        phase = self.mul(self.op(remainder, periods, "DIV"), self.const([2 * 3.14], np.float32))
+        cos = self.n.add_unary(phase, trt.UnaryOperation.COS).get_output(0)
+        sin = self.n.add_unary(phase, trt.UnaryOperation.SIN).get_output(0)
+        features = self.reshape(
+            self.concat([self.reshape(cos, (-1, 1, 2, 1)), self.reshape(sin, (-1, 1, 2, 1))], 3),
+            (-1, 1, 4),
+        )
+        return features
+
+    def define(self, schema):
+        stage = schema["name"]
         dtype = {"int64": trt.int64, "int32": trt.int32, "float32": trt.float32}
         inp = {
             s["name"]: self.n.add_input(s["name"], dtype[s["dtype"]], s["shape"])

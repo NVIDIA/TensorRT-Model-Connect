@@ -18,7 +18,7 @@ class TritonPythonModel:
         parameters = {
             key: value["string_value"] for key, value in config.get("parameters", {}).items()
         }
-        runtime_root = parameters["runtime_root"]
+        runtime_root = str(Path(parameters["runtime_root"]).resolve())
         self.library = ctypes.CDLL(str(Path(runtime_root) / "libhstu_triton.so"))
         self.library.hstu_create.argtypes = [ctypes.c_char_p]
         self.library.hstu_create.restype = ctypes.c_void_p
@@ -30,6 +30,14 @@ class TritonPythonModel:
         self.library.hstu_cache_stats.restype = ctypes.c_char_p
         self.library.hstu_last_error.restype = ctypes.c_char_p
         self.library.hstu_destroy.argtypes = [ctypes.c_void_p]
+        self.library.hstu_runtime_metadata.argtypes = [ctypes.c_char_p]
+        self.library.hstu_runtime_metadata.restype = ctypes.c_char_p
+        metadata = self.library.hstu_runtime_metadata(parameters["bundle"].encode())
+        if not metadata:
+            raise RuntimeError(self.library.hstu_last_error().decode())
+        runtime = json.loads(metadata)
+        self.batch_min = runtime["min_batch_size"]
+        self.batch_max = runtime["max_batch_size"]
         options = dict(
             bundle=parameters["bundle"],
             runtime_root=runtime_root,
@@ -106,12 +114,20 @@ class TritonPythonModel:
                     self.metrics[key].set(float(value))
 
     def arrays(self, request, names):
-        arrays = []
+        views = []
+        batch = None
         for name in names:
             tensor = pb.get_input_tensor_by_name(request, name)
             if tensor is None:
                 raise ValueError(f"missing input for operation: {name}")
-            arrays.append(np.ascontiguousarray(tensor.as_numpy()))
+            value = tensor.as_numpy()
+            if value.ndim == 0 or not self.batch_min <= value.shape[0] <= self.batch_max:
+                raise ValueError("batch is outside the bundle profile")
+            if batch is not None and value.shape[0] != batch:
+                raise ValueError("input batch dimensions differ")
+            batch = value.shape[0]
+            views.append(value)
+        arrays = [np.ascontiguousarray(value) for value in views]
         specs = [
             dict(
                 name=name,
@@ -176,12 +192,15 @@ class TritonPythonModel:
         )
         return outputs
 
+    def publish_safely(self):
+        try:
+            self.publish()
+        except Exception as error:
+            pb.Logger.log_error(f"HSTU cache metrics update failed: {error}")
+
     def poll(self):
         while not self.stop.wait(0.01):
-            try:
-                self.publish()
-            except Exception as error:
-                pb.Logger.log_error(f"HSTU cache metrics update failed: {error}")
+            self.publish_safely()
 
     def execute(self, requests):
         responses = []
@@ -191,7 +210,6 @@ class TritonPythonModel:
                     raise RuntimeError("request cancelled before native execution")
                 if self.hydration:
                     outputs = self.history_execute(request)
-                    self.publish()
                     responses.append(pb.InferenceResponse(output_tensors=outputs))
                     continue
                 arrays, specs = self.arrays(request, self.input_names)
@@ -203,11 +221,11 @@ class TritonPythonModel:
                     data = (ctypes.c_uint8 * spec["bytes"]).from_address(spec["pointer"])
                     value = np.frombuffer(data, dtype=spec["dtype"]).reshape(spec["shape"]).copy()
                     outputs.append(pb.Tensor(spec["name"], value))
-                self.publish()
                 responses.append(pb.InferenceResponse(output_tensors=outputs))
             except Exception as error:
-                self.publish()
                 responses.append(pb.InferenceResponse(error=pb.TritonError(str(error))))
+            finally:
+                self.publish_safely()
         return responses
 
     def finalize(self):

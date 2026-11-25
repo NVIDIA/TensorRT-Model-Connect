@@ -80,17 +80,18 @@ int main(int argc, char** argv) {
         rejects([&] { task.configure_cache(1); }, TRTMC_INVALID_ARGUMENT);
         rejects([&] { task.configure_cache(1000, .1); }, TRTMC_INVALID_ARGUMENT);
         rejects([&] { task.run({{features, 3}}, {{"unknown", 1}}); }, TRTMC_INVALID_CONFIG);
+        auto input_guard = load("must_not_run").task<trtmc::StructuredRanking>();
         auto bad = features[1];
         features[1].name = "continuous";
-        rejects([&] { task.run({{features, 3}}); }, TRTMC_INVALID_ARGUMENT);
+        rejects([&] { input_guard.run({{features, 3}}); }, TRTMC_INVALID_ARGUMENT);
         features[1] = bad;
         features[1].type = static_cast<trtmc::RankingFeatureType>(99);
-        rejects([&] { task.run({{features, 3}}); }, TRTMC_INVALID_ARGUMENT);
+        rejects([&] { input_guard.run({{features, 3}}); }, TRTMC_INVALID_ARGUMENT);
         features[1] = bad;
         features[1].bytes = {};
-        rejects([&] { task.run({{features, 3}}); }, TRTMC_INVALID_ARGUMENT);
+        rejects([&] { input_guard.run({{features, 3}}); }, TRTMC_INVALID_ARGUMENT);
         features[1] = bad;
-        rejects([&] { task.run({}); }, TRTMC_INVALID_ARGUMENT);
+        rejects([&] { input_guard.run({}); }, TRTMC_INVALID_ARGUMENT);
         for (const auto* mode : {"bad_shape", "bad_kind", "bad_scores"}) {
             auto invalid = load(mode).task<trtmc::StructuredRanking>();
             rejects([&] { invalid.run({{features, 3}}); }, TRTMC_INTERNAL_ERROR);

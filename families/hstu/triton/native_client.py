@@ -68,7 +68,8 @@ class NativeClient:
         self.lock = threading.RLock()
         self.stats_lock = threading.Lock()
         self.handle = None
-        bridge_root = runtime_root if bridge_root is None else bridge_root
+        runtime_root = Path(runtime_root).resolve()
+        bridge_root = runtime_root if bridge_root is None else Path(bridge_root).resolve()
         self.metadata = runtime_metadata(Path(bundle), bridge_root)
         self.library = ctypes.CDLL(str(Path(bridge_root) / "libhstu_triton.so"))
         for name, arguments, result in [

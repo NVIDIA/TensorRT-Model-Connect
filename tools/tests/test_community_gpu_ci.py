@@ -300,6 +300,7 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
     community_gpu_ci.run(
         tmp_path,
         {
+            "TRTMC_ALPHA_MODEL_DIR": "/old",
             "TRTMC_GPU_SCOPE": "families",
             "TRTMC_GPU_FAMILIES": '["alpha"]',
             "TRTMC_GPU_DIRECT_FAMILIES": '["alpha"]',
@@ -506,7 +507,11 @@ def test_external_assets_stage_atomically_without_credentials(
             raise OSError("network failure")
         return Download(b"" if failure == "empty" else b"checkpoint")
 
-    monkeypatch.setattr(community_gpu_ci.urllib.request, "urlopen", download)
+    monkeypatch.setattr(
+        community_gpu_ci.urllib.request,
+        "build_opener",
+        lambda *_handlers: SimpleNamespace(open=download),
+    )
     plan = community_gpu_ci.FamilyPlan(
         "alpha", ("smoke",), (), (("weights/a.bin", "https://models.example/a"),)
     )
@@ -519,3 +524,21 @@ def test_external_assets_stage_atomically_without_credentials(
         directory = Path(env["TRTMC_ALPHA_MODEL_DIR"])
         assert (directory / "weights/a.bin").read_bytes() == b"checkpoint"
         assert not list(directory.rglob("*.part"))
+
+
+@pytest.mark.parametrize("target", ["http://middle.example/file", "file:///tmp/file"])
+def test_external_redirect_rejects_insecure_intermediate_hop(target):
+    handler = community_gpu_ci._HttpsRedirectHandler()
+    request = community_gpu_ci.urllib.request.Request("https://models.example/start")
+    # Even when a later hop would return to HTTPS, reject this hop first.
+    with pytest.raises(CiError, match="away from HTTPS"):
+        handler.redirect_request(request, None, 302, "Found", {}, target)
+
+
+def test_external_redirect_preserves_https_mirrors():
+    handler = community_gpu_ci._HttpsRedirectHandler()
+    request = community_gpu_ci.urllib.request.Request("https://models.example/start")
+    redirected = handler.redirect_request(
+        request, None, 302, "Found", {}, "https://mirror.example/file"
+    )
+    assert redirected.full_url == "https://mirror.example/file"

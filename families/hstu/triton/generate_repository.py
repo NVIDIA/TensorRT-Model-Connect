@@ -14,7 +14,11 @@ import ctypes
 
 def runtime_metadata(path, runtime_root=None):
     # Delegate bundle framing and bounded reads to the public native SDK reader.
-    name = str(Path(runtime_root) / "libhstu_triton.so") if runtime_root else "libhstu_triton.so"
+    name = (
+        str(Path(runtime_root).resolve() / "libhstu_triton.so")
+        if runtime_root
+        else "libhstu_triton.so"
+    )
     library = ctypes.CDLL(name)
     library.hstu_runtime_metadata.argtypes = [ctypes.c_char_p]
     library.hstu_runtime_metadata.restype = ctypes.c_char_p
@@ -51,6 +55,7 @@ def main():
         parser.error("--kv-cache-size-bytes must be positive")
     if not args.name or Path(args.name).name != args.name or args.name in {".", ".."}:
         parser.error("--name must be a single model directory name")
+    args.runtime_root = str(Path(args.runtime_root).resolve())
     runtime = runtime_metadata(args.bundle, args.runtime_root)
     fixed = runtime.get("batching") == "fixed"
     if args.history_cache:

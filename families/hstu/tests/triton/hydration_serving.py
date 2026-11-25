@@ -34,7 +34,7 @@ def call(client, module, model, command, arrays, outputs):
 
 
 def scrape(model):
-    text = urllib.request.urlopen("http://localhost:8002/metrics").read().decode()
+    text = urllib.request.urlopen("http://localhost:8002/metrics", timeout=2).read().decode()
     values = {}
     for line in text.splitlines():
         if line.startswith("hstu_kv_cache_") and f'model="{model}"' in line:
@@ -106,9 +106,15 @@ for profile in ("default", "short"):
                     stop = threading.Event()
                     samples = []
 
+                    poll_errors = []
+
                     def poll():
-                        while not stop.wait(0.002):
-                            samples.append(scrape(model)[1])
+                        try:
+                            while not stop.wait(0.002):
+                                samples.append(scrape(model)[1])
+                        except Exception as error:
+                            poll_errors.append(error)
+                            stop.set()
 
                     thread = threading.Thread(target=poll)
                     thread.start()
@@ -140,7 +146,10 @@ for profile in ("default", "short"):
                                 np.testing.assert_array_equal(response.as_numpy(key), value)
                     finally:
                         stop.set()
-                        thread.join()
+                        thread.join(timeout=3)
+                    assert not thread.is_alive(), "metric polling did not terminate"
+                    if poll_errors:
+                        raise poll_errors[0]
                     text, after = wait_metrics(
                         model,
                         lambda v: (

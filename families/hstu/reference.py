@@ -20,6 +20,13 @@ def sigmoid(x):
     return np.exp(-np.logaddexp(np.float32(0), -x))
 
 
+def timestamp_features(timestamp, period_units, units_per_period):
+    """Match upstream FP32 floor division/remainder before periodic features."""
+    units = np.floor_divide(timestamp.astype(np.float32)[..., None], period_units)
+    phase = np.remainder(units, units_per_period) / units_per_period * np.float32(2 * 3.14)
+    return np.stack([np.cos(phase), np.sin(phase)], -1).reshape(len(timestamp), 1, 4)
+
+
 class Reference:
     def __init__(self, config, weights):
         self.c = config
@@ -126,16 +133,9 @@ class Reference:
             )
             x += np.concatenate([u, attn, gated], -1) @ w[p + "_output_weight"]
         user = x[:, t + 1 :]
-        # Timestamp arithmetic is FP32 before floor/remainder, matching upstream.
-        units = np.floor(
-            inputs["query_timestamp"].astype(np.float32)[..., None] / w[POST + "_period_units"]
+        time_features = timestamp_features(
+            inputs["query_timestamp"], w[POST + "_period_units"], w[POST + "_units_per_period"]
         )
-        phase = (
-            np.remainder(units, w[POST + "_units_per_period"])
-            / w[POST + "_units_per_period"]
-            * np.float32(2 * 3.14)
-        )
-        time_features = np.stack([np.cos(phase), np.sin(phase)], -1).reshape(b, 1, 4)
         user = self.ln(
             self.linear(
                 np.concatenate([user, np.broadcast_to(time_features, (b, c, 4))], -1),

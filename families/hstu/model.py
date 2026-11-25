@@ -69,7 +69,7 @@ def build(request, writer):
     writer.add_json("runtime.json", runtime)
     for stage in runtime["stages"]:
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-        owner = Network(network, config, weights, request.precision).define(stage["name"])
+        owner = Network(network, config, weights, request.precision).define(stage)
         profile = builder.create_optimization_profile()
         for i in range(network.num_inputs):
             tensor = network.get_input(i)

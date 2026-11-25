@@ -5,6 +5,7 @@
 
 import argparse
 import json
+import tempfile
 from pathlib import Path
 import numpy as np
 from .config import Config, ServingProfile
@@ -93,9 +94,12 @@ def validate_weights(weights):
         weights[PRE + "_action_encoder._combined_action_weights"], [1, 2, 4, 8, 16]
     ):
         raise ValueError("unsupported action bitmask encoding")
-    for name in (POST + "_period_units", POST + "_units_per_period"):
-        if (weights[name] <= 0).any():
-            raise ValueError("invalid timestamp periods")
+    for name, expected_periods in (
+        (POST + "_period_units", [[3600, 86400]]),
+        (POST + "_units_per_period", [[24, 7]]),
+    ):
+        if not np.array_equal(weights[name], expected_periods):
+            raise ValueError("unsupported timestamp periods")
     return weights
 
 
@@ -117,23 +121,29 @@ def convert(source, output, *, history_length=512, candidates=128):
         {k: v.detach().cpu().numpy().copy() for k, v in state["dense_dict"].items()}
     )
     config = Config(serving=ServingProfile(history_length=history_length, candidates=candidates))
-    output.mkdir(parents=True, exist_ok=True)
-    np.savez(output / "dlrmv3_weights.npz", **weights)
-    config.save(output)
-    (output / "checkpoint_provenance.json").write_text(
-        json.dumps(
-            dict(
-                model="MLPerf Inference v6.0 DLRMv3",
-                source=DEFAULT_URL,
-                license=LICENSE_URL,
-                scope="complete dense model; sparse embedding lookup is caller-owned",
-                tensor_count=len(weights),
-                tensor_bytes=sum(v.nbytes for v in weights.values()),
-            ),
-            indent=2,
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=f".{output.name}-", dir=output.parent) as temporary:
+        staged = Path(temporary)
+        np.savez(staged / "dlrmv3_weights.npz", **weights)
+        config.save(staged)
+        (staged / "checkpoint_provenance.json").write_text(
+            json.dumps(
+                dict(
+                    model="MLPerf Inference v6.0 DLRMv3",
+                    source=str(Path(source).resolve()),
+                    upstream_reference=DEFAULT_URL,
+                    license=LICENSE_URL,
+                    scope="complete dense model; sparse embedding lookup is caller-owned",
+                    tensor_count=len(weights),
+                    tensor_bytes=sum(v.nbytes for v in weights.values()),
+                ),
+                indent=2,
+            )
+            + "\n"
         )
-        + "\n"
-    )
+        if output.exists():
+            output.rmdir()  # Only the previously allowed empty destination.
+        staged.rename(output)
     return config
 
 

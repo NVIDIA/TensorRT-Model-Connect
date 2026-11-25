@@ -192,6 +192,15 @@ def _stage_checkpoints(plans: tuple[FamilyPlan, ...], cache_dir: Path) -> None:
         print(f"Staged checkpoint {repo_id}@{resolved}")
 
 
+class _HttpsRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject a downgrade before urllib follows any redirect hop."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlsplit(newurl).scheme != "https":
+            raise CiError("external file redirected away from HTTPS")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _stage_external_files(plan: FamilyPlan, parent: Path) -> dict[str, str]:
     """Stage declared public assets before offline tests, without Hub credentials.
 
@@ -202,6 +211,7 @@ def _stage_external_files(plan: FamilyPlan, parent: Path) -> dict[str, str]:
         return {}
     parent.mkdir(parents=True, exist_ok=True)
     root = Path(tempfile.mkdtemp(prefix=f"{plan.family}-", dir=parent))
+    opener = urllib.request.build_opener(_HttpsRedirectHandler())
     try:
         for relative, url in plan.external_files:
             output = root / relative
@@ -209,7 +219,7 @@ def _stage_external_files(plan: FamilyPlan, parent: Path) -> dict[str, str]:
             temporary = output.with_name(output.name + ".part")
             request = urllib.request.Request(url, headers={"User-Agent": "TRTMC-CI"})
             with (
-                urllib.request.urlopen(request, timeout=120) as source,
+                opener.open(request, timeout=120) as source,
                 temporary.open("wb") as target,
             ):
                 if urlsplit(source.geturl()).scheme != "https":
@@ -384,8 +394,8 @@ def run(repository: Path, env: dict[str, str]) -> None:
             _stage_checkpoints((plan,), Path(checkpoint_env["HF_HOME"]) / "hub")
             external_env = _stage_external_files(plan, build.parent / "trtmc-community-external")
             runtime_env = {
-                **external_env,
                 **checkpoint_env,
+                **external_env,
                 "CMAKE_CUDA_ARCHITECTURES": build_env["CMAKE_CUDA_ARCHITECTURES"],
                 "HF_HUB_OFFLINE": "1",
                 "TRANSFORMERS_OFFLINE": "1",

@@ -74,7 +74,6 @@ def test_dlrmv3_e2e(dlrm_case, dlrm_root, dlrm_bridge_root, tmp_path):
     assert case["reference_precision"] == "fp64"
     record_evidence("external_files", manifest["external_files"])
     record_evidence("artifact", dict(bundle=manifest["bundle"], checkpoint=manifest["checkpoint"]))
-    oracle = Reference(c, load_weights(directory, c))
     record_evidence("inputs", dict(manifest=manifest, case=case, checkpoint_dir=str(directory)))
     record_evidence(
         "checkpoint", json.loads((directory / "checkpoint_provenance.json").read_text())
@@ -93,6 +92,7 @@ def test_dlrmv3_e2e(dlrm_case, dlrm_root, dlrm_bridge_root, tmp_path):
         lease_seconds=0,
     ) as task:
         mark_loaded()
+        oracle = Reference(c, load_weights(directory, c))
         errors, agreement, overlap = [], [], []
         seeds = [*range(42, 50), *range(142, 158), *range(242, 258)]
         for seed in seeds:
@@ -130,6 +130,19 @@ def test_dlrmv3_e2e(dlrm_case, dlrm_root, dlrm_bridge_root, tmp_path):
             groups.append(
                 dict(seeds=seeds[begin:end], top1=top1, top10=top10, max_abs=max(errors[begin:end]))
             )
+        timestamp_errors = []
+        for timestamp in (1700009984, 206587478016, 2**40):
+            boundary = example_inputs(c, b, seed=42)
+            boundary["query_timestamp"].fill(timestamp)
+            target = oracle.score(boundary)["scores"]
+            result = task.score(boundary)["scores"]
+            np.testing.assert_allclose(
+                result, target, atol=gate["score_atol"], rtol=gate["score_rtol"]
+            )
+            timestamp_errors.append(
+                dict(timestamp=timestamp, max_abs=float(np.max(abs(result - target))))
+            )
+        record_evidence("timestamp_boundaries", timestamp_errors)
         history = {
             spec["name"]: inputs[spec["name"]] for spec in task.metadata["stages"][0]["inputs"]
         }
