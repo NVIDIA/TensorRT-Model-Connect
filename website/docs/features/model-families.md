@@ -167,6 +167,14 @@ are 0, a power of two below 64, or a multiple of 64. Each extra engine carries
 its own copy of the weights, so it adds to the bundle size and build time.
 Bundles built before this engine existed still load and prefill token by token.
 
+When the decode and prefill engines' weights do not both fit in 80% of the GPU
+memory (a 27B FP16 checkpoint on a 128 GB unified-memory GPU), a bundle without
+MTP ships only `prefill_engine.plan` (`decoder_engine_layout: "chunked"`). It
+also decodes, one row per call. A prompt must fit the KV cache
+(`--max-sequence-length`), and generation stops when the cache is full; a
+bundle with the decode engine instead shifts the cache. Older runtimes reject
+these bundles.
+
 ### Nemotron-H Edge-LLM execution
 
 Use `trtmc nemotron_h build MODEL -o model.bundle` with the owning
