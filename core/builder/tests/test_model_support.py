@@ -116,7 +116,7 @@ def test_modular_index_preserves_existing_config_identity(tmp_path: Path, config
 
     assert metadata.config == config
     assert metadata.model_index == {}
-    assert metadata.files == ("modular_model_index.json",)
+    assert metadata.files == ("config.json", "modular_model_index.json")
 
 
 def test_standard_pipeline_index_takes_precedence_over_modular_index(tmp_path: Path) -> None:
