@@ -152,12 +152,14 @@ class Graph:
         ).get_output(0)
         return self.cast(y, v.dtype)
 
-    def finish(self):
+    def finish(self, configure=None):
         config = self.builder.create_builder_config()
         config.builder_optimization_level = 3
         config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
         config.clear_flag(trt.BuilderFlag.TF32)
         config.add_optimization_profile(self.profile)
+        if configure is not None:
+            configure(config)
         plan = self.builder.build_serialized_network(self.net, config)
         if plan is None:
             raise RuntimeError("Molmo2 TensorRT engine construction failed")

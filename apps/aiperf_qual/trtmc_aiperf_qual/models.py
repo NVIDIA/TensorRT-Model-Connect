@@ -213,10 +213,7 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     entries = {entry.name: entry for entry in catalog_profiles(repository)}
     if profile not in entries:
         raise ConfigError(f"{profile} is not a ready catalog profile")
-    _import_repository(repository)
-    from trtmc_benchmark.catalog import ManifestCatalog
-
-    catalog_model = ManifestCatalog(repository / "families").resolve(profile)
+    catalog_model = entries[profile].model  # what ManifestCatalog.resolve returns, without reading every manifest again
     manifest = json.loads(Path(catalog_model.manifest_path).read_text())
     tasks = yaml.safe_load((root / "tasks.yaml").read_text())
     if catalog_model.task not in tasks["tasks"]:

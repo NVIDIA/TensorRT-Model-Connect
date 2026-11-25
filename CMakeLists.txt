@@ -965,6 +965,8 @@ if(TRTMC_BUILD_TESTS)
     CUDA::cudart
   )
   target_compile_options(test_trt_module_dynamic_input PRIVATE -Wall -Wextra -Wpedantic)
+  target_link_libraries(test_trt_module_dynamic_input PRIVATE ${CMAKE_DL_LIBS})
+  target_link_options(test_trt_module_dynamic_input PRIVATE "-Wl,--export-dynamic-symbol=cudaMemcpy")
   add_test(NAME trt_module_dynamic_input COMMAND test_trt_module_dynamic_input)
   set_tests_properties(trt_module_dynamic_input PROPERTIES SKIP_RETURN_CODE 77 LABELS gpu)
 

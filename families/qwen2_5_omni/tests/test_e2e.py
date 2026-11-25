@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pinned Qwen2.5 Omni Thinker MoE parity through native incremental text continuation."""
+"""Pinned Qwen2.5 Omni Thinker parity through native incremental text continuation.
+
+The FP32 bundle must reproduce the Hugging Face FP32 greedy tokens exactly. An
+FP8 bundle (``quantization`` in the manifest) must start with the reference's
+first ``min_equal_prefix_tokens`` tokens and contain the expected word.
+"""
 
 from __future__ import annotations
 
@@ -196,6 +201,16 @@ def _run_json(
     return payloads[0]
 
 
+def _equal_prefix(payload: dict, expected_ids: list[int]) -> int:
+    """Number of leading native tokens equal to the reference tokens."""
+    count = 0
+    for left, right in zip(payload["token_ids"], expected_ids):
+        if left != right:
+            break
+        count += 1
+    return count
+
+
 def test_official_checkpoint_e2e(case_name, tmp_path, request):
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
@@ -236,7 +251,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         {
             "model_dir": str(directory),
             "hf_revision": checkpoint_revision,
-            "revision_status": "unverified" if checkpoint_revision is None else "pinned_cache_lookup",
+            "revision_status": "unverified"
+            if checkpoint_revision is None
+            else "pinned_cache_lookup",
         },
     )
     binary, runtime_root = _runtime()
@@ -272,7 +289,17 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         .to("cuda")
     )
     reference = complete.thinker
-    record_evidence("thresholds", {"token_ids": "exact equality", "text": "exact equality"})
+    quantized = manifest.get("quantization") not in (None, "none")
+    if quantized:
+        record_evidence(
+            "thresholds",
+            {
+                "token_ids": f"first {case['min_equal_prefix_tokens']} tokens equal",
+                "text": "contains the expected word",
+            },
+        )
+    else:
+        record_evidence("thresholds", {"token_ids": "exact equality", "text": "exact equality"})
     expected = []
     for prompt in case["prompts"]:
         inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
@@ -325,10 +352,26 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
                 path = tmp_path / f"{role}-comparison-{sample_index}.json"
                 path.write_text(json.dumps(output, ensure_ascii=False, indent=2))
                 pair[role] = path
-            mismatches = abs(len(payload["token_ids"]) - len(expected_ids)) + sum(
-                left != right for left, right in zip(payload["token_ids"], expected_ids)
-            )
-            text_mismatch = int(payload["text"] != expected_text)
+            if quantized:
+                word = case["expected_words"][sample_index]
+                checks = [
+                    (
+                        "equal_prefix_tokens",
+                        _equal_prefix(payload, expected_ids),
+                        ">=",
+                        case["min_equal_prefix_tokens"],
+                    ),
+                    ("expected_word_missing", int(word not in payload["text"]), "==", 0),
+                ]
+            else:
+                mismatches = abs(len(payload["token_ids"]) - len(expected_ids)) + sum(
+                    left != right for left, right in zip(payload["token_ids"], expected_ids)
+                )
+                text_mismatch = int(payload["text"] != expected_text)
+                checks = [
+                    ("token_mismatches", mismatches, "==", 0),
+                    ("text_mismatch", text_mismatch, "==", 0),
+                ]
             record_evidence(
                 "reference_comparison",
                 {
@@ -341,20 +384,30 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
                             "name": name,
                             "scope": "independent_reference",
                             "actual": value,
-                            "operator": "==",
-                            "expected": 0,
-                            "passed": value == 0,
+                            "operator": operator,
+                            "expected": limit,
+                            "passed": value >= limit if operator == ">=" else value == limit,
                         }
-                        for name, value in (
-                            ("token_mismatches", mismatches),
-                            ("text_mismatch", text_mismatch),
-                        )
+                        for name, value, operator, limit in checks
                     ],
                 },
             )
 
+        assert expected_text.strip()
+        if quantized:
+            # FP8 changes the logits a little: the answer must start with the reference's
+            # tokens and contain the expected word; later tokens may leave it after a near tie.
+            assert case["expected_words"][sample_index] in expected_text
+            assert _equal_prefix(payload, expected_ids) >= case["min_equal_prefix_tokens"], {
+                "native": payload,
+                "reference": expected_ids,
+            }
+            assert case["expected_words"][sample_index] in payload["text"], payload
+            print(
+                f"Qwen2.5 Omni Thinker FP8 answer {payload['text']!r} (reference {expected_text!r})"
+            )
+            continue
         assert payload["token_ids"] == expected_ids
         assert payload["text"] == expected_text
-        assert expected_text.strip()
 
         print(f"Qwen2.5 Omni Thinker generated {len(expected_ids)} exact tokens: {expected_text!r}")

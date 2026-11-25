@@ -31,7 +31,8 @@ def test_reference_python_preserves_virtual_environment(tmp_path, monkeypatch):
     "override",
     [
         {"precision": "fp16"},
-        {"quantization": "fp8"},
+        {"quantization": "nvfp4"},
+        {"quantization": "fp8", "precision": "fp32"},
         {"tensor_parallel_size": 2},
         {"context_parallel_size": 2},
         {"dynamic_kv_cache": True},

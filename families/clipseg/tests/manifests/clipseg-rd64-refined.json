@@ -1,0 +1,21 @@
+{
+  "name": "clipseg-rd64-refined",
+  "hf_id": "CIDAS/clipseg-rd64-refined",
+  "hf_revision": "999e0328d9e10b484360c477313983f9afdd7050",
+  "bundle": "clipseg-rd64-refined.bundle",
+  "family": "clipseg",
+  "task": "text_prompted_segmentation",
+  "precision": "fp32",
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "clipseg-rd64-refined",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg",
+      "prompts": [
+        "a car",
+        "the sky"
+      ]
+    }
+  ]
+}

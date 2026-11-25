@@ -201,9 +201,10 @@ public CI, protected CI, or maintainer review.
 ### 9. Run contributor-visible Community CI
 
 Opening a pull request or pushing a new commit automatically starts **Stable
-Community CI** with the existing four parallel CPU stages: source quality,
-documentation, ownership and impact, and C++/Python unit tests. The
-`Community CPU / Required` result requires all four to pass.
+Community CI** with five parallel CPU stages: source quality, documentation,
+ownership and impact, C++/Python unit tests, and the AIPerf qualification
+application's tests in its own environment. The `Community CPU / Required`
+result requires all five to pass.
 
 Stable automatic Community GPU execution remains disabled during qualification.
 Maintainers retain the existing manual GPU smoke option. **Dev Community CI**

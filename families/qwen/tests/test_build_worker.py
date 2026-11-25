@@ -320,6 +320,8 @@ def _process_is_running(pid):
     stat = Path(f"/proc/{pid}/stat")
     try:
         state = stat.read_text().rsplit(") ", 1)[1].split()[0]
+    except ProcessLookupError:  # reaped between the signal and the read: reading its open stat file fails with ESRCH
+        return False
     except FileNotFoundError:
         return not Path("/proc").is_dir()
     return state not in {"Z", "X"}

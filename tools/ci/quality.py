@@ -179,8 +179,6 @@ class UnitTestRunner:
                     "test_voicechat_full_duplex_source.py"
                 ),
                 "tools/tests",
-                # Each family's AIPerf qualification settings, checked where they live (apps/aiperf_qual/config).
-                "apps/aiperf_qual/tests/families",
                 *(
                     str(path.relative_to(self.context.repository))
                     for path in sorted(self.context.repository.glob("families/*/tests/test_support.py"))

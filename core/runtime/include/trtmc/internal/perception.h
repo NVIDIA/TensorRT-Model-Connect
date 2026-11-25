@@ -40,6 +40,29 @@ struct BinaryImageMask {
     std::uint32_t height{0}, width{0};
 };
 
+// Aligned categorical trimap: background=0, unknown=1, foreground=2. The
+// family maps states into its checkpoint input representation.
+struct ImageTrimapView {
+    Span<const uint8_t> states;
+    uint32_t height{0}, width{0};
+};
+struct ImageTrimapToAlphaRequest {
+    ImageView image;
+    ImageTrimapView trimap;
+};
+struct AlphaMatteResult {
+    FloatMatrix alpha;
+}; // Original-image [H,W] continuous opacity in [0,1].
+class IImageTrimapToAlpha {
+  public:
+    using TaskInterface = IImageTrimapToAlpha;
+    static constexpr std::string_view kTask = "image_trimap_to_alpha";
+    virtual ~IImageTrimapToAlpha() = default;
+    // Family profile validation uses metadata only, before shared payload scans.
+    virtual void validate_request(const ImageTrimapToAlphaRequest&, ConfigView) const = 0;
+    virtual AlphaMatteResult run(const ImageTrimapToAlphaRequest&, ConfigView) = 0;
+};
+
 struct ImageToSemanticSegmentationRequest {
     ImageView image;
 };

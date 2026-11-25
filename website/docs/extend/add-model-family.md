@@ -207,8 +207,8 @@ of public APIs; neither a family nor core may import their implementation.
 
 ## Reproduce the pre-merge gates before you push
 
-`.github/workflows/community-ci.yml` runs four jobs on every pull request, and
-`Community CPU / Required` fails unless all four pass. Each has a local
+`.github/workflows/community-ci.yml` runs five jobs on every pull request, and
+`Community CPU / Required` fails unless all five pass. Each has a local
 equivalent, so a failure does not have to cost a push and a CI round trip.
 
 The gates shell out to `lizard`, `ruff` and `clang-format` by name, and one
@@ -230,6 +230,7 @@ from (`upstream/main` or `github/main`):
 | `Community CPU / Ownership and impact` | `python3 -m tools.community_ci impact --base <base-ref>` | ownership resolution and the CPU test scope your change selects |
 | `Community CPU / Unit / C++ and Python` | `python3 -m tools.community_ci unit` | compiles the C++ and runs the source-only C++ and Python unit tests in the CI container |
 | `Community CPU / Docs` | `cd website && npm ci && npm run test:model-support && npm run build` | the generated model support inventory and the production documentation build |
+| `Community CPU / AIPerf qualification` | in a separate virtual environment, `pip install -r apps/aiperf_qual/requirements.txt pytest`, `pip install --no-deps apps/aiperf_qual/plugins`, then `CUDA_VISIBLE_DEVICES= HF_HUB_OFFLINE=1 PYTHONPATH=apps/aiperf_qual:apps/aiperf_qual/plugins:core/builder:apps/benchmark:. python -m pytest apps/aiperf_qual/tests -m "not gpu and not trt"` | the AIPerf qualification application against the catalog. A new profile the application cannot qualify yet is left out with its reason; it does not fail this job |
 
 `unit` is the one that needs more than the virtual environment. It
 builds and runs the CI container, so it needs a working Docker daemon, and two

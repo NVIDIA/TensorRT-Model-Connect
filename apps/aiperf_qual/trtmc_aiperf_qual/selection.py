@@ -8,7 +8,9 @@ reason and its ``source``, the file that decides it, checked in this order:
 1. ``config/tasks.yaml``: the profile's Task has no defaults, so the qualification cannot qualify it.
 2. ``config/exclusions.yaml``: no machine runs it (a native reference that cannot serve the profile as cataloged,
    a test model).
-3. The machine's ``models`` (its environment file): ``include`` and ``exclude``, then its platform's exclusions
+3. ``config/models``: an image-generation profile whose catalog request leaves a size, step or guidance control to
+   the pipeline's default, which each side would choose for itself; its ``request`` must state the control.
+4. The machine's ``models`` (its environment file): ``include`` and ``exclude``, then its platform's exclusions
    (``config/platforms/<platform>.yaml``), then ``max_checkpoint_gib``:
 
     models:
@@ -31,11 +33,12 @@ from typing import Any, Callable, Mapping, Sequence
 
 import yaml
 
-from .config import CONFIG_ROOT, EXCLUSIONS, ConfigError, exclusions
+from .config import CONFIG_ROOT, EXCLUSIONS, ConfigError, Environment, exclusions
 
 KEYS = {"include", "exclude", "max_checkpoint_gib"}
 TASKS_SOURCE = "config/tasks.yaml"
 EXCLUSIONS_SOURCE = f"config/{EXCLUSIONS}"
+MODELS_SOURCE = "config/models"
 MACHINE_SOURCE = "environment"
 
 
@@ -45,7 +48,7 @@ class Profile:
     task: str
     checkpoint: str
     revision: str | None
-    excluded: str | None = None  # why no machine runs it (config/tasks.yaml or config/exclusions.yaml)
+    excluded: str | None = None  # why no machine runs it (config/tasks.yaml, config/exclusions.yaml or config/models)
     source: str | None = None  # the file of that reason
 
 
@@ -53,23 +56,42 @@ def catalog(repository: Path, root: Path = CONFIG_ROOT) -> list[Profile]:
     """Ready catalog profiles (the qualification scope) with their Task, checkpoint, and why no machine runs one."""
     from .models import catalog_profiles
 
-    from trtmc_benchmark.catalog import ManifestCatalog
-
     tasks = yaml.safe_load((root / "tasks.yaml").read_text())["tasks"]
     rules = exclusions(root)
-    resolver = ManifestCatalog(repository / "families")
     profiles = []
     for entry in catalog_profiles(repository):
-        model = resolver.resolve(entry.name)
+        model = entry.model  # what ManifestCatalog.resolve returns, without reading every manifest again
         reason, source = None, None
+        rule = next((rule for rule in rules if fnmatch.fnmatchcase(entry.name, rule["profile"])), None)
         if model.task not in tasks:
             reason, source = f"no Task defaults for {model.task!r}", TASKS_SOURCE
-        else:
-            rule = next((rule for rule in rules if fnmatch.fnmatchcase(entry.name, rule["profile"])), None)
-            if rule:
-                reason, source = rule["reason"], EXCLUSIONS_SOURCE
+        elif rule:
+            reason, source = rule["reason"], EXCLUSIONS_SOURCE
+        elif entry.operation == "generate_image" and (missing := _unstated_image_controls(entry, repository, root)):
+            reason, source = (f"its catalog request leaves {', '.join(missing)} to the pipeline's default; its "
+                              "configuration's request states none of them"), MODELS_SOURCE
         profiles.append(Profile(entry.name, model.task, model.hf_id, model.hf_revision or None, reason, source))
     return profiles
+
+
+def _unstated_image_controls(entry: Any, repository: Path, root: Path) -> list[str]:
+    """The image controls the profile's catalog request, with its ``config/models`` ``request``, leaves unstated.
+
+    A profile whose configuration or catalog request cannot resolve is kept: its run reports what it finds (its
+    suites may not use the catalog request, as an image-to-video profile without a prompt)."""
+    from trtmc_benchmark.catalog import resolve_case
+    from trtmc_benchmark.types import BenchmarkError
+
+    from .models import resolve_model
+    from .suites import unstated_defaults
+
+    try:
+        model = resolve_model(entry.name, Environment({"repo": str(repository)}), root)
+        request = {**dict(resolve_case(entry.model, Path(f"{entry.name}.bundle")).request),
+                   **model.get("catalog_request", {})}
+    except (BenchmarkError, ConfigError):
+        return []
+    return unstated_defaults(request, model["operation"])
 
 
 def checkpoint_gib(profile: Profile) -> float | None:

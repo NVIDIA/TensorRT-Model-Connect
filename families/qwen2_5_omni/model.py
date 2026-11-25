@@ -60,7 +60,19 @@ def load_weights(directory):
     return weights
 
 
-def build_engine(weights, cfg, length, stream, verbose=False):
+def _refuse_quantized_checkpoint(directory):
+    """FP8 quantizes the original BF16 weights; a pre-quantized checkpoint is refused."""
+    config = json.loads((directory / "config.json").read_text())
+    index = json.loads((directory / "model.safetensors.index.json").read_text())["weight_map"]
+    packed = ("qweight", "qzeros", "weight_scale", "weight_scale_2", "input_scale")
+    if config.get("quantization_config") or any(key.endswith(packed) for key in index):
+        raise ValueError(
+            "Qwen2.5 Omni FP8 quantizes the original checkpoint; this checkpoint is already "
+            "quantized"
+        )
+
+
+def build_engine(weights, cfg, length, stream, verbose=False, quant=None):
     import torch
     from transformers import Qwen2_5OmniTextConfig
     from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniRotaryEmbedding
@@ -71,6 +83,8 @@ def build_engine(weights, cfg, length, stream, verbose=False):
     options = builder.create_builder_config()
     options.builder_optimization_level = 3
     options.clear_flag(trt.BuilderFlag.TF32)
+    if quant is not None:
+        quant.configure(options)
     width, heads, kv, dim = (
         cfg[k] for k in ("hidden_size", "num_attention_heads", "num_key_value_heads", "head_dim")
     )
@@ -94,12 +108,15 @@ def build_engine(weights, cfg, length, stream, verbose=False):
         return layer.get_output(0)
 
     def linear(x, key, *, require_bias=False):
-        result = net.add_matrix_multiply(
-            x,
-            trt.MatrixOperation.NONE,
-            const(weights[key + ".weight"]),
-            trt.MatrixOperation.TRANSPOSE,
-        ).get_output(0)
+        if quant is not None and quant.covers(key):
+            result = quant.matmul(net, x, key, weights[key + ".weight"])
+        else:
+            result = net.add_matrix_multiply(
+                x,
+                trt.MatrixOperation.NONE,
+                const(weights[key + ".weight"]),
+                trt.MatrixOperation.TRANSPOSE,
+            ).get_output(0)
         if require_bias or key + ".bias" in weights:
             result = add(result, const(weights[key + ".bias"].reshape(1, -1)))
         return result
@@ -210,12 +227,16 @@ def build(request, writer):
         raise NotImplementedError("qwen2_5_omni does not support dynamic_kv_cache")
     if request.task != "text_continuation" or request.backend != "trt":
         raise ValueError("Qwen2_5Omni requires text_continuation with backend=trt")
+    quantized = request.quantization not in (None, "none")
+    if quantized and request.quantization != "fp8":
+        raise ValueError(
+            f"Qwen2.5 Omni quantization must be none or fp8, not {request.quantization!r}"
+        )
     if (
         request.precision != "fp32"
         or request.tensor_parallel_size != 1
         or request.context_parallel_size != 1
         or request.max_batch_size != 1
-        or request.quantization not in (None, "none")
         or request.fp32_layers
         or request.image_height is not None
         or request.image_width is not None
@@ -224,6 +245,8 @@ def build(request, writer):
     ):
         raise NotImplementedError("Qwen2_5Omni supports one fp32 sequence with a fixed KV profile")
     directory = Path(request.model_dir)
+    if quantized:
+        _refuse_quantized_checkpoint(directory)
     from transformers import Qwen2_5OmniConfig
 
     root_config = Qwen2_5OmniConfig.from_pretrained(directory)
@@ -249,7 +272,13 @@ def build(request, writer):
     _validate_tokenizer(json.loads(tokenizer_json))
     writer.set_header(family="qwen2_5_omni", task=request.task, backend=request.backend)
     with writer.open_section("model.plan") as section:
-        build_engine(load_weights(directory), cfg, length, section, request.verbose)
+        weights = load_weights(directory)
+        quant = None
+        if quantized:
+            from .quantization import thinker_quantization
+
+            quant = thinker_quantization(cfg, weights, request.quantization)
+        build_engine(weights, cfg, length, section, request.verbose, quant)
     writer.add_bytes("tokenizer.json", tokenizer_json.encode())
     writer.add_json(
         "runtime.json",

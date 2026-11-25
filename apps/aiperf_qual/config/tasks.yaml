@@ -132,8 +132,11 @@ benchmarks:
   token_score_parity: {suite: token-score-parity, suite_definition: uniref50-test-200, metric: vector_parity,
                        truncate_tokens: 254, gate: {field: logits, min_cosine: 0.999, max_relative_l2: 0.02}}
   # Relative monocular depth (Depth Anything) against the native map on 50 COCO images: the family's E2E gate.
+  # A quantized (NVFP4) candidate carries its weight error on every image: about twice the worst one measured on
+  # this suite (correlation 0.9946, relative error 0.0174), as the robot-model gates are derived.
   depth_parity: {suite: depth-parity, suite_definition: coco-val2017-depth-50, metric: depth_parity,
-                 gate: {min_correlation: 0.998, max_relative_error: 0.01}}
+                 gate: {min_correlation: 0.998, max_relative_error: 0.01},
+                 quantized_gate: {min_correlation: 0.989, max_relative_error: 0.035}}
   # Point-cloud semantic segmentation (PointNet): S3DIS Area 5 blocks, class mIoU of the per-point classes over the
   # corpus against the S3DIS annotation.
   s3dis_area5: {suite: s3dis-area5-miou, suite_definition: s3dis-area5-blocks-300, metric: point_miou,
@@ -202,6 +205,7 @@ tasks:
   text_generation: &generate_text
     absolute: [mmlu]
     performance: {output_grader: parity_token_exact, output_grader_params: {min_prefix: 8, accept_equal_text: true}}
+  conditional_text_generation: *generate_text
   text_continuation: *generate_text  # the Task SDK name of the migrated decoder LMs (qwen3, #1558)
 
   vision_language_generation:
@@ -357,6 +361,7 @@ tasks:
     # The catalog testcases are a few values, not the models' context: Perf times the first ETTh1 window.
     performance: {suite: {from_benchmark: etth1-mse}, output_grader: parity_numeric}
   series_to_point_forecast: *forecast
+  series_to_quantile_forecast: *forecast  # Chronos-Bolt: scored on its median quantile
   # Tasks whose native reference is the family's own Transformers model (config/models: reference.adapter).
   audio_to_class_scores:
     absolute: [audioset]

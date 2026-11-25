@@ -1,0 +1,10 @@
+numpy>=1.26
+safetensors>=0.4
+torch>=2.6
+torchvision>=0.21
+# The validated reference stack. The hub is pinned below 2.0 because packages already in the
+# base environment cap it there, and an upgraded transformers alone would let pip pick 2.x.
+transformers==5.22.2
+tokenizers==0.23.3
+huggingface-hub==1.33.0
+Pillow>=10.1
