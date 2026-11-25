@@ -37,6 +37,20 @@ def main():
             add_generation_prompt=True,
         )
         inputs = processor(text=text, images=image, return_tensors="pt").to("cuda", torch.float16)
+        if "native_token_ids" in case:
+            # Force the native tokens and report, per token, how far its logit lies
+            # below the reference's top logit at that position.
+            forced = torch.tensor([case["native_token_ids"]], device="cuda")
+            ids = torch.cat([inputs["input_ids"], forced], dim=1)
+            with torch.inference_mode():
+                logits = model(input_ids=ids, attention_mask=torch.ones_like(ids),
+                               pixel_values=inputs["pixel_values"]).logits[0].float()
+            start = inputs["input_ids"].shape[1] - 1
+            rows = logits[start:start + forced.shape[1]]
+            chosen = rows.gather(1, forced[0][:, None])[:, 0]
+            results[case["name"]] = {"native_gaps": (rows.max(dim=1).values - chosen).tolist()}
+            print(json.dumps({"case": case["name"], **results[case["name"]]}), flush=True)
+            continue
         with torch.inference_mode():
             output = model.generate(**inputs, max_new_tokens=case["max_new_tokens"], do_sample=False)
             features = model.model.get_image_features(
