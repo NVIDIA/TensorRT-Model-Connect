@@ -9,14 +9,15 @@ import numpy as np
 import tensorrt as trt
 
 from .builders import Graph
+from .quantization import QUANTIZATIONS, fp8_quantization, reject_quantized_checkpoint
 
 
-def build_engine(weights, cfg, length, *, decoder=False, verbose=False):
+def build_engine(weights, cfg, length, *, decoder=False, verbose=False, quant=None):
     from transformers.models.seamless_m4t_v2.modeling_seamless_m4t_v2 import (
         SeamlessM4Tv2SinusoidalPositionalEmbedding,
     )
 
-    graph = Graph(weights, verbose)
+    graph = Graph(weights, verbose, quant)
     net = graph.net
     width = cfg["hidden_size"]
     prefix = "text_decoder" if decoder else "text_encoder"
@@ -89,7 +90,7 @@ def build(request, writer):
         or request.tensor_parallel_size != 1
         or request.context_parallel_size != 1
         or request.max_batch_size != 1
-        or request.quantization not in (None, "none")
+        or request.quantization not in (None, "none", *QUANTIZATIONS)
         or request.fp32_layers
         or request.dynamic_kv_cache
         or request.image_height is not None
@@ -111,6 +112,9 @@ def build(request, writer):
             "SeamlessM4T v2 profile must fit source tokens and decoder language prefix"
         )
     index = json.loads((directory / "model.safetensors.index.json").read_text())["weight_map"]
+    quantized = request.quantization not in (None, "none")
+    if quantized:
+        reject_quantized_checkpoint(cfg, index)
     selected = {
         key: shard
         for key, shard in index.items()
@@ -131,10 +135,14 @@ def build(request, writer):
     for language, token in languages.items():
         if tokenizer.convert_tokens_to_ids(f"__{language}__") != token:
             raise ValueError("SeamlessM4T v2 tokenizer and generation language map disagree")
+    quant = fp8_quantization(cfg, weights, request.quantization) if quantized else None
     writer.set_header(family="seamless_m4t_v2", task=request.task, backend=request.backend)
-    writer.add_bytes("encoder.plan", build_engine(weights, cfg, length, verbose=request.verbose))
     writer.add_bytes(
-        "decoder.plan", build_engine(weights, cfg, length, decoder=True, verbose=request.verbose)
+        "encoder.plan", build_engine(weights, cfg, length, verbose=request.verbose, quant=quant)
+    )
+    writer.add_bytes(
+        "decoder.plan",
+        build_engine(weights, cfg, length, decoder=True, verbose=request.verbose, quant=quant),
     )
     writer.add_bytes("tokenizer.json", tokenizer.backend_tokenizer.to_str().encode())
     writer.add_json(

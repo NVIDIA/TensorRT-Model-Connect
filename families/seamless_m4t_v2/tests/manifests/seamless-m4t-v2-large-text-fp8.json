@@ -1,0 +1,40 @@
+{
+  "name": "seamless-m4t-v2-large-text-fp8",
+  "hf_id": "facebook/seamless-m4t-v2-large",
+  "hf_revision": "5f8cc790b19fc3f67a61c105133b20b34e3dcb76",
+  "family": "seamless_m4t_v2",
+  "bundle": "seamless-m4t-v2-large-text-fp8.bundle",
+  "task": "text_translation",
+  "precision": "fp32",
+  "quantization": "fp8",
+  "max_sequence_length": 128,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "seamless-m4t-v2-large-text-fp8",
+      "premerge": true,
+      "max_new_tokens": 64,
+      "min_equal_prefix_tokens": 6,
+      "inputs": [
+        {
+          "text": "My name is Sarah and I love learning new languages.",
+          "source": "eng",
+          "target": "fra",
+          "expected_word": "langues"
+        },
+        {
+          "text": "My name is Sarah and I love learning new languages.",
+          "source": "eng",
+          "target": "deu",
+          "expected_word": "Sprachen"
+        },
+        {
+          "text": "北京是中国的首都。",
+          "source": "cmn",
+          "target": "eng",
+          "expected_word": "Beijing"
+        }
+      ]
+    }
+  ]
+}
