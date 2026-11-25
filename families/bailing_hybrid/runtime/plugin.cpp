@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "families/bailing_hybrid/runtime/generation.h"
 #include "families/bailing_hybrid/runtime/tokenizer.h"
 #include "trtmc/internal/model.h"
 #include "trtmc/internal/text.h"
@@ -45,8 +46,8 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
              nlohmann::json cfg)
         : embedding_(std::move(embedding)), layers_(std::move(layers)), head_(std::move(head)),
           tokenizer_(std::move(tokenizer)), cfg_(std::move(cfg)),
-          fields_{{"max_new_tokens", internal::ConfigKind::I64, internal::ConfigValue{int64_t{32}},
-                   "Maximum generated tokens"},
+          fields_{{"max_new_tokens", internal::ConfigKind::I64, std::nullopt,
+                   "Maximum generated tokens; default is min(32, remaining profile capacity)"},
                   {"do_sample", internal::ConfigKind::Bool, internal::ConfigValue{false},
                    "Greedy decoding only"}} {}
     const char* task() const noexcept override { return "text_continuation"; }
@@ -58,14 +59,12 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
                              internal::ConfigView config) override {
         const Span<const internal::ConfigField> fields{fields_.data(), fields_.size()};
         internal::validate_config(fields, config);
-        const auto max_new = *internal::config_get<int64_t>(config, fields, "max_new_tokens");
+        const auto requested = internal::config_get<int64_t>(config, fields, "max_new_tokens");
         if (*internal::config_get<bool>(config, fields, "do_sample"))
             throw std::invalid_argument("Ling3 currently supports greedy decoding");
         const int32_t length = cfg_.at("sequence_length"), vocab = cfg_.at("vocab_size");
         const int32_t layers = cfg_.at("layers"), heads = cfg_.at("heads"),
                       dim = cfg_.at("head_dim");
-        if (max_new <= 0 || max_new > length)
-            throw std::invalid_argument("Invalid Ling3 generation length");
         std::vector<int32_t> ids;
         if (const auto* text = std::get_if<std::string_view>(&request.prefix))
             ids = tokenizer_->encode(std::string(*text));
@@ -73,8 +72,7 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
             const auto tokens = std::get<Span<const int32_t>>(request.prefix);
             ids.assign(tokens.begin(), tokens.end());
         }
-        if (ids.empty() || ids.size() + max_new > static_cast<std::size_t>(length))
-            throw std::invalid_argument("Ling3 prefix and generation exceed the built KV profile");
+        const auto max_new = generation_limit(requested, ids.size(), length);
         for (const auto id : ids)
             if (id < 0 || id >= vocab)
                 throw std::invalid_argument("Invalid Ling3 token ID");
@@ -104,7 +102,7 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
         std::vector<float> hidden(width);
         std::vector<float> logits;
         int32_t position = 0;
-        auto step = [&](int32_t token) {
+        auto step = [&](int32_t token, bool need_logits) {
             if (position >= length)
                 throw std::runtime_error("Ling3 exhausted its KV profile");
             const auto embedded =
@@ -146,18 +144,20 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
                         retain(std::string("present_conv_") + "qkv"[j], state.convolution[j]);
                 }
             }
-            const auto predicted =
-                head_->forward({{"hidden", tensor(hidden.data(), {1, width}, DType::kFloat32)}});
-            const auto& scores = output(predicted, "logits", vocab);
-            const auto* data = static_cast<const float*>(scores.data);
-            logits.assign(data, data + vocab);
-            for (const auto value : logits)
-                if (!std::isfinite(value))
-                    throw std::runtime_error("Ling3 logit is nonfinite");
+            if (need_logits) {
+                const auto predicted = head_->forward(
+                    {{"hidden", tensor(hidden.data(), {1, width}, DType::kFloat32)}});
+                const auto& scores = output(predicted, "logits", vocab);
+                const auto* data = static_cast<const float*>(scores.data);
+                logits.assign(data, data + vocab);
+                for (const auto value : logits)
+                    if (!std::isfinite(value))
+                        throw std::runtime_error("Ling3 logit is nonfinite");
+            }
             ++position;
         };
-        for (const auto token : ids)
-            step(token);
+        for (std::size_t i = 0; i < ids.size(); ++i)
+            step(ids[i], i + 1 == ids.size());
         const auto eos = cfg_.at("eos_ids").get<std::vector<int32_t>>();
         internal::TextResult result;
         for (int64_t i = 0; i < max_new; ++i) {
@@ -167,7 +167,7 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
             if (std::find(eos.begin(), eos.end(), next) != eos.end())
                 break;
             if (i + 1 < max_new)
-                step(next);
+                step(next, true);
         }
         result.text = tokenizer_->decode(result.token_ids);
         return result;

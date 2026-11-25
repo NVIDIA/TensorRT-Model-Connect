@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from functools import cache
 from pathlib import Path
 
@@ -15,6 +16,8 @@ import pytest
 
 from tensorrt_model_connect import BuildRequest, build
 from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
+
+from ._checkpoint import checkpoint_record
 
 FAMILY = "bailing_hybrid"
 TASKS = frozenset({"text_continuation"})
@@ -187,14 +190,6 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
     record_evidence(
-        "checkpoint",
-        {
-            "repo_id": manifest["hf_id"],
-            "revision": manifest["hf_revision"],
-            "precision": manifest["precision"],
-        },
-    )
-    record_evidence(
         "thresholds",
         {
             key: value
@@ -213,42 +208,41 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                     break
     import gc
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
 
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
         directory = _model_dir(manifest)
+        record_evidence(
+            "checkpoint",
+            checkpoint_record(
+                directory,
+                manifest,
+                local_override=bool(os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")),
+            ),
+        )
     _, runtime_root = _runtime()
     runner = _native_test_binary("test_bailing_hybrid_runtime")
     with evidence_stage("comparison"):
         assert runner.is_file()
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
+    reference_input = tmp_path / "reference-input.json"
+    reference_output = tmp_path / "reference-output.json"
+    reference_input.write_text(json.dumps(case))
     with evidence_stage("reference"):
-        tokenizer = AutoTokenizer.from_pretrained(directory)
-    # Recompute each prefix in the pinned official model. This checks the
-    # native KDA recurrence against the full-prefix official recurrent kernel.
-    with evidence_stage("reference"):
-        reference = AutoModelForCausalLM.from_pretrained(
-            directory,
-            dtype=torch.float32,
-            device_map={"": "cuda:0"},
-            trust_remote_code=True,
-            attn_implementation="eager",
-        ).eval()
-    expected = []
-    for prompt in case["prompts"]:
-        inputs = tokenizer(prompt, return_tensors="pt", return_token_type_ids=False).to("cuda")
-        with evidence_stage("reference"), torch.no_grad():
-            generated = reference.generate(
-                **inputs, do_sample=False, use_cache=False, max_new_tokens=case["max_new_tokens"]
-            )
-        ids = generated[0, inputs["input_ids"].shape[1] :].tolist()
-        expected.append({"token_ids": ids, "text": tokenizer.decode(ids, skip_special_tokens=True)})
-        print(f"Official Ling3: {expected[-1]!r}", flush=True)
-    del reference, generated, inputs
-    gc.collect()
-    torch.cuda.empty_cache()
+        completed = subprocess.run(
+            [
+                os.environ.get("TRTMC_BAILING_HYBRID_REFERENCE_PYTHON", sys.executable),
+                str(TEST_ROOT / "reference.py"),
+                str(directory),
+                str(reference_input),
+                str(reference_output),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=int(case.get("runtime_timeout_s", 3600)),
+        )
+        assert completed.returncode == 0, completed.stderr + completed.stdout
+        expected = json.loads(reference_output.read_text())
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
         _build(directory, bundle, manifest)

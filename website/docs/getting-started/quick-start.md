@@ -26,6 +26,37 @@ python -m pip install -r "$FAMILY_REQUIREMENTS"
 There is no central family extra or dependency registry. A family without a
 `requirements.txt` needs only the pinned base environment and the wheel.
 
+## Host runtime libraries
+
+The wheel includes the project libraries. CUDA, TensorRT, and libraries linked
+by a selected family must also be available on the host. ICU-linked families,
+including `bailing_hybrid` and `nemotron_omni`, require ICU's `uc`, `i18n`, and
+`data` shared libraries. Install the runtime package matching the wheel's ICU
+ABI (for example, `libicu74` for an Ubuntu 24.04 build). Source builds also need
+the ICU headers from `libicu-dev`.
+
+Before loading an ICU-linked family, check its installed library and all its
+transitive dependencies. For example, for Ling:
+
+```bash
+python - <<'PYTHON'
+import ctypes
+import os
+from pathlib import Path
+import tensorrt_model_connect
+
+runtime = Path(tensorrt_model_connect.__file__).resolve().parent / "bin"
+ctypes.CDLL(str(runtime / "libtrtmc_model_bailing_hybrid.so"),
+            mode=os.RTLD_NOW | os.RTLD_LOCAL)
+PYTHON
+```
+
+A missing or incompatible host library raises `OSError` with the dependency's
+name before a family factory or model runs. The native loader performs the
+same eager dependency check and reports the dynamic linker's error.
+
+## Build and run
+
 Build a bundle directly from a Hugging Face model ID:
 
 ```bash

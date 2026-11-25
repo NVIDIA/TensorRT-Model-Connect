@@ -309,7 +309,9 @@ class Graph:
             self.reduce(selected, trt.ReduceOperation.SUM, 1, False), (1, groups, 1)
         )
         keep = self.op(selected, self.const([[[0.5]]]), trt.ElementWiseOperation.GREATER)
-        filtered = net.add_select(keep, grouped, self.const(np.full((1, 1, 1), -1e9))).get_output(0)
+        filtered = net.add_select(
+            keep, grouped, self.const(np.full((1, 1, 1), -np.inf))
+        ).get_output(0)
         ids = self.reshape(
             net.add_topk(
                 self.reshape(filtered, (1, experts)), trt.TopKOperation.MAX, top, 2
@@ -350,6 +352,67 @@ class Graph:
         ).get_output(0)
         result = self.reduce(self.mul(result, weights), trt.ReduceOperation.SUM, 1, False)
         return self.add(result, self.dense(hidden, prefix + ".shared_experts"))
+
+
+def _validate_tokenizer(document):
+    if document.get("normalizer", {}).get("type") != "NFC":
+        raise ValueError("Ling3 requires an NFC tokenizer normalizer")
+    pre = document.get("pre_tokenizer", {})
+    parts = pre.get("pretokenizers", [])
+    if pre.get("type") != "Sequence" or len(parts) != 2:
+        raise ValueError("Ling3 requires Split followed by ByteLevel pre-tokenization")
+    split, byte_level = parts
+    if (
+        split.get("type") != "Split"
+        or split.get("behavior") != "Isolated"
+        or split.get("invert") is not False
+        or byte_level.get("type") != "ByteLevel"
+        or byte_level.get("add_prefix_space") is not False
+        or byte_level.get("use_regex") is not False
+    ):
+        raise ValueError(
+            "Unsupported Ling3 pre-tokenizer options: require add_prefix_space=false and use_regex=false"
+        )
+    if document.get("decoder", {}).get("type") != "ByteLevel":
+        raise ValueError("Ling3 requires a ByteLevel decoder")
+
+
+def _build_embedding(weights, cfg, logger, section):
+    graph = Graph(weights, cfg, logger)
+    token = graph.net.add_input("input_ids", trt.int32, (1,))
+    graph.output(
+        graph.net.add_gather(
+            graph.const(weights.read("model.word_embeddings.weight")), token, 0
+        ).get_output(0),
+        "result",
+    )
+    graph.save(section)
+
+
+def _build_layer(weights, cfg, logger, section, layer, kind, length):
+    graph = Graph(weights, cfg, logger)
+    prefix = f"model.layers.{layer}"
+    hidden = graph.net.add_input("hidden", trt.float32, (1, cfg["hidden_size"]))
+    normal = graph.norm(hidden, prefix + ".input_layernorm")
+    attention = (
+        graph.mla(normal, prefix + ".attention", length)
+        if kind == "mla"
+        else graph.kda(normal, prefix + ".attention")
+    )
+    hidden = graph.add(hidden, attention)
+    normal = graph.norm(hidden, prefix + ".post_attention_layernorm")
+    feed_forward = (
+        graph.dense(normal, prefix + ".mlp") if layer == 0 else graph.moe(normal, prefix + ".mlp")
+    )
+    graph.output(graph.add(hidden, feed_forward), "result")
+    graph.save(section)
+
+
+def _build_head(weights, cfg, logger, section):
+    graph = Graph(weights, cfg, logger)
+    hidden = graph.net.add_input("hidden", trt.float32, (1, cfg["hidden_size"]))
+    graph.output(graph.linear(graph.norm(hidden, "model.norm"), "lm_head"), "logits")
+    graph.save(section)
 
 
 def build(request, writer):
@@ -400,6 +463,8 @@ def build(request, writer):
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(directory)
+    tokenizer_data = tokenizer.backend_tokenizer.to_str()
+    _validate_tokenizer(json.loads(tokenizer_data))
     writer.set_header(family="bailing_hybrid", task=request.task, backend=request.backend)
     logger = trt.Logger(trt.Logger.VERBOSE if request.verbose else trt.Logger.WARNING)
     kinds = [
@@ -408,44 +473,16 @@ def build(request, writer):
     ]
     with ExitStack() as stack:
         weights = Weights(directory, stack)
-        graph = Graph(weights, cfg, logger)
-        token = graph.net.add_input("input_ids", trt.int32, (1,))
-        graph.output(
-            graph.net.add_gather(
-                graph.const(weights.read("model.word_embeddings.weight")), token, 0
-            ).get_output(0),
-            "result",
-        )
+        # Each helper owns all of its tensor handles. They leave scope before
+        # constructing the next network, including the embedding input tensor.
         with writer.open_section("embedding.plan") as section:
-            graph.save(section)
-        del graph
+            _build_embedding(weights, cfg, logger, section)
         for layer, kind in enumerate(kinds):
-            graph = Graph(weights, cfg, logger)
-            prefix = f"model.layers.{layer}"
-            hidden = graph.net.add_input("hidden", trt.float32, (1, cfg["hidden_size"]))
-            normal = graph.norm(hidden, prefix + ".input_layernorm")
-            attention = (
-                graph.mla(normal, prefix + ".attention", length)
-                if kind == "mla"
-                else graph.kda(normal, prefix + ".attention")
-            )
-            hidden = graph.add(hidden, attention)
-            normal = graph.norm(hidden, prefix + ".post_attention_layernorm")
-            feed_forward = (
-                graph.dense(normal, prefix + ".mlp")
-                if layer == 0
-                else graph.moe(normal, prefix + ".mlp")
-            )
-            graph.output(graph.add(hidden, feed_forward), "result")
             with writer.open_section(f"layer.{layer}.plan") as section:
-                graph.save(section)
-            del graph
-        graph = Graph(weights, cfg, logger)
-        hidden = graph.net.add_input("hidden", trt.float32, (1, cfg["hidden_size"]))
-        graph.output(graph.linear(graph.norm(hidden, "model.norm"), "lm_head"), "logits")
+                _build_layer(weights, cfg, logger, section, layer, kind, length)
         with writer.open_section("head.plan") as section:
-            graph.save(section)
-    writer.add_bytes("tokenizer.json", tokenizer.backend_tokenizer.to_str().encode())
+            _build_head(weights, cfg, logger, section)
+    writer.add_bytes("tokenizer.json", tokenizer_data.encode())
     writer.add_json(
         "runtime.json",
         dict(
