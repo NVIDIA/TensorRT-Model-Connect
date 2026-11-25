@@ -8,6 +8,7 @@
 #include "families/vibevoice/runtime/noise.h"
 
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -111,10 +112,15 @@ void check_schedule(const std::vector<float>& train_sigmas, std::int32_t steps) 
     float previous = 0.0F;
     for (std::size_t index = 0; index < timesteps.size(); ++index) {
         const float sigma = train_sigmas.at(static_cast<std::size_t>(timesteps[index]));
-        // A positive finite sigma has a finite log-SNR; another one is refused before its
-        // logarithm is taken.
+        // A positive sigma whose float32 square stays finite has a finite log-SNR; another one
+        // is refused before its logarithm is taken (an infinite square makes alpha and the
+        // scaled sigma 0).
         if (!(sigma > 0.0F) || !std::isfinite(sigma))
             throw std::invalid_argument("vibevoice train_sigmas must be positive and finite");
+        if (static_cast<double>(sigma) * static_cast<double>(sigma) >
+            static_cast<double>(std::numeric_limits<float>::max()))
+            throw std::invalid_argument(
+                "vibevoice train_sigmas must not exceed the square root of the float32 maximum");
         const float lambda = alpha_sigma(sigma).lambda;
         if (!std::isfinite(lambda) || (index > 0 && !(lambda > previous)))
             throw std::invalid_argument("vibevoice diffusion_steps=" + std::to_string(steps) +

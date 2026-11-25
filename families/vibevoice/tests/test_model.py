@@ -450,12 +450,15 @@ def test_the_build_refuses_a_tokenizer_the_runtime_would_refuse():
     worded["added_tokens"][0]["special"] = "false"
     no_z = copy.deepcopy(good)
     del no_z["model"]["vocab"]["z"]
+    two_keys = copy.deepcopy(good)  # the reference reads Split's pattern as a single-key map
+    two_keys["pre_tokenizer"]["pretokenizers"][0]["pattern"]["String"] = " "
     for document, match in (
         (own_regex, "pre_tokenizer is not supported"),
         (lowercase, "normalizer is not supported"),
         (worded, "special is not supported"),
         (_with_merges(good, [["a", "zz"]]), "merge is not supported"),
         (no_z, "lacks the byte-level token of byte 122"),
+        (two_keys, "pre_tokenizer is not supported"),
     ):
         with pytest.raises(ValueError, match=match):
             model.check_tokenizer_layout(_bytes(document))

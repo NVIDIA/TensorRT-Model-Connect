@@ -233,16 +233,20 @@ def hf_config(original: dict):
 @contextmanager
 def tf32_off():
     """TF32 off for CUDA matmuls and cuDNN inside the block, as the reference runs in
-    float32; the previous settings come back on exit, also after an error."""
+    float32; the previous settings come back on exit, also after an error. The matmul
+    setting is saved as its precision string: the TF32 flag reads True for both "high"
+    and "medium", so restoring the flag would not restore "medium"."""
     import torch
 
-    saved = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
-    torch.backends.cuda.matmul.allow_tf32 = False
+    saved_matmul = torch.get_float32_matmul_precision()
+    saved_cudnn = torch.backends.cudnn.allow_tf32
+    torch.set_float32_matmul_precision("highest")
     torch.backends.cudnn.allow_tf32 = False
     try:
         yield
     finally:
-        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = saved
+        torch.set_float32_matmul_precision(saved_matmul)
+        torch.backends.cudnn.allow_tf32 = saved_cudnn
 
 
 def load_reference(model_dir: str | Path, dtype, device: str):

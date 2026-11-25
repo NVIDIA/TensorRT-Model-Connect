@@ -312,6 +312,18 @@ void test_schedule_limits(const nlohmann::json& fixtures) {
         expect(std::fetestexcept(FE_DIVBYZERO) == 0,
                "a sigma of " + std::to_string(bad) + " is refused without a logarithm of 0");
     }
+    // alpha_sigma squares sigma in float32: a square past the float32 maximum would make alpha
+    // and the scaled sigma 0, so such a sigma is refused first; one just below it is accepted.
+    auto huge = sigmas;
+    huge[999] = 1e20F;
+    std::feclearexcept(FE_ALL_EXCEPT);
+    check_throws_as<std::invalid_argument>(
+        [&] { check_schedule(huge, 10); }, "a sigma whose float32 square overflows",
+        "must not exceed the square root of the float32 maximum");
+    expect(std::fetestexcept(FE_DIVBYZERO) == 0,
+           "a sigma whose square overflows is refused without a logarithm of 0");
+    huge[999] = 1.8e19F;
+    check_no_throw([&] { check_schedule(huge, 10); }, "a sigma just below the square limit");
 }
 
 void test_scheduler_state(const nlohmann::json& fixtures) {
@@ -966,6 +978,12 @@ void test_tokenizer_required_options() {
     // An absent use_regex is true: the pre-tokenizer's own regex, another layout.
     refused([](nlohmann::json& d) { d["pre_tokenizer"]["pretokenizers"][1].erase("use_regex"); },
             "a ByteLevel pre-tokenizer without use_regex", "pre_tokenizer is not supported");
+    // The reference reads Split's pattern as a map with a single key.
+    refused(
+        [](nlohmann::json& d) {
+            d["pre_tokenizer"]["pretokenizers"][0]["pattern"]["String"] = " ";
+        },
+        "a Split pattern with a String key beside its Regex", "pre_tokenizer is not supported");
     check_no_throw(
         [&] {
             load([](nlohmann::json& d) {

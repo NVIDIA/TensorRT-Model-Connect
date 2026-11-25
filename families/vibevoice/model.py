@@ -265,6 +265,7 @@ def check_tokenizer_layout(tokenizer_json: bytes) -> None:
         and isinstance(byte_level, dict)
         and split.get("type") == "Split"
         and isinstance(pattern, dict)
+        and len(pattern) == 1  # one key, as the reference reads the pattern
         and pattern.get("Regex") == QWEN_SPLIT_PATTERN
         and split.get("behavior") == "Isolated"
         and not required_flag(split, "invert")

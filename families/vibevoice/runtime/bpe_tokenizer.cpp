@@ -1723,6 +1723,8 @@ class BpeTokenizer final : public ITokenizer {
         const bool qwen = steps.is_array() && steps.size() == 2 && steps[0].is_object() &&
                           steps[1].is_object() && steps[0].value("type", "") == "Split" &&
                           steps[0].contains("pattern") && steps[0]["pattern"].is_object() &&
+                          // One key, as the reference reads the pattern (a map with a single key).
+                          steps[0]["pattern"].size() == 1 &&
                           steps[0]["pattern"].value("Regex", "") == kQwenSplitPattern &&
                           steps[0].value("behavior", "") == "Isolated" &&
                           !required_flag(steps[0], "invert") &&
