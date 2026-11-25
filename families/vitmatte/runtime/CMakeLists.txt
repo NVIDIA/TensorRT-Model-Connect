@@ -65,10 +65,13 @@ if(TRTMC_BUILD_TESTS)
   add_executable(test_vitmatte_runtime ${PROJECT_SOURCE_DIR}/families/vitmatte/tests/cpp/test_runtime.cpp)
   target_link_libraries(test_vitmatte_runtime PRIVATE trtmc_c nlohmann_json::nlohmann_json)
   set_target_properties(test_vitmatte_runtime PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
-  add_executable(test_vitmatte_registration ${PROJECT_SOURCE_DIR}/families/vitmatte/tests/cpp/test_registration.cpp)
-  target_link_libraries(test_vitmatte_registration PRIVATE trtmc_model_vitmatte Threads::Threads)
-  target_link_options(test_vitmatte_registration PRIVATE "-Wl,--export-dynamic-symbol=trtmc_load_byok_kernel"
-    "-Wl,--export-dynamic-symbol=_Znwm")
+  foreach(_vitmatte_registration_target IN ITEMS
+      test_vitmatte_registration test_vitmatte_registration_error_allocation)
+    add_executable(${_vitmatte_registration_target} ${PROJECT_SOURCE_DIR}/families/vitmatte/tests/cpp/test_registration.cpp)
+    target_link_libraries(${_vitmatte_registration_target} PRIVATE trtmc_model_vitmatte Threads::Threads)
+    target_link_options(${_vitmatte_registration_target} PRIVATE "-Wl,--export-dynamic-symbol=trtmc_load_byok_kernel"
+      "-Wl,--export-dynamic-symbol=_Znwm")
+  endforeach()
   add_test(NAME vitmatte_registration COMMAND test_vitmatte_registration)
-  add_test(NAME vitmatte_registration_error_allocation COMMAND test_vitmatte_registration --allocation-failure)
+  add_test(NAME vitmatte_registration_error_allocation COMMAND test_vitmatte_registration_error_allocation --allocation-failure)
 endif()
