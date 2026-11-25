@@ -534,6 +534,12 @@ def _assert_contract(
     """
     native_record, reference_record = records
     assert native.size > 0 and native.size % 3200 == 0 and np.isfinite(native).all()
+    # So is every reference: an empty one would leave an empty prefix to compare (an infinite
+    # SNR, no drift) and widen the span of the official lengths.
+    for name, audio in references.items():
+        assert audio.size > 0 and audio.size % 3200 == 0 and np.isfinite(audio).all(), (
+            f"the Transformers {name} reference is not whole frames of finite samples"
+        )
     precision = manifest["precision"]
     expected = references[precision]
     rms = float(np.sqrt(np.mean(native**2)))
@@ -781,6 +787,35 @@ def test_frame_checks_name_the_frames_they_compare(monkeypatch) -> None:
     assert checks["min_frame_snr_db"]["label"] == (
         "Lowest SNR of the first 4 frames against Transformers, dB"
     )
+
+
+def test_every_reference_must_be_whole_finite_frames(monkeypatch) -> None:
+    # Without this, an empty official bfloat16 synthesis compares an empty prefix (an infinite
+    # SNR and no drift) and passes the length check against the float32 length alone.
+    monkeypatch.setitem(globals(), "_transcribe", lambda audio, manifest: "Hello there.")
+    monkeypatch.setitem(globals(), "record_evidence", lambda key, value: value)
+    whole = (0.1 * np.random.default_rng(5).standard_normal(58 * 3200)).astype(np.float32)
+    broken = whole.copy()
+    broken[7] = np.nan
+    for name, bf16, fp32 in (
+        ("an empty bf16 reference", whole[:0], whole),
+        ("an empty fp32 reference", whole, whole[:0]),
+        ("a partial frame", whole[:-1], whole),
+        ("a NaN sample", broken, whole),
+    ):
+        try:
+            _assert_contract(
+                whole,
+                {"bf16": bf16, "fp32": fp32},
+                "Hello there.",
+                {"precision": "bf16"},
+                dict(DEFAULT_THRESHOLDS),
+                records=({"audio": Path("native.wav")}, {"audio": Path("reference.wav")}),
+            )
+        except AssertionError as error:
+            assert "is not whole frames of finite samples" in str(error), name
+        else:
+            raise AssertionError(f"{name} passed the contract")
 
 
 def test_the_reference_restores_the_tf32_settings(monkeypatch) -> None:

@@ -465,6 +465,41 @@ def test_the_build_refuses_a_tokenizer_the_runtime_would_refuse():
         model.check_tokenizer_config(b'{"add_prefix_space": true}')
 
 
+def test_the_build_requires_the_options_the_reference_requires():
+    # As the runtime: added-token options, Split's invert and ByteLevel's add_prefix_space and
+    # trim_offsets must be booleans (absent or null is refused, as by the reference), use_regex
+    # may be absent but not null, and a BPE model option may be absent or null.
+    good = _qwen_tokenizer()
+    good["post_processor"] = dict(good["decoder"])
+
+    def edited(change) -> bytes:
+        document = copy.deepcopy(good)
+        change(document)
+        return _bytes(document)
+
+    def pre(document):
+        return document["pre_tokenizer"]["pretokenizers"]
+
+    for change, match in (
+        (lambda d: d["added_tokens"][0].update(special=None), "special is not supported: null"),
+        (lambda d: d["added_tokens"][0].pop("lstrip"), "lstrip is missing"),
+        (lambda d: pre(d)[0].pop("invert"), "invert is missing"),
+        (lambda d: pre(d)[1].update(trim_offsets=None), "trim_offsets is not supported: null"),
+        (lambda d: pre(d)[1].pop("use_regex"), "pre_tokenizer is not supported"),
+        (lambda d: d["decoder"].pop("add_prefix_space"), "add_prefix_space is missing"),
+        (lambda d: d["post_processor"].update(use_regex=None), "use_regex is not supported: null"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            model.check_tokenizer_layout(edited(change))
+
+    def defaults(document):
+        document["decoder"].pop("use_regex")
+        document["post_processor"].pop("use_regex")
+        document["model"]["byte_fallback"] = None
+
+    model.check_tokenizer_layout(edited(defaults))
+
+
 def test_tokenizer_ids_index_the_embedding_table():
     good = _qwen_tokenizer()
     rows = len(good["model"]["vocab"])

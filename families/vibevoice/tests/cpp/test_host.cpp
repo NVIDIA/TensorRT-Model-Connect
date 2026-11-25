@@ -916,6 +916,68 @@ void test_tokenizer_repeated_keys() {
         "a tokenizer that repeats a setting", "repeats the key normalizer");
 }
 
+void test_tokenizer_required_options() {
+    constexpr std::int32_t kVocab = 262;
+    // The reference refuses a tokenizer.json whose required boolean options are absent or null:
+    // every added-token option, Split's invert, every ByteLevel component's add_prefix_space and
+    // trim_offsets; use_regex may be absent (true) but not null; a BPE model option may be either.
+    const auto load = [&](const std::function<void(nlohmann::json&)>& edit) {
+        auto document = nlohmann::json::parse(byte_tokenizer_json());
+        document["post_processor"] = nlohmann::json::parse(
+            R"({"type": "ByteLevel", "add_prefix_space": false, "trim_offsets": false, "use_regex": false})");
+        edit(document);
+        const auto text = document.dump();
+        return CreateBpeTokenizer(text.data(), text.size(), false, kVocab);
+    };
+    const auto refused = [&](const std::function<void(nlohmann::json&)>& edit,
+                             const std::string& what, const std::string& message) {
+        check_throws_as<std::runtime_error>([&] { load(edit); }, what, message.c_str());
+    };
+    for (const char* key : {"special", "lstrip", "rstrip", "single_word", "normalized"}) {
+        refused([&](nlohmann::json& d) { d["added_tokens"][0][key] = nullptr; },
+                std::string("an added token with a null ") + key,
+                std::string(key) + " is not supported: null");
+        refused([&](nlohmann::json& d) { d["added_tokens"][0].erase(key); },
+                std::string("an added token without ") + key, std::string(key) + " is missing");
+    }
+    refused([](nlohmann::json& d) { d["pre_tokenizer"]["pretokenizers"][0]["invert"] = nullptr; },
+            "a Split with a null invert", "invert is not supported: null");
+    refused([](nlohmann::json& d) { d["pre_tokenizer"]["pretokenizers"][0].erase("invert"); },
+            "a Split without invert", "invert is missing");
+    const std::vector<std::pair<std::string, std::function<nlohmann::json&(nlohmann::json&)>>>
+        components = {
+            {"the pre-tokenizer's ByteLevel",
+             [](nlohmann::json& d) -> nlohmann::json& {
+                 return d["pre_tokenizer"]["pretokenizers"][1];
+             }},
+            {"the decoder", [](nlohmann::json& d) -> nlohmann::json& { return d["decoder"]; }},
+            {"the post-processor",
+             [](nlohmann::json& d) -> nlohmann::json& { return d["post_processor"]; }}};
+    for (const auto& [name, component] : components) {
+        for (const char* key : {"add_prefix_space", "trim_offsets"}) {
+            refused([&](nlohmann::json& d) { component(d)[key] = nullptr; },
+                    name + " with a null " + key, std::string(key) + " is not supported: null");
+            refused([&](nlohmann::json& d) { component(d).erase(key); }, name + " without " + key,
+                    std::string(key) + " is missing");
+        }
+        refused([&](nlohmann::json& d) { component(d)["use_regex"] = nullptr; },
+                name + " with a null use_regex", "use_regex is not supported: null");
+    }
+    // An absent use_regex is true: the pre-tokenizer's own regex, another layout.
+    refused([](nlohmann::json& d) { d["pre_tokenizer"]["pretokenizers"][1].erase("use_regex"); },
+            "a ByteLevel pre-tokenizer without use_regex", "pre_tokenizer is not supported");
+    check_no_throw(
+        [&] {
+            load([](nlohmann::json& d) {
+                d["decoder"].erase("use_regex");
+                d["post_processor"].erase("use_regex");
+                d["model"]["byte_fallback"] = nullptr;
+                d["model"].erase("ignore_merges");
+            });
+        },
+        "a decoder and post-processor without use_regex, BPE options null or absent");
+}
+
 nlohmann::json runtime_json() {
     return {{"precision", "bf16"},
             {"hidden_size", 8},
@@ -1172,6 +1234,7 @@ int main() {
         test_tokenizer();
         test_tokenizer_contractions_and_budget();
         test_tokenizer_repeated_keys();
+        test_tokenizer_required_options();
         test_runtime_config();
         test_engine_io();
     } catch (const std::exception& error) {

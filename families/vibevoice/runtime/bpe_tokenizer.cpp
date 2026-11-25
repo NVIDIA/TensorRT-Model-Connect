@@ -1348,11 +1348,13 @@ class BpeTokenizer final : public ITokenizer {
                 throw std::runtime_error(
                     "tokenizer.json added token needs a string content and an integer id");
             // Added tokens are matched on the raw text, as written: stripping, word
-            // boundaries and matching on normalized text are not implemented.
+            // boundaries and matching on normalized text are not implemented. The reference
+            // requires every option, and the special flag, as a boolean.
             for (const char* option : {"lstrip", "rstrip", "single_word", "normalized"}) {
-                if (flag(tok, option, false))
+                if (required_flag(tok, option))
                     unsupported("added token option", tok);
             }
+            const bool special = required_flag(tok, "special");
             const std::string content = content_field->get<std::string>();
             if (content.empty())
                 throw std::runtime_error("tokenizer.json added token needs a nonempty content");
@@ -1388,7 +1390,7 @@ class BpeTokenizer final : public ITokenizer {
             mVocab[id] = content;
             mTokenToId[content] = id;
 
-            if (flag(tok, "special", false)) {
+            if (special) {
                 mSpecialTokens[content] = id;
                 mSpecialIds.insert(id);
                 if (is_eos_content(content))
@@ -1634,7 +1636,8 @@ class BpeTokenizer final : public ITokenizer {
                                  " is not supported: " + value.dump());
     }
 
-    // A boolean field: absent or null counts as `fallback`.
+    // Boolean fields as the reference reads them. A BPE model option: absent or null counts
+    // as `fallback`.
     static bool flag(const nlohmann::json& object, const char* key, bool fallback) {
         const auto it = object.find(key);
         if (it == object.end() || it->is_null())
@@ -1642,6 +1645,36 @@ class BpeTokenizer final : public ITokenizer {
         if (!it->is_boolean())
             unsupported(key, *it);
         return it->get<bool>();
+    }
+
+    // A field the reference requires (added-token options, Split's invert, ByteLevel's
+    // add_prefix_space and trim_offsets): absent or null rejects the bundle, as it does there.
+    static bool required_flag(const nlohmann::json& object, const char* key) {
+        const auto it = object.find(key);
+        if (it == object.end())
+            throw std::runtime_error(std::string("tokenizer.json ") + key + " is missing");
+        if (!it->is_boolean())
+            unsupported(key, *it);
+        return it->get<bool>();
+    }
+
+    // A field with a default (ByteLevel's use_regex): absent counts as `fallback`, null
+    // rejects the bundle.
+    static bool optional_flag(const nlohmann::json& object, const char* key, bool fallback) {
+        const auto it = object.find(key);
+        if (it == object.end())
+            return fallback;
+        if (!it->is_boolean())
+            unsupported(key, *it);
+        return it->get<bool>();
+    }
+
+    // The options every ByteLevel component carries in the reference; their values do not
+    // change the ids.
+    static void check_byte_level_options(const nlohmann::json& component) {
+        required_flag(component, "add_prefix_space");
+        required_flag(component, "trim_offsets");
+        optional_flag(component, "use_regex", true);
     }
 
     static bool empty_string(const nlohmann::json& object, const char* key) {
@@ -1681,23 +1714,28 @@ class BpeTokenizer final : public ITokenizer {
         const auto post = j.value("post_processor", nlohmann::json());
         if (!post.is_null() && !(post.is_object() && post.value("type", "") == "ByteLevel"))
             unsupported("post_processor", post);
+        if (!post.is_null())
+            check_byte_level_options(post);
         const auto pre = j.value("pre_tokenizer", nlohmann::json());
         const auto steps = pre.is_object() && pre.value("type", "") == "Sequence"
                                ? pre.value("pretokenizers", nlohmann::json())
                                : nlohmann::json();
-        const bool qwen =
-            steps.is_array() && steps.size() == 2 && steps[0].is_object() && steps[1].is_object() &&
-            steps[0].value("type", "") == "Split" && steps[0].contains("pattern") &&
-            steps[0]["pattern"].is_object() &&
-            steps[0]["pattern"].value("Regex", "") == kQwenSplitPattern &&
-            steps[0].value("behavior", "") == "Isolated" && !flag(steps[0], "invert", false) &&
-            steps[1].value("type", "") == "ByteLevel" &&
-            !flag(steps[1], "add_prefix_space", true) && !flag(steps[1], "use_regex", true);
-        if (!qwen)
+        const bool qwen = steps.is_array() && steps.size() == 2 && steps[0].is_object() &&
+                          steps[1].is_object() && steps[0].value("type", "") == "Split" &&
+                          steps[0].contains("pattern") && steps[0]["pattern"].is_object() &&
+                          steps[0]["pattern"].value("Regex", "") == kQwenSplitPattern &&
+                          steps[0].value("behavior", "") == "Isolated" &&
+                          !required_flag(steps[0], "invert") &&
+                          steps[1].value("type", "") == "ByteLevel";
+        if (qwen)
+            check_byte_level_options(steps[1]);
+        if (!qwen || required_flag(steps[1], "add_prefix_space") ||
+            optional_flag(steps[1], "use_regex", true))
             unsupported("pre_tokenizer", pre);
         const auto decoder = j.value("decoder", nlohmann::json());
         if (!decoder.is_object() || decoder.value("type", "") != "ByteLevel")
             unsupported("decoder", decoder);
+        check_byte_level_options(decoder);
         const auto& model = j["model"];
         if (model.value("type", "BPE") != "BPE" || flag(model, "byte_fallback", false) ||
             flag(model, "ignore_merges", false) ||

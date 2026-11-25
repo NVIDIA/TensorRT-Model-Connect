@@ -194,13 +194,40 @@ def check_tokenizer_layout(tokenizer_json: bytes) -> None:
         return ValueError(f"{FAMILY} tokenizer.json {part} is not supported: {json.dumps(value)}")
 
     def flag(item, key, fallback=False):
-        """A boolean option: absent or null is `fallback`, anything but a boolean is refused."""
+        """A BPE model option: absent or null is `fallback`, anything but a boolean is refused."""
         value = item.get(key)
         if value is None:
             return fallback
         if not isinstance(value, bool):
             raise unsupported(key, value)
         return value
+
+    def required_flag(item, key):
+        """An option the reference requires (added-token options, Split's invert, ByteLevel's
+        add_prefix_space and trim_offsets): absent or null is refused, as it is there."""
+        if key not in item:
+            raise ValueError(f"{FAMILY} tokenizer.json {key} is missing")
+        value = item[key]
+        if not isinstance(value, bool):
+            raise unsupported(key, value)
+        return value
+
+    def optional_flag(item, key, fallback):
+        """An option with a default (ByteLevel's use_regex): absent is `fallback`, null is
+        refused."""
+        if key not in item:
+            return fallback
+        value = item[key]
+        if not isinstance(value, bool):
+            raise unsupported(key, value)
+        return value
+
+    def check_byte_level_options(component):
+        """The options every ByteLevel component carries in the reference; their values do not
+        change the ids."""
+        required_flag(component, "add_prefix_space")
+        required_flag(component, "trim_offsets")
+        optional_flag(component, "use_regex", True)
 
     def is_nfc(norm):
         if not isinstance(norm, dict):
@@ -223,6 +250,8 @@ def check_tokenizer_layout(tokenizer_json: bytes) -> None:
     post = raw.get("post_processor")
     if post is not None and not (isinstance(post, dict) and post.get("type") == "ByteLevel"):
         raise unsupported("post_processor", post)
+    if post is not None:
+        check_byte_level_options(post)
     pre = raw.get("pre_tokenizer")
     steps = (
         pre.get("pretokenizers")
@@ -231,22 +260,28 @@ def check_tokenizer_layout(tokenizer_json: bytes) -> None:
     )
     split, byte_level = steps if isinstance(steps, list) and len(steps) == 2 else ({}, {})
     pattern = split.get("pattern") if isinstance(split, dict) else None
-    if not (
+    qwen = (
         isinstance(split, dict)
         and isinstance(byte_level, dict)
         and split.get("type") == "Split"
         and isinstance(pattern, dict)
         and pattern.get("Regex") == QWEN_SPLIT_PATTERN
         and split.get("behavior") == "Isolated"
-        and not flag(split, "invert")
+        and not required_flag(split, "invert")
         and byte_level.get("type") == "ByteLevel"
-        and not flag(byte_level, "add_prefix_space", True)
-        and not flag(byte_level, "use_regex", True)
+    )
+    if qwen:
+        check_byte_level_options(byte_level)
+    if (
+        not qwen
+        or required_flag(byte_level, "add_prefix_space")
+        or optional_flag(byte_level, "use_regex", True)
     ):
         raise unsupported("pre_tokenizer", pre)
     decoder = raw.get("decoder")
     if not isinstance(decoder, dict) or decoder.get("type") != "ByteLevel":
         raise unsupported("decoder", decoder)
+    check_byte_level_options(decoder)
     bpe = raw.get("model")
     if not isinstance(bpe, dict) or not isinstance(bpe.get("vocab"), dict):
         raise unsupported("model", bpe if not isinstance(bpe, dict) else "without a vocab object")
@@ -288,9 +323,11 @@ def check_tokenizer_layout(tokenizer_json: bytes) -> None:
                 f"{FAMILY} tokenizer.json added token needs a nonempty content: "
                 f"{json.dumps(token)}"
             )
-        flag(token, "special")  # a boolean, as the runtime reads it
-        if any(flag(token, option) for option in ("lstrip", "rstrip", "single_word", "normalized")):
+        # The reference requires every option, and the special flag, as a boolean.
+        options = ("lstrip", "rstrip", "single_word", "normalized")
+        if any(required_flag(token, option) for option in options):
             raise unsupported("added token option", token)
+        required_flag(token, "special")
 
 
 def _special_token_ids(tokenizer_json: dict) -> dict[str, int]:
