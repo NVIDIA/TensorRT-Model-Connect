@@ -56,7 +56,8 @@ def _self_attention_block(network, h, weights, p, dtype):
     norm = graph.layer_norm(network, h, LN_EPS, weights[p + "norm1.weight"], weights[p + "norm1.bias"])
     q, k, v = (graph.linear(network, norm, weights[f"{p}attn1.to_{n}.weight"], weights[f"{p}attn1.to_{n}.bias"], dtype=dtype)
                for n in "qkv")
-    context = graph.attention(network, q, k, v, heads=VL_HEADS, kv_heads=VL_HEADS, head_dim=VL_HEAD_DIM, dtype=dtype)
+    context = graph.attention(network, q, k, v, heads=VL_HEADS, kv_heads=VL_HEADS, head_dim=VL_HEAD_DIM,
+                              dtype=dtype, fp32_intermediates=(dtype == trt.float16))
     h = graph.add(network, h, graph.f32(network, graph.linear(
         network, context, weights[p + "attn1.to_out.0.weight"], weights[p + "attn1.to_out.0.bias"], dtype=dtype)))
     norm = graph.layer_norm(network, h, LN_EPS, weights[p + "norm3.weight"], weights[p + "norm3.bias"])

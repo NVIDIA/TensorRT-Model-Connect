@@ -8,7 +8,8 @@ reshapes copy (``0``) or infer (``-1``) that axis instead of reading it.
 
 Precision follows the reference's bfloat16 autocast: matrix products run in the
 ``compute`` dtype, while the residual stream, norm statistics, softmax and rotary
-angles stay in float32. A float32 build simply has ``compute`` float32 too.
+angles stay in float32. The Isaac FP16 conditioner also keeps the intermediate
+attention products in float32, as in math SDPA, before returning an FP16 context.
 """
 
 from __future__ import annotations
@@ -211,7 +212,23 @@ def softmax_fp32(network, scores, axis):
     return layer.get_output(0)
 
 
-def attention(network, query, key, value, *, heads, kv_heads, head_dim, dtype, bias=None):
+def _scaled_dot_product(network, q, k, v, *, head_dim, dtype, fp32_intermediates, bias=None):
+    # The Isaac FP16 conditioner follows math SDPA: Q/K/V and the result are FP16,
+    # but neither the scaled scores nor the probabilities are rounded to FP16.
+    intermediate = trt.float32 if fp32_intermediates else dtype
+    scores = network.add_matrix_multiply(
+        cast(network, q, intermediate), trt.MatrixOperation.NONE,
+        cast(network, k, intermediate), trt.MatrixOperation.TRANSPOSE).get_output(0)
+    scores = mul(network, f32(network, scores), scalar(network, head_dim ** -0.5, 4))
+    if bias is not None:
+        scores = add(network, scores, f32(network, bias))
+    probs = cast(network, softmax_fp32(network, scores, 3), intermediate)
+    context = network.add_matrix_multiply(
+        probs, trt.MatrixOperation.NONE, cast(network, v, intermediate), trt.MatrixOperation.NONE).get_output(0)
+    return cast(network, context, dtype)
+
+
+def attention(network, query, key, value, *, heads, kv_heads, head_dim, dtype, bias=None, fp32_intermediates=False):
     """Scaled dot-product attention over row tensors, in ``dtype`` with a float32 softmax.
 
     ``query[S, heads*D]``, ``key``/``value[T, kv_heads*D]`` (grouped query heads share a key
@@ -225,12 +242,8 @@ def attention(network, query, key, value, *, heads, kv_heads, head_dim, dtype, b
     k = shuffle(network, k, reshape=(kv_heads, 1, -1, head_dim))
     v = shuffle(network, cast(network, value, dtype), reshape=(0, kv_heads, head_dim), second=(1, 0, 2))
     v = shuffle(network, v, reshape=(kv_heads, 1, -1, head_dim))
-    scores = network.add_matrix_multiply(q, trt.MatrixOperation.NONE, k, trt.MatrixOperation.TRANSPOSE).get_output(0)
-    scores = mul(network, f32(network, scores), scalar(network, head_dim ** -0.5, 4))
-    if bias is not None:
-        scores = add(network, scores, f32(network, bias))
-    probs = cast(network, softmax_fp32(network, scores, 3), dtype)
-    context = network.add_matrix_multiply(probs, trt.MatrixOperation.NONE, v, trt.MatrixOperation.NONE).get_output(0)
+    context = _scaled_dot_product(network, q, k, v, head_dim=head_dim, dtype=dtype,
+                                  fp32_intermediates=fp32_intermediates, bias=bias)
     context = shuffle(network, context, reshape=(heads, -1, head_dim), second=(1, 0, 2))
     return shuffle(network, context, reshape=(0, heads * head_dim))
 
@@ -242,11 +255,8 @@ def batched_attention(network, query, key, value, *, heads, head_dim, dtype):
     def to_heads(tensor):
         return shuffle(network, cast(network, tensor, dtype), reshape=(batch, seq, heads, head_dim), second=(0, 2, 1, 3))
 
-    scores = network.add_matrix_multiply(
-        to_heads(query), trt.MatrixOperation.NONE, to_heads(key), trt.MatrixOperation.TRANSPOSE).get_output(0)
-    scores = mul(network, f32(network, scores), scalar(network, head_dim ** -0.5, 4))
-    probs = cast(network, softmax_fp32(network, scores, 3), dtype)
-    context = network.add_matrix_multiply(probs, trt.MatrixOperation.NONE, to_heads(value), trt.MatrixOperation.NONE).get_output(0)
+    context = _scaled_dot_product(network, to_heads(query), to_heads(key), to_heads(value),
+                                  head_dim=head_dim, dtype=dtype, fp32_intermediates=(dtype == trt.float16))
     return shuffle(network, context, first=(0, 2, 1, 3), reshape=(batch, seq, heads * head_dim))
 
 

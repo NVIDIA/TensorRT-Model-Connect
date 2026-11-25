@@ -37,14 +37,17 @@ the Edge 0.12.0 builder, and Model Connect must have its matching GR00T C++
 archive and headers. The base Edge 0.12.0 SDK does not install these policy
 components. If Edge preparation fails, MC warns and retries the same native policy.
 
-**Accuracy status:** Native FP16 built and ran the recorded episode 1272 frame 0 with fixed
-noise. One run passed the independent Isaac FP32 comparison (mean absolute action error
-0.001853). A separately built GB300 engine missed the same 0.0026 mean limit (0.002731)
-with the same checkpoint, observation, fixed noise and FP32 reference; its maximum error
-and cosine still passed. Replaying the passing engine 20 times and changing only the native
-consumer both reproduced its original actions. These controls do not identify which build
-difference caused the miss. The released Edge runner missed the maximum error limit
-(0.2722 vs 0.03). Both routes run, but neither result establishes consistent accuracy.
+**Accuracy status:** On A30, native FP16 built and ran episode 1272 frame 0 with fixed
+noise. Its mean absolute action error against the independent Isaac FP32 reference was
+0.002540 (limit 0.0026); maximum error was 0.02378 (limit 0.03) and cosine was 0.999906
+(minimum 0.999). The conditioner keeps FP16 projections, keys/values and context outputs;
+it preserves FP32 residual normalization and uses FP32 intermediates for attention,
+as in PyTorch math SDPA. The denoiser remains unchanged.
+
+Earlier native builds on this fixture gave means of 0.003133 on A30 and 0.001853 and
+0.002731 on GB300. The latter miss is not resolved by an A30 pass; accuracy across
+engine builds or GPUs is not established. The released Edge runner missed the maximum
+error limit (0.2722 vs 0.03). Both routes run; Edge remains unqualified.
 No other Isaac embodiment or LIBERO checkpoint is claimed here.
 
 ## LeRobot supported boundary

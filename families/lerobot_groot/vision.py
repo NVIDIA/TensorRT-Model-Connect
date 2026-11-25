@@ -105,7 +105,7 @@ def _merger(network, h, weights, prefix, *, postshuffle, dtype):
 def build_vision(network, pixel_values, weights, *, images, grid_h, grid_w, dtype):
     """Image tokens ``[images * tokens, OUT]`` and the DeepStack features, all in ``dtype``.
 
-    Every matrix product runs in ``dtype``; norms, softmax, gelu, the rotary embedding and
+    Projections run in ``dtype``; FP16 attention uses FP32 intermediates. Norms, softmax, gelu and
     the residual stream stay float32, as in the rest of the graph.
 
     ``pixel_values[images * grid_h * grid_w, PATCH_VALUES]`` are the processor's normalised

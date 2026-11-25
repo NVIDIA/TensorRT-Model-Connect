@@ -94,19 +94,25 @@ def build_backbone(network, weights, *, token_ids, image_index, image_mask, posi
     h = _scatter(network, image_tokens, image_index, is_image, base=text)
     cos, sin = rope_tables(network, position_ids)
 
+    # Isaac's RMSNorm restores its input type. Residuals are FP32 even though their
+    # projections run in FP16; projected Q/K heads still normalize back to FP16.
+    fp16_condition = dtype == trt.float16
+    residual_norm_dtype = h.dtype if fp16_condition else dtype
     for index in range(kept_layers(weights)):
         p = f"{_ROOT}layers.{index}."
-        norm = graph.rms_norm(network, h, weights[p + "input_layernorm.weight"], RMS_EPS, dtype=dtype)
+        norm = graph.rms_norm(network, h, weights[p + "input_layernorm.weight"], RMS_EPS,
+                              dtype=residual_norm_dtype)
         q = _heads(network, norm, weights[p + "self_attn.q_proj.weight"], weights[p + "self_attn.q_norm.weight"],
                    HEADS, cos, sin, dtype)
         k = _heads(network, norm, weights[p + "self_attn.k_proj.weight"], weights[p + "self_attn.k_norm.weight"],
                    KV_HEADS, cos, sin, dtype)
         v = graph.linear(network, norm, weights[p + "self_attn.v_proj.weight"], dtype=dtype)
         context = graph.attention(network, q, k, v, heads=HEADS, kv_heads=KV_HEADS, head_dim=HEAD_DIM,
-                                  dtype=dtype, bias=causal_bias)
+                                  dtype=dtype, bias=causal_bias, fp32_intermediates=fp16_condition)
         h = graph.add(network, h, graph.f32(network, graph.linear(
             network, context, weights[p + "self_attn.o_proj.weight"], dtype=dtype)))
-        norm = graph.rms_norm(network, h, weights[p + "post_attention_layernorm.weight"], RMS_EPS, dtype=dtype)
+        norm = graph.rms_norm(network, h, weights[p + "post_attention_layernorm.weight"], RMS_EPS,
+                              dtype=residual_norm_dtype)
         gate = graph.silu(network, graph.linear(network, norm, weights[p + "mlp.gate_proj.weight"], dtype=dtype))
         hidden = graph.mul(network, gate, graph.linear(network, norm, weights[p + "mlp.up_proj.weight"], dtype=dtype))
         h = graph.add(network, h, graph.f32(network, graph.linear(
