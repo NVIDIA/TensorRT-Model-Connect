@@ -310,8 +310,10 @@ client reject them. Fixing this parser requires a Triton backend change.
 
 CI stages `external_files` from the manifests before offline execution. Set
 `TRTMC_HSTU_MODEL_DIR` to that raw-checkpoint directory (or explicitly set
-`DLRMV3_CHECKPOINT`); selected tests never download weights. CI's
-`TRTMC_NATIVE_BUILD_DIR` locates the transport library while the Task loader
+`DLRMV3_CHECKPOINT`); selected tests never download weights. The
+family dependency image uses `ci/Dockerfile.dependencies` to download and
+SHA-256-check the official checkpoint before network-isolated execution.
+CI's `TRTMC_NATIVE_BUILD_DIR` locates the transport library while the Task loader
 uses the isolated `TRTMC_RUNTIME_ROOT`. An independent upstream check is
 available through `tests/upstream_check.py` with `DLRMV3_UPSTREAM`,
 `DLRMV3_CHECKPOINT` and `DLRMV3_CONVERTED` set.
