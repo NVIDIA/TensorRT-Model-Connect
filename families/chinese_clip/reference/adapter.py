@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Chinese-CLIP's Transformers model for ``relevance``, as tests/test_e2e.py runs it: the Python processor
-(``use_fast=False``), every query of the request against the one image with the text padded to the 64-token window,
-and each pair scored as the logit scale times the cosine of the projected embeddings (the runtime's logit)."""
+(``use_fast=False``), lowercasing as the runtime does, every query of the request against the one image with the
+text padded to the 64-token window, and each pair scored as the logit scale times the cosine of the projected
+embeddings (the runtime's logit)."""
 
 from pathlib import Path
 from typing import Any, Mapping
@@ -14,8 +15,10 @@ class Adapter:
         from transformers import ChineseCLIPModel, ChineseCLIPProcessor
 
         self.spec, self.host = spec, host
+        # The checkpoint ships no tokenizer config, and Transformers' BertTokenizer does not lowercase by default:
+        # its vocabulary is lowercase, so a capital such as "English" would become [UNK]. The runtime lowercases.
         self.processor = ChineseCLIPProcessor.from_pretrained(spec.model, **{**spec.pretrained_kwargs(),
-                                                                            "use_fast": False})
+                                                                            "use_fast": False, "do_lower_case": True})
         self.model = host.maybe_compile(ChineseCLIPModel.from_pretrained(
             spec.model, **spec.model_kwargs()).to(spec.device, spec.dtype).eval(), spec)
 
