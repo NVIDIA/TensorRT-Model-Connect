@@ -185,6 +185,31 @@ void test_original_resolution_and_uint8_input() {
             "0.5 quantizes to 128: float32 and 8-bit inputs must agree");
 }
 
+void test_scores_are_resized_before_the_argmax() {
+    auto module = std::make_unique<RecordingModule>();
+    auto* recording = module.get();
+    trtmc::mask2former::Mask2FormerSemanticSegmentation model(std::move(module), preprocessing(),
+                                                              head());
+    // Class 1 scores 100 in the left half and class 2 scores 1 in the right half. Resizing the
+    // scores from width 4 to width 8 keeps class 1 at column 4 (0.25 * 100 against 0.75 * 1);
+    // resizing the argmax map instead would take column 2's class 2 there.
+    recording->scores.assign(recording->scores.size(), 0.0F);
+    for (int y = 0; y < kSize; ++y) {
+        for (int x = 0; x < kSize; ++x) {
+            recording->scores[(1 * kSize + y) * kSize + x] = x < kSize / 2 ? 100.0F : 0.0F;
+            recording->scores[(2 * kSize + y) * kSize + x] = x < kSize / 2 ? 0.0F : 1.0F;
+        }
+    }
+    const std::vector<float> pixels(2 * 8 * 3, 0.5F);
+    const auto result = model.run(request(pixels, 2, 8), {});
+    const std::vector<std::int32_t> row{1, 1, 1, 1, 1, 2, 2, 2};
+    require(result.labels.size() == 16, "labels come back at the image resolution");
+    for (int y = 0; y < 2; ++y)
+        require(std::vector<std::int32_t>(result.labels.begin() + y * 8,
+                                          result.labels.begin() + (y + 1) * 8) == row,
+                "the scores are resized to the image before the argmax");
+}
+
 void test_invalid_inputs_and_outputs() {
     auto module = std::make_unique<RecordingModule>();
     auto* recording = module.get();
@@ -320,6 +345,7 @@ int main() {
     try {
         test_binding_and_owned_result();
         test_original_resolution_and_uint8_input();
+        test_scores_are_resized_before_the_argmax();
         test_invalid_inputs_and_outputs();
         test_engine_must_match_runtime_metadata();
         test_normalization_must_stay_finite();
