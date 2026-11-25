@@ -5,6 +5,7 @@
 
 #include "families/qwen/runtime/kv_cache.h"
 #include "families/qwen/runtime/pipeline.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <iostream>
@@ -193,6 +194,27 @@ void exercise(bool graphs) {
     require(pipeline.generate_ids({2, 3}, request).token_ids == std::vector<int32_t>({2, 3}),
             "zero-token request changed its prompt");
     require(prefill_view->calls == prefill_before, "zero-token request launched prefill");
+
+    // An output the cache cannot hold is not rejected up front: generation
+    // stops once the cache is full. A prompt two rows short of the cache gets
+    // the prefill token and two decoder steps, L - P + 1 = 3 tokens.
+    request.max_new_tokens = 20;
+    request.eos_token_id = 31;
+    const std::vector<int32_t> long_prompt(kCacheLength - 2, 2);
+    auto expected_long = long_prompt;
+    expected_long.insert(expected_long.end(), {3, 4, 5});
+    require(pipeline.generate_ids(long_prompt, request).token_ids == expected_long,
+            "a full cache did not end the generation");
+    require(cache_view->position() == kCacheLength, "generation did not fill the cache");
+
+    // A prompt the cache cannot hold is an invalid request.
+    bool rejected = false;
+    try {
+        pipeline.generate_ids(std::vector<int32_t>(kCacheLength + 1, 2), request);
+    } catch (const trtmc::internal::ConfigError&) {
+        rejected = true;
+    }
+    require(rejected, "a prompt longer than the cache was not rejected as invalid");
     require(cudaDeviceSynchronize() == cudaSuccess, "pending KV copies failed");
 }
 
