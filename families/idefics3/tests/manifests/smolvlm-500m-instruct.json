@@ -16,7 +16,6 @@
       "premerge": true,
       "max_new_tokens": 32,
       "questions": [
-        "What type of vehicle is shown?",
         "What color is the car?"
       ]
     }
