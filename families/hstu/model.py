@@ -4,10 +4,35 @@
 """Build the complete official DLRMv3 dense model and immutable history cache."""
 
 import json
+from importlib import metadata
 from pathlib import Path
 from .checkpoint import load_weights
 import uuid
 from .config import Config
+
+
+def _add_provenance(writer, model_dir):
+    provenance = json.loads((Path(model_dir) / "checkpoint_provenance.json").read_text())
+    provenance.update(
+        reference=(
+            "https://github.com/mlcommons/inference/tree/"
+            "3fbc329939999c13d0a7b5e67fb2092287e06047/recommendation/dlrm_v3"
+        ),
+        copyright="Copyright (c) Meta Platforms, Inc. and affiliates.",
+        modifications="NVIDIA TensorRT graph, NumPy reference, cache runtime and serving adapters",
+        license_spdx="Apache-2.0",
+    )
+    writer.add_json("checkpoint_provenance.json", provenance)
+    # The source distribution and installed wheel both carry the project license.
+    license_path = Path(__file__).resolve().parents[2] / "LICENSE"
+    license_text = (
+        license_path.read_text()
+        if license_path.is_file()
+        else metadata.distribution("tensorrt-model-connect").read_text("licenses/LICENSE")
+    )
+    if not license_text:
+        raise FileNotFoundError("TRT-MC's packaged Apache-2.0 LICENSE is missing")
+    writer.add_bytes("LICENSE.txt", license_text.encode())
 
 
 def build(request, writer):
@@ -65,10 +90,4 @@ def build(request, writer):
             raise RuntimeError("DLRMv3 build failed: " + stage["name"])
         writer.add_bytes(stage["name"] + ".plan", bytes(plan))
         del owner
-    root = Path(request.model_dir)
-    writer.add_json(
-        "checkpoint_provenance.json", json.loads((root / "checkpoint_provenance.json").read_text())
-    )
-    owner = Path(__file__).parent
-    writer.add_bytes("LICENSE.txt", (owner / "UPSTREAM_LICENSE.txt").read_bytes())
-    writer.add_bytes("NOTICE", (owner / "NOTICE").read_bytes())
+    _add_provenance(writer, request.model_dir)

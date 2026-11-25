@@ -31,7 +31,7 @@ if(TRTMC_BUILD_TESTS)
 endif()
 
 install(TARGETS hstu_triton LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../NOTICE ${CMAKE_CURRENT_SOURCE_DIR}/../UPSTREAM_LICENSE.txt
+install(FILES ${PROJECT_SOURCE_DIR}/LICENSE ${CMAKE_CURRENT_SOURCE_DIR}/../README.md
   DESTINATION ${CMAKE_INSTALL_DATADIR}/trtmc/families/hstu)
 
 # The family proof consumes this transport while CI isolates the Task DSOs.

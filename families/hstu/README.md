@@ -9,6 +9,13 @@ are retained (16,693,594 elements, 63.68 MiB). Model and checkpoint provenance:
 [checkpoint](https://inference.mlcommons-storage.org/dlrmv3_trained_checkpoint/non_sparse.ckpt),
 [publisher's Apache-2.0 license](https://inference.mlcommons-storage.org/dlrmv3_trained_checkpoint/LICENSE.txt).
 
+Copyright (c) Meta Platforms, Inc. and affiliates. The TensorRT graph and NumPy
+reference are NVIDIA adaptations; the cache runtime and serving adapters are
+NVIDIA additions. See the repository [LICENSE](../../LICENSE) and
+[asset attribution](../../ASSET_LICENSES.md#dlrmv3-dense-hstu-model). Generated
+bundles retain this attribution in `checkpoint_provenance.json` and include
+`LICENSE.txt` copied from the project's canonical license.
+
 The caller performs sparse embedding lookup and supplies embeddings. The full
 release's roughly 1 TB sparse table is unnecessary for this dense interface.
 Scores represent candidate relevance probabilities; this model was trained on
@@ -148,6 +155,13 @@ SDK DSOs unchanged. It accounts for that prototype's INT64 ordinal and
 four-field factory/six-argument loader ABI. Do not mix it with a main-built
 SDK or assume it applies to another image release. Rebuild serialized engines
 when the TensorRT version or target platform changes.
+
+The native serving path loads `libtrtmc_model_hstu.so` directly through the
+image's backend. `native_repository.py` generates its configuration;
+`libhstu_triton.so` reads bundle metadata for that generator and supports the
+direct validation client. `model.py` and `generate_repository.py` implement the
+separate Python-backend endpoint used for snapshot hydration; they are optional
+for native scoring and its seven backend-published metrics.
 
 Building in this image requires matching TensorRT Python bindings. A converted
 checkpoint directory can be passed to `tests.prepare` to avoid installing
