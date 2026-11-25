@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from tensorrt_model_connect.build import build as publish
-from tensorrt_model_connect.model_support import load_model_metadata, resolve_family
+from tensorrt_model_connect.model_support import load_model_metadata, resolve_family, resolve_model
 
 _MODEL = "nvidia/GR00T-N1.7-LIBERO"
 _REVISION = "658540327860f93dd2cb9c1ed3e3b10fb792a0eb"
@@ -46,30 +46,27 @@ class GrootBuildRequest:
 def build(*, model: str, output: Path, source_revision: str | None = None,
           precision: str | None = None, verbose: bool = False, edge_builder_python: Path | None = None,
           checkpoint_subdir: str | None = None, quantization: str | None = None) -> int:
-    """Resolve the named download or local policy without changing its precision or layout."""
+    """Resolve a GR00T policy by metadata, preserving the named Isaac download layout."""
     if checkpoint_subdir not in (None, "isaac-libero10"):
         raise ValueError("Only the staged Isaac LIBERO-10 subdirectory is supported")
-    directory = Path(model)
-    if not directory.is_dir():
-        if model not in {_MODEL, _LEROBOT}:
-            raise ValueError(f"Supply a local GR00T policy directory, {_MODEL}, or {_LEROBOT}")
+    if model == _MODEL and not Path(model).is_dir():
         from huggingface_hub import snapshot_download
 
-        if model == _MODEL:
-            directory = Path(snapshot_download(
-                _MODEL, revision=source_revision or _REVISION,
-                allow_patterns=["libero_10/" + name for name in (
-                    "config.json", "embodiment_id.json", "statistics.json", "processor_config.json",
-                    "model.safetensors.index.json", "model-*.safetensors")],
-            )) / "libero_10"
-        else:
-            directory = Path(snapshot_download(_LEROBOT, revision=source_revision or _LEROBOT_REVISION))
-    elif checkpoint_subdir:
-        directory = directory / checkpoint_subdir
-        if not (directory / "config.json").is_file():
-            raise FileNotFoundError(f"No staged Isaac checkpoint at {directory / 'config.json'}")
-    elif not (directory / "config.json").is_file():
-        directory = directory / "libero_10"
+        directory = Path(snapshot_download(
+            _MODEL, revision=source_revision or _REVISION,
+            allow_patterns=["libero_10/" + name for name in (
+                "config.json", "embodiment_id.json", "statistics.json", "processor_config.json",
+                "model.safetensors.index.json", "model-*.safetensors")],
+        )) / "libero_10"
+    else:
+        revision = source_revision or (_LEROBOT_REVISION if model == _LEROBOT else None)
+        directory = resolve_model(model, revision)
+        if checkpoint_subdir:
+            directory = directory / checkpoint_subdir
+            if not (directory / "config.json").is_file():
+                raise FileNotFoundError(f"No staged Isaac checkpoint at {directory / 'config.json'}")
+        elif not (directory / "config.json").is_file():
+            directory = directory / "libero_10"
 
     metadata = load_model_metadata(directory)
     _, support = resolve_family(metadata, "lerobot_groot")

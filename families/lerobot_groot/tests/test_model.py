@@ -692,3 +692,23 @@ def test_family_build_preserves_native_and_isaac_inputs(tmp_path, monkeypatch):
         with pytest.raises(FileNotFoundError, match="No staged Isaac checkpoint"):
             cli.build(model=str(root), output=output, checkpoint_subdir=stage.name)
     assert len(requests) == 4
+
+    downloads = []
+
+    def download(repo_id, *, revision, **_):
+        downloads.append((repo_id, revision))
+        return str(native)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", download)
+    for model, revision, expected_revision in (
+        ("example-org/renamed-groot", "my-revision", "my-revision"),
+        ("example-org/renamed-groot", None, None),
+        (cli._LEROBOT, None, cli._LEROBOT_REVISION),
+    ):
+        assert cli.build(model=model, source_revision=revision, output=output) == 0
+        assert downloads[-1] == (model, expected_revision)
+        assert (requests[-1].model_dir, requests[-1].precision) == (native, "bf16")
+
+    (native / "config.json").write_text(json.dumps({"model_type": "not_groot"}))
+    with pytest.raises(ValueError, match="does not support this model"):
+        cli.build(model="example-org/other-model", output=output)
