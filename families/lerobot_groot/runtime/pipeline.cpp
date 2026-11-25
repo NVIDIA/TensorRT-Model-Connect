@@ -83,6 +83,18 @@ Pipeline::Pipeline(std::unique_ptr<ITrtModule> condition, std::unique_ptr<ITrtMo
 // condition engine writes the cross-attention keys/values and the state token into device
 // buffers sized for the longest prompt, which the denoising steps read in place.
 void Pipeline::validate_engines() {
+    // Host buffers are copied as bytes, not converted to the engine binding type.
+    for (const char* name : {"pixel_values", "state", "causal_bias"})
+        require(condition_->tensor_dtype(name) == DType::kFloat32,
+                std::string("condition engine requires FP32 ") + name);
+    for (const char* name : {"token_ids", "image_index", "image_mask", "position_ids"})
+        require(condition_->tensor_dtype(name) == DType::kInt32,
+                std::string("condition engine requires INT32 ") + name);
+    for (const char* name :
+         {"x_t", "timestep", "dt", "text_bias", "image_bias", "state_features", "x_next"})
+        require(denoise_->tensor_dtype(name) == DType::kFloat32,
+                std::string("denoise engine requires FP32 ") + name);
+
     const auto patches = static_cast<std::int64_t>(config_.cameras.size()) * config_.grid() *
                          config_.grid() * kMerge * kMerge;
     require(condition_->tensor_shape("pixel_values") ==

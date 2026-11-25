@@ -39,8 +39,11 @@ components. If Edge preparation fails, MC warns and retries the same native poli
 
 **Accuracy status:** Native FP16 built and ran the recorded episode 1272 frame 0 with fixed
 noise. One run passed the independent Isaac FP32 comparison (mean absolute action error
-0.001853); another GB300 run missed the same 0.0026 mean limit (0.002731). Its maximum
-error and cosine still passed. The released Edge runner missed the maximum error limit
+0.001853). A separately built GB300 engine missed the same 0.0026 mean limit (0.002731)
+with the same checkpoint, observation, fixed noise and FP32 reference; its maximum error
+and cosine still passed. Replaying the passing engine 20 times and changing only the native
+consumer both reproduced its original actions. These controls do not identify which build
+difference caused the miss. The released Edge runner missed the maximum error limit
 (0.2722 vs 0.03). Both routes run, but neither result establishes consistent accuracy.
 No other Isaac embodiment or LIBERO checkpoint is claimed here.
 
