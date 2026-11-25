@@ -283,7 +283,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         str(binary), "generate-image", str(bundle), "--runtime-root", str(runtime_root),
         "--prompt", case["prompt"], "--output", str(output), "--initial-latents-raw", str(latents_path),
         "--set", f"negative_prompt={case.get('negative_prompt', '')}",
-        "--set", f"num_inference_steps={case['num_inference_steps']}",
+        "--set", f"num_steps={case['num_inference_steps']}",
         "--set", f"guidance_scale={case['guidance_scale']}",
     ]
     completed = subprocess.run(command, capture_output=True, text=True, env=env, check=False,

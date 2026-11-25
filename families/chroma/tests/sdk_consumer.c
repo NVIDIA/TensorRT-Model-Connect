@@ -66,7 +66,7 @@ int main(int argc, char** argv) {
 
     trtmc_config_entry_v1 entries[3];
     memset(entries, 0, sizeof(entries));
-    entries[0].name = sv("num_inference_steps");
+    entries[0].name = sv("num_steps");
     entries[0].value.kind = TRTMC_CONFIG_I64;
     entries[0].value.as.i64 = 2;
     entries[1].name = sv("guidance_scale");
