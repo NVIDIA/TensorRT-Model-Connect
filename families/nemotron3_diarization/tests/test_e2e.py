@@ -304,9 +304,14 @@ def _sdk_results(native_build: Path, runtime_root: Path, bundle: Path, samples,
 def _official_reference(model_dir: Path, samples):
     """Transformers' own Nemotron3Diarization in float32 on the GPU, TF32 off.
 
-    The speaker cache keeps the frames its scores rank highest; torch.topk on
-    CUDA resolves an exact tie to the first index seen, which is the rule the
-    native runtime implements, so the reference runs on CUDA, not the CPU.
+    The speaker cache keeps the frames its scores rank highest. The native
+    runtime breaks an exact tie deterministically, by the first index seen
+    (`top_k_first_seen`). PyTorch does not guarantee the order of tied
+    indices in torch.topk; on CUDA the reference's selections agree with that
+    rule on the E2E inputs, so the reference runs on CUDA, not the CPU. A tie
+    broken differently changes the frames the cache keeps: the first chunk,
+    which runs before any cache state, is gated on its own, and the
+    later-chunk gate then fails with a message that points at the cache.
     """
     import torch
     from transformers import AutoModelForAudioFrameClassification, AutoProcessor
@@ -354,6 +359,24 @@ def _runs(active) -> list[tuple[int, int, int]]:
 def _frames(intervals) -> list[tuple[int, int, int]]:
     return sorted((round(start * 100), round(end * 100), int(label))
                   for start, end, label in intervals)
+
+
+# A native endpoint is a whole frame times the 10 ms hop, divided once in
+# double precision, so it lies on the grid to about 1e-12 of a frame. Rounding
+# to frames alone would hide an endpoint that is off by less than 5 ms.
+GRID_TOLERANCE_FRAMES = 1e-6
+
+
+def _native_frames(intervals) -> list[tuple[int, int, int]]:
+    """Native intervals as frames, after checking every endpoint against the 10 ms grid."""
+    intervals = list(intervals)
+    for start, end, label in intervals:
+        for seconds in (start, end):
+            offset = abs(seconds * 100 - round(seconds * 100))
+            assert offset <= GRID_TOLERANCE_FRAMES, (
+                f"native interval endpoint {seconds!r} s of label {label} is {offset:.3g} frames "
+                "off the 10 ms frame grid")
+    return _frames(intervals)
 
 
 def _first_chunk_frames(model_dir: Path) -> int:
@@ -404,8 +427,8 @@ def _assert_parity(native: dict, reference, segments, case: dict, first_chunk: i
         "first step, the padding mask and the frames the speaker cache kept")
 
     native_active, reference_active = _active(logits), _active(reference)
-    assert _frames((item["start_seconds"], item["end_seconds"], item["label"])
-                   for item in native["intervals"]) == _runs(native_active), (
+    assert _native_frames((item["start_seconds"], item["end_seconds"], item["label"])
+                          for item in native["intervals"]) == _runs(native_active), (
         "native intervals are not the runs of its own frame decisions")
     assert _frames(segments) == _runs(reference_active), (
         "the reference segments are not the runs of its frame decisions")
@@ -417,8 +440,8 @@ def _assert_parity(native: dict, reference, segments, case: dict, first_chunk: i
             f"frame {frame} speaker {speaker} flipped with reference logit "
             f"{reference[frame, speaker]:.4f}")
     if not len(flipped):
-        assert _frames((item["start_seconds"], item["end_seconds"], item["label"])
-                       for item in native["intervals"]) == _frames(segments)
+        assert _native_frames((item["start_seconds"], item["end_seconds"], item["label"])
+                              for item in native["intervals"]) == _frames(segments)
     speakers = sorted({speaker for _, _, speaker in segments})
     print(f"{case['name']}: {len(native['intervals'])} intervals, reference speakers {speakers}, "
           f"{len(flipped)} near-threshold decisions differ; setup {native['setup_ms']:.1f} ms, "
@@ -452,3 +475,25 @@ def test_e2e(tmp_path: Path, case_name: str, request) -> None:
             "the public SDK frame scores differ from the CLI's")
     reference, segments = _official_reference(model_dir, samples)
     _assert_parity(native, reference, segments, case, _first_chunk_frames(model_dir))
+
+
+def test_parity_refuses_native_endpoints_off_the_frame_grid() -> None:
+    """An endpoint off the 10 ms grid fails even when rounding to frames would hide it."""
+    import numpy as np
+
+    logits = np.full((6, 8), -5.0)
+    logits[1:4, 0] = 5.0
+    case = {"name": "frame-grid", "logit_tolerance": 1e-3, "test_input": "single_speaker"}
+    segments = [(0.01, 0.04, 0)]
+
+    def native(start: float, end: float) -> dict:
+        return {"labels": [f"speaker_{index}" for index in range(8)], "vocabulary_id": "",
+                "score_kind": "logit", "frame_seconds": 0.01, "frame_scores": logits.tolist(),
+                "intervals": [{"start_seconds": start, "end_seconds": end, "label": 0}],
+                "setup_ms": 0.0, "inference_ms": 0.0}
+
+    _assert_parity(native(0.01, 0.04), logits, segments, case, first_chunk=6)
+    # 2 ms and 4.9 ms off the grid: both still round to frames 1 and 4.
+    for start, end in ((0.012, 0.04), (0.01, 0.0449)):
+        with pytest.raises(AssertionError, match="off the 10 ms frame grid"):
+            _assert_parity(native(start, end), logits, segments, case, first_chunk=6)
