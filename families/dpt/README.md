@@ -40,13 +40,13 @@ Both are adapted from Pillow and PyTorch; see `NOTICE`.
 float32 on the CPU (`DPTImageProcessor`, `DPTForDepthEstimation`,
 `post_process_depth_estimation`) on the repository's test photograph in
 landscape and in portrait orientation. Errors are relative to the largest
-reference depth. 1x NVIDIA B300 (SXM6 and PCIe), CUDA 13, TensorRT 11.4, eight
+reference depth. 1x NVIDIA B300 (two systems), CUDA 13, TensorRT 11.4, eight
 builds of the fp32 engine and six of the fp16 one:
 
 | Engine | Largest error | Mean error | Correlation | Engine call, batch 1 |
 |---|---|---|---|---|
-| fp32 | 2.4e-6 - 8.8e-6 | 2.0e-7 - 2.5e-7 | > 0.999999999999 | 8.7 ms (SXM6), 11.6 ms (PCIe) |
-| fp16 | 6.2e-3 - 3.0e-2 | 2.5e-4 - 6.1e-4 | >= 0.9999977 | 1.7 ms (SXM6), 1.8 ms (PCIe) |
+| fp32 | 2.4e-6 - 8.8e-6 | 2.0e-7 - 2.5e-7 | > 0.999999999999 | 8.7 - 11.6 ms |
+| fp16 | 6.2e-3 - 3.0e-2 | 2.5e-4 - 6.1e-4 | >= 0.9999977 | 1.7 - 1.8 ms |
 
 The fp16 builds pick different kernels, and their largest error on the landscape
 input moves between 1.1e-2 and 3.0e-2. For scale, the official model's
