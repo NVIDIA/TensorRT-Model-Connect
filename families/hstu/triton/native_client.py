@@ -18,7 +18,7 @@ from .generate_repository import runtime_metadata
 
 def snapshot_metadata(snapshot):
     """Read metadata for routing/revisions. Native restore performs integrity validation."""
-    if len(snapshot) < 16 or snapshot[:8] != b"HSTUKV1\0":
+    if len(snapshot) < 16 or snapshot[:8] != b"HSTUKV2\0":
         raise ValueError("invalid history snapshot")
     length = struct.unpack_from("<Q", snapshot, 8)[0]
     if not 0 < length <= 65536 or length > len(snapshot) - 16:
@@ -67,7 +67,7 @@ class NativeClient:
         self.lock = threading.RLock()
         self.stats_lock = threading.Lock()
         self.handle = None
-        self.metadata = runtime_metadata(Path(bundle))
+        self.metadata = runtime_metadata(Path(bundle), runtime_root)
         self.library = ctypes.CDLL(str(Path(runtime_root) / "libhstu_triton.so"))
         for name, arguments, result in [
             ("hstu_create", [ctypes.c_char_p], ctypes.c_void_p),

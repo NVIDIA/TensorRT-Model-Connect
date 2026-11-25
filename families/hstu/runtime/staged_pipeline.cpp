@@ -31,13 +31,13 @@ StagedPipeline::StagedPipeline(std::unique_ptr<ITrtModule> prepare,
     : prepare_(std::move(prepare)), step_(std::move(step)), request_(std::move(request)),
       config_(std::move(config)), bundle_identity_(std::move(identity)) {
     if (!prepare_ || !step_ || !prepare_->ok() || !step_->ok() ||
-        prepare_->stream() != step_->stream() || config_.at("decode_steps") <= 0 ||
-        config_.at("decode_steps") > 4096 || config_.at("candidates") <= 0)
+        prepare_->stream() != step_->stream() || config_.at("decode_steps") != 1 ||
+        config_.at("candidates") <= 0)
         throw std::invalid_argument("invalid staged ranking contract");
     if (prepare_->input_info().size() != config_.at("stages").at(0).at("inputs").size())
         throw std::invalid_argument("staged feature input count mismatch");
-    if (request_ &&
-        (!request_->ok() || request_->stream() != step_->stream() || bundle_identity_.size() != 64))
+    if (!request_ || !request_->ok() || request_->stream() != step_->stream() ||
+        bundle_identity_.empty())
         throw std::invalid_argument("invalid history-cache modules");
     // Count only the immutable projected history K/V, never workspace or slate state.
     for (const auto& spec : config_.at("stages").at(0).at("outputs")) {
@@ -56,35 +56,17 @@ StagedPipeline::StagedPipeline(std::unique_ptr<ITrtModule> prepare,
                                     {"min_batch_size", config_.value("min_batch_size", 1)},
                                     {"max_batch_size", config_.at("max_batch_size")}};
         for (const auto& spec : config_.at("stages").at(0).at("outputs"))
-            if (spec.at("name") == "history_mask") {
+            if (spec.at("name") != "history_k_b" && spec.at("name") != "history_v_b") {
                 auto shape = spec.at("shape").get<std::vector<std::int64_t>>();
                 shape.at(0) = 1;
-                mask_bytes_per_sequence_ = checked_bytes(shape, parse_dtype(spec.at("dtype")));
+                mask_bytes_per_sequence_ += checked_bytes(shape, parse_dtype(spec.at("dtype")));
             }
     }
-    // Include the complete initial non-cache profile state in the free-memory
-    // denominator, rather than allocating it after the cache cap is resolved.
-    reset_state(config_.at("max_batch_size").get<std::int64_t>());
     check(cudaStreamSynchronize(step_->stream()));
     stats_.supported = true;
     stats_.reserved_bytes = bytes_per_sequence_ * config_.at("max_batch_size").get<std::uint64_t>();
     scratch_bytes_ = stats_.reserved_bytes;
-    std::size_t free_bytes, total_bytes;
-    check(cudaMemGetInfo(&free_bytes, &total_bytes));
-    // Engine IO already owns this storage. Add it back to reconstruct the free
-    // memory denominator after all non-cache allocations. Later instances see
-    // earlier allocations through cudaMemGetInfo; no speculative reservations.
-    stats_.budget_bytes = cache_ratio
-                              ? std::uint64_t(cache_ratio * (free_bytes + stats_.reserved_bytes))
-                              : (cache_bytes ? cache_bytes : stats_.reserved_bytes);
-    if (stats_.budget_bytes < stats_.reserved_bytes)
-        throw std::invalid_argument(
-            "KV cache budget is smaller than the complete engine profile allocation");
-    positions_.resize(config_.at("decode_steps").get<std::size_t>());
-    for (std::size_t i = 0; i < positions_.size(); ++i)
-        positions_[i] = i;
-    check(cudaEventCreate(&begin_));
-    check(cudaEventCreate(&end_));
+    configure_cache_budget(cache_bytes, cache_ratio);
     std::random_device random;
     generation_ = std::to_string(random()) + "-" + std::to_string(random()) + "-" +
                   std::to_string(random()) + "-" + std::to_string(random()) + "-";
@@ -104,6 +86,22 @@ StagedPipeline::StagedPipeline(std::unique_ptr<ITrtModule> prepare,
         history_stats_[key] = std::uint64_t(0);
     history_stats_["restore_seconds_total"] = 0.0;
 }
+void StagedPipeline::configure_cache_budget(std::uint64_t bytes, double ratio) {
+    std::lock_guard<std::mutex> execution(execute_mutex_);
+    if (!std::isfinite(ratio) || ratio < 0 || ratio > 1 || (bytes && ratio))
+        throw std::invalid_argument("specify positive KV bytes or a ratio in (0, 1], exclusively");
+    if (history_enabled_ || !entries_.empty())
+        throw std::invalid_argument("configure cache budget before enabling restoration");
+    std::size_t free_bytes{}, total_bytes{};
+    check(cudaMemGetInfo(&free_bytes, &total_bytes));
+    const auto budget = ratio ? std::uint64_t(ratio * (free_bytes + scratch_bytes_))
+                              : (bytes ? bytes : scratch_bytes_);
+    if (budget < scratch_bytes_)
+        throw std::invalid_argument(
+            "KV cache budget is smaller than the complete engine profile allocation");
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    stats_.budget_bytes = budget;
+}
 CacheStats StagedPipeline::cache_stats() const {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     return stats_;
@@ -114,48 +112,11 @@ void StagedPipeline::set_active(std::int64_t batch) {
     stats_.used_bytes = bytes_per_sequence_ * batch;
     stats_.peak_bytes = std::max(stats_.peak_bytes, stats_.used_bytes);
 }
-StagedPipeline::~StagedPipeline() {
-    if (begin_)
-        cudaEventDestroy(begin_);
-    if (end_)
-        cudaEventDestroy(end_);
-}
-void StagedPipeline::reset_state(std::int64_t batch) {
-    const auto stream = step_->stream();
-    if (batch_ != batch) {
-        check(cudaStreamSynchronize(stream));
-        state_.clear();
-        for (const auto& spec : config_.at("stages").back().at("inputs")) {
-            const auto name = spec.at("name").get<std::string>();
-            if (name != "scores" && name != "placed_mask" && name != "frozen_raw" &&
-                name != "placed_count" && name != "step_index")
-                continue;
-            auto shape = spec.at("shape").get<std::vector<std::int64_t>>();
-            if (name != "step_index")
-                shape.at(0) = batch;
-            auto value = DeviceTensor(shape, parse_dtype(spec.at("dtype")), stream);
-            if (!value.ok())
-                throw std::runtime_error("state allocation failed");
-            step_->bind_external(name, value.data(), shape);
-            state_.emplace(name, std::move(value));
-        }
-        picks_ = DeviceTensor({batch, config_.at("decode_steps").get<std::int64_t>()},
-                              DType::kInt64, stream);
-        if (!picks_.ok())
-            throw std::runtime_error("picked output allocation failed");
-        batch_ = batch;
-    }
-    for (auto& [name, tensor] : state_)
-        check(cudaMemsetAsync(tensor.data(), 0, tensor.nbytes(), stream));
-    check(cudaMemsetAsync(picks_.data(), 0xff, picks_.nbytes(), stream));
-}
 std::vector<FeatureTensor> StagedPipeline::score(const std::vector<FeatureTensor>& inputs) {
     std::lock_guard<std::mutex> execution(execute_mutex_);
-    const auto prepare_start = Clock::now();
     const auto bound = validate_inputs(inputs, config_);
     const auto batch = inputs.front().shape.front();
     const auto stream = step_->stream();
-    profile_ = {};
     set_active(batch);
     struct ActiveGuard {
         StagedPipeline* owner;
@@ -165,29 +126,18 @@ std::vector<FeatureTensor> StagedPipeline::score(const std::vector<FeatureTensor
             owner->set_active(0);
         }
     } guard{this, stream};
-    reset_state(batch);
-    if (request_) {
-        TensorMap history, request;
-        for (const auto& spec : config_.at("stages").at(0).at("inputs"))
-            history.emplace(spec.at("name"), bound.at(spec.at("name")));
-        for (const auto& spec : config_.at("stages").at(1).at("inputs"))
-            request.emplace(spec.at("name"), bound.at(spec.at("name")));
-        prepare_->forward_async(history);
-        increment("history_prepare_calls_total");
-        request_->forward_async(request);
-        increment("request_prepare_calls_total");
-        bind_context(*request_, config_.at("stages").at(1).at("outputs"), batch);
-    } else {
-        prepare_->forward_async(bound);
-    }
+    TensorMap history, request;
+    for (const auto& spec : config_.at("stages").at(0).at("inputs"))
+        history.emplace(spec.at("name"), bound.at(spec.at("name")));
+    for (const auto& spec : config_.at("stages").at(1).at("inputs"))
+        request.emplace(spec.at("name"), bound.at(spec.at("name")));
+    prepare_->forward_async(history);
+    increment("history_prepare_calls_total");
+    request_->forward_async(request);
+    increment("request_prepare_calls_total");
+    bind_context(*request_, config_.at("stages").at(1).at("outputs"), batch);
     bind_context(*prepare_, config_.at("stages").at(0).at("outputs"), batch);
-    if (profiling_) {
-        check(cudaStreamSynchronize(stream));
-        profile_.prepare_wall_ms = elapsed(prepare_start);
-        profile_.round_wall_ms.reserve(positions_.size());
-        profile_.round_gpu_ms.reserve(positions_.size());
-    }
-    return run_rounds(batch);
+    return run_step(batch);
 }
 void StagedPipeline::bind_context(ITrtModule& module, const nlohmann::json& specs,
                                   std::int64_t batch) {
@@ -197,49 +147,18 @@ void StagedPipeline::bind_context(ITrtModule& module, const nlohmann::json& spec
         step_->bind_external(spec.at("name"), module.device_ptr(spec.at("name")), shape);
     }
 }
-std::vector<FeatureTensor> StagedPipeline::run_rounds(std::int64_t batch) {
+std::vector<FeatureTensor> StagedPipeline::run_step(std::int64_t batch) {
     const auto stream = step_->stream();
-    for (std::size_t round = 0; round < positions_.size(); ++round) {
-        const auto start = Clock::now();
-        if (profiling_)
-            check(cudaEventRecord(begin_, stream));
-        auto& position = state_.at("step_index");
-        check(cudaMemcpyAsync(position.data(), &positions_[round], sizeof(std::int64_t),
-                              cudaMemcpyHostToDevice, stream));
-        step_->forward_device_async({});
-        if (request_)
-            increment("decode_step_calls_total");
-        // Keep separate input/output storage. State copies are included in both timings.
-        for (auto& [name, tensor] : state_) {
-            if (name == "step_index")
-                continue;
-            check(cudaMemcpyAsync(tensor.data(), step_->device_ptr(name + "_out"), tensor.nbytes(),
-                                  cudaMemcpyDeviceToDevice, stream));
-        }
-        check(cudaMemcpy2DAsync(
-            static_cast<std::uint8_t*>(picks_.data()) + round * sizeof(std::int64_t),
-            positions_.size() * sizeof(std::int64_t), step_->device_ptr("picked"),
-            sizeof(std::int64_t), sizeof(std::int64_t), batch, cudaMemcpyDeviceToDevice, stream));
-        if (profiling_) {
-            check(cudaEventRecord(end_, stream));
-            check(cudaEventSynchronize(end_));
-            profile_.round_wall_ms.push_back(elapsed(start));
-            float gpu_ms;
-            check(cudaEventElapsedTime(&gpu_ms, begin_, end_));
-            profile_.round_gpu_ms.push_back(gpu_ms);
-        }
-    }
+    step_->forward_device_async({});
+    increment("decode_step_calls_total");
     std::vector<FeatureTensor> outputs;
     for (const auto& spec : config_.at("outputs")) {
-        const auto name = spec.at("name").get<std::string>();
         auto shape = spec.at("shape").get<std::vector<std::int64_t>>();
         shape.at(0) = batch;
-        FeatureTensor output{name, parse_dtype(spec.at("dtype")), shape, {}};
+        FeatureTensor output{spec.at("name"), parse_dtype(spec.at("dtype")), shape, {}};
         output.bytes.resize(checked_bytes(shape, output.dtype));
-        const void* ptr =
-            output.dtype == DType::kFloat32 ? state_.at("scores").data() : picks_.data();
-        check(cudaMemcpyAsync(output.bytes.data(), ptr, output.bytes.size(), cudaMemcpyDeviceToHost,
-                              stream));
+        check(cudaMemcpyAsync(output.bytes.data(), step_->device_ptr(output.name),
+                              output.bytes.size(), cudaMemcpyDeviceToHost, stream));
         outputs.push_back(std::move(output));
     }
     check(cudaStreamSynchronize(stream));
@@ -327,10 +246,10 @@ StagedPipeline::export_history(const std::vector<FeatureTensor>& inputs,
             throw std::invalid_argument("invalid history revision");
     HistorySnapshot snapshot;
     auto& meta = snapshot.metadata;
-    meta = {{"bundle_sha256", bundle_identity_},
+    meta = {{"bundle_id", bundle_identity_},
             {"batch", batch},
             {"revisions", revisions},
-            {"history_sha256", nlohmann::json::array()}};
+            {"history_key", nlohmann::json::array()}};
     for (std::int64_t row = 0; row < batch; ++row) {
         HistoryHash hash;
         for (const auto& spec : config_.at("stages").at(0).at("inputs")) {
@@ -341,7 +260,7 @@ StagedPipeline::export_history(const std::vector<FeatureTensor>& inputs,
             const auto bytes = tensor.nbytes() / std::size_t(batch);
             hash.update(static_cast<const std::uint8_t*>(tensor.data) + row * bytes, bytes);
         }
-        meta["history_sha256"].push_back(hash.finish());
+        meta["history_key"].push_back(hash.finish());
     }
     prepare_->forward_async(bound);
     increment("history_prepare_calls_total");
@@ -387,7 +306,7 @@ std::vector<std::string> StagedPipeline::restore_history(const std::vector<std::
             const auto metadata =
                 nlohmann::json{{"bundle", bundle_identity_},
                                {"revision", snapshot.metadata.at("revisions").at(row)},
-                               {"history", snapshot.metadata.at("history_sha256").at(row)}}
+                               {"history", snapshot.metadata.at("history_key").at(row)}}
                     .dump();
             hash.update(metadata.data(), metadata.size());
             for (const auto& tensor : snapshot.tensors) {
@@ -434,7 +353,7 @@ std::vector<std::string> StagedPipeline::restore_history(const std::vector<std::
                 entry.id = generation_ + std::to_string(++next_handle_);
                 entry.key = key;
                 entry.revision = snapshot.metadata.at("revisions").at(row);
-                entry.feature_digest = snapshot.metadata.at("history_sha256").at(row);
+                entry.feature_digest = snapshot.metadata.at("history_key").at(row);
                 entry.expires = now + duration(ttl_seconds_);
                 entry.leased_until = now + duration(lease_seconds_);
                 entry.touched = now;
@@ -444,8 +363,9 @@ std::vector<std::string> StagedPipeline::restore_history(const std::vector<std::
                     DeviceTensor device(shape, tensor.dtype, step_->stream());
                     if (!device.ok())
                         throw std::runtime_error("history device allocation failed");
-                    (tensor.dtype == DType::kFloat32 ? pending_kv : pending_mask) +=
-                        device.nbytes();
+                    ((tensor.name == "history_k_b" || tensor.name == "history_v_b")
+                         ? pending_kv
+                         : pending_mask) += device.nbytes();
                     refresh_residency(pending_kv, pending_mask);
                     const auto n = tensor.bytes.size() / batch;
                     check(cudaMemcpyAsync(device.data(), tensor.bytes.data() + row * n, n,
@@ -525,8 +445,6 @@ StagedPipeline::score_with_history(const std::vector<std::string>& handles,
             self->set_active(0);
         }
     } guard{this, stream};
-    profile_ = {};
-    reset_state(batch);
     const auto& specs = config_.at("stages").at(0).at("outputs");
     for (std::size_t tensor = 0; tensor < specs.size(); ++tensor) {
         if (batch == 1) {
@@ -549,7 +467,7 @@ StagedPipeline::score_with_history(const std::vector<std::string>& handles,
     request_->forward_async(bound);
     increment("request_prepare_calls_total");
     bind_context(*request_, config_.at("stages").at(1).at("outputs"), batch);
-    auto outputs = run_rounds(batch);
+    auto outputs = run_step(batch);
     const auto now = HistoryClock::now();
     for (auto* entry : selected) {
         entry->touched = now;
@@ -567,8 +485,8 @@ nlohmann::json StagedPipeline::history_info(const std::string& handle) {
     return {{"handle", handle},
             {"ready", true},
             {"revision", entry.revision},
-            {"history_sha256", entry.feature_digest},
-            {"bundle_sha256", bundle_identity_},
+            {"history_key", entry.feature_digest},
+            {"bundle_id", bundle_identity_},
             {"kv_bytes", bytes_per_sequence_},
             {"mask_bytes", mask_bytes_per_sequence_},
             {"leased", entry.leased_until > now},

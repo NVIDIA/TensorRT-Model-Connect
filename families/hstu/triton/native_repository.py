@@ -11,7 +11,7 @@ import shutil
 from .generate_repository import runtime_metadata
 
 
-def generate(bundle, repository, name, *, parameters=None, instances=1):
+def generate(bundle, repository, name, *, parameters=None, instances=1, runtime_root=None):
     if not name or Path(name).name != name or name in (".", ".."):
         raise ValueError("name must be one directory component")
     if instances < 1:
@@ -35,7 +35,7 @@ def generate(bundle, repository, name, *, parameters=None, instances=1):
             or not 0 < value <= 1
         ):
             raise ValueError("KV ratio must be finite and in (0,1]")
-    runtime = runtime_metadata(bundle)
+    runtime = runtime_metadata(bundle, runtime_root)
     fixed = runtime.get("batching") == "fixed"
     batch = runtime["max_batch_size"]
     target = Path(repository) / name
@@ -83,6 +83,7 @@ def main():
     p.add_argument("--bundle", type=Path, required=True)
     p.add_argument("--repository", type=Path, required=True)
     p.add_argument("--name", default="hstu")
+    p.add_argument("--runtime-root", required=True)
     g = p.add_mutually_exclusive_group()
     g.add_argument("--kv-cache-size-bytes", type=int)
     g.add_argument("--kv-cache-memory-ratio", type=float)
@@ -98,7 +99,7 @@ def main():
         if not math.isfinite(a.kv_cache_memory_ratio) or not 0 < a.kv_cache_memory_ratio <= 1:
             p.error("ratio must be finite in (0,1]")
         params["kv_cache_memory_ratio"] = a.kv_cache_memory_ratio
-    print(generate(a.bundle, a.repository, a.name, parameters=params))
+    print(generate(a.bundle, a.repository, a.name, parameters=params, runtime_root=a.runtime_root))
 
 
 if __name__ == "__main__":

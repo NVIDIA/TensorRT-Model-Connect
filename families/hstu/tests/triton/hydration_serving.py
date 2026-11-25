@@ -52,15 +52,17 @@ def wait_metrics(model, predicate):
     raise AssertionError((model, values))
 
 
-for n in (50, 64):
+for profile in ("default", "short"):
     for precision in ("fp32", "bf16"):
-        variant = f"hstu{n}-{precision}"
-        model = "history_" + variant.replace("-", "_")
+        variant = f"dlrmv3-{profile}-{precision}"
+        model = "hydrated_" + variant.replace("-", "_")
         if admin.is_model_ready(model):
             admin.unload_model(model)
             wait_metrics(model, lambda v: not v)
         admin.load_model(model)
-        cases = [1, 4]
+        cases = [1, 4] if profile == "default" else [4]
+        c = Config.load(root / "output" / variant)
+        per_history = 5 * 4 * (c.serving.history_length + 1) * 256 * 4
         with NativeClient(root / "output" / variant / "model.bundle", runtime_root) as native:
             names = [s["name"] for s in native.metadata["stages"][0]["inputs"]]
             output_names = [s["name"] for s in native.metadata["outputs"]]
@@ -86,7 +88,10 @@ for n in (50, 64):
                     (root / "output" / variant / f"{case}-{protocol}-resident.prom").write_text(
                         text
                     )
-                    assert before["resident_bytes"] == 262144 * batch and before["used_bytes"] == 0
+                    assert (
+                        before["resident_bytes"] == per_history * batch
+                        and before["used_bytes"] == 0
+                    )
                     assert before["history_prepare_calls_total"] == 0
                     assert before["restoring_bytes"] == 0
                     duplicate = call(
@@ -140,7 +145,7 @@ for n in (50, 64):
                         model,
                         lambda v: (
                             v.get("decode_step_calls_total")
-                            == before["decode_step_calls_total"] + 50 * repetitions
+                            == before["decode_step_calls_total"] + repetitions
                         ),
                     )
                     assert (
@@ -188,7 +193,7 @@ for n in (50, 64):
                             resident_bytes=before["resident_bytes"],
                             active_sample=True,
                             history_launches=0,
-                            decode_launches=50 * repetitions,
+                            decode_launches=repetitions,
                         )
                     )
                     client.close()
@@ -229,25 +234,25 @@ for n in (50, 64):
         (root / "triton-qualification.json").write_text(json.dumps(results, indent=2))
         print(
             variant,
-            "passed HTTP/gRPC B1/B4, live metrics, export, corruption and reload",
+            f"passed HTTP/gRPC batches {cases}, live metrics, export, corruption and reload",
             flush=True,
         )
 # Exercise a positive allocation-failure metric through a real Triton endpoint.
 # A native fixed-scratch score cannot create post-load cache pressure; snapshot
 # restoration can fill the same runtime's leased-entry budget deterministically.
-model = "history_hstu50_fp32"
+model = "hydrated_dlrmv3_default_fp32"
 admin.load_model(model)
 handles = []
 try:
-    checkpoint = root / "output/hstu50-fp32"
+    checkpoint = root / "output/dlrmv3-default-fp32"
     features = example_inputs(Config.load(checkpoint), 4)
     with NativeClient(checkpoint / "model.bundle", runtime_root) as producer:
-        history = {k: v for k, v in features.items() if k.startswith("history_")}
-        for iteration in range(9):
+        history = {s["name"]: features[s["name"]] for s in producer.metadata["stages"][0]["inputs"]}
+        for iteration in range(3):
             snapshot = producer.export_history(
                 history, [f"pressure-{iteration}-{row}" for row in range(4)]
             )
-            if iteration < 8:
+            if iteration < 2:
                 response = call(
                     admin,
                     http,
@@ -272,7 +277,11 @@ try:
                 else:
                     raise AssertionError("leased-entry cache pressure must reject restoration")
     text, values = wait_metrics(model, lambda v: v.get("allocation_failures", 0) == 1)
-    assert values["resident_entries"] == 32 and values["reserved_bytes"] == 9437184
+    assert values["resident_entries"] == 8
+    assert (
+        values["reserved_bytes"]
+        == 12 * 5 * 4 * (Config.load(checkpoint).serving.history_length + 1) * 256 * 4
+    )
     assert values["restoring_bytes"] == values["used_bytes"] == 0
     (root / "positive-allocation-failure.prom").write_text(text)
     (root / "positive-allocation-failure.json").write_text(json.dumps(values, indent=2))

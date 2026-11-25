@@ -5,6 +5,7 @@
 
 import numpy as np
 import tensorrt as trt
+from .checkpoint import BLOCK, HEAD, POS, POST, PRE
 
 
 class Network:
@@ -12,7 +13,6 @@ class Network:
         self.n, self.c, self.w = network, config, weights
         self.low = trt.bfloat16 if precision == "bf16" else trt.float32
         self.precision = precision
-        self.fast_bf16 = precision == "bf16" and config.bf16_policy == "fast"
         self.keep = []
 
     def const(self, value, dtype=None):
@@ -71,16 +71,35 @@ class Network:
     def silu(self, x):
         return self.mul(x, self.n.add_activation(x, trt.ActivationType.SIGMOID).get_output(0))
 
-    def norm(self, x):
-        # Sensitive reductions and reciprocal sqrt are explicitly FP32.
+    def norm(self, x, weight, bias, eps=1e-5):
         x = self.cast(x, trt.float32)
-        mean = self.reduce(x, "AVG", len(x.shape) - 1)
-        centered = self.op(x, mean, "SUB")
-        var = self.reduce(self.mul(centered, centered), "AVG", len(x.shape) - 1)
+        centered = self.op(x, self.reduce(x, "AVG", len(x.shape) - 1), "SUB")
+        variance = self.reduce(self.mul(centered, centered), "AVG", len(x.shape) - 1)
         denom = self.n.add_unary(
-            self.add(var, self.const([self.c.epsilon], np.float32)), trt.UnaryOperation.SQRT
+            self.add(variance, self.const([eps], np.float32)), trt.UnaryOperation.SQRT
         ).get_output(0)
-        return self.op(centered, denom, "DIV")
+        return self.add(
+            self.mul(self.op(centered, denom, "DIV"), self.const(weight)), self.const(bias)
+        )
+
+    def ln(self, x, prefix):
+        return self.norm(x, self.w[prefix + "weight"], self.w[prefix + "bias"])
+
+    def dense(self, x, prefix):
+        weight = self.const(self.w[prefix + "weight"])
+        weight = self.reshape(weight, (1,) * (len(x.shape) - 2) + tuple(weight.shape))
+        return self.add(self.mm(x, weight, transpose=True), self.const(self.w[prefix + "bias"]))
+
+    def swish_ln(self, x, prefix):
+        return self.mul(
+            x, self.n.add_activation(self.ln(x, prefix), trt.ActivationType.SIGMOID).get_output(0)
+        )
+
+    def mlp(self, x, prefix):
+        return self.ln(
+            self.dense(self.swish_ln(self.dense(x, prefix + "0."), prefix + "1."), prefix + "2."),
+            prefix + "3.",
+        )
 
     def mm(self, a, b, low=False, transpose=False):
         dtype = self.low if low else trt.float32
@@ -106,218 +125,271 @@ class Network:
         layer.axis = axis
         return layer.get_output(0)
 
-    def batch_gather(self, value, indices, axis):
-        layer = self.n.add_gather(value, indices, axis)
-        layer.num_elementwise_dims = 1
-        return layer.get_output(0)
+    def slice_last(self, x, start, count):
+        return self.n.add_gather(
+            x, self.const(np.arange(start, start + count), np.int32), 2
+        ).get_output(0)
 
-    def refine_selection(self, scores, canonical, eligible, tensors, attention_scores):
-        """Refine a small shortlist; keep the graph eligible for capture/replay."""
-        count = min(self.c.refinement_candidates, self.c.candidates)
-        if count < 2:
-            return scores
-        masked = self.select(eligible, scores, self.const([-1e30], np.float32))
-        top = self.n.add_topk(masked, trt.TopKOperation.MAX, count, 1 << 1)
-        values, indices = top.get_output(0), top.get_output(1)
-        first = self.n.add_gather(values, self.const([0], np.int32), 1).get_output(0)
-        second = self.n.add_gather(values, self.const([1], np.int32), 1).get_output(0)
-        close = self.less(
-            self.op(first, second, "SUB"), self.const([self.c.selection_margin], np.float32)
-        )
-        enough = self.less(
-            self.const([1], np.int32), self.reduce(self.cast(eligible, trt.int32), "SUM", 1)
-        )
-        needed = self.cast(self.op(close, enough, "AND"), trt.int32)
-        selected = self.batch_gather(canonical, indices, 1)
-        q, u, x, keys, vals, mask = tensors
-        refined = attention_scores(
-            False,
-            self.batch_gather(q, selected, 2),
-            self.batch_gather(u, selected, 1),
-            self.batch_gather(x, selected, 1),
-            keys,
-            vals,
-            self.batch_gather(mask, selected, 2),
-            count,
-        )
-        scatter = self.n.add_scatter(scores, selected, refined, trt.ScatterMode.ELEMENT)
-        scatter.axis = 1
-        decision = self.select(self.cast(needed, trt.bool), scatter.get_output(0), scores)
-        return self.batch_gather(decision, canonical, 1)
+    def reduced(self, layer):
+        return self.precision == "bf16" and layer not in self.c.fp32_block_indices
 
-    def project(self, raw, positions, tokens):
-        c = self.c
-        d, h = c.hidden_size, c.num_heads
+    def project(self, x, layer):
+        p = BLOCK + str(layer) + "."
+        normalized = self.norm(
+            x, self.w[p + "_input_norm_weight"], self.w[p + "_input_norm_bias"], 1e-6
+        )
+        projection = self.add(
+            self.linear(normalized, p + "_uvqk_weight", low=self.reduced(layer)),
+            self.const(self.w[p + "_uvqk_beta"]),
+        )
+        u, v, q, key = [self.slice_last(projection, i * 512, 512) for i in range(4)]
+
+        def heads(value):
+            return self.transpose(self.reshape(value, (-1, x.shape[1], 4, 128)), (0, 2, 1, 3))
+
+        return self.silu(u), heads(v), heads(q), heads(key)
+
+    def weights(self, logits, mask, layer):
+        n = self.c.serving.history_length + self.c.serving.candidates + 1
+        dtype = self.low if self.reduced(layer) else trt.float32
+        logits = self.mul(
+            self.cast(logits, dtype), self.cast(self.const([128**-0.5], np.float32), dtype)
+        )
+        weights = self.mul(self.silu(logits), self.cast(self.const([1 / n], np.float32), dtype))
+        return self.mul(weights, self.cast(mask, dtype))
+
+    def finish(self, x, u, attended, layer):
+        p = BLOCK + str(layer) + "."
+        attended = self.reshape(self.transpose(attended, (0, 2, 1, 3)), (-1, x.shape[1], 512))
+        normalized = self.norm(
+            attended, self.w[p + "_output_norm_weight"], self.w[p + "_output_norm_bias"], 1e-6
+        )
+        output = self.concat([u, attended, self.mul(u, normalized)], 2)
+        return self.add(x, self.linear(output, p + "_output_weight", low=self.reduced(layer)))
+
+    def preprocess(self, item, category, actions):
+        return self.add(
+            self.add(
+                self.mlp(item, PRE + "_content_embedding_mlp."),
+                self.mlp(category, PRE + "_additional_embedding_mlp."),
+            ),
+            self.mlp(actions, PRE + "_action_embedding_mlp."),
+        )
+
+    def position(self, x, indices, timestamps, query_time):
+        delta = self.cast(self.op(query_time, timestamps, "SUB"), trt.float32)
+        delta = self.op(
+            self.op(delta, self.const([1e-6], np.float32), "MAX"),
+            self.const([60], np.float32),
+            "DIV",
+        )
+        bucket = self.n.add_unary(delta, trt.UnaryOperation.SQRT).get_output(0)
+        bucket = self.cast(self.op(bucket, self.const([2048], np.float32), "MIN"), trt.int32)
+        return self.add(
+            self.mul(x, self.const([np.sqrt(512)], np.float32)),
+            self.add(
+                self.gather(POS + "_position_embeddings_weight", indices),
+                self.gather(POS + "_timestamp_embeddings_weight", bucket),
+            ),
+        )
+
+    def prepare_history(self, inp):
+        t = self.c.serving.history_length
+        lengths = inp["history_lengths"]
+        bits = self.const(
+            self.w[PRE + "_action_encoder._combined_action_weights"]
+            .astype(np.int32)
+            .reshape(1, 1, 5)
+        )
+        action = self.reshape(inp["history_actions"], (-1, t, 1))
+        quotient = self.op(action, bits, "FLOOR_DIV")
+        exploded = self.op(
+            quotient,
+            self.mul(
+                self.op(quotient, self.const([2], np.int32), "FLOOR_DIV"), self.const([2], np.int32)
+            ),
+            "SUB",
+        )
+        exploded = self.cast(self.less(self.const([0], np.int32), exploded), trt.float32)
+        actions = self.reshape(
+            self.mul(
+                self.reshape(exploded, (-1, t, 5, 1)),
+                self.const(
+                    self.w[PRE + "_action_encoder._action_embedding_table"].reshape(1, 1, 5, 8)
+                ),
+            ),
+            (-1, t, 40),
+        )
+        x = self.preprocess(
+            inp["history_item_embeddings"], inp["history_category_embeddings"], actions
+        )
+        enough = self.cast(
+            self.less(self.const([19], np.int32), self.add(lengths, inp["num_candidates"])),
+            trt.float32,
+        )
+        contextual = self.mul(inp["user_embeddings"], self.reshape(enough, (-1, 1, 1)))
+        context = self.add(
+            self.mm(contextual, self.const(self.w[PRE + "_batched_contextual_linear_weights"])),
+            self.const(self.w[PRE + "_batched_contextual_linear_bias"]),
+        )
+        x = self.concat([context, x], 1)
+        zero = self.mul(lengths, self.const([0], np.int32))
+        positions = self.op(
+            self.add(lengths, self.const([1], np.int32)),
+            self.const(np.arange(t)[None], np.int32),
+            "SUB",
+        )
+        positions = self.op(
+            self.op(positions, self.const([1], np.int32), "MAX"),
+            self.const([8191], np.int32),
+            "MIN",
+        )
+        positions = self.concat([zero, positions], 1)
+        timestamps = self.concat([self.cast(zero, trt.int64), inp["history_timestamps"]], 1)
+        x = self.position(x, positions, timestamps, inp["query_timestamp"])
+        valid = self.cast(
+            self.less(
+                self.const(np.arange(t + 1)[None], np.int32),
+                self.add(lengths, self.const([1], np.int32)),
+            ),
+            trt.float32,
+        )
+        mask = self.mul(
+            self.const(np.tril(np.ones((1, 1, t + 1, t + 1), np.float32))),
+            self.reshape(valid, (-1, 1, 1, t + 1)),
+        )
+        keys, values = [], []
+        keep = self.reshape(valid, (-1, 1, t + 1, 1))
+        for layer in range(5):
+            u, v, q, key = self.project(x, layer)
+            keys.append(self.reshape(self.mul(key, keep), (-1, 1, 4, t + 1, 128)))
+            values.append(self.reshape(self.mul(v, keep), (-1, 1, 4, t + 1, 128)))
+            if layer < 4:
+                weights = self.weights(
+                    self.mm(q, key, low=self.reduced(layer), transpose=True), mask, layer
+                )
+                x = self.finish(x, u, self.mm(weights, v, low=self.reduced(layer)), layer)
+        candidate_mask = self.cast(
+            self.less(
+                self.const(np.arange(self.c.serving.candidates)[None], np.int32),
+                inp["num_candidates"],
+            ),
+            trt.int32,
+        )
+        return [
+            self.concat(keys, 1),
+            self.concat(values, 1),
+            self.cast(valid, trt.int32),
+            candidate_mask,
+            inp["query_timestamp"],
+        ]
+
+    def prepare_request(self, inp):
+        item, category = inp["candidate_item_embeddings"], inp["candidate_category_embeddings"]
+        zeros = self.mul(self.slice_last(item, 0, 40), self.const([0], np.float32))
+        actions = self.add(
+            zeros, self.const(self.w[PRE + "_action_encoder._target_action_embedding_table"])
+        )
+        x = self.preprocess(item, category, actions)
+        emb = self.mlp(self.concat([item, category], 2), "_item_embedding_mlp.")
+        return [x, emb]
+
+    def score_candidates(self, inp):
+        t, c = self.c.serving.history_length, self.c.serving.candidates
         x = self.add(
-            self.mul(raw, self.const([np.sqrt(d)], np.float32)),
-            self.gather("position_embeddings", positions),
+            self.mul(inp["candidate_x"], self.const([np.sqrt(512)], np.float32)),
+            self.const(
+                (
+                    self.w[POS + "_position_embeddings_weight"][1]
+                    + self.w[POS + "_timestamp_embeddings_weight"][0]
+                ).reshape(1, 1, 512)
+            ),
         )
-        uvqk = self.silu(self.linear(self.norm(x), "uvqk"))
-        parts = [self.slice_last(uvqk, i * d, d) for i in range(4)]
-
-        def heads(a):
-            return self.transpose(self.reshape(a, (-1, tokens, h, d // h)), (0, 2, 1, 3))
-
-        return x, parts[0], heads(parts[1]), heads(parts[2]), heads(parts[3])
-
-    def slice_last(self, x, start, size):
-        layer = self.n.add_slice(x, (0, 0, start), (1, int(x.shape[1]), size), (1, 1, 1))
-        shape = self.n.add_shape(x).get_output(0)
-        batch = self.n.add_slice(shape, (0,), (1,), (1,)).get_output(0)
-        dimensions = self.concat([batch, self.const([int(x.shape[1]), size], np.int64)], 0)
-        layer.set_input(2, dimensions)
-        return layer.get_output(0)
+        mask = self.reshape(self.cast(inp["history_mask"], trt.float32), (-1, 1, 1, t + 1))
+        for layer in range(5):
+            index = self.const([layer], np.int32)
+            key = self.reshape(
+                self.n.add_gather(inp["history_k_b"], index, 1).get_output(0), (-1, 4, t + 1, 128)
+            )
+            val = self.reshape(
+                self.n.add_gather(inp["history_v_b"], index, 1).get_output(0), (-1, 4, t + 1, 128)
+            )
+            u, self_val, q, self_key = self.project(x, layer)
+            weights = self.weights(
+                self.mm(q, key, low=self.reduced(layer), transpose=True), mask, layer
+            )
+            # Targets see the immutable prefix and themselves, never other targets.
+            self_logit = self.reduce(self.mul(q, self_key), "SUM", 3)
+            self_weight = self.weights(self_logit, self.const([1], np.float32), layer)
+            attended = self.add(
+                self.mm(weights, val, low=self.reduced(layer)),
+                self.mul(self.cast(self_weight, trt.float32), self_val),
+            )
+            x = self.finish(x, u, attended, layer)
+        timestamp = self.cast(self.reshape(inp["query_timestamp_b"], (-1, 1, 1)), trt.float32)
+        units = self.n.add_unary(
+            self.op(timestamp, self.const(self.w[POST + "_period_units"].reshape(1, 1, 2)), "DIV"),
+            trt.UnaryOperation.FLOOR,
+        ).get_output(0)
+        periods = self.const(self.w[POST + "_units_per_period"].reshape(1, 1, 2))
+        remainder = self.op(
+            units,
+            self.mul(
+                self.n.add_unary(
+                    self.op(units, periods, "DIV"), trt.UnaryOperation.FLOOR
+                ).get_output(0),
+                periods,
+            ),
+            "SUB",
+        )
+        phase = self.mul(self.op(remainder, periods, "DIV"), self.const([2 * 3.14], np.float32))
+        cos = self.n.add_unary(phase, trt.UnaryOperation.COS).get_output(0)
+        sin = self.n.add_unary(phase, trt.UnaryOperation.SIN).get_output(0)
+        features = self.reshape(
+            self.concat([self.reshape(cos, (-1, 1, 2, 1)), self.reshape(sin, (-1, 1, 2, 1))], 3),
+            (-1, 1, 4),
+        )
+        features = self.add(
+            self.mul(self.slice_last(x, 0, 4), self.const([0], np.float32)), features
+        )
+        user = self.ln(
+            self.dense(self.concat([x, features], 2), POST + "_time_feature_combiner."),
+            POST + "_layer_norm.",
+        )
+        head = self.swish_ln(
+            self.dense(self.mul(user, inp["candidate_emb"]), HEAD + "0."), HEAD + "1."
+        )
+        score = self.reshape(
+            self.n.add_activation(
+                self.dense(head, HEAD + "2."), trt.ActivationType.SIGMOID
+            ).get_output(0),
+            (-1, c),
+        )
+        return [
+            self.select(
+                self.equal(inp["candidate_mask"], self.const([1], np.int32)),
+                score,
+                self.const([0], np.float32),
+            )
+        ]
 
     def define(self, stage):
-        c = self.c
-        d, t, r, k = c.hidden_size, c.history_length, c.decode_steps, c.candidates
-        dtype = {"float32": trt.float32, "int32": trt.int32, "int64": trt.int64}
-        specs = c.runtime(max(c.min_batch_size, c.opt_batch_size or 1), "fp32")["stages"]
-        schema = next(s for s in specs if s["name"] == stage)
+        batch = max(self.c.serving.min_batch_size, self.c.serving.opt_batch_size)
+        schema = next(
+            s for s in self.c.runtime(batch, self.precision)["stages"] if s["name"] == stage
+        )
+        dtype = {"int64": trt.int64, "int32": trt.int32, "float32": trt.float32}
         inp = {
             s["name"]: self.n.add_input(s["name"], dtype[s["dtype"]], s["shape"])
             for s in schema["inputs"]
         }
-        if stage == "history_prepare":
-            positions = self.const(np.arange(t, dtype=np.int64)[None, :])
-            _, _, v, _, key = self.project(
-                self.gather("item_embeddings", inp["history_ids"]), positions, t
-            )
-            mask = self.cast(self.less(positions, inp["history_lengths"]), trt.int32)
-            outputs = [key, v, mask]
-        elif stage == "request_prepare":
-            raw = self.gather("item_embeddings", inp["candidate_ids"])
-            valid = self.cast(
-                self.less(self.const(np.arange(k, dtype=np.int64)[None, :]), inp["num_candidates"]),
-                trt.int32,
-            )
-            outputs = [raw, valid, inp["candidate_ids"]]
-        else:
-            hist_mask = self.cast(inp["history_mask"], trt.float32)
-            lengths = self.cast(self.reduce(inp["history_mask"], "SUM", 1), trt.int64)
-            step = self.reshape(inp["step_index"], (1, 1))
-            x, u, cv, q, ck = self.project(inp["candidate_emb"], self.add(lengths, step), k)
-            _, _, fv, _, fk = self.project(
-                inp["frozen_raw"],
-                self.add(lengths, self.const(np.arange(r, dtype=np.int64)[None, :])),
-                r,
-            )
-            keys = self.concat([inp["history_k_b"], fk, ck], 2)
-            values = self.concat([inp["history_v_b"], fv, cv], 2)
-            history = self.reshape(hist_mask, (-1, 1, 1, t))
-            previous = self.reshape(
-                self.cast(
-                    self.less(self.const(np.arange(r, dtype=np.int64)[None, :]), step), trt.float32
-                ),
-                (1, 1, 1, r),
-            )
-            # Broadcast masks explicitly using the query/candidate axes.
-            query_ones = self.const(np.ones((1, 1, k, 1), np.float32))
-            history = self.mul(history, query_ones)
-            previous = self.mul(previous, query_ones)
-            # Include a dynamic batch axis so concatenation has equal leading dims.
-            batch_ones = self.add(
-                self.mul(
-                    self.reshape(self.cast(lengths, trt.float32), (-1, 1, 1, 1)),
-                    self.const([0], np.float32),
-                ),
-                self.const([1], np.float32),
-            )
-            previous = self.mul(previous, batch_ones)
-            target = self.mul(self.const(np.eye(k, dtype=np.float32)[None, None, :, :]), batch_ones)
-            mask = self.concat([history, previous, target], 3)
-
-            def attention_scores(
-                low,
-                query=q,
-                gate=u,
-                residual=x,
-                all_keys=keys,
-                all_values=values,
-                query_mask=mask,
-                queries=k,
-            ):
-                logits = self.mm(query, all_keys, low=low, transpose=True)
-                # Keep the complete SiLU/scale/mask epilogue in one explicit
-                # dtype. TensorRT owns whether this graph becomes fused HSTU.
-                epi = self.low if low and c.bf16_attention_epilogue else trt.float32
-                logits = self.cast(logits, epi)
-                scale = self.cast(self.const([1 / c.normalization_length], np.float32), epi)
-                attention = self.mul(self.silu(logits), scale)
-                attended = self.mm(
-                    self.mul(attention, self.cast(query_mask, epi)), all_values, low=low
-                )
-                attended = self.reshape(self.transpose(attended, (0, 2, 1, 3)), (-1, queries, d))
-                encoded = self.add(
-                    self.add(
-                        self.linear(
-                            self.mul(gate, self.norm(attended)), "output_weight", low=self.fast_bf16
-                        ),
-                        self.const(self.w["output_bias"]),
-                    ),
-                    residual,
-                )
-                return self.reshape(
-                    self.add(
-                        self.linear(self.norm(encoded), "head_weight"),
-                        self.const(self.w["head_bias"]),
-                    ),
-                    (-1, queries),
-                )
-
-            raw_scores = attention_scores(low=True)
-            # Equal item IDs denote the same mathematical query. Canonicalize the
-            # score to its first occurrence before stable argmax: GEMM row tiling
-            # may otherwise perturb exact duplicates by an FP32 ULP.
-            ids = inp["candidate_ids_context"]
-            same = self.equal(self.reshape(ids, (-1, k, 1)), self.reshape(ids, (-1, 1, k)))
-            canonical = self.reduce(
-                self.select(
-                    same,
-                    self.const(np.arange(k, dtype=np.int64)[None, None, :]),
-                    self.const([k], np.int64),
-                ),
-                "MIN",
-                2,
-                False,
-            )
-            gather = self.n.add_gather(raw_scores, canonical, 1)
-            gather.num_elementwise_dims = 1
-            raw_scores = gather.get_output(0)
-            eligible = self.op(
-                self.equal(inp["placed_mask"], self.const([0], np.int32)),
-                self.equal(inp["valid_mask"], self.const([1], np.int32)),
-                "AND",
-            )
-            decision_scores = raw_scores
-            if self.precision == "bf16" and not self.fast_bf16:
-                decision_scores = self.refine_selection(
-                    raw_scores, canonical, eligible, (q, u, x, keys, values, mask), attention_scores
-                )
-            masked = self.select(eligible, decision_scores, self.const([-1e30], np.float32))
-            maximum = self.reduce(masked, "MAX", 1)
-            indices = self.const(np.arange(k, dtype=np.int64)[None, :])
-            matches = self.op(eligible, self.equal(masked, maximum), "AND")
-            best = self.reduce(self.select(matches, indices, self.const([k], np.int64)), "MIN", 1)
-            exists = self.less(best, self.const([k], np.int64))
-            picked = self.select(exists, best, self.const([-1], np.int64))
-            chosen = self.equal(indices, picked)
-            scores = self.select(chosen, raw_scores, inp["scores"])
-            placed = self.select(chosen, self.const([1], np.int32), inp["placed_mask"])
-            chosen_emb = self.reduce(
-                self.mul(
-                    inp["candidate_emb"], self.reshape(self.cast(chosen, trt.float32), (-1, k, 1))
-                ),
-                "SUM",
-                1,
-            )
-            slot = self.equal(self.const(np.arange(r, dtype=np.int64)[None, :]), step)
-            slot = self.op(slot, exists, "AND")
-            frozen = self.select(self.reshape(slot, (-1, r, 1)), chosen_emb, inp["frozen_raw"])
-            count = self.add(inp["placed_count"], self.reshape(self.cast(exists, trt.int64), (-1,)))
-            outputs = [scores, placed, frozen, count, self.reshape(picked, (-1,))]
-        for value, spec in zip(outputs, schema["outputs"], strict=True):
-            value = self.n.add_identity(value).get_output(0)
-            value.name = spec["name"]
-            self.n.mark_output(value)
+        functions = {
+            "history_prepare": self.prepare_history,
+            "request_prepare": self.prepare_request,
+            "step": self.score_candidates,
+        }
+        for tensor, spec in zip(functions[stage](inp), schema["outputs"], strict=True):
+            tensor = self.n.add_identity(tensor).get_output(0)
+            tensor.name = spec["name"]
+            self.n.mark_output(tensor)
         return self

@@ -52,23 +52,29 @@ def rejection(name, variant, parameters):
         admin.unload_model(name)
 
 
-for candidates in (50, 64):
+for profile in ("default", "short"):
     for precision in ("fp32", "bf16"):
-        variant = f"hstu{candidates}-{precision}"
+        variant = f"dlrmv3-{profile}-{precision}"
         suffix = variant.replace("-", "_")
+        c = Config.load(root / "output" / variant)
+        per_history = 5 * 4 * (c.serving.history_length + 1) * 256 * 4
         requests = {
-            batch: example_inputs(Config.load(root / "output" / variant), batch) for batch in (1, 4)
+            batch: example_inputs(Config.load(root / "output" / variant), batch)
+            for batch in ((1, 4) if profile == "default" else (4,))
         }
         with NativeClient(root / "output" / variant / "model.bundle", runtime_root) as reference:
-            expected = {batch: reference.score(requests[batch]) for batch in (1, 4)}
+            expected = {
+                batch: reference.score(requests[batch])
+                for batch in ((1, 4) if profile == "default" else (4,))
+            }
 
         def explicit_budget():
             name = "cap_" + suffix
-            make_model(name, variant, {"kv_cache_size_bytes": 8388608})
+            make_model(name, variant, {"kv_cache_size_bytes": 134217728})
             results = []
             try:
                 admin.load_model(name)
-                for batch in (1, 4):
+                for batch in (1, 4) if profile == "default" else (4,):
                     for module, protocol, port in ((http, "http", 8000), (grpc, "grpc", 8001)):
                         with module.InferenceServerClient(f"localhost:{port}") as client:
                             response = infer(client, module, name, requests[batch], expected[batch])
@@ -81,17 +87,17 @@ for candidates in (50, 64):
                             lambda values: (
                                 all(key in values for key in FIELDS)
                                 and values["used_bytes"] == values["active_sequences"] == 0
-                                and values["peak_bytes"] >= 262144 * batch
+                                and values["peak_bytes"] >= per_history * batch
                             ),
                         )
                         (root / "output" / variant / f"cap-b{batch}-{protocol}.prom").write_text(
                             text
                         )
                         assert fields["supported"] == 1, fields
-                        assert fields["budget_bytes"] == 8388608, fields
+                        assert fields["budget_bytes"] == 134217728, fields
                         assert 0 < fields["reserved_bytes"] <= fields["budget_bytes"], fields
                         assert fields["used_bytes"] == fields["active_sequences"] == 0, fields
-                        assert fields["peak_bytes"] >= 262144 * batch, fields
+                        assert fields["peak_bytes"] >= per_history * batch, fields
                         assert fields["allocation_failures"] == 0, fields
                         results.append(
                             dict(
@@ -144,15 +150,15 @@ for candidates in (50, 64):
             lambda: rejection(
                 "both_" + suffix,
                 variant,
-                {"kv_cache_size_bytes": 8388608, "kv_cache_memory_ratio": 0.01},
+                {"kv_cache_size_bytes": 134217728, "kv_cache_memory_ratio": 0.01},
             ),
         )
 
-        if variant == "hstu50-fp32":
+        if variant == "dlrmv3-default-fp32":
 
             def live_metrics():
                 name = "live_cache_metrics"
-                make_model(name, variant, {"kv_cache_size_bytes": 8388608})
+                make_model(name, variant, {"kv_cache_size_bytes": 134217728})
                 samples = []
                 stop = threading.Event()
                 errors = []
@@ -175,7 +181,12 @@ for candidates in (50, 64):
                     finally:
                         stop.set()
                         thread.join()
-                    text, rows, idle = scrape(name)
+                    text, rows, idle = wait_metrics(
+                        name,
+                        lambda values: (
+                            values.get("active_sequences") == values.get("used_bytes") == 0
+                        ),
+                    )
                     (root / "live-cache-metrics.prom").write_text(text)
                     observations = dict(
                         polls=len(samples),
@@ -205,13 +216,13 @@ for candidates in (50, 64):
 
 for key, values in [
     ("kv_cache_memory_ratio", ["-1", "1.1", "nan", "inf", "abc", "0.05junk"]),
-    ("kv_cache_size_bytes", ["-1", "8388608.5", "abc", "8388608junk", "18446744073709551616"]),
+    ("kv_cache_size_bytes", ["-1", "134217728.5", "abc", "134217728junk", "18446744073709551616"]),
 ]:
     for index, value in enumerate(values):
         check(
             "invalid:" + key + ":" + value,
             lambda key=key, value=value, index=index: rejection(
-                f"invalid_{key}_{index}", "hstu50-fp32", {key: value}
+                f"invalid_{key}_{index}", "dlrmv3-default-fp32", {key: value}
             ),
         )
 
@@ -219,16 +230,16 @@ for key, values in [
 def multiple_models():
     observations = []
     names = []
-    features = example_inputs(Config.load(root / "output/hstu50-fp32"), 4)
-    for index, budget in enumerate((8388608, 16777216)):
+    features = example_inputs(Config.load(root / "output/dlrmv3-default-fp32"), 4)
+    for index, budget in enumerate((134217728, 268435456)):
         name = f"isolated_cache_{index}"
         names.append(name)
-        make_model(name, "hstu50-fp32", {"kv_cache_size_bytes": budget})
+        make_model(name, "dlrmv3-default-fp32", {"kv_cache_size_bytes": budget})
     try:
         for name in names:
             admin.load_model(name)
-        for name, budget in zip(names, (8388608, 16777216)):
-            infer(admin, http, name, features, ["scores", "picked_indices"])
+        for name, budget in zip(names, (134217728, 268435456)):
+            infer(admin, http, name, features, ["scores"])
             text, samples, fields = wait_metrics(
                 name, lambda values: values.get("budget_bytes", 0) > 0
             )
@@ -246,12 +257,12 @@ check("multiple_model_metric_isolation", multiple_models)
 
 def multiple_instances():
     name = "two_cache_instances"
-    make_model(name, "hstu50-fp32", {"kv_cache_size_bytes": 8388608}, instances=2)
-    features = example_inputs(Config.load(root / "output/hstu50-fp32"), 4)
+    make_model(name, "dlrmv3-default-fp32", {"kv_cache_size_bytes": 134217728}, instances=2)
+    features = example_inputs(Config.load(root / "output/dlrmv3-default-fp32"), 4)
     try:
         admin.load_model(name)
         for _ in range(8):
-            infer(admin, http, name, features, ["scores", "picked_indices"])
+            infer(admin, http, name, features, ["scores"])
         text, samples, fields = wait_metrics(name, lambda values: values.get("budget_bytes", 0) > 0)
         (root / (name + ".prom")).write_text(text)
         observations = dict(
@@ -263,7 +274,7 @@ def multiple_instances():
         (root / "multi-instance-observations.json").write_text(
             json.dumps(observations, indent=2) + "\n"
         )
-        assert fields["budget_bytes"] == 2 * 8388608, observations
+        assert fields["budget_bytes"] == 2 * 134217728, observations
         return observations
     finally:
         admin.unload_model(name)

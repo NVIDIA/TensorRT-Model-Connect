@@ -4,7 +4,7 @@
  */
 #pragma once
 #include "families/hstu/include/history_cache.h"
-#include "families/hstu/runtime/pipeline.h"
+#include "families/hstu/runtime/validation.h"
 
 #include <array>
 #include <chrono>
@@ -17,11 +17,10 @@ class StagedPipeline final : public IStructuredRanking, public IHistoryCache {
     StagedPipeline(std::unique_ptr<ITrtModule> prepare, std::unique_ptr<ITrtModule> step,
                    nlohmann::json config, std::uint64_t cache_bytes = 0, double cache_ratio = 0,
                    std::unique_ptr<ITrtModule> request = {}, std::string bundle_identity = {});
-    ~StagedPipeline() override;
+    ~StagedPipeline() override = default;
     std::vector<FeatureTensor> score(const std::vector<FeatureTensor>& inputs) override;
     CacheStats cache_stats() const override;
-    void set_profiling(bool enabled) override { profiling_ = enabled; }
-    TimingProfile last_profile() const override { return profile_; }
+    void configure_cache_budget(std::uint64_t bytes, double ratio) override;
     bool history_supported() const noexcept override { return bool(request_); }
     void configure_history(std::size_t max_entries, double ttl_seconds,
                            double lease_seconds) override;
@@ -43,16 +42,8 @@ class StagedPipeline final : public IStructuredRanking, public IHistoryCache {
     CacheStats stats_;
     std::uint64_t bytes_per_sequence_{};
     void set_active(std::int64_t batch);
-    bool profiling_{false};
-    TimingProfile profile_;
-    std::unordered_map<std::string, DeviceTensor> state_;
-    DeviceTensor picks_;
-    std::int64_t batch_{-1};
-    std::vector<std::int64_t> positions_;
-    cudaEvent_t begin_{}, end_{};
-    void reset_state(std::int64_t batch);
     std::mutex execute_mutex_;
-    std::vector<FeatureTensor> run_rounds(std::int64_t batch);
+    std::vector<FeatureTensor> run_step(std::int64_t batch);
     void bind_context(ITrtModule&, const nlohmann::json& specs, std::int64_t batch);
     TensorMap validate_stage(const std::vector<FeatureTensor>&, std::size_t stage) const;
     void increment(const char* key, std::uint64_t amount = 1);

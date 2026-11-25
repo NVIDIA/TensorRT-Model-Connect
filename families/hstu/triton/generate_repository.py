@@ -9,19 +9,20 @@ import json
 import math
 from pathlib import Path
 import shutil
-import struct
+import ctypes
 
 
-def runtime_metadata(path):
-    # Read only runtime.json; engine sections can be several gigabytes.
-    with path.open("rb") as stream:
-        if stream.read(8) != b"BUNDLE\x01\x00":
-            raise ValueError("expected a native .bundle file")
-        header_size = struct.unpack("<Q", stream.read(8))[0]
-        header = json.loads(stream.read(header_size))
-        section = header["sections"]["runtime.json"]
-        stream.seek(16 + header_size + section["offset"])
-        return json.loads(stream.read(section["length"]))
+def runtime_metadata(path, runtime_root=None):
+    # Delegate bundle framing and bounded reads to the public native SDK reader.
+    name = str(Path(runtime_root) / "libhstu_triton.so") if runtime_root else "libhstu_triton.so"
+    library = ctypes.CDLL(name)
+    library.hstu_runtime_metadata.argtypes = [ctypes.c_char_p]
+    library.hstu_runtime_metadata.restype = ctypes.c_char_p
+    library.hstu_last_error.restype = ctypes.c_char_p
+    data = library.hstu_runtime_metadata(str(path).encode())
+    if not data:
+        raise ValueError(library.hstu_last_error().decode())
+    return json.loads(data)
 
 
 def main():
@@ -29,7 +30,7 @@ def main():
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--name", default="hstu")
-    parser.add_argument("--runtime-root", default="/src/build-local")
+    parser.add_argument("--runtime-root", required=True)
     cache = parser.add_mutually_exclusive_group()
     cache.add_argument("--kv-cache-memory-ratio", type=float)
     cache.add_argument("--kv-cache-size-bytes", type=int)
@@ -50,7 +51,7 @@ def main():
         parser.error("--kv-cache-size-bytes must be positive")
     if not args.name or Path(args.name).name != args.name or args.name in {".", ".."}:
         parser.error("--name must be a single model directory name")
-    runtime = runtime_metadata(args.bundle)
+    runtime = runtime_metadata(args.bundle, args.runtime_root)
     fixed = runtime.get("batching") == "fixed"
     if args.history_cache:
         args.kv_cache_max_entries = (

@@ -12,8 +12,8 @@ namespace {
 
 class FakeForecast final : public trtmc::ITimeSeriesForecast {
   public:
-    FakeForecast(trtmc::IBackend& backend, std::uint64_t kv_cache_size_bytes, double ratio = 0)
-        : backend_(backend), kv_cache_size_bytes_(kv_cache_size_bytes), ratio_(ratio) {}
+    FakeForecast(trtmc::IBackend& backend, std::uint64_t kv_cache_size_bytes)
+        : backend_(backend), kv_cache_size_bytes_(kv_cache_size_bytes) {}
 
     trtmc::ForecastResult forecast(const trtmc::ForecastRequest& request) override {
         const char* backend_name = backend_.name();
@@ -34,15 +34,12 @@ class FakeForecast final : public trtmc::ITimeSeriesForecast {
             static_cast<std::int64_t>(kv_cache_size_bytes_ == 0 ? 1 : kv_cache_size_bytes_),
             static_cast<std::int64_t>(result.values.size()),
         };
-        if (ratio_ != 0)
-            result.shape.push_back(static_cast<std::int64_t>(ratio_ * 1000));
         return result;
     }
 
   private:
     trtmc::IBackend& backend_;
     std::uint64_t kv_cache_size_bytes_;
-    double ratio_;
 };
 
 class FakeEncoding final : public trtmc::IEncoding {
@@ -178,12 +175,10 @@ trtmc::ITask* create_fake_task(const trtmc::FamilyContext& context) {
     if (context.reader.info().task == trtmc::IAudioGeneration::kTask)
         return new FakeAudioGeneration();
     if (context.reader.info().task == trtmc::ITimeSeriesForecast::kTask)
-        return new FakeForecast(context.backend, context.kv_cache_size_bytes,
-                                context.kv_cache_memory_ratio);
+        return new FakeForecast(context.backend, context.kv_cache_size_bytes);
     if (context.reader.info().task == trtmc::ITextGeneration::kTask) {
         // Deliberately violate the factory contract for the loader's mismatch test.
-        return new FakeForecast(context.backend, context.kv_cache_size_bytes,
-                                context.kv_cache_memory_ratio);
+        return new FakeForecast(context.backend, context.kv_cache_size_bytes);
     }
     throw std::runtime_error("unsupported fake task");
 }

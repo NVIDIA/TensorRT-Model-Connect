@@ -27,26 +27,21 @@ void reject(const std::function<void()>& operation) {
 }
 int main() {
     try {
-        check(history_sha256("", 0) ==
-              "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
-        check(history_sha256("abc", 3) ==
-              "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
         HistoryHash incremental;
-        const std::string million(1000000, 'a');
-        for (std::size_t i = 0; i < million.size(); i += 1000)
-            incremental.update(million.data() + i, 1000);
-        check(incremental.finish() ==
-              "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
-        const std::string identity(64, 'a');
+        incremental.update("a", 1);
+        incremental.update("bc", 2);
+        check(incremental.finish() == history_data_key("abc", 3));
+        check(history_data_key("abc", 3) != history_data_key("abd", 3));
+        const std::string identity = "test-bundle-id";
         Json specs =
             Json::array({{{"name", "history_k_b"}, {"dtype", "float32"}, {"shape", {-1, 1, 2, 2}}},
                          {{"name", "history_v_b"}, {"dtype", "float32"}, {"shape", {-1, 1, 2, 2}}},
                          {{"name", "history_mask"}, {"dtype", "int32"}, {"shape", {-1, 2}}}});
         HistorySnapshot snapshot;
         snapshot.metadata = {{"batch", 1},
-                             {"bundle_sha256", identity},
+                             {"bundle_id", identity},
                              {"revisions", {"r1"}},
-                             {"history_sha256", {identity}}};
+                             {"history_key", {history_data_key("abc", 3)}}};
         for (const auto& spec : specs) {
             auto shape = spec.at("shape").get<std::vector<std::int64_t>>();
             shape.at(0) = 1;
@@ -85,8 +80,9 @@ int main() {
         reject([&] {
             decode_history_snapshot(encode_history_snapshot(snapshot), identity, specs, 4);
         });
-        std::cout << "PASS snapshot SHA-256, ownership, compatibility, integrity, finite values "
-                     "and mask validation\n";
+        std::cout
+            << "PASS snapshot data checksum, ownership, compatibility, integrity, finite values "
+               "and mask validation\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

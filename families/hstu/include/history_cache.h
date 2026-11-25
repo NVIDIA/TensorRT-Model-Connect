@@ -13,6 +13,7 @@ namespace trtmc::hstu {
 class IHistoryCache {
   public:
     virtual ~IHistoryCache() = default;
+    virtual void configure_cache_budget(std::uint64_t bytes, double ratio) = 0;
     virtual bool history_supported() const noexcept = 0;
     virtual void configure_history(std::size_t max_entries, double ttl_seconds,
                                    double lease_seconds) = 0;

@@ -1,7 +1,0 @@
-{
-  "threshold_overrides": {
-    "score_atol": 0.0001,
-    "score_rtol": 0.001,
-    "greedy_position_agreement": 1.0
-  }
-}

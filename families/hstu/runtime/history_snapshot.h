@@ -4,28 +4,23 @@
  */
 
 #pragma once
-#include "families/hstu/runtime/pipeline.h"
+#include "families/hstu/runtime/validation.h"
 
 #include <array>
 #include <cstddef>
 
 namespace trtmc::hstu {
-// Incremental CPU SHA-256; snapshot integrity never depends on process-local hashes.
+// Deterministic CPU data fingerprint for row deduplication and accidental
+// corruption detection. Snapshots are trusted inputs, not authenticated messages.
 class HistoryHash {
   public:
     void update(const void* data, std::size_t size);
-    std::string finish();
+    std::string finish() const;
 
   private:
-    void block(const std::uint8_t* data);
-    std::array<std::uint32_t, 8> state_{{0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f,
-                                         0x9b05688c, 0x1f83d9ab, 0x5be0cd19}};
-    std::array<std::uint8_t, 64> buffer_{};
-    std::size_t count_{};
-    std::uint64_t bytes_{};
+    std::uint64_t first_{14695981039346656037ull}, second_{7809847782465536322ull};
 };
-std::string history_sha256(const void* data, std::size_t size);
-std::string history_file_sha256(const std::string& path);
+std::string history_data_key(const void* data, std::size_t size);
 struct HistorySnapshot {
     nlohmann::json metadata;
     std::vector<FeatureTensor> tensors;
@@ -34,5 +29,5 @@ std::vector<std::uint8_t> encode_history_snapshot(HistorySnapshot snapshot);
 HistorySnapshot decode_history_snapshot(const std::vector<std::uint8_t>& data,
                                         const std::string& bundle_identity,
                                         const nlohmann::json& specs, std::int64_t max_batch);
-inline constexpr std::size_t kHistorySnapshotLimit = 64 * 1024 * 1024;
+inline constexpr std::size_t kHistorySnapshotLimit = 1024ull * 1024 * 1024;
 } // namespace trtmc::hstu

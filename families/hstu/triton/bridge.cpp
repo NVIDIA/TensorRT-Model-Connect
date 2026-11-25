@@ -5,9 +5,11 @@
 
 // In-process trusted host-pointer bridge. No model policy or TensorRT topology.
 #include "families/hstu/include/history_cache.h"
+#include "families/hstu/include/task.h"
+#include "trtmc/bundle.h"
 #include "trtmc/runtime/family_loader.h"
-#include "trtmc/structured_ranking.h"
 
+#include <cmath>
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <mutex>
@@ -60,7 +62,7 @@ std::vector<trtmc::FeatureTensor> read_tensors(const Json& specs) {
                 throw std::invalid_argument("invalid tensor shape");
             bytes *= dim;
         }
-        if (bytes != spec.at("bytes").get<std::size_t>() || bytes > 64 * 1024 * 1024)
+        if (bytes != spec.at("bytes").get<std::size_t>() || bytes > 1024ull * 1024 * 1024)
             throw std::invalid_argument("wrong or excessive tensor byte count");
         const auto* data = reinterpret_cast<const void*>(spec.at("pointer").get<std::uintptr_t>());
         if (!data)
@@ -83,6 +85,22 @@ Json output_descriptors(const Handle& handle) {
 }
 } // namespace
 extern "C" {
+const char* hstu_runtime_metadata(const char* path) noexcept {
+    try {
+        trtmc::BundleReader reader(path);
+        if (reader.info().family != "hstu" || reader.info().task != "structured_ranking")
+            throw std::invalid_argument("expected a DLRMv3 structured-ranking bundle");
+        const auto* section = reader.find_section("runtime.json");
+        if (!section || section->length > 1024 * 1024)
+            throw std::invalid_argument("missing or excessive runtime metadata");
+        const auto data = reader.read_section("runtime.json");
+        reply.assign(data.begin(), data.end());
+        return reply.c_str();
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return nullptr;
+    }
+}
 const char* hstu_last_error() noexcept {
     return error.c_str();
 }
@@ -94,18 +112,29 @@ void* hstu_create(const char* configuration) noexcept {
             if (!size.is_number_integer() || size <= 0)
                 throw std::invalid_argument("kv_cache_size_bytes must be a positive integer");
         }
+        if (config.contains("kv_cache_memory_ratio")) {
+            const auto& value = config.at("kv_cache_memory_ratio");
+            if (!value.is_number() || !std::isfinite(value.get<double>()) || value <= 0 ||
+                value > 1)
+                throw std::invalid_argument("kv_cache_memory_ratio must be finite and in (0, 1]");
+        }
+        if (config.contains("kv_cache_memory_ratio") && config.contains("kv_cache_size_bytes"))
+            throw std::invalid_argument("KV byte cap and memory ratio are mutually exclusive");
         if (cudaSetDevice(config.value("device", 0)) != cudaSuccess)
             throw std::runtime_error("cannot select CUDA device");
         auto handle = std::make_unique<Handle>();
         handle->device = config.value("device", 0);
         handle->task = trtmc::load_task(config.at("bundle").get<std::string>(),
-                                        config.at("runtime_root").get<std::string>(),
-                                        config.value("kv_cache_size_bytes", std::uint64_t(0)), {},
-                                        false, config.value("kv_cache_memory_ratio", 0.0));
+                                        config.at("runtime_root").get<std::string>(), 0);
         handle->ranking = dynamic_cast<trtmc::IStructuredRanking*>(handle->task.get());
         if (!handle->ranking)
             throw std::invalid_argument("bundle does not implement structured ranking");
         handle->history = dynamic_cast<trtmc::hstu::IHistoryCache*>(handle->task.get());
+        if (!handle->history)
+            throw std::invalid_argument("bundle lacks the family cache configuration interface");
+        handle->history->configure_cache_budget(
+            config.value("kv_cache_size_bytes", std::uint64_t(0)),
+            config.value("kv_cache_memory_ratio", 0.0));
         if (config.value("kv_cache_hydration_enabled", false)) {
             if (!handle->history || !handle->history->history_supported())
                 throw std::invalid_argument("bundle does not support history restoration");
@@ -190,7 +219,7 @@ const char* hstu_history(void* pointer, const char* command) noexcept {
             const auto size = request.at("bytes").get<std::size_t>();
             const auto* data =
                 reinterpret_cast<const std::uint8_t*>(request.at("pointer").get<std::uintptr_t>());
-            if (!data || size < 16 || size > 64 * 1024 * 1024)
+            if (!data || size < 16 || size > 1024ull * 1024 * 1024)
                 throw std::invalid_argument("invalid snapshot buffer");
             const std::vector<std::uint8_t> snapshot(data, data + size);
             result = {{"handles", handle.history->restore_history(snapshot)}};

@@ -1,3 +1,6 @@
-pytest>=8
-tritonclient[http,grpc]>=2.62
-torch>=2.6  # optional: upstream oracle and public-data checkpoint training
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+numpy>=1.26,<3
+pytest>=8,<9
+torch>=2.6
+tritonclient[http,grpc]>=2.74,<2.75

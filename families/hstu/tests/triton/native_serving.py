@@ -15,9 +15,9 @@ from .common import root, runtime_root
 admin = http.InferenceServerClient("localhost:8000")
 (root / "server-metadata.json").write_text(json.dumps(admin.get_server_metadata(), indent=2) + "\n")
 results = []
-for candidates in (50, 64):
+for profile in ("default", "short"):
     for precision in ("fp32", "bf16"):
-        variant = f"hstu{candidates}-{precision}"
+        variant = f"dlrmv3-{profile}-{precision}"
         model = "native_" + variant.replace("-", "_")
         try:
             admin.load_model(model)
@@ -29,7 +29,7 @@ for candidates in (50, 64):
             with NativeClient(
                 root / "output" / variant / "model.bundle", runtime_root
             ) as reference:
-                for batch in (1, 4):
+                for batch in (1, 4) if profile == "default" else (4,):
                     features = example_inputs(Config.load(root / "output" / variant), batch)
                     expected = reference.score(features)
                     for module, protocol, port in ((http, "http", 8000), (grpc, "grpc", 8001)):

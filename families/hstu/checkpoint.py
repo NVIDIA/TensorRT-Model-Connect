@@ -1,86 +1,151 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Create a reproducible public validation fixture, never pretrained weights."""
+"""Convert all 86 tensors of the official MLPerf Inference v6.0 dense checkpoint."""
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import numpy as np
-from .config import Config, REVISION, UPSTREAM
+from .config import Config, ServingProfile
+
+DEFAULT_URL = "https://inference.mlcommons-storage.org/dlrmv3_trained_checkpoint/non_sparse.ckpt"
+LICENSE_URL = "https://inference.mlcommons-storage.org/dlrmv3_trained_checkpoint/LICENSE.txt"
+PRE = "_hstu_transducer._input_preprocessor."
+POST = "_hstu_transducer._output_postprocessor."
+POS = "_hstu_transducer._positional_encoder."
+BLOCK = "_hstu_transducer._stu_module._stu_layers."
+HEAD = "_multitask_module._prediction_module."
 
 
-def expected_shapes(c):
-    d = c.hidden_size
-    return {
-        "item_embeddings": (c.vocab_size, d),
-        "position_embeddings": (c.max_history_length + c.max_decode_steps + 1, d),
-        "uvqk": (d, 4 * d),
-        "output_weight": (d, d),
-        "output_bias": (d,),
-        "head_weight": (d, 1),
-        "head_bias": (1,),
-    }
+def expected_shapes():
+    shapes = {}
+    for prefix, width, hidden in (
+        (PRE + "_content_embedding_mlp.", 512, 256),
+        (PRE + "_additional_embedding_mlp.", 512, 256),
+        (PRE + "_action_embedding_mlp.", 40, 256),
+        ("_item_embedding_mlp.", 1024, 512),
+    ):
+        shapes.update(
+            {
+                prefix + "0.weight": (hidden, width),
+                prefix + "0.bias": (hidden,),
+                prefix + "1.weight": (hidden,),
+                prefix + "1.bias": (hidden,),
+                prefix + "2.weight": (512, hidden),
+                prefix + "2.bias": (512,),
+                prefix + "3.weight": (512,),
+                prefix + "3.bias": (512,),
+            }
+        )
+    shapes.update(
+        {
+            PRE + "_action_encoder._action_embedding_table": (5, 8),
+            PRE + "_action_encoder._combined_action_weights": (5,),
+            PRE + "_action_encoder._target_action_embedding_table": (1, 40),
+            PRE + "_batched_contextual_linear_weights": (1, 512, 512),
+            PRE + "_batched_contextual_linear_bias": (1, 512),
+            POS + "_position_embeddings_weight": (8192, 512),
+            POS + "_timestamp_embeddings_weight": (2049, 512),
+            POST + "_period_units": (1, 2),
+            POST + "_units_per_period": (1, 2),
+            POST + "_time_feature_combiner.weight": (512, 516),
+            POST + "_time_feature_combiner.bias": (512,),
+            POST + "_layer_norm.weight": (512,),
+            POST + "_layer_norm.bias": (512,),
+            HEAD + "0.weight": (512, 512),
+            HEAD + "0.bias": (512,),
+            HEAD + "1.weight": (512,),
+            HEAD + "1.bias": (512,),
+            HEAD + "2.weight": (1, 512),
+            HEAD + "2.bias": (1,),
+        }
+    )
+    for i in range(5):
+        prefix = BLOCK + str(i) + "."
+        shapes.update(
+            {
+                prefix + "_uvqk_weight": (512, 2048),
+                prefix + "_uvqk_beta": (2048,),
+                prefix + "_output_weight": (1536, 512),
+            }
+        )
+        for name in (
+            "_input_norm_weight",
+            "_input_norm_bias",
+            "_output_norm_weight",
+            "_output_norm_bias",
+        ):
+            shapes[prefix + name] = (512,)
+    return shapes
 
 
-def load_weights(path, c):
-    with np.load(Path(path) / "hstu_weights.npz", allow_pickle=False) as f:
-        if set(f.files) != set(expected_shapes(c)):
-            raise ValueError("checkpoint keys differ from supported HSTU reference")
-        values = {name: np.array(f[name], copy=True) for name in f.files}
-    for name, shape in expected_shapes(c).items():
-        v = values[name]
-        if v.shape != shape or v.dtype != np.float32 or not np.isfinite(v).all():
-            raise ValueError(f"invalid checkpoint tensor: {name}")
-    return values
+def validate_weights(weights):
+    expected = expected_shapes()
+    if set(weights) != set(expected):
+        raise ValueError("checkpoint must contain exactly the 86 official dense tensors")
+    for name, shape in expected.items():
+        value = weights[name]
+        dtype = np.int64 if name.endswith("_combined_action_weights") else np.float32
+        if value.shape != shape or value.dtype != dtype or not np.isfinite(value).all():
+            raise ValueError("invalid checkpoint tensor: " + name)
+    if not np.array_equal(
+        weights[PRE + "_action_encoder._combined_action_weights"], [1, 2, 4, 8, 16]
+    ):
+        raise ValueError("unsupported action bitmask encoding")
+    for name in (POST + "_period_units", POST + "_units_per_period"):
+        if (weights[name] <= 0).any():
+            raise ValueError("invalid timestamp periods")
+    return weights
 
 
-def create_fixture(path, candidates=50, seed=20261124, *, config=None):
-    path = Path(path)
-    path.mkdir(parents=True, exist_ok=True)
-    if any(path.iterdir()):
-        raise FileExistsError("fixture output directory must be empty")
-    c = config or Config(candidates=candidates)
-    rng = np.random.default_rng(seed)
-    weights = {
-        name: rng.normal(0, 0.02, shape).astype(np.float32)
-        for name, shape in expected_shapes(c).items()
-    }
-    weights["output_weight"] *= np.float32(3.0)
-    weights["head_weight"] *= np.float32(8.0)
-    weights["output_bias"].fill(0)
-    weights["head_bias"].fill(0)
-    np.savez(path / "hstu_weights.npz", **weights)
-    c.save(path)
-    (path / "checkpoint_provenance.json").write_text(
+def load_weights(directory, config=None):
+    with np.load(Path(directory) / "dlrmv3_weights.npz", allow_pickle=False) as archive:
+        return validate_weights(
+            {name: np.array(archive[name], copy=True) for name in archive.files}
+        )
+
+
+def convert(source, output, *, history_length=512, candidates=128):
+    import torch
+
+    output = Path(output)
+    if output.exists() and any(output.iterdir()):
+        raise FileExistsError("conversion output must be empty")
+    state = torch.load(source, map_location="cpu", weights_only=True)
+    weights = validate_weights(
+        {k: v.detach().cpu().numpy().copy() for k, v in state["dense_dict"].items()}
+    )
+    config = Config(serving=ServingProfile(history_length=history_length, candidates=candidates))
+    output.mkdir(parents=True, exist_ok=True)
+    np.savez(output / "dlrmv3_weights.npz", **weights)
+    config.save(output)
+    (output / "checkpoint_provenance.json").write_text(
         json.dumps(
             dict(
-                kind="deterministic-validation-fixture",
-                pretrained=False,
-                seed=seed,
-                architecture_source=UPSTREAM,
-                architecture_revision=REVISION,
-                sha256=hashlib.sha256((path / "hstu_weights.npz").read_bytes()).hexdigest(),
+                model="MLPerf Inference v6.0 DLRMv3",
+                source=DEFAULT_URL,
+                license=LICENSE_URL,
+                scope="complete dense model; sparse embedding lookup is caller-owned",
+                tensor_count=len(weights),
+                tensor_bytes=sum(v.nbytes for v in weights.values()),
             ),
             indent=2,
         )
         + "\n"
     )
-    return c
+    return config
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("output", type=Path)
-    p.add_argument("--candidates", type=int, choices=(50, 64), default=50)
-    p.add_argument("--seed", type=int, default=20261124)
-    p.add_argument(
-        "--config", type=Path, help="Directory containing a validated architecture/serving config"
-    )
-    a = p.parse_args()
-    create_fixture(
-        a.output, a.candidates, a.seed, config=Config.load(a.config) if a.config else None
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument("--history-length", type=int, default=512)
+    parser.add_argument("--candidates", type=int, default=128)
+    args = parser.parse_args()
+    convert(
+        args.source, args.output, history_length=args.history_length, candidates=args.candidates
     )
 
 

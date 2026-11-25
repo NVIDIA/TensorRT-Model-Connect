@@ -10,37 +10,13 @@ are copied byte for byte. Never load this plugin with a main-built SDK.
 """
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import shutil
 import subprocess
 
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--output", type=Path, required=True)
-    p.add_argument("--json-include", type=Path, required=True)
-    a = p.parse_args()
-    backend = Path("/opt/tritonserver/backends/tensorrt/libtriton_tensorrt.so")
-    expected_backend = "8e9d55aaf5b359049f3ea8745d032d10642aac1c9587ace4b629856756ffdca9"
-    sdk = Path("/usr/lib/x86_64-linux-gnu")
-    expected_sdk = {
-        "libtrtmc_core.so": "25cddc8d8b03c609fa524ba01fed394242e5e2d97af04f826f2d07d5a52a7a38",
-        "libtrtmc_runtime.so": "44d50ef2c52763802ee0c318a3e464b5cf9125bb51d7a8638f0ed9d1e25a937c",
-        "libtrtmc_backend_trt.so": "2122be6b4265702dbe13c6a2d7203fa83c7c731cd76fa5e81dc5f76a92c4ec54",
-        "libtrtmc_c.so.1": "87f54868997ce89690ab8fedbc127848e0b1ed0b4ff07422dceff0a827396017",
-    }
-    if hashlib.sha256(backend.read_bytes()).hexdigest() != expected_backend or any(
-        hashlib.sha256((sdk / name).read_bytes()).hexdigest() != digest
-        for name, digest in expected_sdk.items()
-    ):
-        raise RuntimeError("SDK compatibility helper requires the exact tested 26.10/0.2.0 image")
-    out = a.output.resolve()
-    if out.exists() and any(out.iterdir()):
-        raise FileExistsError("deployment output must be empty")
-    out.mkdir(parents=True, exist_ok=True)
-    root = Path(__file__).resolve().parents[3]
+def prototype_headers(root, out):
     header = root / "core/runtime/include/trtmc/runtime/tensor.h"
     text = header.read_text()
     expected = "    kFloat8E4M3,\n    kInt64,"
@@ -49,17 +25,52 @@ def main():
     compat = out / "sdk-compat/trtmc/runtime/tensor.h"
     compat.parent.mkdir(parents=True)
     compat.write_text(text.replace(expected, "    kInt64,\n    kFloat8E4M3,"))
+    factory = root / "core/runtime/include/trtmc/runtime/family_factory.h"
+    compat_factory = out / "sdk-compat/trtmc/runtime/family_factory.h"
+    marker = "    std::uint64_t kv_cache_size_bytes{0};"
+    if factory.read_text().count(marker) != 1:
+        raise RuntimeError("review prototype FactoryContext compatibility")
+    compat_factory.write_text(
+        factory.read_text().replace(marker, marker + "\n    double kv_cache_memory_ratio{0.0};")
+    )
+    loader = root / "core/runtime/include/trtmc/runtime/family_loader.h"
+    compat_loader = out / "sdk-compat/trtmc/runtime/family_loader.h"
+    marker = "bool cuda_graphs = false);"
+    if loader.read_text().count(marker) != 2:
+        raise RuntimeError("review prototype loader function ABI")
+    compat_loader.write_text(
+        loader.read_text().replace(
+            marker, "bool cuda_graphs = false, double kv_cache_memory_ratio = 0.0);"
+        )
+    )
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--json-include", type=Path, required=True)
+    a = p.parse_args()
+    backend = Path("/opt/tritonserver/backends/tensorrt/libtriton_tensorrt.so")
+    sdk = Path("/usr/lib/x86_64-linux-gnu")
+    if not backend.is_file() or not (sdk / "libtrtmc_runtime.so").is_file():
+        raise RuntimeError("run inside the supplied Triton 26.10/TRT-MC 0.2.0 image")
+    out = a.output.resolve()
+    if out.exists() and any(out.iterdir()):
+        raise FileExistsError("deployment output must be empty")
+    out.mkdir(parents=True, exist_ok=True)
+    root = Path(__file__).resolve().parents[3]
+    prototype_headers(root, out)
     sdk = Path("/usr/lib/x86_64-linux-gnu")
     receipts = {}
     for stem in ("core", "runtime", "backend_trt", "c"):
         for source in sdk.glob("libtrtmc_" + stem + ".so*"):
             target = out / source.name
             shutil.copyfile(source, target)
-            receipts[source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
+            receipts[source.name] = source.stat().st_size
     # Retain the image's other families when this directory becomes the loader root.
     for source in sdk.glob("libtrtmc_model_*.so*"):
         shutil.copyfile(source, out / source.name)
-        receipts[source.name] = hashlib.sha256(source.read_bytes()).hexdigest()
+        receipts[source.name] = source.stat().st_size
     include = [
         out / "sdk-compat",
         root,
@@ -70,6 +81,7 @@ def main():
     common = [
         "g++",
         "-std=c++17",
+        "-DHSTU_TRITON_026_ABI",
         "-shared",
         "-fPIC",
         "-O2",
@@ -88,7 +100,7 @@ def main():
             *[
                 str(family / "runtime" / name)
                 for name in (
-                    "pipeline.cpp",
+                    "validation.cpp",
                     "staged_pipeline.cpp",
                     "history_snapshot.cpp",
                     "plugin.cpp",
@@ -106,6 +118,7 @@ def main():
             *common,
             str(family / "triton/bridge.cpp"),
             "-ltrtmc_runtime",
+            "-ltrtmc_core",
             "-lcudart",
             "-o",
             str(out / "libhstu_triton.so"),
@@ -117,9 +130,9 @@ def main():
         json.dumps(
             dict(
                 mode="26.10 prototype ABI; INT64 enum ordinal 5; main uses ordinal 6",
-                stock_sdk_sha256=receipts,
-                backend_sha256=hashlib.sha256(backend.read_bytes()).hexdigest(),
-                compat_header_sha256=hashlib.sha256(compat.read_bytes()).hexdigest(),
+                stock_sdk_bytes=receipts,
+                backend=str(backend),
+                family_context="prototype 0.2.0 four-field cache ABI",
             ),
             indent=2,
         )

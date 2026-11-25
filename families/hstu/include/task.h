@@ -5,26 +5,34 @@
 
 #pragma once
 #include "trtmc/runtime/tensor.h"
-#include "trtmc/structured_ranking.h"
+#include "trtmc/task.h"
 
-namespace trtmc::hstu {
-// Family-owned semantics use the shared host tensor transport contract.
-using FeatureTensor = trtmc::FeatureTensor;
-
-struct TimingProfile {
-    double prepare_wall_ms{};
-    std::vector<double> round_wall_ms;
-    std::vector<double> round_gpu_ms;
+#include <cstdint>
+#include <string>
+#include <vector>
+namespace trtmc {
+// Model-agnostic host tensor transport and cache observability contract.
+struct FeatureTensor {
+    std::string name;
+    DType dtype{DType::kFloat32};
+    std::vector<std::int64_t> shape;
+    std::vector<std::uint8_t> bytes;
 };
-
-class IStructuredRanking : public trtmc::IStructuredRanking {
+struct CacheStats {
+    bool supported{false};
+    std::uint64_t budget_bytes{}, reserved_bytes{}, used_bytes{}, peak_bytes{};
+    std::uint64_t active_sequences{}, allocation_failures{};
+};
+class IStructuredRanking : public virtual ITask {
   public:
     static constexpr const char* kTask = "structured_ranking";
     const char* task() const noexcept override { return kTask; }
     virtual std::vector<FeatureTensor> score(const std::vector<FeatureTensor>& inputs) = 0;
-    // Optional synchronized diagnostic profile. Each round includes GPU completion.
-    virtual void set_profiling(bool) {}
-    virtual TimingProfile last_profile() const { return {}; }
+    virtual CacheStats cache_stats() const { return {}; }
 };
+} // namespace trtmc
 
+namespace trtmc::hstu {
+using FeatureTensor = trtmc::FeatureTensor;
+using IStructuredRanking = trtmc::IStructuredRanking;
 } // namespace trtmc::hstu

@@ -1,248 +1,184 @@
-# Public HSTU ranking
+# DLRMv3 HSTU ranking
 
-For the recommended existing trained 16-block checkpoint and configurable
-serving profiles, use [hstu_research](../hstu_research/README.md). This family
-retains the earlier one-block target-aware greedy-slate example.
+This family serves the **official MLPerf Inference v6.0 DLRMv3 dense model**:
+five HSTU blocks, width 512, four attention heads of width 128, learned
+content/category/action preprocessing, user context, position/time encoding,
+item MLP and binary `rating` prediction head. All 86 dense checkpoint tensors
+are retained (16,693,594 elements, 63.68 MiB). Model and checkpoint provenance:
+[MLCommons reference](https://github.com/mlcommons/inference/tree/3fbc329939999c13d0a7b5e67fb2092287e06047/recommendation/dlrm_v3),
+[checkpoint](https://inference.mlcommons-storage.org/dlrmv3_trained_checkpoint/non_sparse.ckpt),
+[publisher's Apache-2.0 license](https://inference.mlcommons-storage.org/dlrmv3_trained_checkpoint/LICENSE.txt).
 
-This family uses Meta's Apache-2.0 [HSTU implementation](https://github.com/meta-recsys/generative-recommenders/blob/474afe5cfdb3d16d603d04f943f4dbe7eb6866fd/generative_recommenders/research/modeling/sequential/hstu.py), revision `474afe5cfdb3d16d603d04f943f4dbe7eb6866fd`, as its mathematical reference. It contains one HSTU block and a public target-aware scoring head/greedy slate adapter. It is not Meta's complete pretrained recommender or its production DLRM model. No customer topology, checkpoint, feature names, or golden outputs are required.
+The caller performs sparse embedding lookup and supplies embeddings. The full
+release's roughly 1 TB sparse table is unnecessary for this dense interface.
+Scores represent candidate relevance probabilities; this model was trained on
+the benchmark's synthetic streaming data. Numerical parity tests below do not
+establish production recommendation quality or full MLPerf accuracy.
 
-The block computes `LN -> SiLU(U,V,Q,K) -> SiLU(QKᵀ)/N -> mask -> AV -> LN -> U gate -> projection + residual`. Attention has **no softmax**. Timestamp/relative bias, multiple HSTU blocks, and arbitrary upstream checkpoints are outside this profile. The tests execute the pinned upstream block itself, with only CPU dense/jagged transport shims.
+## Build and change the serving profile
 
-Default profiles: one block, width 256, eight heads, 128 padded history positions, 50 selection rounds, 50 or 64 candidates, FP32/BF16. Architecture and serving dimensions are now separate; alternate dimensions and batch ranges are validated and allocated from configuration. A GPU-qualified alternate profile uses width 128, four heads, T=32, C=17 and seven rounds. Existing flat config files remain readable; saving writes `architecture`, `serving` and `precision` sections. History/round capacities and the normalization divisor belong to the checkpoint, so changing serving padding does not change model mathematics. The application pads histories and supplies lengths. Candidate queries see valid history, previously selected items, and themselves. Duplicate item IDs use their first occurrence's score before stable, lowest-index tie breaking. Unselected scores remain zero; unused selection slots are `-1`.
+Keep downloaded weights, bundles, build products and test results outside the
+checkout. Conversion requires PyTorch; building requires TensorRT and NumPy.
+
+```bash
+export PYTHONPATH="$PWD/core/builder:$PWD"
+mkdir -p /tmp/dlrmv3
+curl -fL -A 'Mozilla/5.0' \
+  https://inference.mlcommons-storage.org/dlrmv3_trained_checkpoint/non_sparse.ckpt \
+  -o /tmp/dlrmv3/non_sparse.ckpt
+python -m families.hstu.checkpoint /tmp/dlrmv3/model \
+  --source /tmp/dlrmv3/non_sparse.ckpt --history-length 512 --candidates 128
+```
+
+```python
+from pathlib import Path
+from tensorrt_model_connect import BuildRequest, build
+
+build(
+    BuildRequest(
+        model_dir=Path("/tmp/dlrmv3/model"),
+        output_path=Path("/tmp/dlrmv3/model.bundle"),
+        family="hstu",
+        task="structured_ranking",
+        precision="bf16",
+        max_batch_size=4,
+    )
+)
+```
+
+`config.json` owns the serving limits: `serving.history_length`, `candidates`,
+`batching` (`dynamic` or `fixed`), `min_batch_size` and `opt_batch_size`.
+`max_batch_size` comes from `BuildRequest`. The default is history 512,
+128 candidates, dynamic batches 1–4. The second test profile uses history 32,
+eight candidates and fixed batch 4. A larger profile, for example history 2048
+and 256 candidates, uses the same checkpoint and requires rebuilding engines.
+HSTU divides attention weights by `T+C+1`, matching the upstream call with
+those maximum lengths; changing capacities can change scores. Validate each
+new profile against the reference at the same limits. The architecture and
+weights stay fixed. Capacity limits are history 16384,
+candidates 2048, batch 64; these are bounds, not qualification of every shape.
+`cuda_graphs` enables capture for the scoring stage; prefix and request
+preparation execute through the native TensorRT runtime.
+
+## Tensor and Task interface
+
+`trtmc::IStructuredRanking::score`, `cache_stats`, the native Python client and
+Triton tensor transport preserve the shared serving APIs. The interface
+header lives in this family at `include/task.h`. DLRMv3 has its own schema;
+it does not imitate the private AJK/DAZR/Feed feature names or slate outputs.
 
 | Input | Type | Shape |
-| --- | --- | --- |
-| `history_ids` | INT64 | `[B,128]` |
-| `history_lengths` | INT64 | `[B,1]`, 0–128 |
-| `candidate_ids` | INT64 | `[B,C]` |
-| `num_candidates` | INT64 | `[B,1]`, 0–C |
+|---|---|---|
+| `history_item_embeddings`, `history_category_embeddings` | FP32 | `[B,T,512]` |
+| `history_lengths` | INT32 | `[B,1]`, 0 through T |
+| `history_timestamps` | INT64 | `[B,T]`, seconds since epoch |
+| `history_actions` | INT32 | `[B,T]`, bitmask 0–31 |
+| `user_embeddings` | FP32 | `[B,1,512]` |
+| `query_timestamp` | INT64 | `[B,1]`, shared candidate query time |
+| `num_candidates` | INT32 | `[B,1]`, 0 through C |
+| `candidate_item_embeddings`, `candidate_category_embeddings` | FP32 | `[B,C,512]` |
+| **Output:** `scores` | FP32 | `[B,C]`, padded candidates zeroed |
 
-IDs must be in the checkpoint vocabulary, including padded positions. Outputs are `scores: FP32[B,C]` and `picked_indices: INT64[B,50]`.
+T and C are engine profile capacities. Callers pad tensors to these capacities;
+lengths select valid rows. Attention is causal for history. Each candidate sees
+the history and itself, and never another candidate. All candidates in one
+request share `query_timestamp`. Embeddings must be finite; timestamps are
+nonnegative and bounded by 2^40. Runtime metadata contains the exact schema.
 
-## Public checkpoints
+FP32 is the reference mode. BF16 keeps sensitive blocks 0–2 in FP32 and runs
+blocks 3–4 with BF16 projections and attention. Normalization, residual state,
+preprocessing and the prediction head stay FP32. `fp32_block_indices` makes this
+policy explicit; changing it requires rebuilding and requalification. Each
+block runs once, with no duplicate FP32 attention/head computation.
+`tests/thresholds/` declares score and ranking gates before qualification.
+The original MLCommons model independently validates the full-sequence oracle;
+its production positional kernel is used because its PyTorch fallback has a
+bucket-count bug. TensorRT controls fusion and tactics; BF16 alone does not
+guarantee a fused HSTU kernel or a speedup.
 
-Create a reproducible, **untrained validation fixture** without downloads:
+## KV budget, metrics and native Triton
 
-```bash
-export PYTHONPATH=core/builder:.
-python3 -m families.hstu.checkpoint /tmp/hstu-public --candidates 50
-python3 -m tensorrt_model_connect build /tmp/hstu-public --family hstu \
-  --task structured_ranking --precision bf16 --max-batch-size 4 \
-  -o /tmp/hstu-public/model.bundle
-```
-
-Alternatively, train example weights on a separately downloaded MovieLens 100K `u.data` file:
-
-```bash
-python3 -m families.hstu.train --ratings /path/to/ml-100k/u.data \
-  --output /tmp/hstu-movielens --steps 100 --batch-size 8
-```
-
-The training command needs PyTorch. It trains the whole public block and head; it records the seed, data/weight hashes, loss, and sampled held-out evaluation in `checkpoint_provenance.json`. This short recipe is a training/integration example, not an official pretrained release or a recommendation-quality qualification. MovieLens has its own [dataset terms](https://files.grouplens.org/datasets/movielens/ml-100k-README.txt). Neither data nor checkpoint binaries are checked into this repository. Checkpoint arrays are validated by `checkpoint.py`; do not treat unrelated Hugging Face HSTU state dictionaries as compatible.
-
-Hugging Face was checked as well. [Lingqu-Rec/HSTU-1B](https://huggingface.co/Lingqu-Rec/HSTU-1B) explicitly uses random weights for testing. [tzchen07/hstu-iter78-preservation](https://huggingface.co/tzchen07/hstu-iter78-preservation) contains trained MovieLens research artifacts, but its card distinguishes the code license from research-artifact weight terms and its architecture differs. Neither is silently substituted as a supported pretrained checkpoint here.
-
-## Precision and runtime
-
-FP32 is the baseline. Both BF16 policies run QK and attention-weight/V GEMMs with BF16 inputs/outputs, restoring FP32 for sensitive arithmetic. The tested A100 Tensor Core tactics accumulate in FP32; BF16 output rounding remains. Embeddings, UVQK projection, normalization, and the score head stay FP32. `config.json` selects:
-
-- `"bf16_policy": "strict"` (default): FP32 output projection and FP32 refinement of a small BF16 shortlist preserve greedy stability. The full candidate-wide FP32 attention/head replica has been removed. `refinement_candidates` defaults to 4; the refined decision is applied when the top-two BF16 score gap is below `selection_margin` (default 0.02). The shortlist computation is unconditional to preserve CUDA Graph capture. The existing strict numerical gates apply.
-- `"bf16_policy": "fast"`: one attention/head path produces scores and selections; the output projection also uses BF16. This trades full-slate/individual-score parity for lower latency. Ranking overlap, held-out quality, and mean score error have separate checks; passing them does not imply passing strict score parity.
-
-These checkpoint fields are encoded in rebuilt bundles. New bundles default to `"cuda_graphs": true`: the native runtime captures/replays the reusable **step engine**, with preparation, the host round loop, and state copies outside capture. TensorRT invalidates its capture when shapes or bindings change. Set the checkpoint field to `false`, or pass `--no-cuda-graphs` below, to disable it. Older bundles without this metadata keep graphs disabled. This family checkpoint option is separate from the shared RTX-only loader graph flag.
-
-Build all four serving variants with the fast BF16 policy and matched graph settings:
-
-```bash
-python3 -m families.hstu.tests.triton.prepare --root /tmp/hstu-fast \
-  --runtime-root /tmp/hstu-sdk --checkpoint /tmp/hstu-movielens \
-  --bf16-policy fast --cuda-graphs
-HSTU_FAST_E2E_ROOT=/tmp/hstu-fast/output TRTMC_RUNTIME_ROOT=/tmp/hstu-sdk \
-  python3 -m pytest families/hstu/tests/test_fast_precision.py -q
-python3 -m families.hstu.tests.compare_precision --root /tmp/hstu-fast/output \
-  --runtime-root /tmp/hstu-sdk --ratings /path/to/ml-100k/u.data \
-  --examples 256 --output /tmp/hstu-fast/quality.json
-```
-
-The quality comparison requires identical FP32/BF16 weights. Its fixed limits are at most 1% relative NDCG@10 loss, one percentage point hit-rate loss, at least 98% mean top-10 overlap, and mean absolute score error at most 0.02. It holds out each sampled user's final interaction. The separate strict numerical gates are unchanged.
-
-TensorRT owns fusion and kernel selection. The TensorRT 11.4 A100 C50/B4 trace contains 150 BF16 Tensor Core GEMM launches in fast mode: 50 QK, 50 AV, and 50 output projections, with FP32 accumulation. FP32 has zero BF16 launches. Both modes replay 50 step CUDA Graphs per request; disabling the checkpoint graph switch produces zero graph launches. QK and AV remain separate in that configuration. Softmax-MHA fusion results from another model do not transfer.
-
-### Fixed batches and BF16 attention arithmetic
-
-The repository and development image pin **TensorRT 11.4.0.106**. These family options keep that dependency pin and expose graph/profile choices explicitly:
-
-```json
-{
-  "batching": "fixed",
-  "bf16_attention_epilogue": true,
-  "bf16_policy": "strict",
-  "cuda_graphs": true
-}
-```
-
-Add these fields to the checkpoint's `config.json` and rebuild normally. `batching="fixed"` makes every engine profile's minimum, optimum, and maximum batch equal to `BuildRequest.max_batch_size` (CLI `--max-batch-size`). The native runtime rejects any other batch before engine execution, including history export and cached scoring. The default `"dynamic"` retains batches 1 through the requested maximum. This option does not pad or split requests.
-
-`bf16_attention_epilogue=true` keeps the BF16 attention branch's QK output, SiLU, scaling, mask multiplication, and AV inputs in BF16. QK and AV use FP32 accumulation. UVQK projection, normalization and the strict scoring head remain FP32; strict mode also computes its small FP32 selection shortlist. FP32 builds ignore this BF16-only setting. The default `false` retains the existing FP32 SiLU/scaling/mask boundary. Neither option selects a kernel, injects compiler environment options, or changes behavior based on GPU/SDK detection.
-
-Prepare and validate both fixed profiles using a public checkpoint:
-
-```bash
-for batch in 1 4; do
-  python3 -m families.hstu.tests.triton.prepare \
-    --root /tmp/hstu-fixed/fixed-b$batch --runtime-root /tmp/hstu-sdk \
-    --checkpoint /tmp/hstu-movielens --batching fixed --max-batch-size "$batch" \
-    --bf16-attention-epilogue --bf16-policy strict --cuda-graphs
-done
-HSTU_FIXED_E2E_ROOT=/tmp/hstu-fixed TRTMC_RUNTIME_ROOT=/tmp/hstu-sdk \
-  python3 -m pytest families/hstu/tests/test_fixed_batch_gpu.py -q
-```
-
-Fixed-batch native Triton repositories use `max_batch_size: 0` and explicit tensor dimensions, for example `[4,128]` for history IDs and `[4,50]` for scores. Callers submit the complete fixed batch. Triton's implicit/dynamic batching is disabled for this configuration. Snapshot restore can still admit individual histories, but cold scoring, history export, and scoring with restored histories require the bundle's exact batch size.
-
-The full SiLU graph is eligible for HSTU fusion, but eligibility is not a guarantee. GB300 experiments with TensorRT 11.6.0.108 and these options execute 50 fused attention kernels per request in fixed profiles; the dynamic 1–4 profile remains unfused. Strict BF16 passes the unchanged numerical gates. A separate fast fixed-4 experiment exceeded the existing 0.02 mean-error gate, so strict mode remains the default. The TensorRT 11.4.0.106 GB300/A100 experiments did not observe full SiLU-attention fusion in the tested builds; this does not imply that 11.4 lacks HSTU support generally.
-
-In matched GB300 **strict BF16** measurements on TensorRT 11.6.0.108, the default fused route was slightly slower than disabling attention fusion. Same weights, graph, fixed profile, inputs and CUDA Graph policy; 50 warmups and 300 alternating timed calls per variant. Times include the native test bridge's host serialization/copies and synchronized Task execution, and exclude startup/loading/building/warmup:
-
-| Candidates / batch | Unfused p50 ms | Fused p50 ms | Fused latency change |
-|---|---:|---:|---:|
-| 50 / 1 | 6.054 | 6.314 | +4.3% |
-| 50 / 4 | 6.805 | 7.007 | +3.0% |
-| 64 / 1 | 6.211 | 6.456 | +3.9% |
-| 64 / 4 | 6.977 | 7.048 | +1.0% |
-
-Actual traces distinguish 50 fused attention launches from zero, with 50 step graph replays for both variants. These are not FP32-versus-BF16 results and do not establish a latency benefit from fusion. These historical fusion measurements used the earlier full FP32 selection branch; they do not describe the new shortlist implementation. Rebuild plans and repeat accuracy, kernel tracing, and serving qualification with the deployed SDK; 11.6 engines cannot be substituted into the supplied 11.4 Triton image.
-
-The staged runtime retains the existing three-engine orchestration, GPU slate state, KV byte accounting, SHA-256 snapshots, restore/deduplication, revisions, TTL, leases, and eviction. Cache storage is FP32 in both precision modes: **262,144 KV bytes per history**, plus a 512-byte history mask outside the KV budget. A max-batch-4 engine reserves 1,048,576 scratch KV bytes. Restored histories need budget beyond scratch. Snapshots are bound to the exact bundle hash and cannot migrate from the private model, a rebuilt engine, or a different precision bundle.
-
-## Triton and KV budgets
-
-Use the native backend in the supplied AMD64 `tritonserver:26.10-py3-trtmc-0.2.0` image:
-
-```bash
-python3 -m families.hstu.triton.native_repository \
-  --bundle /tmp/hstu-public/model.bundle --repository /tmp/models \
-  --name hstu --kv-cache-memory-ratio 0.05
-```
-
-It generates:
-
-```protobuf
-backend: "tensorrt"
-platform: "model_connect"
-default_model_filename: "model.bundle"
-parameters { key: "kv_cache_memory_ratio" value { string_value: "0.05" } }
-```
-
-Alternatively specify `--kv-cache-size-bytes 8388608`. The two options are mutually exclusive. Ratio must be finite and in `(0,1]`; it caps KV bytes against free GPU memory after non-cache initialization, adding back already allocated scratch KV. An omitted cap defaults to scratch capacity. Each model instance resolves its own budget. Too little capacity fails model loading; the ratio is a cap, not an eager allocation of that fraction.
-
-**Match the SDK ABI.** Current main and the prototype image use different release-coupled C++ tensor enums. Build ordinary native SDK libraries together with CMake (`TRTMC_BUILD_FAMILIES=hstu`). For this exact prototype image, run the following *inside the image* to create a separate SDK directory containing byte-identical image SDK libraries and the new public plugin/bridge compiled for its ABI:
+Build `trtmc_model_hstu` and `hstu_triton` with the SDK. For the supplied
+**amd64 Triton 26.10 / TRT-MC 0.2.0 prototype**, run its ABI adapter inside the
+image, then build the bundles there with TensorRT 11.4.0.106:
 
 ```bash
 python3 -m families.hstu.triton.build_image_plugin \
-  --output /tmp/hstu-sdk --json-include /path/containing/nlohmann
-LD_LIBRARY_PATH=/tmp/hstu-sdk:$LD_LIBRARY_PATH \
-  tritonserver --model-repository=/tmp/models --model-control-mode=explicit
+  --output /tmp/dlrmv3/deploy --json-include /path/to/nlohmann/include
+python3 -m families.hstu.triton.native_repository \
+  --bundle /tmp/dlrmv3/model.bundle --repository /tmp/dlrmv3/repository \
+  --name dlrmv3 --runtime-root /tmp/dlrmv3/deploy --kv-cache-memory-ratio 0.05
+LD_LIBRARY_PATH=/tmp/dlrmv3/deploy:$LD_LIBRARY_PATH \
+  tritonserver --model-repository=/tmp/dlrmv3/repository
 ```
 
-The helper pins the tested backend/SDK hashes. It changes neither the Triton backend nor TensorRT/CUDA libraries. Do not mix the image plugin with main-built SDK libraries. Rebuild engines inside the target image for the target GPU.
+The adapter recompiles only the family plugin and bridge and copies the image's
+SDK DSOs unchanged. It accounts for that prototype's INT64 ordinal and
+four-field factory/six-argument loader ABI. Do not mix it with a main-built
+SDK or assume it applies to another image release. Rebuild serialized engines
+when the TensorRT version or target platform changes.
 
-The native backend publishes these seven gauges at `http://localhost:8002/metrics`, labeled by model, version, device, and instance:
+Generated configuration uses `backend: "tensorrt"`, `platform: "model_connect"`.
+Specify **one** parameter: `kv_cache_size_bytes` (positive bytes) or
+`kv_cache_memory_ratio` (finite fraction in (0,1]). Ratio budgets use free GPU
+memory after engine initialization, adding back the already allocated KV
+scratch. Both limits must cover the entire engine profile's scratch allocation.
+They bound K/V storage, not weights, workspace or all GPU memory. The family
+client configures these limits through its cache capability; the generic main
+SDK decoder `--kv-cache-size` flag is unsupported for this family.
 
-- `hstu_kv_cache_supported`
-- `hstu_kv_cache_budget_bytes`
-- `hstu_kv_cache_reserved_bytes`
-- `hstu_kv_cache_used_bytes`
-- `hstu_kv_cache_peak_bytes`
-- `hstu_kv_cache_active_sequences`
-- `hstu_kv_cache_allocation_failures`
+The native backend publishes seven `hstu_kv_cache_*` metrics at
+`http://localhost:8002/metrics`: `supported`, `budget_bytes`, `reserved_bytes`,
+`used_bytes`, `peak_bytes`, `active_sequences`, `allocation_failures`.
+Reservation includes profile scratch and any restored entries; used/active
+track in-flight scoring and return to zero at idle. Peak is a high-water mark.
+FP32 K/V storage is `2 × 5 × 4 × (T+1) × 128 × 4` bytes per sequence, including
+the user-context token. Model instances own their caches and metrics separately.
 
-Metrics publish asynchronously. Observe effective budgets and active/idle transitions, not just echoed configuration. For B4, active KV usage is 1,048,576 bytes; idle usage/active sequences return to zero while reserved storage and peak remain. The normal native scoring path has no additional cache allocation after loading, so its allocation-failure gauge normally stays zero.
+## Restore precomputed history
 
-## Restore example
+The family retains `export_history`, `restore_history`, `score_with_history`,
+`history_info` and `release_history`. An opaque v2 snapshot contains all five
+layers' K/V plus auxiliary state. Restoration copies this state to GPU without
+running history preparation. Query time, candidate count, user context, history
+features/revision, precision and serving profile belong to snapshot identity.
+Only candidate embeddings may change during cached scoring. In particular,
+the original model's context gate depends on history length plus candidate count.
+
+Snapshots are trusted binary inputs with bounded framing, tensor validation
+and corruption checks. A per-build bundle UUID rejects incompatible bundles;
+rebuilding produces a new identity. Handles belong to one model instance.
+Restore admission enforces byte/entry limits, TTL, early-hydration leases and
+LRU eviction. The maximum snapshot size is 1 GiB.
 
 ```bash
-python3 -m families.hstu.examples.history_cache \
-  --checkpoint /tmp/hstu-public --bundle /tmp/hstu-public/model.bundle \
-  --runtime-root /tmp/hstu-sdk --snapshot /tmp/history.kv
+python -m families.hstu.examples.history_cache \
+  --bundle /tmp/dlrmv3/model.bundle --checkpoint /tmp/dlrmv3/model \
+  --runtime-root /path/to/sdk/build
 ```
 
-This exports a snapshot, destroys the producer, restores into another instance, scores using only candidate inputs, checks bit-identical cold/restored results, and verifies zero history preparation calls after restoration.
+For remote restore, `triton.generate_repository --history-cache` creates the
+Python transport exposing `CACHE_CONTROL`, `CACHE_SNAPSHOT` and `CACHE_STATUS`.
+It runs the same native family plugin. This endpoint owns a separate cache
+from the native backend endpoint; a handle cannot cross between them.
+See `tests/triton/hydration_serving.py` for HTTP/gRPC restore and score requests.
 
-The prototype **native** Triton backend supports scoring and seven metrics, but has no snapshot-control input contract. This is the existing integration boundary. The family-owned Python transport exposes export/restore/score/release over Triton using the same C++ runtime:
+## Reproduce validation
 
 ```bash
-python3 -m families.hstu.triton.generate_repository \
-  --bundle /tmp/hstu-public/model.bundle --repository /tmp/models \
-  --name hstu_history --runtime-root /tmp/hstu-sdk --history-cache \
-  --kv-cache-size-bytes 9437184
+python -m families.hstu.tests.prepare --root /tmp/dlrmv3/qualification \
+  --checkpoint /tmp/dlrmv3/non_sparse.ckpt --runtime-root /path/to/sdk/build
+HSTU_E2E_ROOT=/tmp/dlrmv3/qualification/output TRTMC_RUNTIME_ROOT=/path/to/sdk/build \
+  pytest families/hstu/tests/test_e2e.py families/hstu/tests/test_history_cache_gpu.py
 ```
 
-That endpoint uses `backend: "python"` and optional `CACHE_CONTROL`/`CACHE_SNAPSHOT` inputs. It also publishes restoration/residency counters. No PyTorch is used for serving. The bridge is trusted in-process test/example transport, not a remote pointer API. The modern TRT-MC C SDK has no structured-ranking binding yet; use this C++ Task interface, the example bridge, or the prototype native Triton backend.
-
-## Validation
-
-Numerical gates are fixed in `tests/thresholds/correctness.json`. CPU tests run without a GPU. Selected E2E tests build deterministic fixtures in pytest temporary directories by default. Set `HSTU_E2E_ROOT` to use prepared `hstu50-fp32`, `hstu50-bf16`, `hstu64-fp32`, and `hstu64-bf16` directories instead:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest families/hstu/tests -q
-HSTU_E2E_ROOT=/tmp/checkpoints TRTMC_RUNTIME_ROOT=/tmp/hstu-sdk \
-  python3 -m pytest families/hstu/tests/test_e2e.py --e2e-model hstu -q
-HSTU_UPSTREAM_SOURCE=/path/to/pinned/public/hstu.py \
-  python3 -m pytest families/hstu/tests/test_upstream.py -q
-```
-
-Prepare all four variants and both endpoint configurations in a fresh test directory:
-
-```bash
-export HSTU_TEST_ROOT=/work/qa
-export TRTMC_RUNTIME_ROOT=/work/hstu-sdk
-python3 -m families.hstu.tests.triton.prepare --root "$HSTU_TEST_ROOT" \
-  --runtime-root "$TRTMC_RUNTIME_ROOT" --checkpoint /path/to/public-checkpoint
-# Omit --checkpoint to create untrained fixtures.
-LD_LIBRARY_PATH="$TRTMC_RUNTIME_ROOT:$LD_LIBRARY_PATH" \
-  tritonserver --model-repository="$HSTU_TEST_ROOT/triton-models" \
-  --model-control-mode=explicit --allow-gpu-metrics=false
-# In another shell inside the same container, with the same exports:
-python3 -m families.hstu.tests.triton.native_serving
-python3 -m families.hstu.tests.triton.hydration_serving
-python3 -m families.hstu.tests.triton.native_cache
-```
-
-`tests/triton/{native_serving,native_cache,hydration_serving}.py` replay the container campaigns. Run them as Python modules against a dedicated test server and the directory prepared above. `HSTU_TEST_ROOT` defaults to `/work`; `TRTMC_RUNTIME_ROOT` defaults to its `deploy` subdirectory. Busy-gauge checks sustain scoring until an active sample appears, with a five-second observation deadline; short individual requests can fall between asynchronous metric publications. They preserve failure exit codes and write evidence outside the source directory. The history lifecycle test accepts `HSTU_HISTORY_BUNDLE`, `HSTU_HISTORY_REQUEST` (NPZ), and `HSTU_HISTORY_RUNTIME_ROOT`.
-
-The 26.10 image has four pre-existing configuration-parser defects: it accepts ratio `"0.05junk"`, bytes `"-1"`, `"8388608.5"`, and `"8388608junk"`. The negative tests remain failures; the backend needs strict full-string numeric parsing. This family cannot recover the original strings after the backend has parsed them. Valid budget/metric, multi-model, and multi-instance cases pass.
-
-## Earlier measured result
-
-The tables below predate the strict shortlist change. In the new GB300/TRT 11.4
-qualification, the four-candidate refinement passed all 160 accuracy cells but
-was 9–12% slower than the former full selector across C50/C64, B1/B4. It removes
-duplicate full-width computation but is not a latency optimization. The fast
-policy remains the lower-latency option for this synthetic slate task. The
-recommended trained `hstu_research` path uses selective FP32 blocks and one
-encoder path, with measured BF16 latency improvements.
-
-AMD64 A100 PCIe 40 GB, supplied 26.10/0.2.0 image, TensorRT 11.4.0.106; public MovieLens 100-step example weights, seed 20261124. This is a short training/integration example, not production recommendation-quality qualification.
-
-Matched `NativeClient.score` median milliseconds, including synchronized GPU work and host tensor transport, excluding model loading/compilation and HTTP. CUDA Graphs are **enabled for all three policies**. Each cell uses 50 warmups and 300 measured calls per policy, interleaved over three repeats:
-
-| Candidates | Batch | FP32 ms | Strict BF16 ms | Fast BF16 ms | Fast latency reduction vs FP32 |
-| --- | --- | --- | --- | --- | --- |
-| 50 | 1 | 5.615 | 7.104 | 5.013 | 10.7% |
-| 50 | 4 | 6.086 | 7.481 | 5.445 | 10.5% |
-| 64 | 1 | 5.994 | 7.419 | 5.088 | 15.1% |
-| 64 | 4 | 6.436 | 7.901 | 5.868 | 8.8% |
-
-The earlier latency table used strict BF16 with graphs disabled. The fast policy removes the second full attention/head path and moves the output projection to BF16; it beats the matched FP32 baseline in these four staged cases. Unrolled/Loop variants and other GPUs are unqualified.
-
-Held-out quality on all **943 MovieLens users per candidate count**, with matched FP32/BF16 weights and sampled negative candidates:
-
-| Candidates | FP32 NDCG@10 | Fast BF16 NDCG@10 | Mean top-10 overlap | Top-1 agreement | Full-slate position agreement | Mean absolute score error |
-| --- | --- | --- | --- | --- | --- | --- |
-| 50 | 0.19304 | 0.19378 | 99.69% | 99.89% | 96.94% | 0.00597 |
-| 64 | 0.15842 | 0.15842 | 99.73% | 99.89% | 95.71% | 0.00564 |
-
-No NDCG@10 loss was measured in this smoke evaluation. **Fast mode does not preserve individual-score parity:** tail selections can diverge and alter later context, and C64 candidates can cross the selected/unselected boundary. Maximum individual score differences reached 2.486 (C50) and 1.885 (C64). Use strict mode for score calibration or full-slate parity requirements; its original numerical gates remain unchanged.
-
-The optimization rerun includes eight strict numerical cells and eight fast-policy/graph-freshness tests per SDK (image and current main), 64 history lifecycle checks across both SDKs, four main-SDK C++ checks, 16 native HTTP/gRPC cells, and 16 snapshot transport cells with a positive allocation-failure metric check. The seven native gauges and effective KV budgets are checked by the native cache/config campaign; its four existing backend parser failures remain explicit. Source and evidence are recorded outside the repository. The generic modern C-SDK structured-ranking binding remains unavailable; these timings use the family-owned native Task bridge.
+In the supplied image, serve `qualification/triton-models` with explicit model
+control, the matching deployment directory on `LD_LIBRARY_PATH`, and ports
+8000/8001/8002. Set `HSTU_TEST_ROOT` to the qualification directory and
+`TRTMC_RUNTIME_ROOT` to the deployment directory; run
+`families.hstu.tests.triton.native_serving`, `native_cache` and
+`hydration_serving` with `python -m`. Results and Prometheus scrapes go there.
+The supplied image still accepts four malformed configurations: ratio
+`0.05junk`, or byte limits `-1`, `134217728.5` and `134217728junk`. The native
+cache campaign reports these as failures; the family generators and native
+client reject them. Fixing this parser requires a Triton backend change.

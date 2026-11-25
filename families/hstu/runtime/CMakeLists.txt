@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-add_library(trtmc_model_hstu SHARED pipeline.cpp staged_pipeline.cpp history_snapshot.cpp plugin.cpp)
+add_library(trtmc_model_hstu SHARED validation.cpp staged_pipeline.cpp history_snapshot.cpp plugin.cpp)
 target_include_directories(trtmc_model_hstu PRIVATE ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include)
 target_include_directories(trtmc_model_hstu SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
 target_link_libraries(trtmc_model_hstu PRIVATE trtmc_core nlohmann_json::nlohmann_json ${TRTMC_CUDART_LIBRARY})
@@ -19,15 +19,15 @@ endif()
 add_library(hstu_triton SHARED ../triton/bridge.cpp)
 target_include_directories(hstu_triton PRIVATE ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include)
 target_include_directories(hstu_triton SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
-target_link_libraries(hstu_triton PRIVATE trtmc_runtime nlohmann_json::nlohmann_json ${TRTMC_CUDART_LIBRARY})
+target_link_libraries(hstu_triton PRIVATE trtmc_runtime trtmc_core nlohmann_json::nlohmann_json ${TRTMC_CUDART_LIBRARY})
 set_target_properties(hstu_triton PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" BUILD_RPATH "\$ORIGIN" INSTALL_RPATH "\$ORIGIN")
 
 if(TRTMC_BUILD_TESTS)
-  add_executable(test_hstu_pipeline ../tests/cpp/test_pipeline.cpp)
-  target_include_directories(test_hstu_pipeline PRIVATE ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include)
-  target_include_directories(test_hstu_pipeline SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
-  target_link_libraries(test_hstu_pipeline PRIVATE trtmc_model_hstu nlohmann_json::nlohmann_json)
-  add_test(NAME hstu_pipeline COMMAND test_hstu_pipeline)
+  add_executable(test_hstu_inputs ../tests/cpp/test_inputs.cpp)
+  target_include_directories(test_hstu_inputs PRIVATE ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include)
+  target_include_directories(test_hstu_inputs SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_hstu_inputs PRIVATE trtmc_model_hstu nlohmann_json::nlohmann_json)
+  add_test(NAME hstu_inputs COMMAND test_hstu_inputs)
 endif()
 
 install(TARGETS hstu_triton LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
