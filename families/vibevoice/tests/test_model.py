@@ -298,6 +298,70 @@ def test_usable_gain_mirrors_the_runtime_check():
     assert not config_module.usable_gain(-1e6, 1e-6)
 
 
+def _staged_tokenizer_cache(tmp_path, monkeypatch, *, offline: bool, files) -> Path:
+    """A Hugging Face cache as CI stages it: the tokenizer snapshot's ``files`` and no cached
+    tree listing. Every request to the Hub fails the test."""
+    httpx = pytest.importorskip("httpx")
+    from huggingface_hub import constants
+
+    repo = "models--" + config_module.TOKENIZER_REPOSITORY.replace("/", "--")
+    snapshot = tmp_path / "hub" / repo / "snapshots" / config_module.TOKENIZER_REVISION
+    snapshot.mkdir(parents=True)
+    for name in files:
+        (snapshot / name).write_text("{}")
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", offline)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1" if offline else "0")
+
+    def no_request(*args, **kwargs):
+        raise AssertionError("the build sent a request to the Hub")
+
+    monkeypatch.setattr(httpx.Client, "send", no_request)
+    return snapshot
+
+
+def test_the_tokenizer_comes_from_the_cache_without_a_request(tmp_path, monkeypatch):
+    snapshot = _staged_tokenizer_cache(
+        tmp_path, monkeypatch, offline=True, files=config_module.TOKENIZER_FILES
+    )
+    assert model._resolve_tokenizer_dir(tmp_path / "checkpoint") == snapshot
+
+
+def test_a_tokenizer_missing_offline_is_reported_without_a_request(tmp_path, monkeypatch):
+    # The snapshot lacks vocab.json; offline, nothing may be downloaded.
+    present = [name for name in config_module.TOKENIZER_FILES if name != "vocab.json"]
+    _staged_tokenizer_cache(tmp_path, monkeypatch, offline=True, files=present)
+    with pytest.raises(FileNotFoundError, match="offline mode \\(HF_HUB_OFFLINE\\) forbids"):
+        model._resolve_tokenizer_dir(tmp_path / "checkpoint")
+
+
+def test_a_tokenizer_missing_online_is_downloaded_after_the_cache_lookup(tmp_path, monkeypatch):
+    import huggingface_hub
+    from huggingface_hub import constants
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    downloaded = tmp_path / "downloaded"
+    downloaded.mkdir()
+    for name in config_module.TOKENIZER_FILES:
+        (downloaded / name).write_text("{}")
+    calls = []
+
+    def fake_snapshot_download(repo_id, *, revision, allow_patterns, local_files_only):
+        calls.append(local_files_only)
+        assert (repo_id, revision) == (
+            config_module.TOKENIZER_REPOSITORY,
+            config_module.TOKENIZER_REVISION,
+        )
+        if local_files_only:
+            raise LocalEntryNotFoundError("not cached")
+        return str(downloaded)
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", False)
+    assert model._resolve_tokenizer_dir(tmp_path / "checkpoint") == downloaded
+    assert calls == [True, False]
+
+
 def test_the_reference_keeps_the_acoustic_noise_scale():
     transformers = pytest.importorskip("transformers")
     if not hasattr(transformers, "VibeVoiceConfig"):

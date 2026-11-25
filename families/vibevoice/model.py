@@ -38,18 +38,42 @@ DEFAULT_DIFFUSION_STEPS = 10
 
 
 def _resolve_tokenizer_dir(model_dir: Path) -> Path:
-    """The checkpoint ships no tokenizer; its preprocessor config names the Qwen2.5 one."""
+    """The checkpoint ships no tokenizer; its preprocessor config names the Qwen2.5 one.
+
+    The cached snapshot comes first, without any request to the Hub: a commit-hash revision
+    would otherwise make huggingface_hub list the repository even offline, unless the cache
+    holds a tree listing, which older clients do not write. The snapshot is downloaded only
+    when the cache lacks a file and Hugging Face offline mode is off.
+    """
     if all((model_dir / name).is_file() for name in config_module.TOKENIZER_FILES):
         return model_dir
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import constants, snapshot_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
 
-    return Path(
-        snapshot_download(
-            config_module.TOKENIZER_REPOSITORY,
-            revision=config_module.TOKENIZER_REVISION,
-            allow_patterns=config_module.TOKENIZER_FILES,
+    def snapshot(local_files_only: bool) -> Path:
+        return Path(
+            snapshot_download(
+                config_module.TOKENIZER_REPOSITORY,
+                revision=config_module.TOKENIZER_REVISION,
+                allow_patterns=list(config_module.TOKENIZER_FILES),
+                local_files_only=local_files_only,
+            )
         )
-    )
+
+    try:
+        cached = snapshot(local_files_only=True)
+    except LocalEntryNotFoundError:  # also an incomplete snapshot the cached listing shows
+        cached = None
+    if cached is not None and all((cached / name).is_file() for name in config_module.TOKENIZER_FILES):
+        return cached
+    if constants.is_offline_mode():
+        raise FileNotFoundError(
+            f"{FAMILY} needs {', '.join(config_module.TOKENIZER_FILES)} of "
+            f"{config_module.TOKENIZER_REPOSITORY} at revision {config_module.TOKENIZER_REVISION}: "
+            "the Hugging Face cache does not hold them, and offline mode (HF_HUB_OFFLINE) forbids "
+            "downloading them"
+        )
+    return snapshot(local_files_only=False)
 
 
 def _unique_keys(pairs: list) -> dict:
