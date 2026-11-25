@@ -162,6 +162,7 @@ def test_the_near_capacity_request_covers_the_text_generation_task_under_either_
 
     assert runner.near_capacity_applies(model("text_generation"), {"prompt": "x"})
     assert runner.near_capacity_applies(model("text_continuation"), {"prompt": "x"})
+    assert runner.near_capacity_applies(model("conditional_text_generation"), {"prompt": "x"})
     assert not runner.near_capacity_applies(model("text_continuation"), {"prompt": "x", "image": "i"})
     assert not runner.near_capacity_applies(model("vision_language_generation"), {"prompt": "x"})
 

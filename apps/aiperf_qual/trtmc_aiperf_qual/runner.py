@@ -134,7 +134,7 @@ def near_capacity_request(environment: Environment, model: Mapping[str, Any], re
 
 
 # The text generation Task under its legacy name and its Task SDK name (the migrated decoder LMs).
-TEXT_GENERATION_TASKS = frozenset({"text_generation", "text_continuation"})
+TEXT_GENERATION_TASKS = frozenset({"text_generation", "text_continuation", "conditional_text_generation"})
 
 
 def near_capacity_applies(model: Mapping[str, Any], request: Mapping[str, Any]) -> bool:
