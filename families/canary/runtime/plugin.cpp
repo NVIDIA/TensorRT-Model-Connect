@@ -122,5 +122,5 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         config.at("mel_chunk_length").get<std::int32_t>(),
         config.at("mel_sampling_rate").get<std::int32_t>(), config.at("mel_preemph").get<float>(),
         config.at("mel_normalize").get<std::string>() == "per_feature", decoder_options.stream,
-        std::move(tokenizer));
+        std::move(tokenizer), task);
 }

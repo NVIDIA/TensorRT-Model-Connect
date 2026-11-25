@@ -74,4 +74,8 @@ if(TRTMC_BUILD_TESTS)
       RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
     )
   endforeach()
+
+  add_dependencies(test_canary_task_contract
+    test_canary_sdk_c test_canary_sdk_cpp
+  )
 endif()

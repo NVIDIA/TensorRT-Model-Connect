@@ -14,6 +14,7 @@
 #include "families/canary/runtime/tokenizer.h"
 #include "trtmc/internal/audio.h"
 #include "trtmc/internal/model.h"
+#include "trtmc/internal/text.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
@@ -37,9 +38,7 @@ class CanaryPipeline final : public internal::IModel,
                              public ITranscription,
                              public IBatchTranscription {
   public:
-    const char* task() const noexcept override {
-        return internal::ISpeechTranscription::kTask.data();
-    }
+    const char* task() const noexcept override { return task_.c_str(); }
 
     std::vector<internal::TaskInstance> task_bindings() override;
 
@@ -48,8 +47,10 @@ class CanaryPipeline final : public internal::IModel,
     TextResult run(const internal::SpeechTranslationRequest& request,
                    internal::ConfigView config) override;
 
-    BatchTextResult run_batch(const internal::BatchSpeechTranscriptionRequest& request) override;
-    BatchTextResult run_batch(const internal::BatchSpeechTranslationRequest& request) override;
+    internal::BatchTextResult
+    run_batch(const internal::BatchSpeechTranscriptionRequest& request) override;
+    internal::BatchTextResult
+    run_batch(const internal::BatchSpeechTranslationRequest& request) override;
 
     CanaryPipeline(std::unique_ptr<ITrtModule> encoder, std::unique_ptr<ITrtModule> decoder,
                    std::unique_ptr<CanaryInferenceState> state, CanaryConfig canary_config,
@@ -57,7 +58,9 @@ class CanaryPipeline final : public internal::IModel,
                    int32_t mel_n_fft, int32_t mel_win_length, int32_t mel_hop_length,
                    int32_t mel_chunk_length, int32_t mel_sampling_rate, float mel_preemph,
                    bool mel_normalize_per_feature, cudaStream_t stream,
-                   std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "");
+                   std::shared_ptr<ITokenizer> tokenizer = nullptr,
+                   std::string task = std::string(internal::ISpeechTranscription::kTask),
+                   std::string model_id_str = "");
 
     ~CanaryPipeline() override;
 
@@ -126,6 +129,7 @@ class CanaryPipeline final : public internal::IModel,
     bool mel_normalize_per_feature_;
     cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
+    std::string task_;
     std::string model_id_;
 
     void* cross_kv_ptr_{nullptr};

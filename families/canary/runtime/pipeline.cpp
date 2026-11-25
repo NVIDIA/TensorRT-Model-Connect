@@ -653,7 +653,7 @@ CanaryPipeline::CanaryPipeline(
     int32_t num_decoder_layers, MelFilterbank mel_fb, int32_t mel_n_fft, int32_t mel_win_length,
     int32_t mel_hop_length, int32_t mel_chunk_length, int32_t mel_sampling_rate, float mel_preemph,
     bool mel_normalize_per_feature, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
-    std::string model_id_str)
+    std::string task, std::string model_id_str)
     : encoder_(std::move(encoder)), decoder_(std::move(decoder)), state_(std::move(state)),
       canary_config_(std::move(canary_config)), hidden_size_(hidden_size),
       num_decoder_layers_(num_decoder_layers),
@@ -661,7 +661,8 @@ CanaryPipeline::CanaryPipeline(
       mel_win_length_(mel_win_length), mel_hop_length_(mel_hop_length),
       mel_chunk_length_(mel_chunk_length), mel_sampling_rate_(mel_sampling_rate),
       mel_preemph_(mel_preemph), mel_normalize_per_feature_(mel_normalize_per_feature),
-      stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)) {
+      stream_(stream), tokenizer_(std::move(tokenizer)), task_(std::move(task)),
+      model_id_(std::move(model_id_str)) {
     validate_canary_pipeline_components(encoder_.get(), decoder_.get(), state_.get());
 
     // Decoder shapes are stable within each dynamic cache-row bucket. Capture
@@ -1249,11 +1250,11 @@ const internal::ConfigField canary_config_fields[] = {
 };
 
 TranscriptionConfig build_canary_config_from_view(const CanaryConfig& model,
-                                                   internal::ConfigView options,
-                                                   TranscriptionTask task,
-                                                   std::optional<std::string_view> source_lang,
-                                                   std::optional<std::string_view> target_lang,
-                                                   std::optional<uint32_t> sample_rate) {
+                                                  internal::ConfigView options,
+                                                  TranscriptionTask task,
+                                                  std::optional<std::string_view> source_lang,
+                                                  std::optional<std::string_view> target_lang,
+                                                  std::optional<uint32_t> sample_rate) {
     internal::validate_config(canary_config_fields, options);
     TranscriptionConfig cfg;
     cfg.task = task;
@@ -1310,10 +1311,8 @@ TextResult CanaryPipeline::run(const internal::SpeechTranscriptionRequest& reque
     if (request.audio.samples.data() == nullptr || request.audio.samples.empty()) {
         throw std::invalid_argument("Canary transcription requires non-empty audio samples");
     }
-    auto cfg = build_canary_config_from_view(canary_config_, config,
-                                             TranscriptionTask::kTranscribe,
-                                             request.source_language,
-                                             request.source_language,
+    auto cfg = build_canary_config_from_view(canary_config_, config, TranscriptionTask::kTranscribe,
+                                             request.source_language, request.source_language,
                                              request.audio.sample_rate);
     return transcribe(request.audio.samples.data(),
                       static_cast<int32_t>(request.audio.samples.size()), cfg);
@@ -1324,16 +1323,14 @@ TextResult CanaryPipeline::run(const internal::SpeechTranslationRequest& request
     if (request.audio.samples.data() == nullptr || request.audio.samples.empty()) {
         throw std::invalid_argument("Canary translation requires non-empty audio samples");
     }
-    auto cfg = build_canary_config_from_view(canary_config_, config,
-                                             TranscriptionTask::kTranslate,
-                                             request.source_language,
-                                             request.target_language,
+    auto cfg = build_canary_config_from_view(canary_config_, config, TranscriptionTask::kTranslate,
+                                             request.source_language, request.target_language,
                                              request.audio.sample_rate);
     return transcribe(request.audio.samples.data(),
                       static_cast<int32_t>(request.audio.samples.size()), cfg);
 }
 
-BatchTextResult
+internal::BatchTextResult
 CanaryPipeline::run_batch(const internal::BatchSpeechTranscriptionRequest& request) {
     if (request.items.empty()) {
         return {};
@@ -1347,17 +1344,16 @@ CanaryPipeline::run_batch(const internal::BatchSpeechTranscriptionRequest& reque
         TranscriptionRequest req;
         req.audio_samples.assign(item.input.audio.samples.data(),
                                  item.input.audio.samples.data() + item.input.audio.samples.size());
-        req.config = build_canary_config_from_view(canary_config_, item.config,
-                                                   TranscriptionTask::kTranscribe,
-                                                   item.input.source_language,
-                                                   item.input.source_language,
-                                                   item.input.audio.sample_rate);
+        req.config = build_canary_config_from_view(
+            canary_config_, item.config, TranscriptionTask::kTranscribe, item.input.source_language,
+            item.input.source_language, item.input.audio.sample_rate);
         requests.push_back(std::move(req));
     }
     return transcribe_batch(requests);
 }
 
-BatchTextResult CanaryPipeline::run_batch(const internal::BatchSpeechTranslationRequest& request) {
+internal::BatchTextResult
+CanaryPipeline::run_batch(const internal::BatchSpeechTranslationRequest& request) {
     if (request.items.empty()) {
         return {};
     }
@@ -1370,11 +1366,9 @@ BatchTextResult CanaryPipeline::run_batch(const internal::BatchSpeechTranslation
         TranscriptionRequest req;
         req.audio_samples.assign(item.input.audio.samples.data(),
                                  item.input.audio.samples.data() + item.input.audio.samples.size());
-        req.config = build_canary_config_from_view(canary_config_, item.config,
-                                                   TranscriptionTask::kTranslate,
-                                                   item.input.source_language,
-                                                   item.input.target_language,
-                                                   item.input.audio.sample_rate);
+        req.config = build_canary_config_from_view(
+            canary_config_, item.config, TranscriptionTask::kTranslate, item.input.source_language,
+            item.input.target_language, item.input.audio.sample_rate);
         requests.push_back(std::move(req));
     }
     return transcribe_batch(requests);

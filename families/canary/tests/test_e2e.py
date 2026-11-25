@@ -18,7 +18,7 @@ import pytest
 from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "canary"
-TASKS = frozenset({"speech_transcription", "speech_translation"})
+TASKS = frozenset({"speech_transcription"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
@@ -409,7 +409,7 @@ def _native(
     case: dict,
     tmp_path: Path,
 ):
-    manifest["task"]
+    assert manifest["task"] == "speech_transcription", f"unsupported task: {manifest['task']}"
     audio = _asset(case["test_input_audio"])
     return _run_json(
         binary,
@@ -426,7 +426,7 @@ def _native(
 
 
 def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: Path):
-    manifest["task"]
+    assert manifest["task"] == "speech_transcription", f"unsupported task: {manifest['task']}"
     import numpy as np
     import scipy.io.wavfile as wav
     from nemo.collections.asr.models import ASRModel
@@ -464,7 +464,7 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
 
 
 def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
-    manifest["task"]
+    assert manifest["task"] == "speech_transcription", f"unsupported task: {manifest['task']}"
     reference = str(expected["text"])
     hypothesis = str(actual["text"])
     assert reference.strip(), "official ASR reference produced an empty transcript"

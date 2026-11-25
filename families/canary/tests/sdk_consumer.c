@@ -61,7 +61,7 @@ int main(int argc, char** argv) {
 
     const trtmc_api_header* task_header = NULL;
     check(api->model_get_task_api(model, sv(TRTMC_TASK_SPEECH_TRANSCRIPTION), 1, 0, &task_header,
-                                 &err),
+                                  &err),
           api, &err, "get speech_transcription");
 
     const trtmc_speech_transcription_api_v1* task =
