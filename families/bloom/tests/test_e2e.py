@@ -76,13 +76,17 @@ def _require_selected(case_name: str, manifest: dict, config) -> None:
 def _required_environment(tp_size: int):
     binary_value = os.environ.get("TRTMC_BINARY")
     runtime_value = os.environ.get("TRTMC_RUNTIME_ROOT")
+    native_build_value = os.environ.get("TRTMC_NATIVE_BUILD_DIR")
     assert binary_value, "selected E2E requires TRTMC_BINARY"
     assert runtime_value, "selected E2E requires TRTMC_RUNTIME_ROOT"
+    assert native_build_value, "selected E2E requires TRTMC_NATIVE_BUILD_DIR"
 
     binary = Path(binary_value)
     runtime_root = Path(runtime_value)
+    native_build = Path(native_build_value)
     assert binary.is_file() and os.access(binary, os.X_OK), binary
     assert runtime_root.is_dir(), runtime_root
+    assert native_build.is_dir(), native_build
     assert (runtime_root / "libtrtmc_backend_trt.so").is_file(), runtime_root
     assert (runtime_root / f"libtrtmc_model_{_FAMILY}.so").is_file(), runtime_root
 

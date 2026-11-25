@@ -96,7 +96,7 @@ static std::vector<int32_t> encode_prompt(const ITokenizer& tokenizer,
 }
 
 TextResult BloomTextGenerationPipeline::run(const internal::TextContinuationRequest& request,
-                                          internal::ConfigView supplied) {
+                                            internal::ConfigView supplied) {
     const auto cfg = bloom::parse_text_config(supplied);
     std::vector<std::int32_t> input_ids;
     if (const auto* prompt = std::get_if<std::string_view>(&request.prefix)) {

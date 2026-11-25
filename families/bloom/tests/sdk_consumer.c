@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
     trtmc_error* error = NULL;
     trtmc_load_options_v1 options = {0};
     trtmc_text_continuation_request_v1 request = {0};
-    trtmc_text_continuation_result_view_v1 view = {0};
+    trtmc_text_result_view_v1 view = {0};
     trtmc_config_entry_v1* entries = NULL;
     int32_t* ids = NULL;
     FILE* file = NULL;
