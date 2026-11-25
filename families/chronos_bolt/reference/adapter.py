@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Chronos-Bolt's native pipeline for the trtmc-perf-serve reference backend (``solve``): the official
-``chronos`` package's ChronosBoltPipeline, its quantile forecast over the model's prediction length."""
+``chronos`` package's ChronosBoltPipeline, its quantile forecast over the model's prediction length, laid out as
+the ``series_to_quantile_forecast`` Task returns it: [quantile, horizon, channel] with the quantile levels."""
 
 from __future__ import annotations
 
@@ -29,4 +30,8 @@ class Adapter:
         context = torch.tensor(past, dtype=torch.float32, device=self.spec.device)
         forecast, model_ms = self.host.timed(lambda: self.pipeline.predict(
             context, prediction_length=self.pipeline.model_prediction_length, limit_prediction_length=True))
-        return self.host.invocation(self.host.tensor_observation(forecast, artifact_base, inline=True), model_ms)
+        # The pipeline's [series, quantile, horizon] for one univariate series is the Task's [quantile, horizon, 1].
+        quantiles = forecast[0].unsqueeze(-1)
+        observation = self.host.tensor_observation(quantiles, artifact_base, inline=True)
+        return self.host.invocation({**observation, "axes": ["quantile", "horizon", "channel"],
+                                     "quantile_levels": [float(level) for level in self.pipeline.quantiles]}, model_ms)

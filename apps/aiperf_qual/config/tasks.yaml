@@ -357,6 +357,7 @@ tasks:
     # The catalog testcases are a few values, not the models' context: Perf times the first ETTh1 window.
     performance: {suite: {from_benchmark: etth1-mse}, output_grader: parity_numeric}
   series_to_point_forecast: *forecast
+  series_to_quantile_forecast: *forecast  # Chronos-Bolt: scored on its median quantile
   # Tasks whose native reference is the family's own Transformers model (config/models: reference.adapter).
   audio_to_class_scores:
     absolute: [audioset]
