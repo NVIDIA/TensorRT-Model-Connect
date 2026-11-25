@@ -1,4 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-exclude: the native reference cannot load the checkpoint, which needs its own modeling code and is ModelOpt mixed FP8/NVFP4 (Transformers has no modelopt quantizer); the family's independent reference is a pinned vLLM snapshot, and AIPerf has no vLLM native backend

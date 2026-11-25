@@ -35,8 +35,8 @@ def _geometry(monkeypatch, request) -> tuple:
     """The image size and text length build() hands to the component builders."""
     seen = {}
 
-    def capture(writer, checkpoint, precision, verbose, height, width, length):
-        seen.update(precision=precision, size=(height, width, length))
+    def capture(writer, checkpoint, precision, verbose, height, width, length, quantized=None):
+        seen.update(precision=precision, size=(height, width, length), quantized=quantized)
         raise _Stop
 
     monkeypatch.setattr(model, "load_checkpoint", lambda root: SimpleNamespace(root=root))
@@ -66,6 +66,7 @@ def test_defaults_are_the_pipeline_defaults(tmp_path: Path, monkeypatch) -> None
     seen = _geometry(monkeypatch, _request(tmp_path, precision="fp32", image_height=512, image_width=768,
                                            max_sequence_length=256))
     assert seen["size"] == (512, 768, 256) and seen["precision"] == "fp32"
+    assert seen["quantized"] is None
 
 
 @pytest.mark.parametrize("overrides", [
@@ -75,7 +76,10 @@ def test_defaults_are_the_pipeline_defaults(tmp_path: Path, monkeypatch) -> None
     {"tensor_parallel_size": 2},
     {"context_parallel_size": 2},
     {"max_batch_size": 2},
-    {"quantization": "fp8"},
+    {"quantization": "int8"},
+    {"quantization": "fp8", "precision": "fp32"},
+    {"quantization": "nvfp4", "image_height": 1280},
+    {"quantization": "fp8", "image_width": 496},
     {"fp32_layers": (1,)},
     {"dynamic_kv_cache": True},
     {"video_num_frames": 9},

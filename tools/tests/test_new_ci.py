@@ -1134,13 +1134,14 @@ def test_gpu_free_unit_scope_keeps_family_python_in_physical_jobs(tmp_path: Path
 
     python_command = context.calls[2][0]
     assert python_command[:3] == ["python", "-m", "pytest"]
-    assert python_command[3:9] == [
+    assert python_command[3:10] == [
         "core/builder/tests",
         "apps/benchmark/trtmc_benchmark/tests",
         "examples/audio_streaming/test_audio_streaming.py",
         "examples/models/cosmos3/dual_spark/test_cosmos3_dual_spark_source.py",
         ("examples/models/nemotron_voicechat/full_duplex/test_voicechat_full_duplex_source.py"),
         "tools/tests",
+        "apps/aiperf_qual/tests/families",
     ]
     assert "families" not in python_command
 
@@ -1191,7 +1192,7 @@ def test_premerge_adds_physical_family_support_tests_without_expanding_runtime_s
     python_commands = [command for command, _ in context.calls if command[:3] == ["python", "-m", "pytest"]]
     assert len(python_commands) == 1
     command = python_commands[0]
-    assert command[9:11] == sorted(support_paths)
+    assert command[10:12] == sorted(support_paths)
     assert all(name not in command for name in excluded_paths)
     assert "families/empty/tests/test_support.py" not in command
     assert "families" not in command
@@ -1203,7 +1204,7 @@ def test_premerge_adds_physical_family_support_tests_without_expanding_runtime_s
     runner.premerge()
     python_commands = [command for command, _ in context.calls if command[:3] == ["python", "-m", "pytest"]]
     assert len(python_commands) == 2  # Still exactly one pytest invocation per premerge.
-    assert python_commands[1][9:12] == sorted([*support_paths, str(new_path.relative_to(tmp_path))])
+    assert python_commands[1][10:13] == sorted([*support_paths, str(new_path.relative_to(tmp_path))])
     assert python_commands[1][python_commands[1].index("-m", 3) + 1] == "not gpu and not trt"
 
 

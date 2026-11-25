@@ -13,6 +13,7 @@
 #include <cuda_runtime_api.h>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -118,6 +119,11 @@ trtmc::BarkConfig config(int32_t semantic_output_vocab = 10048) {
     return value;
 }
 
+// A coarse window holds max_coarse_input_length + 1 + max_coarse_history input
+// rows plus sliding_window_len - 1 decoded rows (18 with config()), and the
+// cache never drops rows, so the coarse cache must hold a whole window.
+constexpr int32_t kCoarseCacheRows = 32;
+
 std::unique_ptr<trtmc::BarkKvCache> cache(int32_t max_length, cudaStream_t stream) {
     trtmc::BarkKvCacheNames names;
     names.cache_k = {"cache_k_0"};
@@ -144,8 +150,9 @@ void test_bark_generate_audio() {
 
     trtmc::BarkPipeline pipeline(
         module(std::make_shared<ModuleStats>(), semantic_logits, 512, stream),
-        module(std::make_shared<ModuleStats>(), coarse_logits, 16, stream), cache(512, stream),
-        cache(16, stream), std::move(semantic_embed), std::move(coarse_embed), config(), stream);
+        module(std::make_shared<ModuleStats>(), coarse_logits, kCoarseCacheRows, stream),
+        cache(512, stream), cache(kCoarseCacheRows, stream), std::move(semantic_embed),
+        std::move(coarse_embed), config(), stream);
 
     trtmc::internal::ITextToAudio& audio = pipeline;
     trtmc::internal::TextToAudioRequest request;
@@ -187,8 +194,9 @@ void test_bark_seed_handling() {
 
     trtmc::BarkPipeline pipeline(
         module(std::make_shared<ModuleStats>(), semantic_logits, 512, stream),
-        module(std::make_shared<ModuleStats>(), coarse_logits, 16, stream), cache(512, stream),
-        cache(16, stream), std::move(semantic_embed), std::move(coarse_embed), cfg, stream);
+        module(std::make_shared<ModuleStats>(), coarse_logits, kCoarseCacheRows, stream),
+        cache(512, stream), cache(kCoarseCacheRows, stream), std::move(semantic_embed),
+        std::move(coarse_embed), cfg, stream);
 
     trtmc::internal::ITextToAudio& audio = pipeline;
     trtmc::internal::TextToAudioRequest request;
@@ -245,12 +253,13 @@ void test_bark_batches_semantic_and_coarse_prefill() {
 
     trtmc::BarkPipeline pipeline(
         module(std::make_shared<ModuleStats>(), semantic_logits, 512, stream),
-        module(std::make_shared<ModuleStats>(), coarse_logits, 16, stream), cache(512, stream),
-        cache(16, stream), std::move(semantic_embed), std::move(coarse_embed), config(), stream);
+        module(std::make_shared<ModuleStats>(), coarse_logits, kCoarseCacheRows, stream),
+        cache(512, stream), cache(kCoarseCacheRows, stream), std::move(semantic_embed),
+        std::move(coarse_embed), config(), stream);
     auto semantic_stats = std::make_shared<ModuleStats>();
     auto coarse_stats = std::make_shared<ModuleStats>();
     pipeline.set_prefill_modules(module(semantic_stats, semantic_logits, 512, stream),
-                                 module(coarse_stats, coarse_logits, 16, stream));
+                                 module(coarse_stats, coarse_logits, kCoarseCacheRows, stream));
 
     trtmc::internal::TextToAudioRequest request;
     request.prompt = "";
@@ -280,12 +289,14 @@ void test_bark_dual_profile_decode_uses_one_embedding_row() {
     std::vector<float> semantic_embed(6 * 4, 0.1F);
     std::vector<float> coarse_embed(11 * 4, 0.1F);
 
-    trtmc::BarkPipeline pipeline(module(semantic_decode_stats, semantic_logits, 512, nullptr),
-                                 module(coarse_decode_stats, coarse_logits, 16, nullptr),
-                                 cache(512, nullptr), cache(16, nullptr), std::move(semantic_embed),
-                                 std::move(coarse_embed), config(5), nullptr);
-    pipeline.set_prefill_modules(module(semantic_prefill_stats, semantic_logits, 512, nullptr),
-                                 module(coarse_prefill_stats, coarse_logits, 16, nullptr));
+    trtmc::BarkPipeline pipeline(
+        module(semantic_decode_stats, semantic_logits, 512, nullptr),
+        module(coarse_decode_stats, coarse_logits, kCoarseCacheRows, nullptr), cache(512, nullptr),
+        cache(kCoarseCacheRows, nullptr), std::move(semantic_embed), std::move(coarse_embed),
+        config(5), nullptr);
+    pipeline.set_prefill_modules(
+        module(semantic_prefill_stats, semantic_logits, 512, nullptr),
+        module(coarse_prefill_stats, coarse_logits, kCoarseCacheRows, nullptr));
 
     trtmc::internal::TextToAudioRequest request;
     request.prompt = "";
@@ -312,11 +323,12 @@ void test_bark_constructor_validates_semantic() {
     std::vector<float> coarse_embed(11 * 4, 0.1F);
     bool threw = false;
     try {
-        trtmc::BarkPipeline pipeline(
-            nullptr,
-            module(std::make_shared<ModuleStats>(), std::vector<float>(12, 0.1F), 16, stream),
-            cache(512, stream), cache(16, stream), std::move(semantic_embed),
-            std::move(coarse_embed), config(), stream);
+        trtmc::BarkPipeline pipeline(nullptr,
+                                     module(std::make_shared<ModuleStats>(),
+                                            std::vector<float>(12, 0.1F), kCoarseCacheRows, stream),
+                                     cache(512, stream), cache(kCoarseCacheRows, stream),
+                                     std::move(semantic_embed), std::move(coarse_embed), config(),
+                                     stream);
     } catch (const std::exception&) {
         threw = true;
     }
@@ -333,13 +345,42 @@ void test_bark_constructor_validates_embed() {
     try {
         trtmc::BarkPipeline pipeline(
             module(std::make_shared<ModuleStats>(), semantic_logits, 512, stream),
-            module(std::make_shared<ModuleStats>(), coarse_logits, 16, stream), cache(512, stream),
-            cache(16, stream), {}, std::vector<float>(11 * 4, 0.1F), config(), stream);
+            module(std::make_shared<ModuleStats>(), coarse_logits, kCoarseCacheRows, stream),
+            cache(512, stream), cache(kCoarseCacheRows, stream), {},
+            std::vector<float>(11 * 4, 0.1F), config(), stream);
     } catch (const std::exception&) {
         threw = true;
     }
     check(threw, "bark constructor rejects empty semantic embed");
     cudaStreamDestroy(stream);
+}
+
+void test_bark_constructor_validates_cache_rows() {
+    // A cache that cannot hold the semantic prefix (257 rows) or a whole coarse
+    // window (18 rows with config()) is rejected at load: the caches never drop
+    // rows, so such a bundle could not serve any request.
+    const std::vector<float> semantic_logits = {0.9F, 0.8F, 0.7F, 0.1F, 0.0F};
+    const std::vector<float> coarse_logits(12, 0.1F);
+    const auto rejection = [&](int32_t semantic_rows, int32_t coarse_rows) {
+        try {
+            trtmc::BarkPipeline pipeline(
+                module(std::make_shared<ModuleStats>(), semantic_logits, semantic_rows, nullptr),
+                module(std::make_shared<ModuleStats>(), coarse_logits, coarse_rows, nullptr),
+                cache(semantic_rows, nullptr), cache(coarse_rows, nullptr),
+                std::vector<float>(6 * 4, 0.1F), std::vector<float>(11 * 4, 0.1F), config(),
+                nullptr);
+        } catch (const std::runtime_error& error) {
+            return std::string(error.what());
+        }
+        return std::string();
+    };
+    check(rejection(256, kCoarseCacheRows).find("semantic KV cache holds 256 rows but needs 257") !=
+              std::string::npos,
+          "bark constructor rejects a semantic cache shorter than its prefix");
+    check(rejection(512, 17).find("coarse KV cache holds 17 rows but needs 18") !=
+              std::string::npos,
+          "bark constructor rejects a coarse cache shorter than one window");
+    check(rejection(257, 18).empty(), "bark constructor accepts caches that fit exactly");
 }
 
 } // namespace
@@ -356,6 +397,7 @@ int main() {
     test_bark_dual_profile_decode_uses_one_embedding_row();
     test_bark_constructor_validates_semantic();
     test_bark_constructor_validates_embed();
+    test_bark_constructor_validates_cache_rows();
     if (failures > 0)
         std::cerr << failures << " bark pipeline test(s) FAILED\n";
     return failures;

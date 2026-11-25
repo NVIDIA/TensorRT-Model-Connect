@@ -10,13 +10,16 @@ from .config import BuildExecutionInputs, NamedCheckpoint
 
 def execution_inputs(
     execution_variant: str | None, companion: list[str] | tuple[str, ...] = (),
+    draft_top_k: int | None = None,
 ) -> BuildExecutionInputs | None:
     """Parse only explicit local inputs; no variant list or model acquisition."""
     if execution_variant is None:
+        if draft_top_k is not None:
+            raise ValueError("--spec-draft-top-k requires --execution-variant dflash")
         if companion:
             raise ValueError("--companion requires --execution-variant")
         return None
-    if execution_variant not in {"mtp", "dspark", "eagle3", "dflash"}:
+    if execution_variant not in {"mtp", "dspark", "eagle3", "dflash", "jetspec"}:
         raise ValueError("unsupported gemma execution variant")
     checkpoints = []
     for value in companion:
@@ -26,4 +29,4 @@ def execution_inputs(
         if "://" in directory:
             raise ValueError("--companion requires a local directory, not a URI")
         checkpoints.append(NamedCheckpoint(role, Path(directory)))
-    return BuildExecutionInputs(execution_variant, tuple(checkpoints))
+    return BuildExecutionInputs(execution_variant, tuple(checkpoints), draft_top_k)

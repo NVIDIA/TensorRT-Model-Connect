@@ -78,6 +78,11 @@ def source_quantization(request, raw: dict) -> str | None:
     try:
         policies = []
         embedded = raw.get("quantization_config")
+        if isinstance(embedded, dict) and embedded.get("quant_method") == "compressed-tensors":
+            from ..compressed_fp8 import compressed_fp8_exclusions
+
+            compressed_fp8_exclusions(Path(request.model_dir), raw)
+            return "fp8" if request.quantization in {None, "fp8"} else None
         if embedded is not None:
             policies.append(descriptor(embedded))
         for name in ("hf_quant_config.json", "quantize_config.json", "quant_config.json"):

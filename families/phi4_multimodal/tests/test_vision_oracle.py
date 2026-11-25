@@ -31,7 +31,7 @@ def test_checkpoint_reference_declares_scipy() -> None:
         for line in requirements.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     }
-    assert "scipy" in packages
+    assert "scipy==1.18.1" in packages
 
 
 def _bundle(path, sections: dict[str, bytes]) -> None:

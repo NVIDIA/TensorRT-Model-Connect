@@ -162,9 +162,15 @@ std::string chat_template(const BundleReader& bundle) {
 ITask* create_native(const FamilyContext& context, const RuntimeConfig& config, int rank,
                      const ModuleCreateOptions& options) {
     const bool parallel = config.tensor_parallel_size == 2;
-    const auto plan = require_section(
-        context.reader, parallel ? "engine.rank" + std::to_string(rank) + ".plan" : "engine.plan");
-    auto decoder = context.backend.create_module(plan.data(), plan.size(), options);
+    // Free the decoder plan's host copy once it is deserialized: the prefill and MTP plans are
+    // read below, and an FP8 27B bundle's prefill plan is as large as the decoder plan (27 GiB
+    // each), which does not fit twice next to the engines on 128 GB of unified memory.
+    auto decoder = [&] {
+        const auto plan = require_section(context.reader,
+                                          parallel ? "engine.rank" + std::to_string(rank) + ".plan"
+                                                   : "engine.plan");
+        return context.backend.create_module(plan.data(), plan.size(), options);
+    }();
     if (!decoder || !decoder->ok())
         throw std::runtime_error("Qwen native decoder failed to load");
     decoder->set_timing_label("qwen3_8 decoder");

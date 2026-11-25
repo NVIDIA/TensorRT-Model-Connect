@@ -388,6 +388,24 @@ def test_migrated_decoder_language_models_keep_their_benchmarks():
     assert tasks["text_continuation"] == tasks["text_generation"]
 
 
+def test_a_benchmark_without_its_suite_is_a_configuration_error_of_the_profile(tmp_path):
+    """A Task's benchmark whose suite each profile states (action_chunk_parity), named by a profile that states none:
+    the profile's configuration error, never an exception that stops a campaign's other profiles."""
+    import yaml
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT, ConfigError, Environment
+    from trtmc_aiperf_qual.models import resolve_model
+
+    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())
+    tasks["benchmarks"]["stated_per_profile"] = {"suite": "parity", "metric": "action_parity", "gate": {}}
+    tasks["tasks"]["text_continuation"] = {**tasks["tasks"]["text_continuation"], "absolute": ["stated_per_profile"]}
+    root = tmp_path / "config"
+    root.mkdir()
+    (root / "tasks.yaml").write_text(yaml.safe_dump(tasks))
+    with pytest.raises(ConfigError, match="qwen3-0.6b-fp16: benchmark 'parity' names no suite_definition"):
+        resolve_model("qwen3-0.6b-fp16", Environment({"repo": str(REPOSITORY)}), root=root)
+
+
 def test_text_encoders_the_generic_references_cannot_serve_are_excluded_with_a_reason():
     from trtmc_aiperf_qual.selection import catalog
 
@@ -398,9 +416,19 @@ def test_text_encoders_the_generic_references_cannot_serve_are_excluded_with_a_r
     assert not any(excluded[name] for name in ("nemotron-embed-vl-1b-v2", "albert-base-token-features"))
 
 
+def test_profiles_whose_only_native_reference_is_vllm_are_excluded():
+    # The family's independent native reference is a pinned vLLM snapshot, and AIPerf has no vLLM native backend.
+    # Drop this test with the exclusion once AIPerf can serve that reference.
+    from trtmc_aiperf_qual.selection import catalog
+
+    profiles = {profile.name: profile for profile in catalog(REPOSITORY)}
+    assert "vLLM" in profiles["nemotron-omni-nvfp4-text-image"].excluded
+    assert "nemotron-omni-nvfp4-native" not in profiles  # the catalog does not mark it ready
+
+
 def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
-    """A ready profile whose Task has no defaults is a configuration error that reports leave out, so a Task SDK
-    rename drops its profiles without a trace: alias the old entry in config/tasks.yaml, or state the gap here."""
+    """A ready profile whose Task has no defaults is excluded (config/tasks.yaml), so a Task SDK rename would leave
+    its profiles out of every run: alias the old entry in config/tasks.yaml, or state the gap here."""
     import yaml
 
     from trtmc_aiperf_qual.config import CONFIG_ROOT
@@ -1101,15 +1129,15 @@ def test_reports_label_a_timing_normalized_per_audio_second(tmp_path):
     assert "40.000 per audio second</td><td>90.000 per audio second" in report_html._performance([item])
 
 
-def test_a_family_file_adds_an_outlier_allowance_to_a_shared_benchmark_gate(tmp_path):
+def test_a_profile_configuration_adds_an_outlier_allowance_to_a_shared_benchmark_gate(tmp_path):
     from trtmc_aiperf_qual.models import deep_merge, profile_override
 
-    family_file = tmp_path / "families" / "fam" / "tests" / "aiperf" / "enc.yaml"
-    family_file.parent.mkdir(parents=True)
-    family_file.write_text("benchmarks:\n  encoder_parity:\n"
-                           "    gate: {outliers: {max_fraction: 0.01, gate: {max_relative_l2: 0.04}}}\n")
+    definition = tmp_path / "config" / "models" / "enc.yaml"
+    definition.parent.mkdir(parents=True)
+    definition.write_text("benchmarks:\n  encoder_parity:\n"
+                          "    gate: {outliers: {max_fraction: 0.01, gate: {max_relative_l2: 0.04}}}\n")
     shared = {"encoder_parity": {"metric": "vector_parity", "gate": {"min_cosine": 0.999, "max_relative_l2": 0.02}}}
-    override = profile_override("enc", "fam", tmp_path, root=tmp_path / "config")
+    override = profile_override("enc", root=tmp_path / "config")
     gate = deep_merge(shared, override["benchmarks"])["encoder_parity"]["gate"]
     assert gate == {"min_cosine": 0.999, "max_relative_l2": 0.02,
                     "outliers": {"max_fraction": 0.01, "gate": {"max_relative_l2": 0.04}}}

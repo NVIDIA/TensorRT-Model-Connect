@@ -18,6 +18,9 @@ BF16 run moved it by 28.7-48.7 dB. Gates, from those cases:
   PSNR against the official FP32 image (measured -11.7 to +5.7 dB; it is closer
   than the official BF16 image in seven of the eight cases).
 
+* FP8 and NVFP4 bundles (``quantization`` in the manifest, DiT only): the BF16 checks with their own
+  thresholds, set from B200 and B300 runs; a build with every activation scale x0.1 fails both.
+
 The BF16 gates show coarse agreement only (a BF16 build with a wrong
 RMSNorm epsilon also passed them); the BF16 rounding semantics are guarded by
 the RMSNorm tests of ``test_component_parity.py`` and the host test, and the
@@ -264,7 +267,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         model_dir=model_dir, output_path=bundle, family=FAMILY, task=TASK,
         precision=manifest["precision"], image_height=manifest["image_height"],
         image_width=manifest["image_width"], max_sequence_length=_text_length(manifest),
-        tensor_parallel_size=int(manifest["tensor_parallel_size"]),
+        tensor_parallel_size=int(manifest["tensor_parallel_size"]), quantization=manifest.get("quantization"),
     ))
     env = _environment(runtime_root)
     from families.chroma.tokenizer_asset import tokenizer_json

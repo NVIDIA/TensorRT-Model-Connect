@@ -223,6 +223,10 @@ class SafetensorsDirectory:
     def __contains__(self, name: str) -> bool:
         return name in self._index
 
+    def dtype(self, name: str) -> str:
+        """The stored safetensors dtype string (``"BF16"``, ``"F8_E4M3"``, ...)."""
+        return self._index[name][2]["dtype"]
+
     def __getitem__(self, name: str) -> np.ndarray:
         """The tensor in its stored dtype (BF16 as ``ml_dtypes.bfloat16``)."""
         if name not in self._index:

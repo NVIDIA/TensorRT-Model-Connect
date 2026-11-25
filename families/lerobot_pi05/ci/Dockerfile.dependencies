@@ -12,3 +12,11 @@ RUN python -m pip install --disable-pip-version-check --no-cache-dir \
 # LeRobot uses the gated PaliGemma tokenizer. CI uses the documented public copy of
 # the same file, pinned to this Cloud Storage object generation and checked by SHA-256.
 RUN python -c 'from hashlib import sha256; from pathlib import Path; from urllib.request import urlopen; data = urlopen("https://storage.googleapis.com/big_vision/paligemma_tokenizer.model?generation=1711547605575873", timeout=60).read(); assert sha256(data).hexdigest() == "8986bb4f423f07f8c7f70d0dbe3526fb2316056c17bae71b1ea975e77a168fc6"; Path("/opt/trtmc-ci/tokenizer.model").write_bytes(data)'
+
+# Public openpi policy statistics. Pin the GCS object generation for offline tests.
+RUN python -c 'from urllib.request import urlretrieve; urlretrieve("https://storage.googleapis.com/openpi-assets/checkpoints/pi05_libero/assets/physical-intelligence/libero/norm_stats.json?generation=1757354341826612", "/opt/trtmc-ci/pi05_libero_norm_stats.json")'
+
+# Recorded DROID inputs: immutable public clips, decoded offline in the test.
+RUN python -c 'from urllib.request import urlretrieve; urlretrieve("https://storage.googleapis.com/openpi-assets/checkpoints/pi05_droid/assets/droid/norm_stats.json?generation=1757354377575323", "/opt/trtmc-ci/pi05_droid_norm_stats.json")'
+RUN python -c 'from urllib.request import urlretrieve; urlretrieve("https://huggingface.co/datasets/aractingi/droid_100_test/resolve/ae1ae6519703520d5e78b11cadb00cc028499d7f/videos/chunk-000/observation.image.exterior_image_1_left/episode_000000.mp4", "/opt/trtmc-ci/pi05_droid_exterior.mp4")'
+RUN python -c 'from urllib.request import urlretrieve; urlretrieve("https://huggingface.co/datasets/aractingi/droid_100_test/resolve/ae1ae6519703520d5e78b11cadb00cc028499d7f/videos/chunk-000/observation.image.wrist_image_left/episode_000000.mp4", "/opt/trtmc-ci/pi05_droid_wrist.mp4")'

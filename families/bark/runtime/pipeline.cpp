@@ -20,6 +20,7 @@
 #include <iostream>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 namespace trtmc {
 
@@ -27,6 +28,21 @@ namespace {
 
 constexpr int32_t kBarkMaxTextLen = 256;
 constexpr float kNegInf = -1e9F;
+
+// The KV caches never drop rows, so each stage's cache must hold its longest
+// fixed sequence; a smaller bundle fails at load instead of mid-request.
+void require_bark_cache_rows(const BarkInferenceState* state, int32_t rows,
+                             const std::string& stage) {
+    if (state == nullptr)
+        throw std::runtime_error("BarkPipeline: missing " + stage + " KV cache");
+    const int32_t capacity = state->max_length();
+    if (capacity >= 0 && capacity < rows) {
+        throw std::runtime_error("BarkPipeline: the " + stage + " KV cache holds " +
+                                 std::to_string(capacity) + " rows but needs " +
+                                 std::to_string(rows) +
+                                 "; rebuild the bundle with a larger --max-sequence-length");
+    }
+}
 
 // ─── Bark helpers ───
 
@@ -186,6 +202,14 @@ BarkPipeline::BarkPipeline(std::unique_ptr<ITrtModule> semantic, std::unique_ptr
         throw std::runtime_error("BarkPipeline: invalid coarse module");
     if (semantic_embed_.empty() || coarse_embed_.empty())
         throw std::runtime_error("BarkPipeline: empty embedding tables");
+    // Semantic prefill feeds the padded text and the infer token. A coarse window
+    // feeds its semantic context, the infer token and the coarse history, then
+    // decodes all but its last token.
+    require_bark_cache_rows(semantic_state_.get(), kBarkMaxTextLen + 1, "semantic");
+    require_bark_cache_rows(coarse_state_.get(),
+                            config_.max_coarse_input_length + 1 + config_.max_coarse_history +
+                                config_.sliding_window_len - 1,
+                            "coarse");
 }
 
 BarkPipeline::~BarkPipeline() = default;
@@ -491,6 +515,10 @@ std::vector<int32_t> BarkPipeline::run_semantic(const std::vector<int32_t>& text
             break;
 
         semantic_tokens.push_back(token);
+        // A full KV cache ends generation, as max_tokens does; the cache never
+        // drops the text prompt to make room.
+        if (semantic_state_->position() >= semantic_state_->max_length())
+            break;
 
         if (semantic_->has_input("token_id")) {
             run_step_with_token(*semantic_, *semantic_state_, token, logits);

@@ -150,6 +150,18 @@ def test_validation_allows_isolated_family_cpp_tests(tmp_path: Path) -> None:
         test_impact.validate(repo)
 
 
+def test_validation_rejects_aiperf_settings_in_a_family(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    # Family code whose name starts with aiperf is not AIPerf settings.
+    (repo / "families/alpha/tests/aiperf_requests.py").write_text("PACKAGE = None\n")
+    test_impact.validate(repo)
+    settings = repo / "families/alpha/tests/aiperf/alpha.yaml"
+    settings.parent.mkdir()
+    settings.write_text("reference: {mode: eager}\n")
+    with pytest.raises(ValueError, match="alpha: obsolete tests/aiperf"):
+        test_impact.validate(repo)
+
+
 def test_validation_rejects_central_model_cpp_tests(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     source = repo / "tests/cpp/models/test_alpha.cpp"

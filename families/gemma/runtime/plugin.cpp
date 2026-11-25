@@ -46,6 +46,7 @@ struct RuntimeConfig {
     std::vector<std::int32_t> eos_token_ids;
     // Gemma4 owns only a prefix of cache layers, with local/global head widths.
     std::vector<std::int32_t> kv_cache_dimensions;
+    bool fp8_kv{};
 };
 
 template <typename T>
@@ -81,7 +82,14 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     if (!json.is_object())
         throw std::runtime_error("gemma runtime.json must be an object");
     const bool multi_eos = json.contains("eos_token_ids");
-    if (json.size() != static_cast<std::size_t>(14 + (multi_eos ? 1 : 0) +
+    const bool fp8_kv = json.contains("kv_cache_dtype");
+    const bool calibrated_experts = json.contains("expert_activation_quantization");
+    if ((fp8_kv && require_value<std::string>(json, "kv_cache_dtype") != "fp8") ||
+        (calibrated_experts && require_value<std::string>(json, "expert_activation_quantization") !=
+                                   "calibrated_nvfp4_block16") ||
+        ((fp8_kv || calibrated_experts) && !json.contains("kv_cache_dimensions")))
+        throw std::runtime_error("gemma runtime.json has invalid prepared precision metadata");
+    if (json.size() != static_cast<std::size_t>(14 + multi_eos + fp8_kv + calibrated_experts +
                                                 (json.contains("kv_cache_dimensions") ? 1 : 0)))
         throw std::runtime_error("gemma runtime.json has an unexpected field set");
 
@@ -103,6 +111,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         {},
         {},
     };
+    config.fp8_kv = fp8_kv;
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_heads <= 0 ||
         config.num_key_value_heads <= 0 || config.head_dim <= 0 || config.vocab_size <= 0 ||
         config.max_cache_length <= 0 || config.tensor_parallel_size <= 0 ||
@@ -259,9 +268,18 @@ ITask* create(const FamilyContext& context) {
     const auto cache_layers = config.kv_cache_dimensions.empty()
                                   ? config.num_layers
                                   : static_cast<std::int32_t>(config.kv_cache_dimensions.size());
-    auto state = std::make_unique<GemmaKvCache>(
-        cache_layers, config.max_cache_length, kv_dim, stream, cache_dtype(config.precision),
-        make_kv_names(cache_layers), config.kv_cache_dimensions);
+    const DType kv_dtype = config.fp8_kv ? DType::kFloat8E4M3 : cache_dtype(config.precision);
+    if (config.fp8_kv) {
+        for (std::int32_t layer = 0; layer < cache_layers; ++layer) {
+            for (const char* name : {"cache_k", "cache_v", "present_k", "present_v"}) {
+                if (modules.decode->tensor_dtype(gemma_layer_tensor_name(name, layer)) != kv_dtype)
+                    throw std::runtime_error("gemma FP8 cache metadata does not match the engine");
+            }
+        }
+    }
+    auto state = std::make_unique<GemmaKvCache>(cache_layers, config.max_cache_length, kv_dim,
+                                                stream, kv_dtype, make_kv_names(cache_layers),
+                                                config.kv_cache_dimensions);
     if (!state->ok())
         throw std::runtime_error("gemma failed to create KV cache");
 
@@ -339,26 +357,55 @@ ITask* create(const FamilyContext& context) {
             nlohmann::json::parse(require_text_section(context.reader, "assistant.json"));
         const auto variant = require_value<std::string>(metadata, "variant");
         if ((variant != "mtp" && variant != "dflash" && variant != "dspark" &&
-             variant != "eagle3") ||
+             variant != "eagle3" && variant != "jetspec") ||
             require_value<int>(metadata, "hidden_size") != config.hidden_size ||
             require_value<int>(metadata, "vocab_size") != config.vocab_size ||
             config.tensor_parallel_size != 1 || vision || audio)
             throw std::runtime_error("Gemma4 invalid native companion configuration");
-        if (variant == "dflash" || variant == "dspark" || variant == "eagle3") {
+        if (variant == "dflash" || variant == "dspark" || variant == "eagle3" ||
+            variant == "jetspec") {
             const auto layers = require_value<std::vector<int>>(metadata, "target_layers");
             const auto block = require_value<int>(metadata, "block_size");
             const auto mask =
                 variant == "eagle3" ? 0 : require_value<int>(metadata, "mask_token_id");
             const bool skip_first = metadata.value("skip_first", false);
+            const bool shifted = metadata.value("shifted_block_labels", false);
+            if (shifted && (variant != "dflash" || block != 7 || skip_first))
+                throw std::runtime_error("Invalid native Gemma shifted-label draft contract");
+            const bool jetspec = variant == "jetspec";
+            const bool bolt = variant == "dflash" && block == 8 && skip_first &&
+                              metadata.value("draft_quantization", "") == "nvfp4_w4a4";
+            const auto draft_k = metadata.value("draft_top_k", 1);
+            if (bolt && ((draft_k != 1 && draft_k != 4) ||
+                         metadata.value("verify_tokens", 0) != (draft_k == 1 ? 8 : 16)))
+                throw std::runtime_error("Invalid native Bolt DFlash verification contract");
+            if (jetspec && (!skip_first || !metadata.value("causal_head", false) ||
+                            metadata.value("draft_top_k", 0) != 7 ||
+                            metadata.value("proposal_tokens", 0) != 15 ||
+                            metadata.value("verify_tokens", 0) != 128))
+                throw std::runtime_error("Gemma4 invalid native JetSpec tree contract");
             if (layers.empty() ||
-                (skip_first ? (variant != "dflash" || block != 16) : block != 7) || mask < 0 ||
-                mask >= config.vocab_size || !std::is_sorted(layers.begin(), layers.end()) ||
+                (skip_first ? ((!jetspec && variant != "dflash") || (block != 16 && !bolt))
+                            : block != 7) ||
+                mask < 0 || mask >= config.vocab_size ||
+                !std::is_sorted(layers.begin(), layers.end()) ||
                 std::adjacent_find(layers.begin(), layers.end()) != layers.end() ||
                 layers.front() < 0 || layers.back() >= config.num_layers - 1)
                 throw std::runtime_error("Gemma4 invalid native block-draft configuration");
+            text_config.draft_jetspec = jetspec;
+            text_config.draft_ddtree = bolt && draft_k == 4;
             text_config.draft_markov = variant == "dspark";
             text_config.draft_eagle = variant == "eagle3";
+            if (text_config.draft_eagle &&
+                (metadata.contains("draft_top_k") || metadata.contains("draft_steps") ||
+                 metadata.contains("verify_tokens"))) {
+                if (draft_k != 10 || metadata.value("draft_steps", 0) != 6 ||
+                    metadata.value("verify_tokens", 0) != 60)
+                    throw std::runtime_error("Invalid native Gemma EAGLE3 tree contract");
+                text_config.draft_eagle_tree = true;
+            }
             text_config.draft_skip_first = skip_first;
+            text_config.draft_shifted_block_labels = shifted;
             text_config.draft_block_size = block;
             text_config.draft_mask_token_id = mask;
             text_config.draft_feature_width =

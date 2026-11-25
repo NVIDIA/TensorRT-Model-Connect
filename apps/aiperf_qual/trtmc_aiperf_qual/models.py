@@ -6,9 +6,10 @@ A model's configuration is its catalog entry (checkpoint, revision, precision, b
 with the defaults of its Task (config/tasks.yaml). The candidate is the catalog bundle as shipped;
 accuracy comes from the Task's gold-labelled benchmarks (``absolute``) and whole-output checks
 (``supplementary``); a model with neither declares ``accuracy_source: none`` (Perf only). The native
-reference is the generic Hugging Face adapter of the operation. Family-owned exceptions live in
-families/<family>/tests/aiperf/<profile>.yaml. Legacy config/models/<profile>.yaml remains supported;
-the family's definition is merged last. A quantized profile is qualified as its model's highest-precision
+reference is the generic Hugging Face adapter of the operation, or the family's own (``reference.adapter``).
+A profile's own settings live in config/models/<profile>.yaml; the families hold no AIPerf configuration.
+Whether a profile runs is not part of its configuration (``selection``). A quantized profile is qualified as its
+model's highest-precision
 configuration (``qualified_as``): the same benchmarks, requests and native reference, its own candidate.
 A precision variant without a configuration of its own takes its highest-precision sibling's the same way.
 """
@@ -162,16 +163,16 @@ def _definition(path: Path) -> Any:
         raise ConfigError(f"{path}: {error}") from error
 
 
-def profile_override(profile: str, family: str, repository: Path, root: Path = CONFIG_ROOT) -> dict[str, Any]:
-    """A profile's own configuration: legacy config/models/<profile>.yaml, then the family's definition."""
-    override_path = root / "models" / f"{profile}.yaml"
-    override = configuration((_definition(override_path) if override_path.is_file() else None) or {})
-    family_path = repository / "families" / family / "tests" / "aiperf" / f"{profile}.yaml"
-    if family_path.is_file():
-        owned = _definition(family_path)
-        if not isinstance(owned, dict):
-            raise ConfigError(f"{family_path} must contain a mapping")
-        override = deep_merge(override, configuration(owned))
+def profile_override(profile: str, root: Path = CONFIG_ROOT) -> dict[str, Any]:
+    """A profile's own configuration (config/models/<profile>.yaml). Whether a profile runs is not part of it:
+    config/exclusions.yaml decides that (``selection``)."""
+    path = root / "models" / f"{profile}.yaml"
+    override = (_definition(path) if path.is_file() else None) or {}
+    if not isinstance(override, dict):
+        raise ConfigError(f"{path} must contain a mapping")
+    override = configuration(override)
+    if "exclude" in override:
+        raise ConfigError(f"{profile}: exclude belongs in config/exclusions.yaml, not in the profile's configuration")
     return override
 
 
@@ -220,13 +221,13 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     tasks = yaml.safe_load((root / "tasks.yaml").read_text())
     if catalog_model.task not in tasks["tasks"]:
         raise ConfigError(f"no Task defaults for {catalog_model.task!r} ({profile})")
-    override = profile_override(profile, catalog_model.family, repository, root)
+    override = profile_override(profile, root)
     base = qualified_as(profile, entries)
     # A precision variant without a configuration of its own (an fp16 bundle of an fp32 model) takes its
     # highest-precision sibling's, as a quantized profile takes its base's: the family adapter and benchmarks.
     sibling = base if base != profile or override else highest_precision_sibling(profile, entries)
     if sibling != profile:  # the sibling's configuration under the profile's own; the candidate stays the profile's
-        inherited = profile_override(sibling, catalog_model.family, repository, root)
+        inherited = profile_override(sibling, root)
         inherited.pop("candidate", None)
         inherited.pop("capacity_limits", None)  # the sibling's build size, not this candidate's
         override = deep_merge(inherited, override)
@@ -268,6 +269,9 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     absolute = _absolute(list(config.get("absolute") or []), definitions, testcase, bool(quantization))
     for item in absolute:  # gold suites: the suite definition, with the benchmark's request settings
         if item.get("metric"):
+            if not item.get("suite_definition"):  # a benchmark whose suite each profile states
+                raise ConfigError(f"{profile}: benchmark {item.get('suite')!r} names no suite_definition; the "
+                                  "profile's own configuration states its suite")
             suite = _suite(item["suite_definition"], profile, config.get("request"))
             if item.get("request"):  # a null removes the suite's field (a Task that declares no such config)
                 request = {**suite.get("request", {}), **item.pop("request")}

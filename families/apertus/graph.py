@@ -31,6 +31,7 @@ import numpy as np
 import tensorrt as trt
 
 from .config import ApertusConfig
+from .quantization import QuantContext, configure_build, projection_name
 from .rope import rope_tables
 from .weights import ApertusWeights, LayerWeights
 
@@ -48,9 +49,15 @@ _MASKED_SCORE = -1.0e30
 class _Network:
     """Network-building helpers; keeps every host constant alive until serialization."""
 
-    def __init__(self, network: trt.INetworkDefinition, dtype: trt.DataType) -> None:
+    def __init__(
+        self,
+        network: trt.INetworkDefinition,
+        dtype: trt.DataType,
+        quant: QuantContext | None = None,
+    ) -> None:
         self.network = network
         self.dtype = dtype
+        self.quant = quant
         self.storage = (
             np.dtype(ml_dtypes.bfloat16) if dtype == trt.bfloat16 else np.dtype(np.float32)
         )
@@ -95,8 +102,16 @@ class _Network:
         layer.reshape_dims = dims
         return layer.get_output(0)
 
-    def linear(self, tensor: trt.ITensor, weight: np.ndarray) -> trt.ITensor:
-        """``tensor @ weight.T`` with a Hugging Face ``[out, in]`` weight."""
+    def linear(self, tensor: trt.ITensor, weight: np.ndarray, name: str = "") -> trt.ITensor:
+        """``tensor @ weight.T`` with a Hugging Face ``[out, in]`` weight.
+
+        ``name`` is the projection's scale-file name; a projection that the quantization
+        context holds is built as an FP8 matmul instead.
+        """
+        if self.quant is not None and name:
+            quantized = self.quant.matmul(self.network, tensor, name)
+            if quantized is not None:
+                return quantized
         rhs = self.constant(weight.astype(self.storage, copy=False))
         return self.network.add_matrix_multiply(
             tensor, trt.MatrixOperation.NONE, rhs, trt.MatrixOperation.TRANSPOSE
@@ -268,6 +283,7 @@ def _rope(
 def _decoder_layer(
     net: _Network,
     config: ApertusConfig,
+    index: int,
     layer: LayerWeights,
     hidden: trt.ITensor,
     caches: tuple[trt.ITensor, trt.ITensor],
@@ -275,10 +291,20 @@ def _decoder_layer(
 ) -> tuple[trt.ITensor, trt.ITensor, trt.ITensor]:
     eps, head_dim = config.rms_norm_eps, config.head_dim
     heads, kv_heads = config.num_attention_heads, config.num_key_value_heads
+
+    def name(projection: str) -> str:
+        return projection_name(index, projection)
+
     normed = net.rms_norm(hidden, layer.attention_norm, eps, axis=1)
-    query = _rows_to_heads(net, net.linear(normed, layer.q_proj), heads, head_dim)
-    key = _rows_to_heads(net, net.linear(normed, layer.k_proj), kv_heads, head_dim)
-    value = _rows_to_heads(net, net.linear(normed, layer.v_proj), kv_heads, head_dim)
+    query = _rows_to_heads(
+        net, net.linear(normed, layer.q_proj, name("self_attn.q_proj")), heads, head_dim
+    )
+    key = _rows_to_heads(
+        net, net.linear(normed, layer.k_proj, name("self_attn.k_proj")), kv_heads, head_dim
+    )
+    value = _rows_to_heads(
+        net, net.linear(normed, layer.v_proj, name("self_attn.v_proj")), kv_heads, head_dim
+    )
     query = _rope(
         net,
         net.rms_norm(query, layer.q_norm, eps, axis=3),
@@ -305,12 +331,11 @@ def _decoder_layer(
         updates.append(update.get_output(0))
     active = [_active_rows(net, cache, io["key_positions"]) for cache in updates]
     context = _attention(net, config, query, active[0], active[1], io["masks"])
-    hidden = net.add(
-        hidden, net.linear(_heads_to_rows(net, context, config.attention_size), layer.o_proj)
-    )
+    attended = _heads_to_rows(net, context, config.attention_size)
+    hidden = net.add(hidden, net.linear(attended, layer.o_proj, name("self_attn.o_proj")))
     normed = net.rms_norm(hidden, layer.feedforward_norm, eps, axis=1)
-    activated = _xielu(net, net.linear(normed, layer.up_proj), layer)
-    hidden = net.add(hidden, net.linear(activated, layer.down_proj))
+    activated = _xielu(net, net.linear(normed, layer.up_proj, name("mlp.up_proj")), layer)
+    hidden = net.add(hidden, net.linear(activated, layer.down_proj, name("mlp.down_proj")))
     return hidden, updates[0], updates[1]
 
 
@@ -331,12 +356,18 @@ def build_engine(
     precision: str,
     max_cache_length: int,
     verbose: bool,
+    quant: QuantContext | None = None,
 ) -> bytes:
-    """Serialize the dual-profile prefill / decode engine."""
+    """Serialize the dual-profile prefill / decode engine.
+
+    ``quant`` (bf16 only) builds the projections it holds as FP8 matmuls.
+    """
     if precision not in ("bf16", "fp32"):
         raise ValueError("Apertus engines are built in bf16 or fp32")
     if not 1 <= max_cache_length <= config.max_position_embeddings:
         raise ValueError("Apertus cache capacity must be within max_position_embeddings")
+    if quant is not None and precision != "bf16":
+        raise ValueError("Apertus quantized engines are built in bf16")
     dtype = trt.bfloat16 if precision == "bf16" else trt.float32
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -346,7 +377,8 @@ def build_engine(
     if precision == "fp32":
         # FP32 engines are the exact-parity build: no TF32 rounding of FP32 GEMM inputs.
         builder_config.clear_flag(trt.BuilderFlag.TF32)
-    net = _Network(network, dtype)
+    configure_build(builder_config, quant)
+    net = _Network(network, dtype, quant)
 
     token_id = network.add_input("token_id", trt.int32, (-1,))
     position_id = network.add_input("position_id", trt.int32, (-1,))
@@ -388,8 +420,10 @@ def build_engine(
     embedding = net.constant(weights.embedding.astype(net.storage, copy=False))
     hidden = network.add_gather(embedding, token_id, 0).get_output(0)
     presents = []
-    for layer, layer_caches in zip(weights.layers, caches):
-        hidden, present_k, present_v = _decoder_layer(net, config, layer, hidden, layer_caches, io)
+    for index, (layer, layer_caches) in enumerate(zip(weights.layers, caches)):
+        hidden, present_k, present_v = _decoder_layer(
+            net, config, index, layer, hidden, layer_caches, io
+        )
         presents.append((present_k, present_v))
     hidden = net.rms_norm(
         _last_row(net, hidden, config.hidden_size), weights.final_norm, config.rms_norm_eps, axis=1
@@ -405,7 +439,8 @@ def build_engine(
 
     if verbose:
         print(
-            f"[trtmc build] apertus {precision} engine: layers={config.num_hidden_layers} "
+            f"[trtmc build] apertus {precision} engine "
+            f"(quantization={'fp8' if quant else 'none'}): layers={config.num_hidden_layers} "
             f"hidden={config.hidden_size} cache={max_cache_length} prefill_chunk={chunk}",
             file=sys.stderr,
         )

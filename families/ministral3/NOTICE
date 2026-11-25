@@ -1,0 +1,28 @@
+Tekken pre-tokenizer pattern and byte-level BPE settings (runtime/tokenizer.cpp and
+the tokenizer.json sections reproduced in tests/fixtures/), identical to the
+tokenizer.json of Mistral AI's Ministral 3:
+https://huggingface.co/mistralai/Ministral-3-3B-Instruct-2512
+Revision b35d4dfe56c142746f54dbd64f579faab2744308
+Licensed under Apache License 2.0 by Mistral AI.
+
+Ministral 3, YaRN and Llama-4 attention-scaling reference implementation in
+Hugging Face Transformers 5.2.0, reimplemented in rope.py and graph.py:
+Copyright 2025 Mistral AI and the HuggingFace Inc. team.
+Copyright 2024 The HuggingFace Team.
+Licensed under Apache License 2.0.
+
+Byte-level BPE merge procedure of Hugging Face Tokenizers 0.22.2, reimplemented
+in runtime/tokenizer.cpp:
+Copyright the HuggingFace Inc. team.
+Licensed under Apache License 2.0.
+
+Unicode character data 16.0.0 (UnicodeData.txt, PropList.txt), packaged as
+runtime/unicode_data.h, are covered by the Unicode License v3 in
+UNICODE_LICENSE.txt.
+
+The validated checkpoint is not contained in this directory:
+https://huggingface.co/nvidia/Nemotron-3-Embed-1B-BF16
+Revision c0c9fea93ea424587517f2c59e20db9f1d6bf615
+Copyright NVIDIA Corporation, licensed under the OpenMDW License Agreement,
+version 1.1. Bundles built from it contain its weights and tokenizer.json and
+remain subject to its terms.

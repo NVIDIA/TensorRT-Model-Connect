@@ -23,7 +23,7 @@ from .tokenizer_export import convert_paligemma_tokenizer_model
 
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
+    from .edge_llm.cli import OpenPiBuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
@@ -36,7 +36,7 @@ STATE_BINS = 256
 def _dtype(precision: str):
     import tensorrt as trt
 
-    return trt.bfloat16 if precision == "bf16" else trt.float32
+    return {"bf16": trt.bfloat16, "fp32": trt.float32, "fp16": trt.float16}[precision]
 
 
 def _builder(precision: str, verbose: bool):
@@ -95,17 +95,25 @@ def _normalization_json(norm: config_module.Normalization) -> dict:
     return {"mode": norm.mode, "eps": norm.eps, "offset": list(norm.offset), "scale": list(norm.scale)}
 
 
-def build(request: "BuildRequest", writer: "BundleWriter") -> None:
+def build(request: "OpenPiBuildRequest", writer: "BundleWriter") -> None:
     """Build one LeRobot Pi 0.5 bundle: a prefix engine and one flow-matching step."""
     model_dir = Path(request.model_dir)
-    cfg = config_module.load_config(model_dir)
+    policy = getattr(request, "pi05_policy_config", None)
+    if policy is None:
+        cfg = config_module.load_config(model_dir)
+    else:
+        from .openpi import load_policy
+
+        cfg = load_policy(model_dir, policy)
 
     if request.task != TASK:
         raise ValueError(f"lerobot_pi05 supports only task={TASK}")
     if request.backend not in {"trt", "trt_rtx"}:
         raise ValueError("lerobot_pi05 supports only backend=trt")
     precision = str(request.precision).lower()
-    if precision not in _PRECISIONS:
+    if policy is not None and precision != "fp16":
+        raise ValueError(f"The documented openpi {policy} contract requires fp16")
+    if policy is None and precision not in _PRECISIONS:
         raise ValueError(f"Unsupported lerobot_pi05 precision: {precision} (supported: bf16, fp32)")
     if request.max_batch_size != 1:
         raise NotImplementedError("lerobot_pi05 supports batch size one")
@@ -137,6 +145,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
         refuse_quantized_checkpoint(model_dir)
 
+    if policy is not None:
+        from .edge_llm.builder import try_build
+
+        if try_build(request, writer, model_dir):
+            return
+
     # The tokenizer first: a missing or wrong file, or a missing converter dependency,
     # then fails in seconds rather than after the weights load.
     tokenizer_asset, tokenizer_metadata = convert_paligemma_tokenizer_model(
@@ -160,6 +174,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     writer.add_json(
         "runtime.json",
         {
+            **({"openpi_policy": policy} if policy is not None else {}),
             "cameras": list(cfg.cameras),
             "empty_cameras": cfg.empty_cameras,
             "camera_height": cfg.camera_height,

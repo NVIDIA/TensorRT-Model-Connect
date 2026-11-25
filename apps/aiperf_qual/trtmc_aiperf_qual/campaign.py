@@ -396,7 +396,8 @@ def exit_code(records: Sequence[Mapping[str, Any]], config_errors: Sequence[Mapp
 
 
 def write_exclusions(out_root: Path, excluded: Sequence[Mapping[str, Any]]) -> None:
-    """Audit the profiles the machine's model list leaves out, outside result statistics."""
+    """Audit the profiles the run leaves out (``selection``: each with its reason and source), outside result
+    statistics."""
     out_root.mkdir(parents=True, exist_ok=True)
     (out_root / EXCLUSIONS).write_text(json.dumps(list(excluded), indent=2) + "\n")
 

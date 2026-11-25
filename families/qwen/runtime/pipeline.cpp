@@ -26,6 +26,14 @@ namespace trtmc {
 
 namespace {
 
+// The next decode step would store one more K/V row. A full cache ends the
+// generation, as max_new_tokens does, instead of dropping the prompt's rows.
+// A state without a length limit (max_length() < 0) never fills.
+bool kv_cache_full(const QwenInferenceState& state) {
+    const int32_t max_length = state.max_length();
+    return max_length >= 0 && state.position() >= max_length;
+}
+
 bool contains_boxed_answer(const std::string& text) {
     const std::string marker = "\\boxed{";
     const auto start = text.find(marker);
@@ -570,6 +578,8 @@ int32_t QwenTextGenerationPipeline::run_decode_loop(
         // another decoder step to compute logits that no caller will consume.
         if (step + 1 >= max_new_tokens)
             break;
+        if (kv_cache_full(*state_))
+            break;
         run_step(result.token_id, logits);
     }
     return steps;
@@ -639,6 +649,8 @@ QwenTextGenerationPipeline::trace_logits(const std::string& prompt,
             step + 1 >= max_new_tokens) {
             break;
         }
+        if (kv_cache_full(*state_))
+            break;
         run_step(result.token_id, logits);
         trace.rows.push_back(logits);
     }

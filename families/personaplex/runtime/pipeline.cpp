@@ -18,6 +18,7 @@
 #include "families/personaplex/runtime/speech_runtime_plan.h"
 #include "families/personaplex/runtime/speech_temporal_embed_plan.h"
 #include "families/personaplex/runtime/speech_waveform_postprocess.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <array>
@@ -27,6 +28,7 @@
 #include <functional>
 #include <iostream>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 
 namespace trtmc {
@@ -793,6 +795,10 @@ void SpeechPipeline::speak_run_generation_loop(const SpeechGenerationSettings& s
         compute_dual_stream_summed_embed(config_, settings.hidden, settings.stream_cb,
                                          moshi_input.data(), user_input.data(), text_input,
                                          summed_embed.data());
+        // A full temporal cache ends generation, as the output budget does.
+        if (const int32_t capacity = temporal_state_->max_length();
+            capacity >= 0 && temporal_state_->position() >= capacity)
+            break;
 
         temporal_timer.start(stream_);
         const auto temporal_output = run_temporal_embed_step(summed_embed.data(), settings.hidden);
@@ -966,6 +972,17 @@ AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
         plan.effective_frames = num_frames;
         plan.output_frames = std::min(num_frames, max_output_frames);
         plan.total_iters = plan.output_frames;
+    }
+    // The temporal KV cache never drops rows. The input audio must fit after the
+    // prompt, one temporal step per frame; generation past the input stops once
+    // the cache is full (speak_run_generation_loop).
+    if (const int32_t capacity = temporal_state_->max_length();
+        capacity >= 0 && num_frames > capacity - temporal_state_->position()) {
+        throw internal::ConfigError(
+            "personaplex input has " + std::to_string(num_frames) + " frames after a " +
+            std::to_string(temporal_state_->position()) + "-row prompt but the KV cache holds " +
+            std::to_string(capacity) +
+            "; rebuild the bundle with a larger --max-sequence-length or shorten the audio");
     }
     const int32_t mimi_cb = config_.mimi_decode_codebooks;
     std::vector<int32_t> output_codes;
