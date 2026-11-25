@@ -62,7 +62,52 @@ python3 -m families.hstu.tests.compare_precision --root /tmp/hstu-fast/output \
 
 The quality comparison requires identical FP32/BF16 weights. Its fixed limits are at most 1% relative NDCG@10 loss, one percentage point hit-rate loss, at least 98% mean top-10 overlap, and mean absolute score error at most 0.02. It holds out each sampled user's final interaction. The separate strict numerical gates are unchanged.
 
-TensorRT owns fusion and kernel selection. The current A100 C50/B4 trace contains 150 BF16 Tensor Core GEMM launches in fast mode: 50 QK, 50 AV, and 50 output projections, with FP32 accumulation. FP32 has zero BF16 launches. Both modes replay 50 step CUDA Graphs per request; disabling the checkpoint graph switch produces zero graph launches. QK and AV remain separate; no dedicated fused HSTU kernel was observed. Softmax-MHA fusion results from another model do not transfer.
+TensorRT owns fusion and kernel selection. The TensorRT 11.4 A100 C50/B4 trace contains 150 BF16 Tensor Core GEMM launches in fast mode: 50 QK, 50 AV, and 50 output projections, with FP32 accumulation. FP32 has zero BF16 launches. Both modes replay 50 step CUDA Graphs per request; disabling the checkpoint graph switch produces zero graph launches. QK and AV remain separate in that configuration. Softmax-MHA fusion results from another model do not transfer.
+
+### Fixed batches and BF16 attention arithmetic
+
+The repository and development image pin **TensorRT 11.4.0.106**. These family options keep that dependency pin and expose graph/profile choices explicitly:
+
+```json
+{
+  "batching": "fixed",
+  "bf16_attention_epilogue": true,
+  "bf16_policy": "strict",
+  "cuda_graphs": true
+}
+```
+
+Add these fields to the checkpoint's `config.json` and rebuild normally. `batching="fixed"` makes every engine profile's minimum, optimum, and maximum batch equal to `BuildRequest.max_batch_size` (CLI `--max-batch-size`). The native runtime rejects any other batch before engine execution, including history export and cached scoring. The default `"dynamic"` retains batches 1 through the requested maximum. This option does not pad or split requests.
+
+`bf16_attention_epilogue=true` keeps the BF16 attention branch's QK output, SiLU, scaling, mask multiplication, and AV inputs in BF16. QK and AV use FP32 accumulation. UVQK projection, normalization and scoring head remain FP32; strict mode also retains its FP32 selection branch. FP32 builds ignore this BF16-only setting. The default `false` retains the existing FP32 SiLU/scaling/mask boundary. Neither option selects a kernel, injects compiler environment options, or changes behavior based on GPU/SDK detection.
+
+Prepare and validate both fixed profiles using a public checkpoint:
+
+```bash
+for batch in 1 4; do
+  python3 -m families.hstu.tests.triton.prepare \
+    --root /tmp/hstu-fixed/fixed-b$batch --runtime-root /tmp/hstu-sdk \
+    --checkpoint /tmp/hstu-movielens --batching fixed --max-batch-size "$batch" \
+    --bf16-attention-epilogue --bf16-policy strict --cuda-graphs
+done
+HSTU_FIXED_E2E_ROOT=/tmp/hstu-fixed TRTMC_RUNTIME_ROOT=/tmp/hstu-sdk \
+  python3 -m pytest families/hstu/tests/test_fixed_batch_gpu.py -q
+```
+
+Fixed-batch native Triton repositories use `max_batch_size: 0` and explicit tensor dimensions, for example `[4,128]` for history IDs and `[4,50]` for scores. Callers submit the complete fixed batch. Triton's implicit/dynamic batching is disabled for this configuration. Snapshot restore can still admit individual histories, but cold scoring, history export, and scoring with restored histories require the bundle's exact batch size.
+
+The full SiLU graph is eligible for HSTU fusion, but eligibility is not a guarantee. GB300 experiments with TensorRT 11.6.0.108 and these options execute 50 fused attention kernels per request in fixed profiles; the dynamic 1–4 profile remains unfused. Strict BF16 passes the unchanged numerical gates. A separate fast fixed-4 experiment exceeded the existing 0.02 mean-error gate, so strict mode remains the default. The TensorRT 11.4.0.106 GB300/A100 experiments did not observe full SiLU-attention fusion in the tested builds; this does not imply that 11.4 lacks HSTU support generally.
+
+In matched GB300 **strict BF16** measurements on TensorRT 11.6.0.108, the default fused route was slightly slower than disabling attention fusion. Same weights, graph, fixed profile, inputs and CUDA Graph policy; 50 warmups and 300 alternating timed calls per variant. Times include the native test bridge's host serialization/copies and synchronized Task execution, and exclude startup/loading/building/warmup:
+
+| Candidates / batch | Unfused p50 ms | Fused p50 ms | Fused latency change |
+|---|---:|---:|---:|
+| 50 / 1 | 6.054 | 6.314 | +4.3% |
+| 50 / 4 | 6.805 | 7.007 | +3.0% |
+| 64 / 1 | 6.211 | 6.456 | +3.9% |
+| 64 / 4 | 6.977 | 7.048 | +1.0% |
+
+Actual traces distinguish 50 fused attention launches from zero, with 50 step graph replays for both variants. These are not FP32-versus-BF16 results and do not establish a latency benefit from fusion. The strict FP32 selection branch remains present. Rebuild plans and repeat accuracy, kernel tracing, and serving qualification with the deployed SDK; 11.6 engines cannot be substituted into the supplied 11.4 Triton image.
 
 The staged runtime retains the existing three-engine orchestration, GPU slate state, KV byte accounting, SHA-256 snapshots, restore/deduplication, revisions, TTL, leases, and eviction. Cache storage is FP32 in both precision modes: **262,144 KV bytes per history**, plus a 512-byte history mask outside the KV budget. A max-batch-4 engine reserves 1,048,576 scratch KV bytes. Restored histories need budget beyond scratch. Snapshots are bound to the exact bundle hash and cannot migrate from the private model, a rebuilt engine, or a different precision bundle.
 

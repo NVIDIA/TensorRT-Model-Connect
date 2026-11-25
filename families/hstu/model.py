@@ -47,7 +47,8 @@ def build(request, writer):
         profile = builder.create_optimization_profile()
         for i in range(network.num_inputs):
             tensor = network.get_input(i)
-            low = tuple(1 if v == -1 else v for v in tensor.shape)
+            minimum = runtime["min_batch_size"]
+            low = tuple(minimum if v == -1 else v for v in tensor.shape)
             high = tuple(request.max_batch_size if v == -1 else v for v in tensor.shape)
             profile.set_shape(tensor.name, low, high, high)
         options = builder.create_builder_config()

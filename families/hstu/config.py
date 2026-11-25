@@ -24,6 +24,8 @@ class Config:
     execution_method: str = "staged"
     bf16_policy: str = "strict"
     cuda_graphs: bool = True
+    batching: str = "dynamic"
+    bf16_attention_epilogue: bool = False
 
     def __post_init__(self):
         if self.model_type != "hstu_public_ranking":
@@ -43,6 +45,10 @@ class Config:
             raise ValueError("bf16_policy must be strict or fast")
         if not isinstance(self.cuda_graphs, bool):
             raise ValueError("cuda_graphs must be a boolean")
+        if self.batching not in ("dynamic", "fixed"):
+            raise ValueError("batching must be dynamic or fixed")
+        if not isinstance(self.bf16_attention_epilogue, bool):
+            raise ValueError("bf16_attention_epilogue must be a boolean")
 
     @classmethod
     def load(cls, path):
@@ -95,9 +101,12 @@ class Config:
             candidates=c,
             decode_steps=r,
             max_batch_size=batch,
+            min_batch_size=batch if self.batching == "fixed" else 1,
+            batching=self.batching,
             precision=precision,
             bf16_policy=self.bf16_policy,
             cuda_graphs=self.cuda_graphs,
+            bf16_attention_epilogue=self.bf16_attention_epilogue,
             inputs=history + request,
             outputs=[spec("scores", "float32", c), spec("picked_indices", "int64", r)],
             stages=[

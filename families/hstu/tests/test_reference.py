@@ -71,6 +71,8 @@ def test_padding_counts_empty_history_stable_ties_and_nonrepeat(tmp_path, candid
         {"model_type": "hstu"},
         {"bf16_policy": "unknown"},
         {"cuda_graphs": "false"},
+        {"batching": "unknown"},
+        {"bf16_attention_epilogue": "true"},
     ],
 )
 def test_reject_unimplemented_profiles(kwargs):
@@ -97,3 +99,15 @@ def test_execution_options_survive_checkpoint_roundtrip(tmp_path, policy, graphs
     assert loaded == c
     runtime = loaded.runtime(4, "bf16")
     assert runtime["bf16_policy"] == policy and runtime["cuda_graphs"] is graphs
+
+
+@pytest.mark.parametrize("batching", ["dynamic", "fixed"])
+@pytest.mark.parametrize("epilogue", [False, True])
+def test_attention_profile_options_survive_checkpoint_roundtrip(tmp_path, batching, epilogue):
+    c = Config(batching=batching, bf16_attention_epilogue=epilogue)
+    c.save(tmp_path)
+    assert Config.load(tmp_path) == c
+    runtime = c.runtime(4, "bf16")
+    assert runtime["min_batch_size"] == (4 if batching == "fixed" else 1)
+    assert runtime["max_batch_size"] == 4
+    assert runtime["bf16_attention_epilogue"] is epilogue

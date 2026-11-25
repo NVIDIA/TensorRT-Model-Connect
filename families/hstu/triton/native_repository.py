@@ -36,6 +36,8 @@ def generate(bundle, repository, name, *, parameters=None, instances=1):
         ):
             raise ValueError("KV ratio must be finite and in (0,1]")
     runtime = runtime_metadata(bundle)
+    fixed = runtime.get("batching") == "fixed"
+    batch = runtime["max_batch_size"]
     target = Path(repository) / name
     if target.exists():
         raise FileExistsError(target)
@@ -46,7 +48,7 @@ def generate(bundle, repository, name, *, parameters=None, instances=1):
         'backend: "tensorrt"',
         'platform: "model_connect"',
         'default_model_filename: "model.bundle"',
-        f"max_batch_size: {runtime['max_batch_size']}",
+        f"max_batch_size: {0 if fixed else batch}",
         f"instance_group [{{ kind: KIND_GPU count: {instances} gpus: [0] }}]",
     ]
     dtype = {"float32": "TYPE_FP32", "int64": "TYPE_INT64", "int32": "TYPE_INT32"}
@@ -59,7 +61,7 @@ def generate(bundle, repository, name, *, parameters=None, instances=1):
                 + ", data_type: "
                 + dtype[s["dtype"]]
                 + ", dims: "
-                + json.dumps(s["shape"][1:])
+                + json.dumps([batch, *s["shape"][1:]] if fixed else s["shape"][1:])
                 + " }"
                 + ("," if index + 1 < len(runtime[field + "s"]) else "")
             )

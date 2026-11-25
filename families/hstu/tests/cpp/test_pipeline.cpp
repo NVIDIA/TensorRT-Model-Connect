@@ -136,6 +136,13 @@ int main() {
         malformed[1] = feature("bounded", DType::kFloat32, std::numeric_limits<float>::quiet_NaN());
         reject([&] { pipeline.score(malformed); });
         check(engine->calls == 1, "invalid input must fail before GPU execution");
+        auto fixed_config = config;
+        fixed_config["min_batch_size"] = 2;
+        auto fixed_engine = std::make_unique<Engine>();
+        auto* fixed_observer = fixed_engine.get();
+        Pipeline fixed(std::move(fixed_engine), fixed_config);
+        reject([&] { fixed.score(valid); });
+        check(fixed_observer->calls == 0, "fixed-batch mismatch must fail before GPU execution");
         reject(
             [&] { checked_bytes({std::numeric_limits<std::int64_t>::max(), 8}, DType::kInt64); });
         engine->bad_output = true;

@@ -51,6 +51,7 @@ def main():
     if not args.name or Path(args.name).name != args.name or args.name in {".", ".."}:
         parser.error("--name must be a single model directory name")
     runtime = runtime_metadata(args.bundle)
+    fixed = runtime.get("batching") == "fixed"
     if args.history_cache:
         args.kv_cache_max_entries = (
             32 if args.kv_cache_max_entries is None else args.kv_cache_max_entries
@@ -92,7 +93,7 @@ def main():
     lines = [
         f"name: {json.dumps(args.name)}",
         'backend: "python"',
-        f"max_batch_size: {0 if args.history_cache else runtime['max_batch_size']}",
+        f"max_batch_size: {0 if args.history_cache or fixed else runtime['max_batch_size']}",
         "instance_group [{ kind: KIND_GPU count: 1 gpus: [0] }]",
     ]
     for field in ("input", "output"):
@@ -108,13 +109,16 @@ def main():
             ]
         lines.append(field + " [")
         for index, spec in enumerate(specs):
+            shape = spec["shape"] if args.history_cache else spec["shape"][1:]
+            if fixed and spec["name"] not in ("CACHE_CONTROL", "CACHE_STATUS", "CACHE_SNAPSHOT"):
+                shape = [runtime["max_batch_size"], *spec["shape"][1:]]
             lines.append(
                 "  { name: "
                 + json.dumps(spec["name"])
                 + ", data_type: "
                 + dict(dtype, string="TYPE_STRING", uint8="TYPE_UINT8")[spec["dtype"]]
                 + ", dims: "
-                + json.dumps(spec["shape"] if args.history_cache else spec["shape"][1:])
+                + json.dumps(shape)
                 + (
                     " , optional: true"
                     if args.history_cache and field == "input" and spec["name"] != "CACHE_CONTROL"

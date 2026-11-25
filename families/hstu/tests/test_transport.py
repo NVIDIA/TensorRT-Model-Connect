@@ -55,6 +55,51 @@ def test_native_repository_uses_public_tensor_metadata(tmp_path, monkeypatch):
         native_repository.generate(bundle, tmp_path / "models", "hstu")
 
 
+def test_fixed_batch_repository_exposes_explicit_batch_dimensions(tmp_path, monkeypatch):
+    bundle = tmp_path / "model.bundle"
+    bundle.write_bytes(b"example bundle")
+    monkeypatch.setattr(
+        native_repository, "runtime_metadata", lambda _: Config(batching="fixed").runtime(4, "bf16")
+    )
+    target = native_repository.generate(bundle, tmp_path / "models", "fixed")
+    text = (target / "config.pbtxt").read_text()
+    assert "max_batch_size: 0" in text
+    assert "dims: [4, 128]" in text and "dims: [4, 50]" in text
+
+
+@pytest.mark.parametrize("history", [False, True])
+def test_python_repository_preserves_fixed_batch_contract(tmp_path, monkeypatch, history):
+    from families.hstu.triton import generate_repository
+
+    bundle = tmp_path / "model.bundle"
+    bundle.write_bytes(b"example bundle")
+    monkeypatch.setattr(
+        generate_repository,
+        "runtime_metadata",
+        lambda _: Config(batching="fixed").runtime(4, "bf16"),
+    )
+    flags = ["--history-cache", "--kv-cache-size-bytes", "9437184"] if history else []
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "generate_repository",
+            "--bundle",
+            str(bundle),
+            "--repository",
+            str(tmp_path / "models"),
+            *flags,
+        ],
+    )
+    generate_repository.main()
+    text = (tmp_path / "models/hstu/config.pbtxt").read_text()
+    assert "max_batch_size: 0" in text
+    assert "dims: [4, 128]" in text and "dims: [4, 50]" in text
+    if history:
+        assert 'name: "CACHE_CONTROL", data_type: TYPE_STRING, dims: [1]' in text
+        assert 'name: "CACHE_SNAPSHOT", data_type: TYPE_UINT8, dims: [-1]' in text
+
+
 @pytest.mark.parametrize(
     "flags",
     [

@@ -84,8 +84,8 @@ TensorMap validate_inputs(const std::vector<FeatureTensor>& inputs, const nlohma
             throw std::invalid_argument("wrong input rank: " + name);
         if (batch < 0)
             batch = input.shape.front();
-        if (batch < 1 || batch > config.at("max_batch_size").get<std::int64_t>() ||
-            input.shape.front() != batch)
+        if (batch < config.value("min_batch_size", std::int64_t{1}) ||
+            batch > config.at("max_batch_size").get<std::int64_t>() || input.shape.front() != batch)
             throw std::invalid_argument("invalid or inconsistent batch: " + name);
         for (std::size_t axis = 1; axis < expected.size(); ++axis)
             if (input.shape[axis] != expected[axis])

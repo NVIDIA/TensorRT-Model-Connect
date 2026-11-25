@@ -190,8 +190,13 @@ class Network:
 
             def attention_scores(low):
                 logits = self.mm(q, keys, low=low, transpose=True)
-                attention = self.mul(self.silu(logits), self.const([1 / (t + r + k)], np.float32))
-                attended = self.mm(self.mul(attention, mask), values, low=low)
+                # Keep the complete SiLU/scale/mask epilogue in one explicit
+                # dtype. TensorRT owns whether this graph becomes fused HSTU.
+                epi = self.low if low and c.bf16_attention_epilogue else trt.float32
+                logits = self.cast(logits, epi)
+                scale = self.cast(self.const([1 / (t + r + k)], np.float32), epi)
+                attention = self.mul(self.silu(logits), scale)
+                attended = self.mm(self.mul(attention, self.cast(mask, epi)), values, low=low)
                 attended = self.reshape(self.transpose(attended, (0, 2, 1, 3)), (-1, k, d))
                 encoded = self.add(
                     self.add(

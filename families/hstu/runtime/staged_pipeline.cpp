@@ -53,6 +53,7 @@ StagedPipeline::StagedPipeline(std::unique_ptr<ITrtModule> prepare,
     if (request_) {
         for (std::size_t i = 0; i < stage_validation_.size(); ++i)
             stage_validation_[i] = {{"inputs", config_.at("stages").at(i).at("inputs")},
+                                    {"min_batch_size", config_.value("min_batch_size", 1)},
                                     {"max_batch_size", config_.at("max_batch_size")}};
         for (const auto& spec : config_.at("stages").at(0).at("outputs"))
             if (spec.at("name") == "history_mask") {
