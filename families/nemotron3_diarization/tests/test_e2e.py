@@ -317,21 +317,30 @@ def _official_reference(model_dir: Path, samples):
     import torch
     from transformers import AutoModelForAudioFrameClassification, AutoProcessor
 
-    torch.backends.cuda.matmul.allow_tf32 = False
+    # TF32 is process-wide: off for this run only, and restored even when it
+    # fails. Matmul goes through the float32 matmul precision alone: setting
+    # it after `matmul.allow_tf32` mixes PyTorch's two APIs, and the next
+    # reference run in the process then fails to read the precision.
+    saved = torch.get_float32_matmul_precision(), torch.backends.cudnn.allow_tf32
+    torch.set_float32_matmul_precision("highest")
     torch.backends.cudnn.allow_tf32 = False
-    assert torch.get_float32_matmul_precision() == "highest"
-    processor = AutoProcessor.from_pretrained(str(model_dir))
-    model = AutoModelForAudioFrameClassification.from_pretrained(
-        str(model_dir), dtype=torch.float32).to("cuda").eval()
-    inputs = processor(samples, sampling_rate=SAMPLE_RATE).to("cuda")
-    with torch.inference_mode():
-        logits = model(**inputs).logits
-    mask = inputs["attention_mask"]
-    valid = int(mask[0].sum())
-    segments = processor.extract_speaker_dict(logits, mask)[0]
-    reference = logits[0, :valid].double().cpu().numpy()
-    del model
-    torch.cuda.empty_cache()
+    try:
+        assert not torch.backends.cuda.matmul.allow_tf32 and not torch.backends.cudnn.allow_tf32
+        processor = AutoProcessor.from_pretrained(str(model_dir))
+        model = AutoModelForAudioFrameClassification.from_pretrained(
+            str(model_dir), dtype=torch.float32).to("cuda").eval()
+        inputs = processor(samples, sampling_rate=SAMPLE_RATE).to("cuda")
+        with torch.inference_mode():
+            logits = model(**inputs).logits
+        mask = inputs["attention_mask"]
+        valid = int(mask[0].sum())
+        segments = processor.extract_speaker_dict(logits, mask)[0]
+        reference = logits[0, :valid].double().cpu().numpy()
+        del model
+        torch.cuda.empty_cache()
+    finally:
+        torch.set_float32_matmul_precision(saved[0])
+        torch.backends.cudnn.allow_tf32 = saved[1]
     return reference, [(item["Start"], item["End"], item["Speaker"]) for item in segments]
 
 
@@ -608,3 +617,29 @@ def test_parity_refuses_native_endpoints_off_the_frame_grid() -> None:
     for start, end in ((0.012, 0.04), (0.01, 0.0449)):
         with pytest.raises(AssertionError, match="off the 10 ms frame grid"):
             _assert_parity(native(start, end), logits, segments, case, first_chunk=6)
+
+
+def test_the_reference_run_restores_the_tf32_settings(monkeypatch) -> None:
+    """The reference turns TF32 off for its own run only, also when that run fails,
+    and the next reference run in the same process works too."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("reference failed")
+
+    monkeypatch.setattr(transformers.AutoProcessor, "from_pretrained", fail)
+    precision, cudnn = torch.get_float32_matmul_precision(), torch.backends.cudnn.allow_tf32
+    try:
+        for incoming in ("highest", "medium"):
+            torch.set_float32_matmul_precision(incoming)
+            torch.backends.cudnn.allow_tf32 = True
+            for _ in range(2):
+                with pytest.raises(RuntimeError, match="reference failed"):
+                    _official_reference(Path("unused"), None)
+                assert torch.get_float32_matmul_precision() == incoming
+                assert torch.backends.cuda.matmul.allow_tf32 == (incoming != "highest")
+                assert torch.backends.cudnn.allow_tf32
+    finally:
+        torch.set_float32_matmul_precision(precision)
+        torch.backends.cudnn.allow_tf32 = cudnn
