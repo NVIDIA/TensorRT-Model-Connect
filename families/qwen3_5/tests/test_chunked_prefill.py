@@ -205,11 +205,13 @@ def test_triangular_solve_matches_numpy_on_nearly_parallel_keys() -> None:
     assert np.abs(got - want).max() <= 1e-4 * np.abs(want).max()
 
 
-def test_the_prefill_engine_is_built_only_when_a_second_weight_copy_fits() -> None:
+def test_a_text_bundle_whose_second_weight_copy_does_not_fit_fails_to_build() -> None:
     gib = 1024**3
-    assert model._two_engines_fit(18 * gib, 121 * gib)  # 9B FP16 on a 128 GB unified-memory GPU
-    assert not model._two_engines_fit(54 * gib, 121 * gib)  # 27B FP16: the decode engine alone
-    assert model._two_engines_fit(54 * gib, 275 * gib)
-    assert not model._two_engines_fit(2 * gib, None)  # no device to ask: keep the single-engine layout
+    model._require_two_engines_fit(18 * gib, 121 * gib)  # 9B FP16 on a 128 GB unified-memory GPU
+    model._require_two_engines_fit(54 * gib, 275 * gib)
+    model._require_two_engines_fit(2 * gib, None)  # no device to ask: build both engines
+    # 27B FP16 on 128 GB: never fall back to a one-token-at-a-time prompt prefill.
+    with pytest.raises(ValueError, match="need about 108 GiB of weights and the GPU has 121 GiB"):
+        model._require_two_engines_fit(54 * gib, 121 * gib)
     weights = {"w": np.zeros((4, 8), dtype=np.float16), "_rows": 4}
     assert model._host_weight_bytes(weights) == 64

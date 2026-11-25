@@ -137,22 +137,23 @@ def test_per_row_mrope_tables_equal_the_one_token_tables():
         np.testing.assert_array_equal(got[[row, ROWS + row]], want)
 
 
-def test_the_prefill_engine_is_built_only_when_a_second_weight_copy_fits():
+def test_a_bundle_whose_second_weight_copy_does_not_fit_fails_to_build():
     gib = 1024**3
-    assert native_model._two_engines_fit(20 * gib, 121 * gib)  # 35B-A3B GPTQ on a 128 GB unified-memory GPU
-    assert not native_model._two_engines_fit(67 * gib, 121 * gib)  # the BF16 original: decode engine alone
-    assert not native_model._two_engines_fit(2 * gib, None)  # no device to ask: keep the single-engine layout
+    native_model._require_two_engines_fit(20 * gib, 121 * gib)  # 35B-A3B GPTQ on a 128 GB unified-memory GPU
+    native_model._require_two_engines_fit(2 * gib, None)  # no device to ask: build both engines
+    # Never fall back to a one-token-at-a-time prompt prefill.
+    with pytest.raises(ValueError, match="need about 134 GiB of weights and the GPU has 121 GiB"):
+        native_model._require_two_engines_fit(67 * gib, 121 * gib)
 
 
 @pytest.mark.parametrize(
     ("gpu_gib", "options", "wanted"),
     [
         (121, {}, True),
-        (30, {}, False),
-        (None, {}, False),
-        (121, {"require_mtp": True}, False),
-        (121, {"has_draft": True}, False),
-        (121, {"tensor_parallel_size": 2}, False),
+        (None, {}, True),
+        (30, {"require_mtp": True}, False),
+        (30, {"has_draft": True}, False),
+        (30, {"tensor_parallel_size": 2}, False),
     ],
 )
 def test_the_split_decision_uses_the_mapped_shards_and_the_gpu_memory(monkeypatch, gpu_gib, options, wanted):
@@ -165,30 +166,19 @@ def test_the_split_decision_uses_the_mapped_shards_and_the_gpu_memory(monkeypatc
     assert native_model._wants_prefill_engine(weights, readers, **arguments) is wanted
 
 
+def test_a_gptq_bundle_that_cannot_hold_the_prefill_engine_fails_to_build(monkeypatch):
+    gib = 1024**3
+    readers = [SimpleNamespace(mapping=_Sized(20 * gib))]
+    weights = {"layer.0.moe": _experts(np.random.default_rng(3))}
+    monkeypatch.setattr(native_model, "_gpu_memory_bytes", lambda: 30 * gib)
+    with pytest.raises(ValueError, match="the GPU has 30 GiB"):
+        native_model._wants_prefill_engine(weights, readers, tensor_parallel_size=1, require_mtp=False,
+                                           has_draft=False)
+
+
 class _Sized:
     def __init__(self, size: int):
         self.size = size
 
     def __len__(self) -> int:
         return self.size
-
-
-class _RecordingWriter:
-    def __init__(self):
-        self.sections: dict[str, object] = {}
-
-    def add_bytes(self, name: str, data) -> None:
-        self.sections[name] = data
-
-
-def test_a_failed_prefill_build_keeps_the_single_engine_bundle():
-    writer = _RecordingWriter()
-    assert native_model._stage_prefill_engine(writer, lambda: b"plan")
-    assert writer.sections == {"prefill.plan": b"plan"}
-
-    def failed():
-        raise RuntimeError("TensorRT engine build failed")
-
-    writer = _RecordingWriter()
-    assert not native_model._stage_prefill_engine(writer, failed)
-    assert writer.sections == {}

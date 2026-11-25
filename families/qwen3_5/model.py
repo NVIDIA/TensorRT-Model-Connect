@@ -2460,21 +2460,18 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 _TWO_ENGINE_MEMORY_FRACTION = 0.8
 
 
-def _two_engines_fit(weight_bytes: int, gpu_bytes: int | None) -> bool:
-    """Whether the prefill engine, which carries its own copy of every weight, fits beside the decode engine.
+def _require_two_engines_fit(weight_bytes: int, gpu_bytes: int | None) -> None:
+    """Fail the build when the prefill engine, which carries its own copy of every weight, does not fit beside
+    the decode engine.
 
-    Without it, prompts run through the decode engine one token at a time (the bundle stays loadable). An
-    unknown GPU capacity keeps that single-engine layout, which every earlier bundle had.
+    Prompts never fall back to the decode engine one token at a time to save memory. An unknown GPU capacity
+    builds both engines.
     """
-    if gpu_bytes is None:
-        print("Skipping the prefill engine: the GPU memory could not be queried", file=sys.stderr)
-        return False
-    if 2 * weight_bytes <= gpu_bytes * _TWO_ENGINE_MEMORY_FRACTION:
-        return True
-    print(f"Skipping the prefill engine: the decode and prefill engines need about {2 * weight_bytes / 1024**3:.0f} "
-          f"GiB of weights and the GPU has {gpu_bytes / 1024**3:.0f} GiB; prompts run through the decode engine",
-          file=sys.stderr)
-    return False
+    if gpu_bytes is None or 2 * weight_bytes <= gpu_bytes * _TWO_ENGINE_MEMORY_FRACTION:
+        return
+    raise ValueError(
+        f"qwen3_5: the decode and prefill engines need about {2 * weight_bytes / 1024**3:.0f} GiB of weights "
+        f"and the GPU has {gpu_bytes / 1024**3:.0f} GiB; use a GPU with more memory or a smaller checkpoint")
 
 
 def _host_weight_bytes(weights) -> int:
@@ -2617,8 +2614,9 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
     # TensorRT 11.4 cannot lower NVFP4 dynamic activation quantization over a
     # runtime row count, so NVFP4 bundles keep the token loop.
     nvfp4 = quantization == "nvfp4" or getattr(quant_ctx, "has_nvfp4_weights", False)
-    split = (not visual and not require_mtp and draft_config is None and not nvfp4
-             and _two_engines_fit(_host_weight_bytes(weights), _gpu_memory_bytes()))
+    split = not visual and not require_mtp and draft_config is None and not nvfp4
+    if split:
+        _require_two_engines_fit(_host_weight_bytes(weights), _gpu_memory_bytes())
     # Stage the target before building the other engines; do not retain its serialized bytes.
     writer.add_bytes("engine.plan", model.build_engine(
         config,

@@ -2382,21 +2382,19 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _Qwen35MoeModel
 _TWO_ENGINE_MEMORY_FRACTION = 0.8
 
 
-def _two_engines_fit(weight_bytes: int, gpu_bytes: int | None) -> bool:
-    """Whether the prefill engine, which carries its own copy of every weight, fits beside the decode engine.
+def _require_two_engines_fit(weight_bytes: int, gpu_bytes: int | None) -> None:
+    """Fail the build when the prefill engine, which carries its own copy of every weight, does not fit beside
+    the decode engine.
 
-    Without it, prompts run through the decode engine one token at a time (the bundle stays loadable). An
-    unknown GPU capacity keeps that single-engine layout.
+    Prompts never fall back to the decode engine one token at a time to save memory. An unknown GPU capacity
+    builds both engines.
     """
-    if gpu_bytes is None:
-        print("Skipping the prefill engine: the GPU memory could not be queried", file=sys.stderr)
-        return False
-    if 2 * weight_bytes <= gpu_bytes * _TWO_ENGINE_MEMORY_FRACTION:
-        return True
-    print(f"Skipping the prefill engine: the decode and prefill engines need about {2 * weight_bytes / 1024**3:.0f} "
-          f"GiB of weights and the GPU has {gpu_bytes / 1024**3:.0f} GiB; prompts run through the decode engine",
-          file=sys.stderr)
-    return False
+    if gpu_bytes is None or 2 * weight_bytes <= gpu_bytes * _TWO_ENGINE_MEMORY_FRACTION:
+        return
+    raise ValueError(
+        f"qwen3_5_moe: the decode and prefill engines need about {2 * weight_bytes / 1024**3:.0f} GiB of "
+        f"weights and the GPU has {gpu_bytes / 1024**3:.0f} GiB; use a GPU with more memory or a smaller "
+        "checkpoint")
 
 
 def _checkpoint_bytes(readers) -> int:
@@ -2406,22 +2404,13 @@ def _checkpoint_bytes(readers) -> int:
 
 def _wants_prefill_engine(weights, readers, *, tensor_parallel_size: int, require_mtp: bool,
                           has_draft: bool) -> bool:
-    """Whether the bundle adds the chunked prefill engine: single-GPU GPTQ without MTP or a draft, if it fits."""
-    return (not require_mtp and not has_draft and tensor_parallel_size == 1
-            and _dense_prefill_experts(weights)
-            and _two_engines_fit(_checkpoint_bytes(readers), _gpu_memory_bytes()))
+    """Whether the bundle adds the chunked prefill engine: single-GPU GPTQ without MTP or a draft.
 
-
-def _stage_prefill_engine(writer, build) -> bool:
-    """Stage ``prefill.plan`` from ``build()``. The engine is optional: if its build fails, the bundle keeps
-    the single-engine layout and prompts run through the decode engine."""
-    try:
-        plan = build()
-    except (RuntimeError, MemoryError) as error:
-        print(f"Skipping the prefill engine: its build failed ({error}); prompts run through the decode engine",
-              file=sys.stderr)
+    Such a bundle fails to build when the engine's second weight copy does not fit.
+    """
+    if require_mtp or has_draft or tensor_parallel_size != 1 or not _dense_prefill_experts(weights):
         return False
-    writer.add_bytes("prefill.plan", plan)
+    _require_two_engines_fit(_checkpoint_bytes(readers), _gpu_memory_bytes())
     return True
 
 
@@ -2545,7 +2534,7 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
     del plan  # The section is staged; do not retain a full plan during the next build.
     if split:
         try:
-            split = _stage_prefill_engine(writer, lambda: model.build_engine(
+            writer.add_bytes("prefill.plan", model.build_engine(
                 config, weights, max_sequence_length, precision=precision,
                 verbose=bool(request.verbose), media_inputs=visual, prefill_rows=PREFILL_MAX_TOKENS,
             ))
