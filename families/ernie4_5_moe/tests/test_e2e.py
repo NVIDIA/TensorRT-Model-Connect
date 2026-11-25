@@ -16,6 +16,8 @@ import pytest
 from tensorrt_model_connect import BuildRequest, build
 from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
+from ._checkpoint import checkpoint_record
+
 FAMILY = "ernie4_5_moe"
 TASKS = frozenset({"text_continuation"})
 TEST_ROOT = Path(__file__).resolve().parent
@@ -235,17 +237,9 @@ def _run_json(
         return payloads[0]
 
 
-def test_official_checkpoint_e2e(case_name, tmp_path):
+def test_official_checkpoint_e2e(case_name, tmp_path, monkeypatch):
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
-    record_evidence(
-        "checkpoint",
-        {
-            "repo_id": manifest["hf_id"],
-            "revision": manifest["hf_revision"],
-            "precision": manifest["precision"],
-        },
-    )
     record_evidence(
         "thresholds",
         {
@@ -270,6 +264,14 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
         directory = _model_dir(manifest)
+        record_evidence(
+            "checkpoint",
+            checkpoint_record(
+                directory,
+                manifest,
+                local_override=bool(os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")),
+            ),
+        )
     binary, runtime_root = _runtime()
     with evidence_stage("reference"):
         tokenizer = AutoTokenizer.from_pretrained(directory)
@@ -290,8 +292,8 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     with evidence_stage("build"):
         _build(directory, bundle, manifest)
     record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+    monkeypatch.setattr(torch.backends.cudnn, "allow_tf32", False)
     with evidence_stage("reference"):
         reference = (
             AutoModelForCausalLM.from_pretrained(
@@ -365,3 +367,40 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             ],
         )
         print(f"ERNIE generated {len(expected_ids)} exact tokens: {expected_text!r}")
+
+    # Exercise request-local device-cache reset on one loaded model, including
+    # a repeated prompt after a different prompt has used the same buffers.
+    requests = [
+        {"prompt": prompt, "max_new_tokens": case["max_new_tokens"]} for prompt in case["prompts"]
+    ]
+    requests.append(requests[0])
+    expected_repeated = [{"token_ids": ids, "text": text} for ids, text in expected]
+    expected_repeated.append(expected_repeated[0])
+    with evidence_stage("runtime"):
+        repeated = subprocess.run(
+            [str(_native_test_binary("test_ernie4_5_moe_runtime")), str(bundle), str(runtime_root)],
+            input=json.dumps(requests),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=int(case.get("runtime_timeout_s", 3600)),
+        )
+        assert repeated.returncode == 0, repeated.stderr + repeated.stdout
+        actual_repeated = json.loads(repeated.stdout.splitlines()[-1])
+    with evidence_stage("comparison"):
+        assert actual_repeated == expected_repeated
+    _record_comparison(
+        tmp_path,
+        "repeated-generations",
+        actual_repeated,
+        expected_repeated,
+        [
+            {
+                "name": "generation_mismatch",
+                "actual": int(actual_repeated != expected_repeated),
+                "operator": "==",
+                "expected": 0,
+                "passed": actual_repeated == expected_repeated,
+            }
+        ],
+    )

@@ -12,6 +12,7 @@
 #include <cmath>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
+#include <utility>
 
 namespace trtmc::ernie4_5_moe {
 namespace {
@@ -21,19 +22,10 @@ std::vector<char> section(const BundleReader& reader, const char* name) {
         throw std::runtime_error(std::string("ERNIE bundle lacks ") + name);
     return reader.read_section(name);
 }
-Tensor tensor(void* data, std::initializer_list<int64_t> shape, DType dtype) {
-    Tensor result;
-    result.data = data;
-    result.shape = shape;
-    result.dtype = dtype;
-    return result;
-}
-const Tensor& output(const TensorMap& outputs, const std::string& name, std::size_t count) {
-    const auto found = outputs.find(name);
-    if (found == outputs.end() || !found->second.data || found->second.dtype != DType::kFloat32 ||
-        found->second.numel() != count)
-        throw std::runtime_error("Invalid ERNIE output " + name);
-    return found->second;
+void check_cuda(cudaError_t status, const char* operation) {
+    if (status != cudaSuccess)
+        throw std::runtime_error(std::string("ERNIE ") + operation + ": " +
+                                 cudaGetErrorString(status));
 }
 
 class Pipeline final : public internal::IModel, public internal::ITextContinuation {
@@ -74,36 +66,58 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
         for (const auto id : ids)
             if (id < 0 || id >= vocab)
                 throw std::invalid_argument("Invalid ERNIE token ID");
-        const auto cache_count = static_cast<std::size_t>(heads) * length * dim;
-        std::vector<std::vector<float>> keys(layers, std::vector<float>(cache_count, 0));
-        std::vector<std::vector<float>> values(layers, std::vector<float>(cache_count, 0));
-        std::vector<float> logits;
+        const auto cache_bytes = static_cast<std::size_t>(heads) * length * dim * sizeof(float);
+        const auto stream = engine_->stream();
+        auto buffer = [&](const std::string& name) {
+            auto* pointer = engine_->device_ptr(name);
+            if (!pointer)
+                throw std::runtime_error("Missing ERNIE device binding " + name);
+            return pointer;
+        };
+        std::vector<std::pair<void*, void*>> caches;
+        for (int32_t i = 0; i < layers; ++i) {
+            for (const auto* kind : {"k_", "v_"}) {
+                const auto suffix = std::string(kind) + std::to_string(i);
+                auto* input = buffer("cache_" + suffix);
+                auto* present = buffer("present_" + suffix);
+                if (input == present)
+                    throw std::runtime_error(
+                        "ERNIE cache input and output bindings must be distinct");
+                check_cuda(cudaMemsetAsync(input, 0, cache_bytes, stream), "cache reset");
+                caches.emplace_back(input, present);
+            }
+        }
+        std::vector<float> logits(vocab);
         int32_t position = 0;
         auto step = [&](int32_t token) {
             if (position >= length)
                 throw std::runtime_error("ERNIE exhausted its KV profile");
-            TensorMap inputs{{"input_ids", tensor(&token, {1}, DType::kInt32)},
-                             {"position", tensor(&position, {1}, DType::kInt32)}};
-            for (int32_t i = 0; i < layers; ++i) {
-                inputs.emplace("cache_k_" + std::to_string(i),
-                               tensor(keys[i].data(), {1, heads, length, dim}, DType::kFloat32));
-                inputs.emplace("cache_v_" + std::to_string(i),
-                               tensor(values[i].data(), {1, heads, length, dim}, DType::kFloat32));
+            try {
+                check_cuda(cudaMemcpyAsync(buffer("input_ids"), &token, sizeof(token),
+                                           cudaMemcpyHostToDevice, stream),
+                           "token upload");
+                check_cuda(cudaMemcpyAsync(buffer("position"), &position, sizeof(position),
+                                           cudaMemcpyHostToDevice, stream),
+                           "position upload");
+                engine_->forward_device_async({});
+                check_cuda(cudaMemcpyAsync(logits.data(), buffer("logits"),
+                                           logits.size() * sizeof(float), cudaMemcpyDeviceToHost,
+                                           stream),
+                           "logit download");
+                // Preserve the full fixed profile on the device. Inputs and
+                // outputs are separate backend buffers; no cache aliases are assumed.
+                for (const auto& [input, present] : caches)
+                    check_cuda(cudaMemcpyAsync(input, present, cache_bytes,
+                                               cudaMemcpyDeviceToDevice, stream),
+                               "cache update");
+                check_cuda(cudaStreamSynchronize(stream), "decode synchronization");
+            } catch (...) {
+                cudaStreamSynchronize(stream);
+                throw;
             }
-            const auto predicted = engine_->forward(inputs);
-            const auto& scores = output(predicted, "logits", vocab);
-            const auto* data = static_cast<const float*>(scores.data);
-            logits.assign(data, data + vocab);
             for (const auto value : logits)
                 if (!std::isfinite(value))
                     throw std::runtime_error("ERNIE logit is nonfinite");
-            for (int32_t i = 0; i < layers; ++i) {
-                const auto& key = output(predicted, "present_k_" + std::to_string(i), cache_count);
-                const auto& value =
-                    output(predicted, "present_v_" + std::to_string(i), cache_count);
-                std::copy_n(static_cast<const float*>(key.data), cache_count, keys[i].data());
-                std::copy_n(static_cast<const float*>(value.data), cache_count, values[i].data());
-            }
             ++position;
         };
         for (const auto token : ids)

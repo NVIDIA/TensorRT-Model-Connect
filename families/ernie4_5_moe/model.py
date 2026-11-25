@@ -9,6 +9,8 @@ from pathlib import Path
 import numpy as np
 import tensorrt as trt
 
+from .streaming import PlanWriter
+
 
 def load_weights(directory, cfg):
     from safetensors import safe_open
@@ -239,15 +241,6 @@ def build_engine(weights, cfg, length, stream, verbose=False):
         raise RuntimeError("ERNIE engine build failed")
 
 
-class PlanWriter(trt.IStreamWriter):
-    def __init__(self, stream):
-        trt.IStreamWriter.__init__(self)
-        self.stream = stream
-
-    def write(self, data):
-        return self.stream.write(data)
-
-
 def build(request, writer):
     if request.task != "text_continuation" or request.backend != "trt":
         raise ValueError("Ernie4_5_Moe requires text_continuation with backend=trt")
@@ -286,6 +279,9 @@ def build(request, writer):
         raise ValueError("Expected ERNIE 4.5 MoE decoder without projection biases")
     if not 2 <= length <= min(1024, cfg["max_position_embeddings"]):
         raise ValueError("ERNIE fixed KV profile must be in [2, 1024]")
+    eos_id = cfg.get("eos_token_id")
+    if type(eos_id) is not int or not 0 <= eos_id < cfg["vocab_size"]:
+        raise ValueError("ERNIE requires one scalar EOS token ID within the vocabulary")
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(directory)

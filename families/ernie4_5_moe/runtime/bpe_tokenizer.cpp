@@ -23,6 +23,43 @@
 namespace trtmc {
 namespace {
 
+// Replace malformed UTF-8 only after all generated token bytes are joined.
+std::string replace_invalid_utf8(const std::string& text) {
+    std::string result;
+    result.reserve(text.size());
+    for (std::size_t i = 0; i < text.size();) {
+        const auto lead = static_cast<unsigned char>(text[i]);
+        if (lead < 0x80) {
+            result.push_back(text[i++]);
+            continue;
+        }
+        const std::size_t width = lead >= 0xC2 && lead <= 0xDF   ? 2
+                                  : lead >= 0xE0 && lead <= 0xEF ? 3
+                                  : lead >= 0xF0 && lead <= 0xF4 ? 4
+                                                                 : 0;
+        if (!width) {
+            result += "\xEF\xBF\xBD";
+            ++i;
+            continue;
+        }
+        std::size_t valid = 1;
+        while (valid < width && i + valid < text.size()) {
+            const auto byte = static_cast<unsigned char>(text[i + valid]);
+            if (byte < 0x80 || byte > 0xBF ||
+                (valid == 1 && ((lead == 0xE0 && byte < 0xA0) || (lead == 0xED && byte > 0x9F) ||
+                                (lead == 0xF0 && byte < 0x90) || (lead == 0xF4 && byte > 0x8F))))
+                break;
+            ++valid;
+        }
+        if (valid == width)
+            result.append(text, i, width);
+        else
+            result += "\xEF\xBF\xBD";
+        i += valid;
+    }
+    return result;
+}
+
 // ─── UTF-8 helpers ───
 
 // Decode one UTF-8 codepoint from s starting at pos, advance pos.
@@ -86,20 +123,20 @@ inline char32_t read_utf8(const char*& p, const char* end) {
         ++p;
         return c;
     }
-    if ((c & 0xE0) == 0xC0 && p + 1 < end) {
+    if ((c & 0xE0) == 0xC0 && end - p >= 2) {
         char32_t cp =
             (static_cast<char32_t>(c & 0x1F) << 6) | (static_cast<unsigned char>(p[1]) & 0x3F);
         p += 2;
         return cp;
     }
-    if ((c & 0xF0) == 0xE0 && p + 2 < end) {
+    if ((c & 0xF0) == 0xE0 && end - p >= 3) {
         char32_t cp = (static_cast<char32_t>(c & 0x0F) << 12) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[1]) & 0x3F) << 6) |
                       (static_cast<unsigned char>(p[2]) & 0x3F);
         p += 3;
         return cp;
     }
-    if ((c & 0xF8) == 0xF0 && p + 3 < end) {
+    if ((c & 0xF8) == 0xF0 && end - p >= 4) {
         char32_t cp = (static_cast<char32_t>(c & 0x07) << 18) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[1]) & 0x3F) << 12) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[2]) & 0x3F) << 6) |
@@ -381,7 +418,7 @@ inline int match_contraction_suffix(const char* p, const char* end) {
     char c = *p;
     if (c == 's' || c == 't' || c == 'm' || c == 'd')
         return 1;
-    if (p + 1 < end && is_two_char_contraction(c, p[1]))
+    if (end - p >= 2 && is_two_char_contraction(c, p[1]))
         return 2;
     return 0;
 }
@@ -647,13 +684,13 @@ class BpeTokenizer final : public ITokenizer {
         std::string joined = join_vocab_tokens(ids);
         switch (mDecoderType) {
         case DecoderType::kByteLevel:
-            return byte_decode(joined);
+            return replace_invalid_utf8(byte_decode(joined));
         case DecoderType::kMetaspace:
-            return decode_metaspace(joined);
+            return replace_invalid_utf8(decode_metaspace(joined));
         case DecoderType::kSequence:
-            return decode_sequence(joined);
+            return replace_invalid_utf8(decode_sequence(joined));
         }
-        return byte_decode(joined);
+        return replace_invalid_utf8(byte_decode(joined));
     }
 
     int32_t id_for_token(std::string_view token) const override {
@@ -859,9 +896,15 @@ class BpeTokenizer final : public ITokenizer {
         return result;
     }
 
-    void encode_bytelevel(const std::string& text, std::vector<int32_t>& result) const {
+    void encode_bytelevel(const std::string& source, std::vector<int32_t>& result) const {
+        const std::string text =
+            mDirectByteLevel && mByteLevelPrefix && !source.empty() && source[0] != ' '
+                ? " " + source
+                : source;
         std::vector<std::string> words;
-        if (!mUsePreTokenizer) {
+        if (mDirectByteLevel && !mByteLevelRegex) {
+            words = {text};
+        } else if (!mUsePreTokenizer) {
             words = fallback_pre_tokenize(text);
         } else if (mPreTokenizerVariant == pretok::Variant::kBloom) {
             words = pretok::bloom_pre_tokenize(text);
@@ -1154,8 +1197,8 @@ class BpeTokenizer final : public ITokenizer {
         if (!j.contains("added_tokens"))
             return;
         for (auto& tok : j["added_tokens"]) {
-            std::string content = tok["content"].get<std::string>();
-            int32_t id = tok["id"].get<int32_t>();
+            std::string content = tok.at("content").get<std::string>();
+            int32_t id = tok.at("id").get<int32_t>();
 
             if (id >= 0 && static_cast<size_t>(id) >= mVocab.size()) {
                 mVocab.resize(static_cast<size_t>(id) + 1);
@@ -1280,6 +1323,9 @@ class BpeTokenizer final : public ITokenizer {
         std::string pt_type = pt.value("type", "");
 
         if (pt_type == "ByteLevel") {
+            mDirectByteLevel = true;
+            mByteLevelPrefix = pt.value("add_prefix_space", true);
+            mByteLevelRegex = pt.value("use_regex", true);
             mPreTokenizerVariant = pretok::Variant::kGpt2;
         } else if (pt_type == "Sequence") {
             int digit_group = 0;
@@ -1550,6 +1596,9 @@ class BpeTokenizer final : public ITokenizer {
 
     bool mAddSpecialTokens = false;
     bool mUsePreTokenizer = true;
+    bool mDirectByteLevel = false;
+    bool mByteLevelPrefix = false;
+    bool mByteLevelRegex = true;
     bool mIsMetaspace = false; // Set by detect_pre_tokenizer.
     bool mIsSentencePiece = false;
     bool mSentencePiecePrependAlways =
