@@ -174,7 +174,8 @@ ITask* create_native(const FamilyContext& context, const RuntimeConfig& config, 
     const bool parallel = config.tensor_parallel_size == 2;
     if (config.chunked && (context.reader.find_section("native_visual.json") ||
                            context.reader.find_section("native_dspark.json") ||
-                           context.reader.find_section("native_dflash2.json")))
+                           context.reader.find_section("native_dflash2.json") ||
+                           context.reader.find_section("native_domino.json")))
         throw std::runtime_error("qwen3_8 chunked bundles cannot carry media or draft companions");
     // Free the decoder plan's host copy once it is deserialized: the prefill and MTP plans are
     // read below, and an FP8 27B bundle's prefill plan is as large as the decoder plan (27 GiB
