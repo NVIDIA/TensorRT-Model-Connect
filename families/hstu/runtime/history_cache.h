@@ -4,7 +4,7 @@
  */
 
 #pragma once
-#include "families/hstu/include/task.h"
+#include "families/hstu/runtime/prototype_task.h"
 
 #include <nlohmann/json.hpp>
 

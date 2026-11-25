@@ -5,6 +5,8 @@
 
 import json
 import os
+import struct
+import subprocess
 from pathlib import Path
 import numpy as np
 import pytest
@@ -57,7 +59,7 @@ def pytest_generate_tests(metafunc):
 @pytest.mark.gpu
 @covers_variant(precision="fp32")
 @covers_variant(precision="bf16")
-def test_dlrmv3_e2e(dlrm_case, dlrm_root, dlrm_bridge_root):
+def test_dlrmv3_e2e(dlrm_case, dlrm_root, dlrm_bridge_root, tmp_path):
     manifest, case = CASES[dlrm_case]
     root = dlrm_root
     directory = root / f"dlrmv3-{case['profile']}-{manifest['precision']}"
@@ -92,8 +94,9 @@ def test_dlrmv3_e2e(dlrm_case, dlrm_root, dlrm_bridge_root):
     ) as task:
         mark_loaded()
         errors, agreement, overlap = [], [], []
-        for seed in range(8):
-            inputs = example_inputs(c, b, seed=42 + seed)
+        seeds = [*range(42, 50), *range(142, 158), *range(242, 258)]
+        for seed in seeds:
+            inputs = example_inputs(c, b, seed=seed)
             expected, actual = oracle.score(inputs), task.score(inputs)
             gate = json.loads((ROOT / "thresholds" / f"{dlrm_case}.json").read_text())[
                 "threshold_overrides"
@@ -118,8 +121,15 @@ def test_dlrmv3_e2e(dlrm_case, dlrm_root, dlrm_bridge_root):
             overlap.extend(
                 len(set(left) & set(right)) / k for left, right in zip(expected_top, actual_top)
             )
-        assert np.mean(agreement) >= gate["top1_agreement"]
-        assert np.mean(overlap) >= gate.get("top10_overlap", 1.0)
+        groups = []
+        for begin, end in ((0, 8), (8, 24), (24, 40)):
+            top1 = float(np.mean(agreement[begin:end]))
+            top10 = float(np.mean(overlap[begin * b : end * b]))
+            assert top1 >= gate["top1_agreement"]
+            assert top10 >= gate.get("top10_overlap", 1.0)
+            groups.append(
+                dict(seeds=seeds[begin:end], top1=top1, top10=top10, max_abs=max(errors[begin:end]))
+            )
         history = {
             spec["name"]: inputs[spec["name"]] for spec in task.metadata["stages"][0]["inputs"]
         }
@@ -145,6 +155,26 @@ def test_dlrmv3_e2e(dlrm_case, dlrm_root, dlrm_bridge_root):
         if s.batching == "fixed":
             with pytest.raises(RuntimeError):
                 task.score(example_inputs(c, 1))
+    fixture = tmp_path / "sdk-inputs.bin"
+    with fixture.open("wb") as stream:
+        stream.write(struct.pack("=QQQ", b, s.history_length, s.candidates))
+        for spec in c.runtime(4, manifest["precision"])["inputs"]:
+            stream.write(np.ascontiguousarray(inputs[spec["name"]]).tobytes())
+        stream.write(np.ascontiguousarray(expected["scores"]).tobytes())
+    build = Path(os.environ.get("TRTMC_NATIVE_BUILD_DIR", runtime))
+    for language in ("c", "cpp"):
+        subprocess.run(
+            [
+                str(build / f"test_hstu_sdk_{language}"),
+                str(directory / "model.bundle"),
+                runtime,
+                str(fixture),
+                str(gate["score_atol"]),
+                str(gate["score_rtol"]),
+            ],
+            check=True,
+        )
+    record_evidence("sdk_consumers", {"c": "passed", "cpp": "passed"})
     record_evidence(
         "correctness",
         dict(
@@ -154,5 +184,7 @@ def test_dlrmv3_e2e(dlrm_case, dlrm_root, dlrm_bridge_root):
             top10_overlap=float(np.mean(overlap)),
             cold_vs_restored="bit identical",
             stats=after,
+            seeds=seeds,
+            seed_groups=groups,
         ),
     )

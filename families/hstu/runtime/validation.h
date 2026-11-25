@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include "families/hstu/include/task.h"
+#include "families/hstu/runtime/prototype_task.h"
 #include "trtmc/runtime/trt_module.h"
 
 #include <cstdint>

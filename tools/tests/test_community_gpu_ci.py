@@ -121,8 +121,12 @@ def test_family_plan_rejects_missing_or_duplicate_premerge_cases(
         community_gpu_ci.family_plan(tmp_path, "alpha")
 
 
-@pytest.mark.parametrize("missing", [None, "libtrtmc_runtime.so", "libtrtmc_c.so", "libtrtmc_c.so.1"])
-def test_runtime_root_requires_and_links_native_artifacts(tmp_path: Path, missing: str | None) -> None:
+@pytest.mark.parametrize(
+    "missing", [None, "libtrtmc_runtime.so", "libtrtmc_c.so", "libtrtmc_c.so.1"]
+)
+def test_runtime_root_requires_and_links_native_artifacts(
+    tmp_path: Path, missing: str | None
+) -> None:
     """The E2E runtime tree contains core, backend, and the selected family DSO."""
     build = tmp_path / "build"
     build.mkdir()
@@ -155,8 +159,13 @@ def test_runtime_root_preserves_only_selected_family_cli(tmp_path: Path, state: 
     build.mkdir()
     plan = community_gpu_ci.FamilyPlan("alpha", ("alpha-smoke",), ())
     for name in (
-        "libtrtmc_core.so", "libtrtmc_runtime.so", "libtrtmc_c.so", "libtrtmc_c.so.1",
-        "libtrtmc_backend_trt.so", "libtrtmc_model_alpha.so", "libtrtmc_cli_beta.so",
+        "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
+        "libtrtmc_backend_trt.so",
+        "libtrtmc_model_alpha.so",
+        "libtrtmc_cli_beta.so",
     ):
         (build / name).write_bytes(b"native")
     source = tmp_path / "families/alpha/cli.json"
@@ -172,7 +181,11 @@ def test_runtime_root_preserves_only_selected_family_cli(tmp_path: Path, state: 
         declaration.parent.mkdir(parents=True)
         declaration.write_bytes(source.read_bytes())
     if state.startswith("missing_"):
-        message = "no CLI declaration for alpha" if state == "missing_declaration" else "libtrtmc_cli_alpha.so"
+        message = (
+            "no CLI declaration for alpha"
+            if state == "missing_declaration"
+            else "libtrtmc_cli_alpha.so"
+        )
         with pytest.raises(CiError, match=message):
             community_gpu_ci._runtime_root(build, plan, tmp_path)
         return
@@ -275,6 +288,11 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
     monkeypatch.setattr(community_gpu_ci, "_stage_checkpoints", lambda *_args: None)
     monkeypatch.setattr(
         community_gpu_ci,
+        "_stage_external_files",
+        lambda plan, _parent: {f"TRTMC_{plan.family.upper()}_MODEL_DIR": "/staged"},
+    )
+    monkeypatch.setattr(
+        community_gpu_ci,
         "_runtime_root",
         lambda native_build, _plans, _repository: native_build / "runtime",
     )
@@ -297,7 +315,7 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
     expected_targets = ["trtmc_model_alpha"]
     if executor == "native":
         expected_targets.append("trtmc_cli_alpha")
-    assert native_builds[1][native_builds[1].index("--target") + 1:] == expected_targets
+    assert native_builds[1][native_builds[1].index("--target") + 1 :] == expected_targets
     assert len(e2e_calls) == 1
     runtime, families, testcases = e2e_calls[0]
     assert families == ("alpha",)
@@ -306,6 +324,7 @@ def test_gpu_run_builds_native_contract_before_family_e2e(
     assert runtime["TRTMC_RUNTIME_ROOT"] == str(build / "runtime")
     assert runtime["TRTMC_NATIVE_BUILD_DIR"] == str(build)
     assert runtime["HF_HUB_OFFLINE"] == "1"
+    assert runtime["TRTMC_ALPHA_MODEL_DIR"] == "/staged"
 
 
 def test_gpu_run_continues_after_one_family_fails(
@@ -351,6 +370,11 @@ def test_gpu_run_continues_after_one_family_fails(
     monkeypatch.setattr(community_gpu_ci, "E2ERunner", FakeE2ERunner)
     monkeypatch.setattr(community_gpu_ci, "_install_family_requirements", lambda *_args: None)
     monkeypatch.setattr(community_gpu_ci, "_stage_checkpoints", lambda *_args: None)
+    monkeypatch.setattr(
+        community_gpu_ci,
+        "_stage_external_files",
+        lambda plan, _parent: {f"TRTMC_{plan.family.upper()}_MODEL_DIR": "/staged"},
+    )
     monkeypatch.setattr(
         community_gpu_ci,
         "_runtime_root",
@@ -412,3 +436,86 @@ def test_eagle_vlm_declares_remote_processor_http_dependency() -> None:
     )
 
     assert "requests==2.32.5" in requirements.splitlines()
+
+
+def test_external_assets_select_deduplicate_and_reject_conflicts(tmp_path: Path) -> None:
+    declaration = {"path": "weights/model.bin", "url": "https://models.example/weights"}
+    manifests = [
+        {
+            "family": "alpha",
+            "external_files": [declaration],
+            "testcases": [{"name": name, "premerge": True}],
+        }
+        for name in ("first", "second")
+    ]
+    root = _family(tmp_path, "alpha", manifests)
+    plan = community_gpu_ci.family_plan(tmp_path, "alpha")
+    assert plan.external_files == (("weights/model.bin", declaration["url"]),)
+    manifests[1]["external_files"] = [{**declaration, "url": "https://models.example/other"}]
+    (root / "tests/manifests/1.json").write_text(json.dumps(manifests[1]))
+    with pytest.raises(CiError, match="conflicting"):
+        community_gpu_ci.family_plan(tmp_path, "alpha")
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        {"path": "../escape", "url": "https://models.example/a"},
+        {"path": "/absolute", "url": "https://models.example/a"},
+        {"path": "a//b", "url": "https://models.example/a"},
+        {"path": "weights", "url": "file:///etc/passwd"},
+        {"path": "weights", "url": "http://models.example/a"},
+        {"path": "weights", "url": "https://user:password@models.example/a"},
+        {"path": "weights", "url": "https://models.example/a#fragment"},
+    ],
+)
+def test_external_assets_reject_unsafe_declarations(tmp_path: Path, declaration) -> None:
+    _family(
+        tmp_path,
+        "alpha",
+        [
+            {
+                "family": "alpha",
+                "external_files": [declaration],
+                "testcases": [{"name": "smoke", "premerge": True}],
+            }
+        ],
+    )
+    with pytest.raises(CiError):
+        community_gpu_ci.family_plan(tmp_path, "alpha")
+
+
+@pytest.mark.parametrize("failure", [None, "empty", "download", "redirect"])
+def test_external_assets_stage_atomically_without_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str | None,
+) -> None:
+    from io import BytesIO
+
+    class Download(BytesIO):
+        def geturl(self):
+            return (
+                "http://models.example/a" if failure == "redirect" else "https://models.example/a"
+            )
+
+    def download(request, *, timeout):
+        assert timeout == 120
+        assert not request.has_header("Authorization")
+        if failure == "download":
+            raise OSError("network failure")
+        return Download(b"" if failure == "empty" else b"checkpoint")
+
+    monkeypatch.setattr(community_gpu_ci.urllib.request, "urlopen", download)
+    plan = community_gpu_ci.FamilyPlan(
+        "alpha", ("smoke",), (), (("weights/a.bin", "https://models.example/a"),)
+    )
+    if failure:
+        with pytest.raises((OSError, CiError)):
+            community_gpu_ci._stage_external_files(plan, tmp_path)
+        assert not list(tmp_path.iterdir())
+    else:
+        env = community_gpu_ci._stage_external_files(plan, tmp_path)
+        directory = Path(env["TRTMC_ALPHA_MODEL_DIR"])
+        assert (directory / "weights/a.bin").read_bytes() == b"checkpoint"
+        assert not list(directory.rglob("*.part"))

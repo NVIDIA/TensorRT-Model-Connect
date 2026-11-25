@@ -11,6 +11,10 @@ import importlib.util
 import os
 import re
 import sys
+import shutil
+import tempfile
+import urllib.request
+from urllib.parse import urlsplit
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,6 +37,7 @@ class FamilyPlan:
     family: str
     testcases: tuple[str, ...]
     checkpoints: tuple[tuple[str, str | None], ...]
+    external_files: tuple[tuple[str, str], ...] = ()
 
 
 def _family_list(raw: str, label: str) -> tuple[str, ...]:
@@ -85,6 +90,7 @@ def family_plan(repository: Path, family: str) -> FamilyPlan:
 
     cases: list[str] = []
     checkpoints: set[tuple[str, str | None]] = set()
+    external_files: dict[str, str] = {}
     manifests = sorted((root / "tests/manifests").glob("*.json"))
     for path in manifests:
         try:
@@ -111,6 +117,33 @@ def family_plan(repository: Path, family: str) -> FamilyPlan:
                 if revision is not None and (not isinstance(revision, str) or not revision):
                     raise ValueError("hf_revision must be a non-empty string when present")
                 checkpoints.add((repo_id, revision))
+            if selected_cases:
+                entries = manifest.get("external_files", [])
+                if not isinstance(entries, list):
+                    raise ValueError("external_files must be a list")
+                for entry in entries:
+                    if not isinstance(entry, dict) or set(entry) != {"path", "url"}:
+                        raise ValueError("external file requires path and url")
+                    relative, url = entry["path"], entry["url"]
+                    if not isinstance(relative, str) or not all(
+                        re.fullmatch(r"[A-Za-z0-9_.-]+", part) and part not in {".", ".."}
+                        for part in relative.split("/")
+                    ):
+                        raise ValueError("invalid external file path")
+                    if not isinstance(url, str):
+                        raise ValueError("external file URL must be a string")
+                    parsed = urlsplit(url)
+                    if (
+                        parsed.scheme != "https"
+                        or not parsed.hostname
+                        or parsed.username is not None
+                        or parsed.password is not None
+                        or parsed.fragment
+                    ):
+                        raise ValueError("external file URL requires unauthenticated HTTPS")
+                    if relative in external_files and external_files[relative] != url:
+                        raise ValueError("conflicting external file paths")
+                    external_files[relative] = url
             cases.extend(selected_cases)
         except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
             raise CiError(f"invalid GPU manifest {path}: {error}") from error
@@ -126,6 +159,7 @@ def family_plan(repository: Path, family: str) -> FamilyPlan:
         family=family,
         testcases=tuple(sorted(cases)),
         checkpoints=tuple(sorted(checkpoints, key=lambda item: (item[0], item[1] or ""))),
+        external_files=tuple(sorted(external_files.items())),
     )
 
 
@@ -156,6 +190,38 @@ def _stage_checkpoints(plans: tuple[FamilyPlan, ...], cache_dir: Path) -> None:
         if not (snapshot / "config.json").is_file():
             raise CiError(f"staged checkpoint has no config.json: {repo_id}@{resolved}")
         print(f"Staged checkpoint {repo_id}@{resolved}")
+
+
+def _stage_external_files(plan: FamilyPlan, parent: Path) -> dict[str, str]:
+    """Stage declared public assets before offline tests, without Hub credentials.
+
+    A fresh directory prevents reuse of stale files or contributor symlinks.
+    Downloads are atomic and failures never publish a model directory.
+    """
+    if not plan.external_files:
+        return {}
+    parent.mkdir(parents=True, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix=f"{plan.family}-", dir=parent))
+    try:
+        for relative, url in plan.external_files:
+            output = root / relative
+            output.parent.mkdir(parents=True, exist_ok=True)
+            temporary = output.with_name(output.name + ".part")
+            request = urllib.request.Request(url, headers={"User-Agent": "TRTMC-CI"})
+            with (
+                urllib.request.urlopen(request, timeout=120) as source,
+                temporary.open("wb") as target,
+            ):
+                if urlsplit(source.geturl()).scheme != "https":
+                    raise CiError("external file redirected away from HTTPS")
+                shutil.copyfileobj(source, target)
+            if temporary.stat().st_size == 0:
+                raise CiError(f"empty external file: {relative}")
+            temporary.replace(output)
+    except Exception:
+        shutil.rmtree(root)
+        raise
+    return {f"TRTMC_{plan.family.upper()}_MODEL_DIR": str(root)}
 
 
 def _install_family_requirements(context: CiContext, plans: tuple[FamilyPlan, ...]) -> None:
@@ -316,7 +382,9 @@ def run(repository: Path, env: dict[str, str]) -> None:
             )
             runtime_root = _runtime_root(build, plan, repository)
             _stage_checkpoints((plan,), Path(checkpoint_env["HF_HOME"]) / "hub")
+            external_env = _stage_external_files(plan, build.parent / "trtmc-community-external")
             runtime_env = {
+                **external_env,
                 **checkpoint_env,
                 "CMAKE_CUDA_ARCHITECTURES": build_env["CMAKE_CUDA_ARCHITECTURES"],
                 "HF_HUB_OFFLINE": "1",

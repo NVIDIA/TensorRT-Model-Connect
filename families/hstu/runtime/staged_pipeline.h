@@ -3,8 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #pragma once
-#include "families/hstu/include/history_cache.h"
+#include "families/hstu/runtime/history_cache.h"
 #include "families/hstu/runtime/validation.h"
+#include "trtmc/internal/ranking.h"
 
 #include <array>
 #include <chrono>
@@ -12,7 +13,10 @@
 #include <mutex>
 
 namespace trtmc::hstu {
-class StagedPipeline final : public IStructuredRanking, public IHistoryCache {
+class StagedPipeline final : public trtmc::IStructuredRanking,
+                             public IHistoryCache,
+                             public internal::IModel,
+                             public internal::IStructuredRanking {
   public:
     StagedPipeline(std::unique_ptr<ITrtModule> prepare, std::unique_ptr<ITrtModule> step,
                    nlohmann::json config, std::uint64_t cache_bytes = 0, double cache_ratio = 0,
@@ -20,6 +24,10 @@ class StagedPipeline final : public IStructuredRanking, public IHistoryCache {
     ~StagedPipeline() override = default;
     std::vector<FeatureTensor> score(const std::vector<FeatureTensor>& inputs) override;
     CacheStats cache_stats() const override;
+    std::vector<internal::TaskInstance> task_bindings() override;
+    internal::CandidateScoresResult run(const internal::StructuredRankingRequest&,
+                                        internal::ConfigView) override;
+    internal::RankingCacheStats ranking_cache_stats() const override;
     void configure_cache_budget(std::uint64_t bytes, double ratio) override;
     bool history_supported() const noexcept override { return bool(request_); }
     void configure_history(std::size_t max_entries, double ttl_seconds,

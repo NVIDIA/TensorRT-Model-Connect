@@ -22,11 +22,10 @@ Scores represent candidate relevance probabilities; this model was trained on
 the benchmark's synthetic streaming data. Numerical parity tests below do not
 establish production recommendation quality or full MLPerf accuracy.
 
-The tested serving interface is the supplied Triton prototype's structured-ranking
-C++ API and this family's native transport. **Current main's C Task SDK is not
-wired for this family**: it requires an `internal::IModel` implementation and a
-shared Task contract for these mixed named tensors. That API migration remains
-a prerequisite for general C Task SDK support; this contribution remains a draft.
+The main SDK exposes the model through the `structured_ranking` Task in the
+stable C API (`trtmc_get_api`) and its header-only C++ wrapper. The supplied
+Triton image uses its prototype interface through an isolated compatibility
+adapter; the model graph, cache implementation and tensor schema are shared.
 
 ## Build and change the serving profile
 
@@ -75,9 +74,15 @@ preparation execute through the native TensorRT runtime.
 
 ## Tensor and Task interface
 
-`trtmc::IStructuredRanking::score`, `cache_stats`, the native Python client and
-Triton tensor transport preserve the shared serving APIs. The interface
-header lives in this family at `include/task.h`. Tensor schemas and scores follow DLRMv3.
+Include `<trtmc/trtmc.hpp>`, load a bundle with `trtmc::Model::load`, and bind
+`model.task<trtmc::StructuredRanking>()`. `run` accepts named host tensors
+(`RankingFeatureView`: name, type, shape, contiguous bytes) and returns owned
+FP32 candidate scores. Input storage borrows through the synchronous call;
+result views remain valid for the result's lifetime. C callers use
+`TRTMC_TASK_STRUCTURED_RANKING` and `trtmc_structured_ranking_api_v1`.
+See the executable [C consumer](tests/sdk_consumer.c) and
+[C++ consumer](tests/sdk_consumer.cpp), both executed by every named CI case.
+Tensor schemas and scores follow DLRMv3:
 
 | Input | Type | Shape |
 |---|---|---|
@@ -120,7 +125,7 @@ guarantee a fused HSTU kernel or a speedup.
 The expanded policy passed all six precision/profile cases and 20 cache lifecycle
 cases on GB300/SM103 with TensorRT 11.4.0.106. In addition to eight qualification
 seeds, 32 held-out seeds per serving case passed the unchanged score/ranking
-gates. On those held-out inputs, maximum absolute score error was 0.0162,
+gates in BF16. On those held-out BF16 inputs, maximum absolute score error was 0.0162,
 aggregate top-1 agreement was at least 96.875% and top-10 overlap at least 99.14%.
 These are numerical checks on synthetic dense inputs, not dataset AUC/NE or
 MLPerf compliance. Moving whole early blocks to BF16, the FP16 fallback,
@@ -143,11 +148,17 @@ Nsight confirmed 20 BF16 GEMM launches per default-profile request, up from 13.
 The runtime also moves JSON bounds lookup out of the per-float validation loop,
 preserving all finite/range checks. A matched before/after BF16 comparison at
 default batch 4 improved from 24.07 to 9.26 ms; most of this 61.5% reduction is
-CPU work, rather than the extra BF16 operations. FP32 benefits from the same fix.
+CPU work, rather than the extra BF16 operations. FP32 improves from 24.61 to
+10.00 ms with the same fix. The baseline is commit `f392519c4`; measurements
+used the same GB300/SM103, TensorRT 11.4.0.106 and driver 580.105.08.
 
 The measurement boundary is `NativeClient.score`, including host copies,
 validation and synchronization, excluding Triton transport. Reproduce with
-`python -m families.hstu.tests.benchmark --root <prepared>/output --runtime-root <sdk> --warmup 20 --iterations 100 --output <temporary>/latency.json`.
+`python -m families.hstu.tests.benchmark --root <prepared>/output --runtime-root <sdk> --warmup 20 --iterations 100 --rounds 3 --output <temporary>/latency.json`.
+The command rotates case order each round and reports the median of the per-round
+P50 values and the median of the per-round P95 values. It compares FP32 with the
+BF16 policy already built into the bundles; rebuild with
+`bf16_policy="conservative"` to compare that policy separately.
 The earlier conservative policy passed 26 cases on A100; its expanded policy
 and the updated runtime have not been requalified on A100 in this tuning round.
 
@@ -174,7 +185,8 @@ build with `max_batch_size=4`, and send exactly four rows per request.
 
 ## KV budget, metrics and native Triton
 
-Build `trtmc_model_hstu` and `hstu_triton` with the SDK. For the supplied
+The normal SDK installs `trtmc_model_hstu`; `hstu_triton` is a test-only
+prototype transport and is not part of the SDK installation. For the supplied
 **amd64 Triton 26.10 / TRT-MC 0.2.0 prototype**, run its ABI adapter inside the
 image, then build the bundles there with TensorRT 11.4.0.106:
 
@@ -211,8 +223,10 @@ Specify **one** parameter: `kv_cache_size_bytes` (positive bytes) or
 memory after engine initialization, adding back the already allocated KV
 scratch. Both limits must cover the entire engine profile's scratch allocation.
 They bound K/V storage, not weights, workspace or all GPU memory. The family
-client configures these limits through its cache capability; the generic main
-SDK decoder `--kv-cache-size` flag is unsupported for this family.
+client configures these limits through its cache capability. Main SDK callers use
+`task.configure_cache(bytes, ratio)` and `task.cache_stats()` (C: the corresponding
+Task table methods). These calls serialize with scoring, use the same family
+budget/accounting, and do not change score math. The generic main SDK decoder `--kv-cache-size` flag is unsupported for this family.
 
 The native backend publishes seven `hstu_kv_cache_*` metrics at
 `http://localhost:8002/metrics`: `supported`, `budget_bytes`, `reserved_bytes`,
@@ -282,3 +296,19 @@ CI stages `external_files` from the manifests before offline execution. Set
 uses the isolated `TRTMC_RUNTIME_ROOT`. An independent upstream check is
 available through `tests/upstream_check.py` with `DLRMV3_UPSTREAM`,
 `DLRMV3_CHECKPOINT` and `DLRMV3_CONVERTED` set.
+
+## Continuous integration
+
+Both manifests mark all six FP32/BF16 cases as premerge: default B1/B4 and
+short fixed B4. CI stages the declared official checkpoint before offline
+execution, builds bundles on the target TensorRT, and checks 40 seeds per
+case. Extended FP32 coverage found a seed-250/B4 NumPy-reference discrepancy:
+native-vs-upstream error 0.00035 passes the existing gate, while NumPy-vs-upstream
+error 0.00187 fails it. The PR remains draft pending numerical-contract review;
+thresholds are unchanged. The original eight seeds and two groups of 16 held-out seeds each must
+independently satisfy the unchanged ranking gates; every seed must satisfy the
+score gate. Each case also executes public C and C++ SDK consumers, including
+cache cap/ratio effects and statistics. CPU jobs test support discovery and
+source contracts; family CTests cover input validation and snapshot framing.
+The optional `tests/triton/` scripts additionally exercise the supplied amd64
+image's native endpoints, seven metrics, isolation and snapshot hydration.

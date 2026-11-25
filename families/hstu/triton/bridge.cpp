@@ -4,8 +4,8 @@
  */
 
 // In-process trusted host-pointer bridge. No model policy or TensorRT topology.
-#include "families/hstu/include/history_cache.h"
-#include "families/hstu/include/task.h"
+#include "families/hstu/runtime/history_cache.h"
+#include "families/hstu/runtime/prototype_task.h"
 #include "trtmc/bundle.h"
 #include "trtmc/runtime/family_loader.h"
 

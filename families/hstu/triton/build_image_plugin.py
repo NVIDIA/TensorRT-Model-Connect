@@ -104,6 +104,7 @@ def main():
                     "staged_pipeline.cpp",
                     "history_snapshot.cpp",
                     "plugin.cpp",
+                    "sdk.cpp",
                 )
             ],
             "-ltrtmc_core",

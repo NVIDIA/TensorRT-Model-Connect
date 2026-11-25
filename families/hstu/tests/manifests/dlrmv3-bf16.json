@@ -24,13 +24,15 @@
       "name": "dlrmv3-bf16-default-b4",
       "batch": 4,
       "profile": "default",
-      "reference_precision": "fp32"
+      "reference_precision": "fp32",
+      "premerge": true
     },
     {
       "name": "dlrmv3-bf16-short-b4",
       "batch": 4,
       "profile": "short",
-      "reference_precision": "fp32"
+      "reference_precision": "fp32",
+      "premerge": true
     }
   ],
   "external_files": [
