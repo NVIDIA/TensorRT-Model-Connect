@@ -585,10 +585,12 @@ def test_the_catalog_excludes_profiles_without_task_defaults_then_those_config_e
 
     from trtmc_aiperf_qual.config import CONFIG_ROOT
 
+    import shutil
+
     tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())
     del tasks["tasks"]["text_continuation"]
     root = tmp_path / "config"
-    root.mkdir()
+    shutil.copytree(CONFIG_ROOT / "models", root / "models")  # flux-2-dev states its image controls there
     (root / "tasks.yaml").write_text(yaml.safe_dump(tasks))
     (root / "exclusions.yaml").write_text("exclude:\n  - {profile: flux-schnell, reason: a stated gap}\n"
                                           "  - {profile: qwen3-0.6b-fp16, reason: never reached}\n")

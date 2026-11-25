@@ -333,9 +333,14 @@ file to change:
 |---|---|---|
 | `config/tasks.yaml` | the profile's Task has no defaults (no entry, no exclusion to write) | every machine |
 | `config/exclusions.yaml` | the qualification cannot qualify the profile as cataloged | every machine |
+| `config/models` | an image-generation request leaves a size, step or guidance control to the pipeline's default, so each side would choose its own; state it under `request` in `config/models/<profile>.yaml` | every machine |
 | `environment` | not in the machine's `models.include`, or in its `models.exclude` | one machine |
 | `config/platforms/<platform>.yaml` | what the hardware cannot run | one kind of hardware |
 | `environment` | a checkpoint above the machine's `models.max_checkpoint_gib` | one machine |
+
+A family that adds a profile the qualification cannot run yet does not change this application: the
+`config/tasks.yaml` and `config/models` rows leave the profile out on their own, and `plan` shows it with its
+reason.
 
 The scope is every ready catalog profile (L0 smoke and regression variants aside). `run-all`, `plan`, `assign`
 and `matrix` take the machine's list; `--profile` (names or glob patterns, in the order given) replaces its

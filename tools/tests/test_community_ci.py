@@ -209,7 +209,7 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization():
     authorization = jobs["authorize"]["steps"][0]["run"]
     assert 'stable) test "$CI_REF" = refs/heads/main' in authorization
     assert "Unknown Community CI lane" in authorization
-    for name in ("source-quality", "docs", "ownership-impact", "unit"):
+    for name in ("source-quality", "docs", "ownership-impact", "unit", "aiperf-qual"):
         job = jobs[name]
         assert job["needs"] == "authorize"
         assert job["runs-on"] == "ubuntu-24.04"
@@ -233,6 +233,7 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization():
         "docs",
         "ownership-impact",
         "unit",
+        "aiperf-qual",
     ]
     assert jobs["gpu-authorize"]["needs"] == ["authorize", "required"]
     assert "needs.required.result == 'success'" in jobs["gpu-authorize"]["if"]
@@ -254,6 +255,15 @@ def test_public_workflow_is_one_exact_merge_cpu_then_gpu_authorization():
     assert docs["Install website dependencies"]["run"] == "npm ci"
     assert docs["Test generated model support inventory"]["run"] == "npm run test:model-support"
     assert docs["Build production documentation"]["run"] == "npm run build"
+    aiperf = {step["name"]: step for step in jobs["aiperf-qual"]["steps"]}
+    assert all("if" not in step for step in aiperf.values())
+    install = aiperf["Install the application and its AIPerf plugins"]["run"]
+    assert "--requirement apps/aiperf_qual/requirements.txt" in install
+    assert "grep -x 'pytest==.*' requirements/community-ci.txt" in install
+    assert "--no-deps apps/aiperf_qual/plugins" in install
+    test = aiperf["Test the application"]
+    assert test["run"].startswith("python -m pytest apps/aiperf_qual/tests ")
+    assert test["env"]["CUDA_VISIBLE_DEVICES"] == "" and test["env"]["HF_HUB_OFFLINE"] == "1"
 
 
 @pytest.mark.parametrize("event_head", ["", "a" * 40])
@@ -308,13 +318,15 @@ def test_community_authorize_pins_the_exact_merge_and_uses_its_base_parent(tmp_p
 
 
 @pytest.mark.parametrize(
-    ("source_quality", "docs", "ownership_impact", "unit", "expected_returncode"),
+    ("source_quality", "docs", "ownership_impact", "unit", "aiperf_qual", "expected_returncode"),
     [
-        ("success", "success", "success", "success", 0),
-        ("failure", "success", "success", "success", 1),
-        ("success", "failure", "success", "success", 1),
-        ("success", "skipped", "success", "success", 1),
-        ("success", "success", "failure", "failure", 1),
+        ("success", "success", "success", "success", "success", 0),
+        ("failure", "success", "success", "success", "success", 1),
+        ("success", "failure", "success", "success", "success", 1),
+        ("success", "skipped", "success", "success", "success", 1),
+        ("success", "success", "failure", "failure", "success", 1),
+        ("success", "success", "success", "success", "failure", 1),
+        ("success", "success", "success", "success", "skipped", 1),
     ],
 )
 def test_public_required_job_fails_closed(
@@ -322,6 +334,7 @@ def test_public_required_job_fails_closed(
     docs: str,
     ownership_impact: str,
     unit: str,
+    aiperf_qual: str,
     expected_returncode: int,
 ) -> None:
     environment = {
@@ -330,6 +343,7 @@ def test_public_required_job_fails_closed(
         "DOCS_RESULT": docs,
         "OWNERSHIP_IMPACT_RESULT": ownership_impact,
         "UNIT_RESULT": unit,
+        "AIPERF_QUAL_RESULT": aiperf_qual,
     }
     result = subprocess.run(
         [
@@ -353,6 +367,7 @@ def test_public_required_job_fails_closed(
     assert f"Docs: {docs}" in result.stdout
     assert f"Ownership and impact: {ownership_impact}" in result.stdout
     assert f"Unit / C++ and Python: {unit}" in result.stdout
+    assert f"AIPerf qualification: {aiperf_qual}" in result.stdout
 
 
 @pytest.mark.parametrize(
