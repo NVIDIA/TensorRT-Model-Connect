@@ -22,6 +22,7 @@ def test_configured_image_profiles_state_every_control_and_new_ones_are_left_out
     """An image profile with a configuration of its own states every control the pipeline would otherwise choose.
     A catalog profile without one that leaves a control unstated is left out with the controls it leaves, so a
     family adding an image profile does not configure its qualification."""
+    from trtmc_benchmark.types import BenchmarkError
     from trtmc_perf_serving.profiles import resolve_profile
 
     from trtmc_aiperf_qual.config import CONFIG_ROOT
@@ -34,7 +35,11 @@ def test_configured_image_profiles_state_every_control_and_new_ones_are_left_out
     assert profiles
     for profile in profiles:
         model = resolve_model(profile, environment)
-        resolved = resolve_profile(profile, manifest_root=root / "families")
+        try:
+            resolved = resolve_profile(profile, manifest_root=root / "families")
+        except BenchmarkError:  # no catalog request (svd-xt: no prompt): kept, its run reports what it finds
+            assert selection[profile].source != MODELS_SOURCE, profile
+            continue
         missing = unstated_defaults({**resolved.base_request, **model.get("catalog_request", {})}, model["operation"])
         assert not (missing and (CONFIG_ROOT / "models" / f"{profile}.yaml").is_file()), (profile, missing)
         if selection[profile].source not in (TASKS_SOURCE, EXCLUSIONS_SOURCE):  # left out earlier for another reason

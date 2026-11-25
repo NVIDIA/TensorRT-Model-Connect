@@ -77,18 +77,20 @@ def catalog(repository: Path, root: Path = CONFIG_ROOT) -> list[Profile]:
 def _unstated_image_controls(entry: Any, repository: Path, root: Path) -> list[str]:
     """The image controls the profile's catalog request, with its ``config/models`` ``request``, leaves unstated.
 
-    A profile whose configuration cannot resolve is kept: its run reports that error."""
+    A profile whose configuration or catalog request cannot resolve is kept: its run reports what it finds (its
+    suites may not use the catalog request, as an image-to-video profile without a prompt)."""
     from trtmc_benchmark.catalog import resolve_case
+    from trtmc_benchmark.types import BenchmarkError
 
     from .models import resolve_model
     from .suites import unstated_defaults
 
     try:
         model = resolve_model(entry.name, Environment({"repo": str(repository)}), root)
-    except ConfigError:
+        request = {**dict(resolve_case(entry.model, Path(f"{entry.name}.bundle")).request),
+                   **model.get("catalog_request", {})}
+    except (BenchmarkError, ConfigError):
         return []
-    request = {**dict(resolve_case(entry.model, Path(f"{entry.name}.bundle")).request),
-               **model.get("catalog_request", {})}
     return unstated_defaults(request, model["operation"])
 
 
