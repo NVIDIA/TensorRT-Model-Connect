@@ -597,6 +597,8 @@ def unstated_defaults(request: Mapping[str, Any], operation: str | None = None) 
         required = ["num_steps", "guidance_scale", "height", "width"]
         if request.get("media_type") == "video":
             required.append("num_frames")
+        if all(request.get(name) not in (None, "") for name in ("min_guidance_scale", "max_guidance_scale")):
+            required.remove("guidance_scale")  # a per-frame guidance range (Stable Video Diffusion) states it
         problems += [field for field in required if request.get(field) in (None, "") and field not in problems]
         problems += [field for field in ("num_steps", "height", "width", "num_frames")
                      if field in request and (not isinstance(request[field], (int, float))

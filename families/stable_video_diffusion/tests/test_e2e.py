@@ -158,7 +158,7 @@ def _initial_image(manifest: dict, case: dict, tmp_path: Path) -> tuple[Path, np
     from PIL import Image
 
     height, width = int(manifest["image_height"]), int(manifest["image_width"])
-    source = Image.open(TEST_ROOT / "data" / case["image"]).convert("RGB")
+    source = Image.open(TEST_ROOT / case["image"]).convert("RGB")
     crop_width = min(source.width, round(source.height * width / height))
     crop_height = min(source.height, round(crop_width * height / width))
     left = (source.width - crop_width) // 2

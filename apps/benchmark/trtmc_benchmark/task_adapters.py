@@ -977,12 +977,20 @@ def _image_generation_request(task: str, case: Mapping[str, Any], root: Path) ->
 def _initial_image_video_request(case: Mapping[str, Any], root: Path) -> dict[str, Any]:
     """The Task's inputs (prompt, initial image) and only the generation controls the testcase states; the
     image is optional here because a testcase may only flag ``initial_image`` and leave the picture to the
-    benchmark (an AIPerf suite supplies one of the bundle's size)."""
-    base = _image_generation_request("image_generation", case, root)
-    request: dict[str, Any] = {"prompt": base["prompt"]}
+    benchmark (an AIPerf suite supplies one of the bundle's size). An image-only model (Stable Video Diffusion)
+    states no prompt: its request carries the empty prompt its Task requires."""
+    stated = any(case.get(key) for key in ("prompt", "test_prompt", "prompt_file", "prompt_repeat")) or any(
+        _inputs(case).get(key) for key in ("prompt", "source_text"))
+    base = _image_generation_request("image_generation", case if stated else {**case, "prompt": "unused"}, root)
+    request: dict[str, Any] = {"prompt": base["prompt"] if stated else ""}
     if base["negative_prompt"]:
         request["negative_prompt"] = base["negative_prompt"]
-    for name in ("seed", "num_steps", "height", "width"):
+    steps = _explicit(case, "num_inference_steps", "num_steps")
+    if steps is not _MISSING and int(steps) > 0:
+        request["num_steps"] = int(steps)
+    elif base["num_steps"] > 0:  # inputs.num_sampling_steps
+        request["num_steps"] = base["num_steps"]
+    for name in ("seed", "height", "width"):
         if base[name] > 0 or (name == "seed" and base[name] == 0):
             request[name] = base[name]
     if base["guidance_scale"] >= 0:
