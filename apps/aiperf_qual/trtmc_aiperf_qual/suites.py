@@ -597,6 +597,8 @@ def unstated_defaults(request: Mapping[str, Any], operation: str | None = None) 
         required = ["num_steps", "guidance_scale", "height", "width"]
         if request.get("media_type") == "video":
             required.append("num_frames")
+        if all(request.get(name) not in (None, "") for name in ("min_guidance_scale", "max_guidance_scale")):
+            required.remove("guidance_scale")  # a per-frame guidance range (Stable Video Diffusion) states it
         problems += [field for field in required if request.get(field) in (None, "") and field not in problems]
         problems += [field for field in ("num_steps", "height", "width", "num_frames")
                      if field in request and (not isinstance(request[field], (int, float))
@@ -794,19 +796,11 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
             record = {**record, field: str(_square_crop(Path(record[field]), Path(environment["hf_datasets_cache"])))}
         request = {**base, **(record.get("request") or {})}
         request.update(definition.get("request") or {})
-        # A null removes a field of the catalog request: a control the Task declares no config for (Stable Video
-        # Diffusion has no width or height; its frames are then fitted to the bundle's video size).
-        request = {key: value for key, value in request.items() if value is not None}
         for source_field, request_field in (definition.get("fields") or {}).items():
             request[request_field] = record[source_field] if source_field in record else _field(record, source_field)
         for field in definition.get("fit_to_request", []):  # an image at the request's width x height
-            size = {**(definition.get("fit_size") or {}), **{key: request[key] for key in ("width", "height")
-                                                              if key in request}}
-            if "width" not in size or "height" not in size:
-                raise ConfigError(f"suite {definition['suite']}: fit_to_request needs the request's width and "
-                                  "height, or the bundle's video size")
             request[field] = str(_cover_crop(request[field], Path(environment["hf_datasets_cache"]),
-                                             int(size["width"]), int(size["height"])))
+                                             int(request["width"]), int(request["height"])))
         if isinstance(request.get("prompt"), str) and (definition.get("prompt_prefix") or definition.get("prompt_suffix")):
             request["prompt"] = f"{definition.get('prompt_prefix', '')}{request['prompt']}{definition.get('prompt_suffix', '')}"
         try:  # the media go to the shared store once; the request keeps their digests

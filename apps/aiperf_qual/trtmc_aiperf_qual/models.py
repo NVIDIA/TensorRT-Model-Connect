@@ -97,11 +97,9 @@ def _reference_backend(operation: str, task: str) -> str:
     return "reference" if operation in HF_OPERATIONS and task not in NO_GENERIC_TASKS else "unsupported"
 
 
-def _suite(reference: str | Mapping[str, Any], profile: str, catalog_request: Mapping[str, Any] | None = None,
-           video_size: Mapping[str, int] | None = None) -> dict[str, Any]:
+def _suite(reference: str | Mapping[str, Any], profile: str, catalog_request: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """A suite definition; ``catalog_request`` (config/models ``request``) states controls the catalog request
-    leaves to each side's default, in every suite built on that request (the suite's own request wins).
-    ``video_size`` (the bundle's frame size) fits a suite's images when its requests state no width and height."""
+    leaves to each side's default, in every suite built on that request (the suite's own request wins)."""
     if isinstance(reference, Mapping):
         suite = dict(reference)
         if (suite.get("source") or {}).get("kind") == "catalog_testcase" and not suite["source"].get("profile"):
@@ -117,20 +115,12 @@ def _suite(reference: str | Mapping[str, Any], profile: str, catalog_request: Ma
     on_catalog = suite.get("base_profile") or (suite.get("source") or {}).get("kind") == "catalog_testcase"
     if catalog_request and on_catalog:
         suite["request"] = {**dict(catalog_request), **dict(suite.get("request") or {})}
-    if video_size and suite.get("fit_to_request"):
-        suite["fit_size"] = dict(video_size)
     return suite
-
-
-def _video_size(manifest: Mapping[str, Any]) -> dict[str, int] | None:
-    """A video bundle's frame size from its catalog manifest (``image_width`` x ``image_height``)."""
-    width, height = int(manifest.get("image_width") or 0), int(manifest.get("image_height") or 0)
-    return {"width": width, "height": height} if width > 0 and height > 0 else None
 
 
 def model_suite(reference: str | Mapping[str, Any], model: Mapping[str, Any]) -> dict[str, Any]:
     """``_suite`` for a resolved model (its catalog profile and stated catalog request)."""
-    return _suite(reference, model["catalog_profile"], model.get("catalog_request"), model.get("video_size"))
+    return _suite(reference, model["catalog_profile"], model.get("catalog_request"))
 
 
 def _absolute(names: list[Any], definitions: Mapping[str, Any], testcase: Mapping[str, Any],
@@ -282,7 +272,7 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
             if not item.get("suite_definition"):  # a benchmark whose suite each profile states
                 raise ConfigError(f"{profile}: benchmark {item.get('suite')!r} names no suite_definition; the "
                                   "profile's own configuration states its suite")
-            suite = _suite(item["suite_definition"], profile, config.get("request"), _video_size(manifest))
+            suite = _suite(item["suite_definition"], profile, config.get("request"))
             if item.get("request"):  # a null removes the suite's field (a Task that declares no such config)
                 request = {**suite.get("request", {}), **item.pop("request")}
                 suite = {**suite, "request": {key: value for key, value in request.items() if value is not None}}
@@ -310,7 +300,7 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         if source is None or not isinstance(source.get("suite_definition"), Mapping):
             raise ConfigError(f"{profile}: performance.suite.from_benchmark {name!r} is not one of its gold suites")
         policy["suite"] = {**source["suite_definition"], "suite": f"{profile}-{name}-first", "selection": {"method": "first", "count": 1}}
-    policy["suite"] = _suite(policy["suite"], profile, config.get("request"), _video_size(manifest))
+    policy["suite"] = _suite(policy["suite"], profile, config.get("request"))
     reference_model = reference.pop("model", None)
     reference_revision = reference.pop("revision", None) or (None if reference_model else revision)
     size = checkpoint_bytes(reference_model or catalog_model.hf_id, reference_revision)  # the native's checkpoint
@@ -326,7 +316,6 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         "model": profile, "catalog_profile": profile, "operation": operation, "family": catalog_model.family,
         **({"qualified_as": base} if base != profile else {}),
         **({"catalog_request": dict(config["request"])} if config.get("request") else {}),
-        **({"video_size": _video_size(manifest)} if _video_size(manifest) else {}),
         "task": catalog_model.task,
         "candidate": {"bundle": bundle, "precision": candidate_precision, "build": build,
                       "manifest": str(catalog_model.manifest_path), "checkpoint": catalog_model.hf_id,

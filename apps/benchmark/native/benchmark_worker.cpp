@@ -2896,10 +2896,25 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
             observe_video);
     }
     if (initial) {
-        // The frame count is fixed by the bundle; a stated one must be what it produced.
-        const auto expected = request.value("num_frames", std::int64_t{0});
+        // The frame count is fixed by the bundle; a stated one must be what it produced. So is the
+        // frame size of a Task that declares no height or width config (Stable Video Diffusion).
         const auto task = task_for_operation<trtmc::InitialImageTextToVideo>(model, task_id);
-        const auto config = sdk_config(request, task.config_fields(),
+        const auto fields = task.config_fields();
+        const auto declares = [&](std::string_view name) {
+            return std::any_of(fields.begin(), fields.end(),
+                               [&](const auto& field) { return field.name == name; });
+        };
+        const bool fixed_size = !declares("height") && !declares("width");
+        Json inputs = request;
+        std::vector<std::pair<std::string, std::int64_t>> expected{
+            {"num_frames", request.value("num_frames", std::int64_t{0})}};
+        if (fixed_size)
+            for (const char* name : {"height", "width"})
+                if (inputs.contains(name)) {
+                    expected.emplace_back(name, inputs.at(name).get<std::int64_t>());
+                    inputs.erase(name);
+                }
+        const auto config = sdk_config(inputs, fields,
                                        {"prompt", "image_path", "image_paths", "num_frames",
                                         "batch_size", "media_type", "_artifact_prefix"});
         return run(
@@ -2910,8 +2925,10 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
             },
             [&](const trtmc::VideoGenerationResult& result) {
                 auto output = observe_video(result);
-                if (expected > 0 && output.at("num_frames").get<std::int64_t>() != expected)
-                    throw std::runtime_error("generated video does not have the stated num_frames");
+                for (const auto& [name, value] : expected)
+                    if (value > 0 && output.at(name).get<std::int64_t>() != value)
+                        throw std::runtime_error("generated video does not have the stated " +
+                                                 name);
                 return output;
             });
     }

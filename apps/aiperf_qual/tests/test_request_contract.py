@@ -14,6 +14,10 @@ def test_image_video_controls_must_be_present_but_do_not_apply_to_text_or_speech
     assert unstated_defaults(image, "generate_image") == []
     assert unstated_defaults({**image, "media_type": "video"}, "generate_image") == ["num_frames"]
     assert unstated_defaults({**image, "num_steps": -1}, "generate_image") == ["num_steps"]
+    # a per-frame guidance range (Stable Video Diffusion) states the guidance; one end alone does not
+    ranged = {"num_steps": 25, "min_guidance_scale": 1.0, "max_guidance_scale": 3.0, "height": 576, "width": 1024}
+    assert unstated_defaults(ranged, "generate_image") == []
+    assert unstated_defaults({**ranged, "max_guidance_scale": None}, "generate_image") == ["guidance_scale"]
     assert unstated_defaults({"prompt": "cat"}, "generate") == []
     assert unstated_defaults({"text": "hello"}, "generate_audio") == []
 

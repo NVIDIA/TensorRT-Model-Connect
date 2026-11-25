@@ -540,18 +540,6 @@ def test_a_fitted_image_covers_the_video_size_and_keeps_its_center(tmp_path):
     assert _cover_crop(inline, tmp_path / "cache", 16, 32) == fitted  # a decoded dataset image column
 
 
-
-def test_a_video_suite_fits_its_images_to_the_bundle_size_when_the_request_states_none():
-    from trtmc_aiperf_qual.models import _suite, _video_size
-
-    size = _video_size({"image_width": 1024, "image_height": 576})
-    assert size == {"width": 1024, "height": 576} and _video_size({"image_width": 1024}) is None
-    fitted = {"suite": "s", "version": 1, "source": {"kind": "hf_dataset"}, "selection": {"method": "first", "count": 1},
-              "fit_to_request": ["image_path"]}
-    assert _suite(fitted, "p", None, size)["fit_size"] == {"width": 1024, "height": 576}
-    plain = {key: value for key, value in fitted.items() if key != "fit_to_request"}
-    assert "fit_size" not in _suite(plain, "p", None, size) and "fit_size" not in _suite(fitted, "p")
-
 def test_structure_parity_compares_the_written_structure_with_the_native_coordinates(tmp_path):
     import json
 

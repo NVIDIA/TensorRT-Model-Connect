@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# An image-only model: the catalog request's prompt is empty. Its runtime declares no width or height config, so the
-# catalog request's size (from the manifest) is removed and the COCO start frames are fitted to the bundle's video size.
+# An image-only model: the catalog request's prompt is empty and its size is the bundle's. Its guidance is a per-frame
+# range, stated here at the pipeline's defaults (the runtime's too) so neither side falls back on its own.
 reference:
   adapter: families/stable_video_diffusion/reference/adapter.py  # Diffusers StableVideoDiffusionPipeline
   requirements: families/stable_video_diffusion/requirements.txt
   options: {num_frames: 25}  # the manifest's video_num_frames
-request: {width: null, height: null}
+request: {min_guidance_scale: 1.0, max_guidance_scale: 3.0}
