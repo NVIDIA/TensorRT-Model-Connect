@@ -13,7 +13,7 @@ from families.hstu.triton.native_client import NativeClient
 from families.hstu.config import Config
 from families.hstu.reference import example_inputs
 
-from .common import root, runtime_root
+from .common import root, runtime_root, infer
 
 admin = http.InferenceServerClient("localhost:8000")
 results = []
@@ -289,4 +289,47 @@ try:
     print("positive allocation-failure metric under leased-entry pressure PASS", flush=True)
 finally:
     admin.unload_model(model)
+# A native endpoint and a hydration endpoint must coexist without sharing cache state.
+native_model = "native_dlrmv3_default_fp32"
+history_model = "hydrated_dlrmv3_default_fp32"
+try:
+    admin.load_model(native_model)
+    admin.load_model(history_model)
+    directory = root / "output/dlrmv3-default-fp32"
+    features = example_inputs(Config.load(directory), 1)
+    with NativeClient(directory / "model.bundle", runtime_root) as producer:
+        history = {s["name"]: features[s["name"]] for s in producer.metadata["stages"][0]["inputs"]}
+        snapshot = producer.export_history(history, ["coexist-v1"])
+    response = call(
+        admin,
+        http,
+        history_model,
+        {"operation": "restore"},
+        {"CACHE_SNAPSHOT": np.frombuffer(snapshot, dtype=np.uint8)},
+        ["CACHE_STATUS"],
+    )
+    restored = json.loads(response.as_numpy("CACHE_STATUS")[0])["handles"]
+    request = {k: v for k, v in features.items() if k not in history}
+    cached = call(
+        admin,
+        http,
+        history_model,
+        {"operation": "score", "handles": restored, "revisions": ["coexist-v1"]},
+        request,
+        ["scores"],
+    )
+    cold = infer(admin, http, native_model, features, ["scores"])
+    np.testing.assert_array_equal(cached.as_numpy("scores"), cold.as_numpy("scores"))
+    _, hydrated = wait_metrics(history_model, lambda v: v.get("resident_entries") == 1)
+    _, native = wait_metrics(native_model, lambda v: v.get("peak_bytes", 0) > 0)
+    assert hydrated["history_prepare_calls_total"] == 0
+    assert native["reserved_bytes"] == 4 * 5 * 4 * 513 * 256 * 4
+    assert hydrated["reserved_bytes"] == 5 * 5 * 4 * 513 * 256 * 4
+    (root / "cross-backend-cache-isolation.json").write_text(
+        json.dumps(dict(native=native, hydrated=hydrated, scores_bit_identical=True), indent=2)
+    )
+    print("native and hydration endpoint coexistence and cache isolation PASS", flush=True)
+finally:
+    admin.unload_model(history_model)
+    admin.unload_model(native_model)
 admin.close()

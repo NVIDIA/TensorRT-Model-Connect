@@ -133,6 +133,14 @@ HistorySnapshot decode_history_snapshot(const std::vector<std::uint8_t>& data,
                 require(value == 0 || value == 1, "invalid history mask");
             }
         }
+        if (dtype == DType::kInt64) {
+            for (std::size_t j = 0; j < bytes; j += sizeof(std::int64_t)) {
+                std::int64_t value;
+                std::memcpy(&value, pointer + j, sizeof(value));
+                require(value >= 0 && value <= (std::int64_t{1} << 40),
+                        "invalid history query timestamp");
+            }
+        }
         FeatureTensor tensor{spec.at("name"), dtype, shape, {}};
         tensor.bytes.assign(pointer, pointer + bytes);
         result.tensors.push_back(std::move(tensor));

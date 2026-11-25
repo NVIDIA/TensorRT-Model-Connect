@@ -29,7 +29,6 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const auto request_plan = context.reader.read_section("request_prepare.plan");
     const auto step_plan = context.reader.read_section("step.plan");
     trtmc::ModuleCreateOptions options;
-    options.engine_timing = false;
     auto prepare = context.backend.create_module(prepare_plan.data(), prepare_plan.size(), options);
     options.stream = prepare->stream();
     auto request = context.backend.create_module(request_plan.data(), request_plan.size(), options);

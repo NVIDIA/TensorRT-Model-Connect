@@ -33,7 +33,7 @@ class TrtModuleImpl final : public ITrtModule {
                   cudaStream_t stream, int32_t profile_idx = 0,
                   void* distributed_communicator = nullptr,
                   const std::vector<ModuleExternalBinding>& external_bindings = {},
-                  bool backend_managed_cuda_graph = false, bool engine_timing = true);
+                  bool backend_managed_cuda_graph = false);
     ~TrtModuleImpl() override;
 
     TrtModuleImpl(const TrtModuleImpl&) = delete;
@@ -95,7 +95,6 @@ class TrtModuleImpl final : public ITrtModule {
     bool has_dynamic_shapes_{false};
     bool use_cuda_graph_{false};
     bool backend_managed_cuda_graph_{false};
-    bool engine_timing_{true};
     bool alias_groups_ready_{true};
     std::unique_ptr<CudaGraphExec> cuda_graph_;
     std::vector<std::shared_ptr<void>> keep_alive_;

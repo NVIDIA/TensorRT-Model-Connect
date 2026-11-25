@@ -23,7 +23,6 @@ struct ModuleCreateOptions {
     std::shared_ptr<void> distributed_owner; // keeps communicator alive
     const char* runtime_cache_path{""};      // TensorRT-RTX JIT cache, optional
     bool cuda_graphs{false};                 // TensorRT-RTX whole-graph capture
-    bool engine_timing{true};                // optional per-enqueue CUDA events
 };
 
 struct ModuleExternalBinding {

@@ -74,10 +74,10 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
                              cudaStream_t stream, int32_t profile_idx,
                              void* distributed_communicator,
                              const std::vector<ModuleExternalBinding>& external_bindings,
-                             bool backend_managed_cuda_graph, bool engine_timing)
+                             bool backend_managed_cuda_graph)
     : engine_(engine), ctx_(ctx), stream_(stream), profile_idx_(profile_idx),
       distributed_communicator_(distributed_communicator),
-      backend_managed_cuda_graph_(backend_managed_cuda_graph), engine_timing_(engine_timing),
+      backend_managed_cuda_graph_(backend_managed_cuda_graph),
       cuda_graph_(std::make_unique<CudaGraphExec>()) {
     if (!ctx_)
         return;
@@ -741,7 +741,7 @@ void TrtModuleImpl::enqueue_without_cuda_graph() {
 
 void TrtModuleImpl::record_timed_enqueue() {
     TimingEvent timing_event;
-    const bool timing_ok = engine_timing_ && begin_timing_event(timing_event);
+    const bool timing_ok = begin_timing_event(timing_event);
     try {
         if (!use_cuda_graph_)
             enqueue_without_cuda_graph();

@@ -69,3 +69,6 @@ def build(request, writer):
     writer.add_json(
         "checkpoint_provenance.json", json.loads((root / "checkpoint_provenance.json").read_text())
     )
+    owner = Path(__file__).parent
+    writer.add_bytes("LICENSE.txt", (owner / "UPSTREAM_LICENSE.txt").read_bytes())
+    writer.add_bytes("NOTICE", (owner / "NOTICE").read_bytes())

@@ -64,8 +64,7 @@ preparation execute through the native TensorRT runtime.
 
 `trtmc::IStructuredRanking::score`, `cache_stats`, the native Python client and
 Triton tensor transport preserve the shared serving APIs. The interface
-header lives in this family at `include/task.h`. DLRMv3 has its own schema;
-it does not imitate the private AJK/DAZR/Feed feature names or slate outputs.
+header lives in this family at `include/task.h`. Tensor schemas and scores follow DLRMv3.
 
 | Input | Type | Shape |
 |---|---|---|

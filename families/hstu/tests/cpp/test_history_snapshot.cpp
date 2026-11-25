@@ -36,7 +36,8 @@ int main() {
         Json specs =
             Json::array({{{"name", "history_k_b"}, {"dtype", "float32"}, {"shape", {-1, 1, 2, 2}}},
                          {{"name", "history_v_b"}, {"dtype", "float32"}, {"shape", {-1, 1, 2, 2}}},
-                         {{"name", "history_mask"}, {"dtype", "int32"}, {"shape", {-1, 2}}}});
+                         {{"name", "history_mask"}, {"dtype", "int32"}, {"shape", {-1, 2}}},
+                         {{"name", "query_timestamp_b"}, {"dtype", "int64"}, {"shape", {-1, 1}}}});
         HistorySnapshot snapshot;
         snapshot.metadata = {{"batch", 1},
                              {"bundle_id", identity},
@@ -51,7 +52,7 @@ int main() {
         }
         const auto original = encode_history_snapshot(snapshot);
         auto decoded = decode_history_snapshot(original, identity, specs, 4);
-        check(decoded.tensors.size() == 3 && decoded.metadata.at("revisions").at(0) == "r1");
+        check(decoded.tensors.size() == 4 && decoded.metadata.at("revisions").at(0) == "r1");
         decoded.tensors[0].bytes[0] = 7;
         check(snapshot.tensors[0].bytes[0] == 0);
         auto damaged = original;
@@ -76,6 +77,12 @@ int main() {
             decode_history_snapshot(encode_history_snapshot(snapshot), identity, specs, 4);
         });
         std::memset(snapshot.tensors[2].bytes.data(), 0, 4);
+        const std::int64_t invalid_time = -1;
+        std::memcpy(snapshot.tensors[3].bytes.data(), &invalid_time, sizeof(invalid_time));
+        reject([&] {
+            decode_history_snapshot(encode_history_snapshot(snapshot), identity, specs, 4);
+        });
+        std::memset(snapshot.tensors[3].bytes.data(), 0, sizeof(invalid_time));
         snapshot.metadata["revisions"] = Json::array();
         reject([&] {
             decode_history_snapshot(encode_history_snapshot(snapshot), identity, specs, 4);
