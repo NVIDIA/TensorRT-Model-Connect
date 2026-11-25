@@ -68,7 +68,9 @@ def _wan(transformer: Mapping[str, Any], vae: Mapping[str, Any], height: int, wi
     return (1, transformer["in_channels"], (frames - 1) // temporal + 1, height // spatial, width // spatial)
 
 
+# FLUX.2-klein draws and packs its latents exactly as FLUX.2 does.
 LAYOUTS = {"FluxPipeline": Layout(_flux_like, pack=True), "Flux2Pipeline": Layout(_flux2),
+           "Flux2KleinPipeline": Layout(_flux2),
            "PixArtSigmaPipeline": Layout(_pixart, cast_to_pipeline_dtype=True),
            "QwenImagePipeline": Layout(_qwen_image, pack=True), "QwenImageEditPipeline": Layout(_qwen_image, pack=True),
            "QwenImageEditPlusPipeline": Layout(_qwen_image, pack=True), "ZImagePipeline": Layout(_z_image),

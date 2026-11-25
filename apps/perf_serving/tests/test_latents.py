@@ -15,6 +15,7 @@ def test_canonical_shapes_follow_each_pipelines_own_latent_draw():
     image = {"height": 1024, "width": 768}
     assert canonical_shape("FluxPipeline", {"in_channels": 64}, SD_VAE, image) == (1, 16, 128, 96)
     assert canonical_shape("Flux2Pipeline", {"in_channels": 128}, SD_VAE, image) == (1, 128, 64, 48)
+    assert canonical_shape("Flux2KleinPipeline", {"in_channels": 128}, SD_VAE, image) == (1, 128, 64, 48)
     assert canonical_shape("PixArtSigmaPipeline", {"in_channels": 4}, SD_VAE, image) == (1, 4, 128, 96)
     assert canonical_shape("QwenImagePipeline", {"in_channels": 64}, {"temperal_downsample": [False, True, True]},
                            image) == (1, 1, 16, 128, 96)

@@ -99,7 +99,8 @@ def _reference_backend(operation: str, task: str) -> str:
 
 def _suite(reference: str | Mapping[str, Any], profile: str, catalog_request: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """A suite definition; ``catalog_request`` (config/models ``request``) states controls the catalog request
-    leaves to each side's default, in every suite built on that request (the suite's own request wins)."""
+    leaves to each side's default, in every suite built on that request (the suite's own request wins). A null
+    there removes the control from every such request: the model takes it on neither side."""
     if isinstance(reference, Mapping):
         suite = dict(reference)
         if (suite.get("source") or {}).get("kind") == "catalog_testcase" and not suite["source"].get("profile"):
@@ -271,8 +272,11 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
                                   "profile's own configuration states its suite")
             suite = _suite(item["suite_definition"], profile, config.get("request"))
             if item.get("request"):  # a null removes the suite's field (a Task that declares no such config)
-                request = {**suite.get("request", {}), **item.pop("request")}
-                suite = {**suite, "request": {key: value for key, value in request.items() if value is not None}}
+                own = item.pop("request")
+                request = {**suite.get("request", {}), **own}
+                # config/models' nulls stay: building the suite removes them from the catalog request too.
+                suite = {**suite, "request": {key: value for key, value in request.items()
+                                              if value is not None or key not in own}}
             item["suite_definition"] = suite
     supplementary = [dict(item) for item in config.get("supplementary", [])]
     if config.get("accuracy_source") not in (None, "none"):

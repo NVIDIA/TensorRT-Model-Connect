@@ -587,14 +587,18 @@ MODEL_DEFAULT_FIELDS = ("num_steps", "num_inference_steps", "num_sampling_steps"
                         "num_frames", "video_num_frames")
 
 
-def unstated_defaults(request: Mapping[str, Any], operation: str | None = None) -> list[str]:
+def unstated_defaults(request: Mapping[str, Any], operation: str | None = None,
+                      stated: Mapping[str, Any] | None = None) -> list[str]:
     """Unresolved controls and fields required by the image/video request contract.
 
-    Text, speech and tensor operations do not inherit image-generation requirements.
+    Text, speech and tensor operations do not inherit image-generation requirements. ``stated`` is the profile's
+    configuration request (config/models ``request``): a control it sets to null is one the model takes on neither
+    side (Qwen-Image 2.1 has no guidance_scale), so no request states it and none is required to.
     """
+    absent = {field for field, value in (stated or {}).items() if value is None}
     problems = [field for field in MODEL_DEFAULT_FIELDS if request.get(field) in (-1, -1.0)]
     if operation == "generate_image":
-        required = ["num_steps", "guidance_scale", "height", "width"]
+        required = [field for field in ("num_steps", "guidance_scale", "height", "width") if field not in absent]
         if request.get("media_type") == "video":
             required.append("num_frames")
         problems += [field for field in required if request.get(field) in (None, "") and field not in problems]
@@ -793,7 +797,11 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
         for field in source.get("square_crop", []):  # only the selected images
             record = {**record, field: str(_square_crop(Path(record[field]), Path(environment["hf_datasets_cache"])))}
         request = {**base, **(record.get("request") or {})}
-        request.update(definition.get("request") or {})
+        for field, value in (definition.get("request") or {}).items():
+            if value is None:  # a control the model takes on neither side (a null in config/models ``request``)
+                request.pop(field, None)
+            else:
+                request[field] = value
         for source_field, request_field in (definition.get("fields") or {}).items():
             request[request_field] = record[source_field] if source_field in record else _field(record, source_field)
         for field in definition.get("fit_to_request", []):  # an image at the request's width x height

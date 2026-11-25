@@ -233,7 +233,7 @@ def _collect_outputs(environment: Environment, service: Mapping[str, Any], model
                   suite: Suite, out: Path) -> dict[str, Any]:
     """One observation per suite sample from a server (sequential, one request each)."""
     for sample in suite.samples:
-        if missing := unstated_defaults(sample["request"], model["operation"]):
+        if missing := unstated_defaults(sample["request"], model["operation"], model.get("catalog_request")):
             raise ValueError(f"{suite.name}: state {', '.join(missing)} explicitly before benchmarking")
     run = run_aiperf(environment, out, [*TASK_ENDPOINT, *_task_url(service, model["operation"]), "--concurrency", "1",
                                         "--input-file", str(suite.write_inputs(out.parent / f"{out.name}.inputs.jsonl")),
@@ -831,7 +831,8 @@ def execution_session(model: Mapping[str, Any], environment: Environment, out: P
         lambda mine, theirs: judge.work_check({"work": [mine] if mine is not None else []},
                                              {"work": [theirs] if theirs is not None else []}) is None,
         smoke=bool(environment.values.get("smoke")),
-        request_problems=lambda payload: unstated_defaults(payload.get("request") or {}, model["operation"]), **kwargs)
+        request_problems=lambda payload: unstated_defaults(payload.get("request") or {}, model["operation"],
+                                                         model.get("catalog_request")), **kwargs)
 
 
 def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[str, Any]:
@@ -905,7 +906,8 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
     gold_metrics.protect(gold_metrics.protected_roots(environment.values, root))
     accuracy: list[dict[str, Any]] = []
     performance: list[dict[str, Any]] = []
-    unstated = unstated_defaults(perf_suite.samples[0]["request"], model["operation"]) if perf_suite else []
+    unstated = (unstated_defaults(perf_suite.samples[0]["request"], model["operation"], model.get("catalog_request"))
+                if perf_suite else [])
     if unstated:  # each side would apply its own default: different work
         phases.errors["perf_request"] = (f"the timed request leaves {', '.join(unstated)} to each side's default; "
                                          "state them in config/models performance")
