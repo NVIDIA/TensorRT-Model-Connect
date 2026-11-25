@@ -106,6 +106,45 @@ class Network:
         layer.axis = axis
         return layer.get_output(0)
 
+    def batch_gather(self, value, indices, axis):
+        layer = self.n.add_gather(value, indices, axis)
+        layer.num_elementwise_dims = 1
+        return layer.get_output(0)
+
+    def refine_selection(self, scores, canonical, eligible, tensors, attention_scores):
+        """Refine a small shortlist; keep the graph eligible for capture/replay."""
+        count = min(self.c.refinement_candidates, self.c.candidates)
+        if count < 2:
+            return scores
+        masked = self.select(eligible, scores, self.const([-1e30], np.float32))
+        top = self.n.add_topk(masked, trt.TopKOperation.MAX, count, 1 << 1)
+        values, indices = top.get_output(0), top.get_output(1)
+        first = self.n.add_gather(values, self.const([0], np.int32), 1).get_output(0)
+        second = self.n.add_gather(values, self.const([1], np.int32), 1).get_output(0)
+        close = self.less(
+            self.op(first, second, "SUB"), self.const([self.c.selection_margin], np.float32)
+        )
+        enough = self.less(
+            self.const([1], np.int32), self.reduce(self.cast(eligible, trt.int32), "SUM", 1)
+        )
+        needed = self.cast(self.op(close, enough, "AND"), trt.int32)
+        selected = self.batch_gather(canonical, indices, 1)
+        q, u, x, keys, vals, mask = tensors
+        refined = attention_scores(
+            False,
+            self.batch_gather(q, selected, 2),
+            self.batch_gather(u, selected, 1),
+            self.batch_gather(x, selected, 1),
+            keys,
+            vals,
+            self.batch_gather(mask, selected, 2),
+            count,
+        )
+        scatter = self.n.add_scatter(scores, selected, refined, trt.ScatterMode.ELEMENT)
+        scatter.axis = 1
+        decision = self.select(self.cast(needed, trt.bool), scatter.get_output(0), scores)
+        return self.batch_gather(decision, canonical, 1)
+
     def project(self, raw, positions, tokens):
         c = self.c
         d, h = c.hidden_size, c.num_heads
@@ -133,7 +172,7 @@ class Network:
         c = self.c
         d, t, r, k = c.hidden_size, c.history_length, c.decode_steps, c.candidates
         dtype = {"float32": trt.float32, "int32": trt.int32, "int64": trt.int64}
-        specs = c.runtime(1, "fp32")["stages"]
+        specs = c.runtime(max(c.min_batch_size, c.opt_batch_size or 1), "fp32")["stages"]
         schema = next(s for s in specs if s["name"] == stage)
         inp = {
             s["name"]: self.n.add_input(s["name"], dtype[s["dtype"]], s["shape"])
@@ -188,42 +227,45 @@ class Network:
             target = self.mul(self.const(np.eye(k, dtype=np.float32)[None, None, :, :]), batch_ones)
             mask = self.concat([history, previous, target], 3)
 
-            def attention_scores(low):
-                logits = self.mm(q, keys, low=low, transpose=True)
+            def attention_scores(
+                low,
+                query=q,
+                gate=u,
+                residual=x,
+                all_keys=keys,
+                all_values=values,
+                query_mask=mask,
+                queries=k,
+            ):
+                logits = self.mm(query, all_keys, low=low, transpose=True)
                 # Keep the complete SiLU/scale/mask epilogue in one explicit
                 # dtype. TensorRT owns whether this graph becomes fused HSTU.
                 epi = self.low if low and c.bf16_attention_epilogue else trt.float32
                 logits = self.cast(logits, epi)
-                scale = self.cast(self.const([1 / (t + r + k)], np.float32), epi)
+                scale = self.cast(self.const([1 / c.normalization_length], np.float32), epi)
                 attention = self.mul(self.silu(logits), scale)
-                attended = self.mm(self.mul(attention, self.cast(mask, epi)), values, low=low)
-                attended = self.reshape(self.transpose(attended, (0, 2, 1, 3)), (-1, k, d))
+                attended = self.mm(
+                    self.mul(attention, self.cast(query_mask, epi)), all_values, low=low
+                )
+                attended = self.reshape(self.transpose(attended, (0, 2, 1, 3)), (-1, queries, d))
                 encoded = self.add(
                     self.add(
                         self.linear(
-                            self.mul(u, self.norm(attended)), "output_weight", low=self.fast_bf16
+                            self.mul(gate, self.norm(attended)), "output_weight", low=self.fast_bf16
                         ),
                         self.const(self.w["output_bias"]),
                     ),
-                    x,
+                    residual,
                 )
                 return self.reshape(
                     self.add(
                         self.linear(self.norm(encoded), "head_weight"),
                         self.const(self.w["head_bias"]),
                     ),
-                    (-1, k),
+                    (-1, queries),
                 )
 
             raw_scores = attention_scores(low=True)
-            # Strict mode retains an FP32 selector for greedy slate stability.
-            # Fast mode uses one BF16 attention/output-projection path for both
-            # scores and selections, accepting bounded ranking differences.
-            decision_scores = (
-                attention_scores(low=False)
-                if self.precision == "bf16" and not self.fast_bf16
-                else raw_scores
-            )
             # Equal item IDs denote the same mathematical query. Canonicalize the
             # score to its first occurrence before stable argmax: GEMM row tiling
             # may otherwise perturb exact duplicates by an FP32 ULP.
@@ -242,17 +284,16 @@ class Network:
             gather = self.n.add_gather(raw_scores, canonical, 1)
             gather.num_elementwise_dims = 1
             raw_scores = gather.get_output(0)
-            if self.precision == "bf16" and not self.fast_bf16:
-                decision = self.n.add_gather(decision_scores, canonical, 1)
-                decision.num_elementwise_dims = 1
-                decision_scores = decision.get_output(0)
-            else:
-                decision_scores = raw_scores
             eligible = self.op(
                 self.equal(inp["placed_mask"], self.const([0], np.int32)),
                 self.equal(inp["valid_mask"], self.const([1], np.int32)),
                 "AND",
             )
+            decision_scores = raw_scores
+            if self.precision == "bf16" and not self.fast_bf16:
+                decision_scores = self.refine_selection(
+                    raw_scores, canonical, eligible, (q, u, x, keys, values, mask), attention_scores
+                )
             masked = self.select(eligible, decision_scores, self.const([-1e30], np.float32))
             maximum = self.reduce(masked, "MAX", 1)
             indices = self.const(np.arange(k, dtype=np.int64)[None, :])

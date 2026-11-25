@@ -1,10 +1,14 @@
 # Public HSTU ranking
 
+For the recommended existing trained 16-block checkpoint and configurable
+serving profiles, use [hstu_research](../hstu_research/README.md). This family
+retains the earlier one-block target-aware greedy-slate example.
+
 This family uses Meta's Apache-2.0 [HSTU implementation](https://github.com/meta-recsys/generative-recommenders/blob/474afe5cfdb3d16d603d04f943f4dbe7eb6866fd/generative_recommenders/research/modeling/sequential/hstu.py), revision `474afe5cfdb3d16d603d04f943f4dbe7eb6866fd`, as its mathematical reference. It contains one HSTU block and a public target-aware scoring head/greedy slate adapter. It is not Meta's complete pretrained recommender or its production DLRM model. No customer topology, checkpoint, feature names, or golden outputs are required.
 
 The block computes `LN -> SiLU(U,V,Q,K) -> SiLU(QKᵀ)/N -> mask -> AV -> LN -> U gate -> projection + residual`. Attention has **no softmax**. Timestamp/relative bias, multiple HSTU blocks, and arbitrary upstream checkpoints are outside this profile. The tests execute the pinned upstream block itself, with only CPU dense/jagged transport shims.
 
-Supported profiles: one block, width 256, eight heads, 128 padded history positions, 50 selection rounds, 50 or 64 candidates, FP32/BF16, variable batch size up to the built maximum. The application pads histories and supplies lengths. Candidate queries see valid history, previously selected items, and themselves. Duplicate item IDs use their first occurrence's score before stable, lowest-index tie breaking. Unselected scores remain zero; unused selection slots are `-1`.
+Default profiles: one block, width 256, eight heads, 128 padded history positions, 50 selection rounds, 50 or 64 candidates, FP32/BF16. Architecture and serving dimensions are now separate; alternate dimensions and batch ranges are validated and allocated from configuration. A GPU-qualified alternate profile uses width 128, four heads, T=32, C=17 and seven rounds. Existing flat config files remain readable; saving writes `architecture`, `serving` and `precision` sections. History/round capacities and the normalization divisor belong to the checkpoint, so changing serving padding does not change model mathematics. The application pads histories and supplies lengths. Candidate queries see valid history, previously selected items, and themselves. Duplicate item IDs use their first occurrence's score before stable, lowest-index tie breaking. Unselected scores remain zero; unused selection slots are `-1`.
 
 | Input | Type | Shape |
 | --- | --- | --- |
@@ -42,7 +46,7 @@ Hugging Face was checked as well. [Lingqu-Rec/HSTU-1B](https://huggingface.co/Li
 
 FP32 is the baseline. Both BF16 policies run QK and attention-weight/V GEMMs with BF16 inputs/outputs, restoring FP32 for sensitive arithmetic. The tested A100 Tensor Core tactics accumulate in FP32; BF16 output rounding remains. Embeddings, UVQK projection, normalization, and the score head stay FP32. `config.json` selects:
 
-- `"bf16_policy": "strict"` (default): FP32 output projection and a separate FP32 attention/head selector preserve greedy stability. The existing strict numerical gates apply.
+- `"bf16_policy": "strict"` (default): FP32 output projection and FP32 refinement of a small BF16 shortlist preserve greedy stability. The full candidate-wide FP32 attention/head replica has been removed. `refinement_candidates` defaults to 4; the refined decision is applied when the top-two BF16 score gap is below `selection_margin` (default 0.02). The shortlist computation is unconditional to preserve CUDA Graph capture. The existing strict numerical gates apply.
 - `"bf16_policy": "fast"`: one attention/head path produces scores and selections; the output projection also uses BF16. This trades full-slate/individual-score parity for lower latency. Ranking overlap, held-out quality, and mean score error have separate checks; passing them does not imply passing strict score parity.
 
 These checkpoint fields are encoded in rebuilt bundles. New bundles default to `"cuda_graphs": true`: the native runtime captures/replays the reusable **step engine**, with preparation, the host round loop, and state copies outside capture. TensorRT invalidates its capture when shapes or bindings change. Set the checkpoint field to `false`, or pass `--no-cuda-graphs` below, to disable it. Older bundles without this metadata keep graphs disabled. This family checkpoint option is separate from the shared RTX-only loader graph flag.
@@ -79,7 +83,7 @@ The repository and development image pin **TensorRT 11.4.0.106**. These family o
 
 Add these fields to the checkpoint's `config.json` and rebuild normally. `batching="fixed"` makes every engine profile's minimum, optimum, and maximum batch equal to `BuildRequest.max_batch_size` (CLI `--max-batch-size`). The native runtime rejects any other batch before engine execution, including history export and cached scoring. The default `"dynamic"` retains batches 1 through the requested maximum. This option does not pad or split requests.
 
-`bf16_attention_epilogue=true` keeps the BF16 attention branch's QK output, SiLU, scaling, mask multiplication, and AV inputs in BF16. QK and AV use FP32 accumulation. UVQK projection, normalization and scoring head remain FP32; strict mode also retains its FP32 selection branch. FP32 builds ignore this BF16-only setting. The default `false` retains the existing FP32 SiLU/scaling/mask boundary. Neither option selects a kernel, injects compiler environment options, or changes behavior based on GPU/SDK detection.
+`bf16_attention_epilogue=true` keeps the BF16 attention branch's QK output, SiLU, scaling, mask multiplication, and AV inputs in BF16. QK and AV use FP32 accumulation. UVQK projection, normalization and the strict scoring head remain FP32; strict mode also computes its small FP32 selection shortlist. FP32 builds ignore this BF16-only setting. The default `false` retains the existing FP32 SiLU/scaling/mask boundary. Neither option selects a kernel, injects compiler environment options, or changes behavior based on GPU/SDK detection.
 
 Prepare and validate both fixed profiles using a public checkpoint:
 
@@ -107,7 +111,7 @@ In matched GB300 **strict BF16** measurements on TensorRT 11.6.0.108, the defaul
 | 64 / 1 | 6.211 | 6.456 | +3.9% |
 | 64 / 4 | 6.977 | 7.048 | +1.0% |
 
-Actual traces distinguish 50 fused attention launches from zero, with 50 step graph replays for both variants. These are not FP32-versus-BF16 results and do not establish a latency benefit from fusion. The strict FP32 selection branch remains present. Rebuild plans and repeat accuracy, kernel tracing, and serving qualification with the deployed SDK; 11.6 engines cannot be substituted into the supplied 11.4 Triton image.
+Actual traces distinguish 50 fused attention launches from zero, with 50 step graph replays for both variants. These are not FP32-versus-BF16 results and do not establish a latency benefit from fusion. These historical fusion measurements used the earlier full FP32 selection branch; they do not describe the new shortlist implementation. Rebuild plans and repeat accuracy, kernel tracing, and serving qualification with the deployed SDK; 11.6 engines cannot be substituted into the supplied 11.4 Triton image.
 
 The staged runtime retains the existing three-engine orchestration, GPU slate state, KV byte accounting, SHA-256 snapshots, restore/deduplication, revisions, TTL, leases, and eviction. Cache storage is FP32 in both precision modes: **262,144 KV bytes per history**, plus a 512-byte history mask outside the KV budget. A max-batch-4 engine reserves 1,048,576 scratch KV bytes. Restored histories need budget beyond scratch. Snapshots are bound to the exact bundle hash and cannot migrate from the private model, a rebuilt engine, or a different precision bundle.
 
@@ -209,7 +213,15 @@ python3 -m families.hstu.tests.triton.native_cache
 
 The 26.10 image has four pre-existing configuration-parser defects: it accepts ratio `"0.05junk"`, bytes `"-1"`, `"8388608.5"`, and `"8388608junk"`. The negative tests remain failures; the backend needs strict full-string numeric parsing. This family cannot recover the original strings after the backend has parsed them. Valid budget/metric, multi-model, and multi-instance cases pass.
 
-## Measured result
+## Earlier measured result
+
+The tables below predate the strict shortlist change. In the new GB300/TRT 11.4
+qualification, the four-candidate refinement passed all 160 accuracy cells but
+was 9–12% slower than the former full selector across C50/C64, B1/B4. It removes
+duplicate full-width computation but is not a latency optimization. The fast
+policy remains the lower-latency option for this synthetic slate task. The
+recommended trained `hstu_research` path uses selective FP32 blocks and one
+encoder path, with measured BF16 latency improvements.
 
 AMD64 A100 PCIe 40 GB, supplied 26.10/0.2.0 image, TensorRT 11.4.0.106; public MovieLens 100-step example weights, seed 20261124. This is a short training/integration example, not production recommendation-quality qualification.
 

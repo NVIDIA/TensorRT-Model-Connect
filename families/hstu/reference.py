@@ -69,11 +69,7 @@ class Reference:
                 ],
                 axis=-1,
             )
-            a = (
-                silu(q @ k.transpose(0, 1, 3, 2))
-                * mask
-                / np.float32(c.history_length + c.decode_steps + c.candidates)
-            ) @ v
+            a = (silu(q @ k.transpose(0, 1, 3, 2)) * mask / np.float32(c.normalization_length)) @ v
             a = a.transpose(0, 2, 1, 3).reshape(b, c.candidates, c.hidden_size)
             encoded = (u * layer_norm(a, c.epsilon)) @ w["output_weight"] + w["output_bias"] + x
             logits = (layer_norm(encoded, c.epsilon) @ w["head_weight"] + w["head_bias"]).reshape(

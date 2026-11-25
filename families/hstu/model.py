@@ -24,14 +24,11 @@ def build(request, writer):
         or request.mtp_seq_len
     ):
         raise ValueError("unsupported HSTU build option")
-    if (
-        request.image_height
-        or request.image_width
-        or request.video_num_frames
-        or request.max_sequence_length not in (None, 128)
-    ):
-        raise ValueError("HSTU requires fixed history length 128")
+    if request.image_height or request.image_width or request.video_num_frames:
+        raise ValueError("HSTU does not accept image or video dimensions")
     c = Config.load(request.model_dir)
+    if request.max_sequence_length not in (None, c.history_length):
+        raise ValueError("max_sequence_length must match the checkpoint serving profile")
     weights = load_weights(request.model_dir, c)
     import tensorrt as trt
     from .native import Network
@@ -50,7 +47,8 @@ def build(request, writer):
             minimum = runtime["min_batch_size"]
             low = tuple(minimum if v == -1 else v for v in tensor.shape)
             high = tuple(request.max_batch_size if v == -1 else v for v in tensor.shape)
-            profile.set_shape(tensor.name, low, high, high)
+            optimum = tuple(runtime["opt_batch_size"] if v == -1 else v for v in tensor.shape)
+            profile.set_shape(tensor.name, low, optimum, high)
         options = builder.create_builder_config()
         options.builder_optimization_level = 1
         options.clear_flag(trt.BuilderFlag.TF32)

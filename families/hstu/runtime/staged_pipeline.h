@@ -48,7 +48,7 @@ class StagedPipeline final : public IStructuredRanking, public IHistoryCache {
     std::unordered_map<std::string, DeviceTensor> state_;
     DeviceTensor picks_;
     std::int64_t batch_{-1};
-    std::array<std::int64_t, 50> positions_{};
+    std::vector<std::int64_t> positions_;
     cudaEvent_t begin_{}, end_{};
     void reset_state(std::int64_t batch);
     std::mutex execute_mutex_;

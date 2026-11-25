@@ -1,0 +1,17 @@
+Public HSTU mathematical reference:
+Copyright (c) Meta Platforms, Inc. and affiliates.
+https://github.com/meta-recsys/generative-recommenders
+Revision 474afe5cfdb3d16d603d04f943f4dbe7eb6866fd
+Apache License 2.0; see UPSTREAM_LICENSE.txt.
+
+The family implements the complete plain research encoder and retrieval head,
+with a native prefix-cache runtime. These serving additions are not an official
+Meta release.
+
+The default trained checkpoint is published separately by tzchen07:
+https://huggingface.co/tzchen07/hstu-checkpoints-2026-06-10
+Revision fb6530eba870e842cfb236737586a4188ec3faef
+Archive run26_ndcg1849.tar.gz
+An explicit license for these weights was not found in the repository. The
+Apache license of the mathematical reference does not establish weight rights.
+No trained weights or dataset are redistributed in this source contribution.

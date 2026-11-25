@@ -31,8 +31,8 @@ StagedPipeline::StagedPipeline(std::unique_ptr<ITrtModule> prepare,
     : prepare_(std::move(prepare)), step_(std::move(step)), request_(std::move(request)),
       config_(std::move(config)), bundle_identity_(std::move(identity)) {
     if (!prepare_ || !step_ || !prepare_->ok() || !step_->ok() ||
-        prepare_->stream() != step_->stream() || config_.at("decode_steps") != 50 ||
-        (config_.at("candidates") != 50 && config_.at("candidates") != 64))
+        prepare_->stream() != step_->stream() || config_.at("decode_steps") <= 0 ||
+        config_.at("decode_steps") > 4096 || config_.at("candidates") <= 0)
         throw std::invalid_argument("invalid staged ranking contract");
     if (prepare_->input_info().size() != config_.at("stages").at(0).at("inputs").size())
         throw std::invalid_argument("staged feature input count mismatch");
@@ -80,6 +80,7 @@ StagedPipeline::StagedPipeline(std::unique_ptr<ITrtModule> prepare,
     if (stats_.budget_bytes < stats_.reserved_bytes)
         throw std::invalid_argument(
             "KV cache budget is smaller than the complete engine profile allocation");
+    positions_.resize(config_.at("decode_steps").get<std::size_t>());
     for (std::size_t i = 0; i < positions_.size(); ++i)
         positions_[i] = i;
     check(cudaEventCreate(&begin_));
@@ -138,7 +139,8 @@ void StagedPipeline::reset_state(std::int64_t batch) {
             step_->bind_external(name, value.data(), shape);
             state_.emplace(name, std::move(value));
         }
-        picks_ = DeviceTensor({batch, 50}, DType::kInt64, stream);
+        picks_ = DeviceTensor({batch, config_.at("decode_steps").get<std::int64_t>()},
+                              DType::kInt64, stream);
         if (!picks_.ok())
             throw std::runtime_error("picked output allocation failed");
         batch_ = batch;
@@ -182,8 +184,8 @@ std::vector<FeatureTensor> StagedPipeline::score(const std::vector<FeatureTensor
     if (profiling_) {
         check(cudaStreamSynchronize(stream));
         profile_.prepare_wall_ms = elapsed(prepare_start);
-        profile_.round_wall_ms.reserve(50);
-        profile_.round_gpu_ms.reserve(50);
+        profile_.round_wall_ms.reserve(positions_.size());
+        profile_.round_gpu_ms.reserve(positions_.size());
     }
     return run_rounds(batch);
 }
@@ -216,8 +218,8 @@ std::vector<FeatureTensor> StagedPipeline::run_rounds(std::int64_t batch) {
         }
         check(cudaMemcpy2DAsync(
             static_cast<std::uint8_t*>(picks_.data()) + round * sizeof(std::int64_t),
-            50 * sizeof(std::int64_t), step_->device_ptr("picked"), sizeof(std::int64_t),
-            sizeof(std::int64_t), batch, cudaMemcpyDeviceToDevice, stream));
+            positions_.size() * sizeof(std::int64_t), step_->device_ptr("picked"),
+            sizeof(std::int64_t), sizeof(std::int64_t), batch, cudaMemcpyDeviceToDevice, stream));
         if (profiling_) {
             check(cudaEventRecord(end_, stream));
             check(cudaEventSynchronize(end_));

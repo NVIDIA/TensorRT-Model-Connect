@@ -15,7 +15,7 @@ def expected_shapes(c):
     d = c.hidden_size
     return {
         "item_embeddings": (c.vocab_size, d),
-        "position_embeddings": (c.history_length + c.decode_steps + 1, d),
+        "position_embeddings": (c.max_history_length + c.max_decode_steps + 1, d),
         "uvqk": (d, 4 * d),
         "output_weight": (d, d),
         "output_bias": (d,),
@@ -36,12 +36,12 @@ def load_weights(path, c):
     return values
 
 
-def create_fixture(path, candidates=50, seed=20261124):
+def create_fixture(path, candidates=50, seed=20261124, *, config=None):
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     if any(path.iterdir()):
         raise FileExistsError("fixture output directory must be empty")
-    c = Config(candidates=candidates)
+    c = config or Config(candidates=candidates)
     rng = np.random.default_rng(seed)
     weights = {
         name: rng.normal(0, 0.02, shape).astype(np.float32)
@@ -75,8 +75,13 @@ def main():
     p.add_argument("output", type=Path)
     p.add_argument("--candidates", type=int, choices=(50, 64), default=50)
     p.add_argument("--seed", type=int, default=20261124)
+    p.add_argument(
+        "--config", type=Path, help="Directory containing a validated architecture/serving config"
+    )
     a = p.parse_args()
-    create_fixture(a.output, a.candidates, a.seed)
+    create_fixture(
+        a.output, a.candidates, a.seed, config=Config.load(a.config) if a.config else None
+    )
 
 
 if __name__ == "__main__":

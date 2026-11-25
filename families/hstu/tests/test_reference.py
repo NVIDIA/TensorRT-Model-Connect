@@ -62,10 +62,10 @@ def test_padding_counts_empty_history_stable_ties_and_nonrepeat(tmp_path, candid
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"hidden_size": 128},
-        {"num_heads": 4},
-        {"history_length": 64},
-        {"candidates": 51},
+        {"hidden_size": 127},
+        {"num_heads": 7},
+        {"history_length": 0},
+        {"candidates": 0},
         {"epsilon": 1e-5},
         {"execution_method": "unrolled"},
         {"model_type": "hstu"},

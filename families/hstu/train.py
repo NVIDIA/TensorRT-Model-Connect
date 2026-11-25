@@ -24,6 +24,9 @@ def main():
     p.add_argument("--steps", type=int, default=100)
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--seed", type=int, default=20261124)
+    p.add_argument(
+        "--config", type=Path, help="Directory containing the public adapter configuration"
+    )
     a = p.parse_args()
     if a.steps < 1 or a.batch_size < 1:
         p.error("steps and batch size must be positive")
@@ -46,7 +49,7 @@ def main():
     ]
     if not histories:
         raise ValueError("need users with at least three ordered interactions")
-    create_fixture(a.output, seed=a.seed)
+    create_fixture(a.output, seed=a.seed, config=Config.load(a.config) if a.config else None)
     c = replace(Config.load(a.output), vocab_size=int(data[:, 1].max()) + 1)
     # Regenerate only the publicly initialized item table for this dataset vocabulary.
     base = load_weights(a.output, Config.load(a.output))
@@ -90,7 +93,7 @@ def main():
             ],
             dim=1,
         )
-        x = raw * 16 + w["position_embeddings"][positions]
+        x = raw * (d**0.5) + w["position_embeddings"][positions]
         u, v, q, key = F.silu(F.layer_norm(x, (d,), eps=c.epsilon) @ w["uvqk"]).chunk(4, dim=-1)
 
         def heads(value):
@@ -108,7 +111,7 @@ def main():
             ],
             dim=-1,
         )
-        attn = F.silu(query @ key.transpose(-1, -2)) / (t + r + k) * mask
+        attn = F.silu(query @ key.transpose(-1, -2)) / c.normalization_length * mask
         attended = (attn @ v).transpose(1, 2).reshape(b, k, d)
         encoded = (
             (u[:, -k:] * F.layer_norm(attended, (d,), eps=c.epsilon)) @ w["output_weight"]
