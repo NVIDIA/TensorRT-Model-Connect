@@ -17,7 +17,9 @@ reference processor's ids; the greedy generations must then agree:
   its own best token. The margin is the reference model's own BF16 error on
   the gap between its two best tokens on these conversations (0.70 logits for
   the E4B checkpoint): BF16 rounding may reorder candidates that close, and
-  nothing farther apart.
+  nothing farther apart. The FP8 bundle (``quantization`` in the manifest)
+  uses 1.5 logits: its largest margin was 0.014 on B200 and 0.150 on B300,
+  and a build with every activation scale times 0.1 reaches 8.2.
 """
 
 from __future__ import annotations
@@ -324,7 +326,8 @@ def test_e2e(case_name, request, tmp_path):
         build(BuildRequest(model_dir=checkpoint, output_path=bundle, family=FAMILY,
                            task=manifest["task"], precision=manifest["precision"],
                            max_sequence_length=manifest["max_sequence_length"],
-                           tensor_parallel_size=manifest["tensor_parallel_size"]))
+                           tensor_parallel_size=manifest["tensor_parallel_size"],
+                           quantization=manifest.get("quantization")))
     env = dict(os.environ)
     env["LD_LIBRARY_PATH"] = str(runtime) + os.pathsep + env.get("LD_LIBRARY_PATH", "")
     source, destination = tmp_path / "requests.json", tmp_path / "results.json"
