@@ -797,8 +797,13 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
         for source_field, request_field in (definition.get("fields") or {}).items():
             request[request_field] = record[source_field] if source_field in record else _field(record, source_field)
         for field in definition.get("fit_to_request", []):  # an image at the request's width x height
+            size = {**(definition.get("fit_size") or {}), **{key: request[key] for key in ("width", "height")
+                                                              if key in request}}
+            if "width" not in size or "height" not in size:
+                raise ConfigError(f"suite {definition['suite']}: fit_to_request needs the request's width and "
+                                  "height, or the bundle's video size")
             request[field] = str(_cover_crop(request[field], Path(environment["hf_datasets_cache"]),
-                                             int(request["width"]), int(request["height"])))
+                                             int(size["width"]), int(size["height"])))
         if isinstance(request.get("prompt"), str) and (definition.get("prompt_prefix") or definition.get("prompt_suffix")):
             request["prompt"] = f"{definition.get('prompt_prefix', '')}{request['prompt']}{definition.get('prompt_suffix', '')}"
         try:  # the media go to the shared store once; the request keeps their digests

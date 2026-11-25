@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# An image-only model: the catalog request's prompt is empty, and the COCO start frames are fitted to the bundle's
+# video size (its manifest's image_width x image_height), which the request does not state.
+reference:
+  adapter: families/stable_video_diffusion/reference/adapter.py  # Diffusers StableVideoDiffusionPipeline
+  requirements: families/stable_video_diffusion/requirements.txt
+  options: {num_frames: 14}  # the manifest's video_num_frames

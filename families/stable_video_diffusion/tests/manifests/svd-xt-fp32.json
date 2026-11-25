@@ -15,7 +15,7 @@
     {
       "name": "svd-xt-fp32",
       "premerge": true,
-      "image": "test_img.jpeg",
+      "image": "data/test_img.jpeg",
       "seed": 7,
       "num_steps": 25,
       "reference_precisions": [

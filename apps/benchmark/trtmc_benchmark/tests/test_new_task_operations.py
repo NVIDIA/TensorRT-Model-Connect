@@ -94,6 +94,12 @@ def test_image_to_video_requests_send_only_the_stated_controls_and_an_optional_i
     assert flagged.request == {"prompt": "waves", "seed": 42, "num_steps": 50, "guidance_scale": 5.0}
     pictured = resolve_task_case("initial_image_text_to_video", {**case, "image": "start.png"}, tmp_path)
     assert pictured.request["image_path"] == str(tmp_path / "start.png")
+    # an image-only model's testcase (Stable Video Diffusion): no prompt, its steps named num_steps
+    image_only = resolve_task_case("initial_image_text_to_video", {"image": "start.png", "seed": 42, "num_steps": 25},
+                                   tmp_path)
+    assert image_only.request == {"prompt": "", "seed": 42, "num_steps": 25, "image_path": str(tmp_path / "start.png")}
+    with pytest.raises(BenchmarkError):
+        resolve_task_case("initial_image_text_to_video", {**case, "num_steps": 25}, tmp_path)
 
 
 def test_structure_requests_name_the_document_and_only_stated_sampling_controls(tmp_path):

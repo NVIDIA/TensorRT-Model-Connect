@@ -15,7 +15,7 @@
     {
       "name": "svd-xt-fp16",
       "premerge": false,
-      "image": "test_img.jpeg",
+      "image": "data/test_img.jpeg",
       "seed": 42,
       "num_steps": 25,
       "reference_precisions": [
