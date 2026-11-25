@@ -2,4 +2,4 @@ numpy
 safetensors
 torch
 transformers>=4.45
-scipy
+scipy==1.18.1
