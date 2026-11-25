@@ -33,18 +33,18 @@ int main(int argc, char** argv) {
         std::set<std::string> names;
         for (const auto& field : task.config_fields())
             names.insert(std::string(field.name));
-        for (const char* name : {"negative_prompt", "num_steps", "guidance_scale", "seed",
-                                 "height", "width"})
+        for (const char* name :
+             {"negative_prompt", "num_steps", "guidance_scale", "seed", "height", "width"})
             if (names.count(name) == 0)
                 throw std::runtime_error(std::string("missing Config field ") + name);
 
         const trtmc::Config config{{"num_steps", std::int64_t{2}},
                                    {"guidance_scale", 3.0},
                                    {"negative_prompt", std::string("blurry")}};
-        const auto first = task.run({"A lighthouse at dusk", {}},
-                                    trtmc::Config{{"num_steps", std::int64_t{2}},
-                                                  {"guidance_scale", 3.0},
-                                                  {"seed", std::int64_t{11}}});
+        const auto first =
+            task.run({"A lighthouse at dusk", {}}, trtmc::Config{{"num_steps", std::int64_t{2}},
+                                                                 {"guidance_scale", 3.0},
+                                                                 {"seed", std::int64_t{11}}});
         if (first.channels() != 3 ||
             first.pixels().size() != std::size_t{first.height()} * first.width() * 3)
             throw std::runtime_error("text_to_image returned an invalid image");
