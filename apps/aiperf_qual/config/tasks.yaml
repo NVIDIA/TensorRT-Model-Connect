@@ -301,7 +301,7 @@ tasks:
     # both sides (latent replay), which makes them comparable pixel by pixel: how much further TRTMC is
     # from the native fp32 render of the first 10 prompts than the native half-precision run.
     supplementary: [{check: replay_parity, suite: partiprompts-30, informational: true, video_samples: 3,
-                     latent_replay_families: [flux, pixart, qwen_image, z_image, wan_t2v],
+                     latent_replay_families: [flux, pixart, qwen_image, qwen_image2_1, z_image, chroma, wan_t2v],
                      parity_floor_samples: 10, max_psnr_gap_db: 3.0, max_ssim_gap: 0.05,
                      quantized_gap: {max_psnr_gap_db: 6.0, max_ssim_gap: 0.1},
                      fallback_min: {psnr_db: 19.0, ssim: 0.8}, min_pass_rate: 0.9},
@@ -309,7 +309,7 @@ tasks:
                     # tags, OWLv2 detections and CLIP colors, exact counts), paired right/wrong per prompt, margin 5 points.
                     {check: geneval, suite: geneval-full,
                      only_families: [flux, pixart, qwen_image, z_image, stable_diffusion, chroma, qwen_image2_1],
-                     latent_replay_families: [flux, pixart, qwen_image, z_image, stable_diffusion],
+                     latent_replay_families: [flux, pixart, qwen_image, qwen_image2_1, z_image, stable_diffusion, chroma],
                      detector: google/owlv2-base-patch16-ensemble,
                      detector_revision: cfd3195ba4ea9592eec887ded089f4c08eff231d,
                      clip_model: openai/clip-vit-large-patch14, clip_revision: 32bd64288804d66eefd0ccbe215aa642df71cc41,

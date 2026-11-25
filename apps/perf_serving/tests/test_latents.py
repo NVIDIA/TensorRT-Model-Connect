@@ -16,9 +16,13 @@ def test_canonical_shapes_follow_each_pipelines_own_latent_draw():
     assert canonical_shape("FluxPipeline", {"in_channels": 64}, SD_VAE, image) == (1, 16, 128, 96)
     assert canonical_shape("Flux2Pipeline", {"in_channels": 128}, SD_VAE, image) == (1, 128, 64, 48)
     assert canonical_shape("Flux2KleinPipeline", {"in_channels": 128}, SD_VAE, image) == (1, 128, 64, 48)
+    # Chroma: packed tokens x channels, the layout both ChromaPipeline and TRTMC's Chroma take as given.
+    assert canonical_shape("ChromaPipeline", {"in_channels": 64}, SD_VAE, image) == (1, 64 * 48, 64)
     assert canonical_shape("PixArtSigmaPipeline", {"in_channels": 4}, SD_VAE, image) == (1, 4, 128, 96)
     assert canonical_shape("QwenImagePipeline", {"in_channels": 64}, {"temperal_downsample": [False, True, True]},
                            image) == (1, 1, 16, 128, 96)
+    # Qwen-Image 2.1: TRTMC reads the same noise as [64, height / 16, width / 16].
+    assert canonical_shape("QwenImage21Pipeline", {"in_channels": 64}, {}, image) == (1, 1, 64, 64, 48)
     assert canonical_shape("ZImagePipeline", {"in_channels": 16}, SD_VAE, image) == (1, 16, 128, 96)
     video = {"height": 480, "width": 832, "num_frames": 17}
     assert canonical_shape("WanPipeline", {"in_channels": 16}, {}, video) == (1, 16, 5, 60, 104)
