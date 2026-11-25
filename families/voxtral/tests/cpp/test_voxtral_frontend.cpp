@@ -92,6 +92,48 @@ bool rejects(Function function) {
     return false;
 }
 
+double distance(double actual, double expected) {
+    return std::abs(actual - expected);
+}
+
+double distance(const std::complex<double>& actual, const std::complex<double>& expected) {
+    return std::abs(actual - expected);
+}
+
+// Largest |actual - expected|. A non-finite value or difference, or a length mismatch, gives
+// infinity, so that it fails every tolerance: std::max(error, NaN) would keep `error` and let an
+// isolated NaN pass.
+template <class Actual, class Expected>
+double max_abs_error(const Actual& actual, const Expected& expected) {
+    if (actual.size() != expected.size())
+        return std::numeric_limits<double>::infinity();
+    double error = 0.0;
+    for (std::size_t index = 0; index < actual.size(); ++index) {
+        const double difference = distance(actual[index], expected[index]);
+        if (!std::isfinite(difference))
+            return std::numeric_limits<double>::infinity();
+        error = std::max(error, difference);
+    }
+    return error;
+}
+
+void test_max_abs_error() {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    check(max_abs_error(std::vector<double>{1.0, 2.0}, std::vector<double>{1.0, 2.5}) == 0.5,
+          "max_abs_error measures the largest difference");
+    for (const auto& actual :
+         {std::vector<double>{0.0, nan, 0.0}, std::vector<double>{nan, 0.0, 0.0},
+          std::vector<double>{0.0, 0.0, inf}})
+        check(!(max_abs_error(actual, std::vector<double>{0.0, 0.0, 0.0}) <= 1e-6),
+              "a non-finite output fails every tolerance");
+    const std::vector<std::complex<double>> complex_nan = {{0.0, 0.0}, {0.0, nan}};
+    check(!(max_abs_error(complex_nan, std::vector<std::complex<double>>(2)) <= 1e-6),
+          "a non-finite complex output fails every tolerance");
+    check(!(max_abs_error(std::vector<double>{0.0}, std::vector<double>{0.0, 0.0}) <= 1e-6),
+          "a length mismatch fails every tolerance");
+}
+
 constexpr double kPi = 3.14159265358979323846;
 
 std::vector<std::complex<double>> direct_dft(const std::vector<std::complex<double>>& input) {
@@ -120,12 +162,10 @@ void test_fft() {
         Fft fft(length);
         fft.forward(input.data(), output.data());
         const auto expected = direct_dft(input);
-        double error = 0.0, scale = 0.0;
-        for (std::size_t k = 0; k < input.size(); ++k) {
-            error = std::max(error, std::abs(output[k] - expected[k]));
-            scale = std::max(scale, std::abs(expected[k]));
-        }
-        check(error <= 1e-12 * std::max(1.0, scale),
+        double scale = 0.0;
+        for (const auto& value : expected)
+            scale = std::max(scale, std::abs(value));
+        check(max_abs_error(output, expected) <= 1e-12 * std::max(1.0, scale),
               "fft matches the direct DFT, n=" + std::to_string(length));
     }
     check(throws([] { Fft fft(7); }), "fft rejects a length with a prime factor above 5");
@@ -230,10 +270,7 @@ void test_log_mel() {
     const auto features = trtmc::voxtral::log_mel_features(mono, filters, config);
     const auto expected = reference_features(mono, filters, config);
     check(features.size() == 2U * 3U * 12U, "two chunks of mels x frames");
-    double error = 0.0;
-    for (std::size_t index = 0; index < std::min(features.size(), expected.size()); ++index)
-        error = std::max(error, static_cast<double>(std::abs(features[index] - expected[index])));
-    check(features.size() == expected.size() && error < 1e-6, "log-mel matches its definition");
+    check(max_abs_error(features, expected) < 1e-6, "log-mel matches its definition");
     // A silent tail far below the clip maximum is floored at maximum - 8.
     const float top = *std::max_element(features.begin(), features.end());
     const float bottom = *std::min_element(features.begin(), features.end());
@@ -394,6 +431,7 @@ void test_runtime_config() {
 } // namespace
 
 int main() {
+    test_max_abs_error();
     test_fft();
     test_downmix_and_chunks();
     test_log_mel();
