@@ -16,6 +16,8 @@ import pytest
 from tensorrt_model_connect import BuildRequest, build
 from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
+from ._checkpoint import checkpoint_record
+
 FAMILY = "speecht5_hifigan"
 TASKS = frozenset({"spectrogram_to_audio"})
 TEST_ROOT = Path(__file__).resolve().parent
@@ -239,14 +241,6 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
     record_evidence(
-        "checkpoint",
-        {
-            "repo_id": manifest["hf_id"],
-            "revision": manifest["hf_revision"],
-            "precision": manifest["precision"],
-        },
-    )
-    record_evidence(
         "thresholds",
         {
             key: value
@@ -271,6 +265,14 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
         directory = _model_dir(manifest)
+        record_evidence(
+            "checkpoint",
+            checkpoint_record(
+                directory,
+                manifest,
+                local_override=bool(os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")),
+            ),
+        )
     _, runtime_root = _runtime()
     with wave.open(str(TEST_ROOT / "data" / case["audio"]), "rb") as audio:
         with evidence_stage("comparison"):
@@ -319,6 +321,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=int(case.get("runtime_timeout_s", 3600)),
             )
         record_evidence(
             "runtime_process",

@@ -82,5 +82,10 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     auto engine = context.backend.create_module(plan.data(), plan.size(), {});
     if (!engine || !engine->ok())
         throw std::runtime_error("HiFiGAN engine failed to load");
+    if (!engine->has_input("spectrogram") ||
+        engine->tensor_shape("spectrogram") != std::vector<int64_t>{frames, bins} ||
+        engine->tensor_dtype("spectrogram") != DType::kFloat32)
+        throw std::runtime_error(
+            "HiFiGAN engine spectrogram input differs from its runtime profile");
     return new speecht5_hifigan::Pipeline(std::move(engine), cfg);
 }
