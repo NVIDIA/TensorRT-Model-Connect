@@ -335,9 +335,9 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         return {"image_path": _semantic_asset(case, root, "image_path", "image", "test_image"),
                 "queries": list(queries)}
     if task == "masked_text_to_token_scores":
-        prompt = _explicit(case, "prompt")
+        prompt = _explicit(case, "prompt", "text")  # ESM-2 cases name a prompt, MobileBERT's a text
         if not isinstance(prompt, str) or not prompt:
-            raise BenchmarkError("masked token scores require a prompt")
+            raise BenchmarkError("masked token scores require a prompt or text")
         return {"prompt": prompt}
     if task == "monocular_depth":
         return {"image_path": _semantic_asset(case, root, "image_path", "image", "test_image")}
