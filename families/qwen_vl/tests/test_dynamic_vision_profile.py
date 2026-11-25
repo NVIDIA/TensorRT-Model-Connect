@@ -38,7 +38,8 @@ def test_default_dynamic_profile_keeps_the_448_square_budget(tmp_path, processor
     config.raw["_family_build_options"] = {"qwen_vl_vision": {"dynamic_resolution": False}}
     assert not _dynamic_vision_profile(str(tmp_path), config)[0]
     assert not _QwenVLModel().get_vl_config(config)["dynamic_image_resolution"]
-    assert _default_sequence_length(str(tmp_path), config) == 256
+    # The fixed 448-square profile also reserves its 256 image tokens.
+    assert _default_sequence_length(str(tmp_path), config) == 512
 
 
 @pytest.mark.parametrize("maximum,capacity", [(12845056, 16640), (6422528, 8448)])
@@ -76,4 +77,5 @@ def test_explicit_image_dimensions_keep_the_fixed_profile(tmp_path, model_type, 
     })
     assert not _dynamic_vision_profile(str(tmp_path), config)[0]
     assert not _QwenVLModel().get_vl_config(config)["dynamic_image_resolution"]
-    assert _default_sequence_length(str(tmp_path), config) == 256
+    # 196 image tokens: a 448 square in 32-pixel merged patches, plus 256 text tokens.
+    assert _default_sequence_length(str(tmp_path), config) == 452

@@ -284,6 +284,25 @@ void test_lcs_merge_removes_overlapping_token_prefix() {
           "Canary text LCS rejects ambiguous repeated boilerplate");
 }
 
+void test_decode_loop_skips_the_step_after_the_last_token() {
+    // A budget of N tokens needs only N - 1 decoder steps after the prefix: the
+    // last token is returned without being fed back, so an L-row cache holds a
+    // P-token prefix and L - P + 1 output tokens.
+    int step_calls = 0;
+    const auto result = trtmc::run_canary_decode_loop(
+        {61, 62}, 3, 99,
+        [&step_calls](int32_t, std::vector<float>& logits, std::string&) {
+            ++step_calls;
+            logits.assign(1, 1.0F);
+            return true;
+        },
+        [](const std::vector<float>&) { return 7; });
+    check(result.output_ids == std::vector<int32_t>({7, 7, 7}),
+          "canary decode loop emits its whole budget");
+    check(!result.decode_failed, "canary decode loop finishes its budget cleanly");
+    check(step_calls == 4, "canary decode loop skips the decoder step after the last token");
+}
+
 } // namespace
 
 int main() {
@@ -291,6 +310,7 @@ int main() {
     test_decode_loop_reports_prefill_failure();
     test_decode_loop_reports_decode_failure_after_emitting_token();
     test_decode_loop_handles_zero_budget_and_empty_logits();
+    test_decode_loop_skips_the_step_after_the_last_token();
     test_beam_search_recovers_better_sequence_than_greedy_prefix();
     test_beam_search_reports_prefill_failure();
     test_beam_search_reports_branch_advance_failure();

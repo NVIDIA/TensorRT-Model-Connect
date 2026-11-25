@@ -15,7 +15,9 @@ image, against the transformers model run in FP32:
   may leave the FP32 text after such a near tie. The tolerance (``thresholds/``)
   is 1.0 logit, about 1.8 times the largest departure of the official model run
   in BF16 from its own FP32 argmax on 41 image / prompt pairs (0.548 logit;
-  19 of 265 tokens below the argmax).
+  19 of 265 tokens below the argmax). The FP8 bundle (``quantization`` in the
+  manifest) uses 2.5 logit: about 2 times its largest gap on B200 and B300
+  (1.27 logit); a build with every activation scale times 0.1 exceeds it.
 
 Both runs also check the native prompt ids and the decoding of the reference
 tokens with the tokenizer packaged in the bundle. The evidence keeps the input
@@ -295,7 +297,8 @@ def test_e2e(case_name, request, tmp_path):
         build(BuildRequest(model_dir=checkpoint, output_path=bundle, family=FAMILY,
                            task=manifest["task"], precision=manifest["precision"],
                            max_sequence_length=manifest["max_sequence_length"],
-                           tensor_parallel_size=manifest["tensor_parallel_size"]))
+                           tensor_parallel_size=manifest["tensor_parallel_size"],
+                           quantization=manifest.get("quantization")))
     source, destination = tmp_path / "requests.json", tmp_path / "outputs.json"
     source.write_text(json.dumps(_native_requests(images, tmp_path)))
     with evidence_stage("native"):

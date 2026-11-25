@@ -4,6 +4,7 @@
 
 import json
 import math
+import os
 from pathlib import Path
 
 import tensorrt as trt
@@ -243,7 +244,7 @@ def build_final_norm(weight, config, max_sequence_length):
     return bytes(plan)
 
 
-def build_backbone(checkpoint, config, max_sequence_length, quantization=None):
+def build_backbone(checkpoint, config, max_sequence_length, quantization=None, spill_dir=None):
     """One execution context shares workspace across all decoder blocks.
 
     ``quantization="fp8"`` self-quantizes the backbone projections (see quantization.py).
@@ -263,7 +264,7 @@ def build_backbone(checkpoint, config, max_sequence_length, quantization=None):
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    graph = Graph(network, {}, fp32_sigmoid=_fp32_sigmoid(config))
+    graph = Graph(network, {}, fp32_sigmoid=_fp32_sigmoid(config), spill_dir=spill_dir)
     hidden = config["hidden_size"]
     rotary = int(config["head_dim"] * config["rope_parameters"]["partial_rotary_factor"])
     x = network.add_input("hidden_states", trt.bfloat16, (-1, hidden))
@@ -295,6 +296,8 @@ def build_backbone(checkpoint, config, max_sequence_length, quantization=None):
         from .quantization import configure_fp8_build
 
         configure_fp8_build(settings)
+    if graph.spilled_bytes:
+        print(f"Moved {graph.spilled_bytes / 1024**3:.1f} GiB of backbone weights to file-backed pages", flush=True)
     print("Compiling Clef backbone", flush=True)
     plan = builder.build_serialized_network(network, settings)
     if plan is None:
@@ -324,7 +327,17 @@ class Checkpoint:
         return result
 
 
-def build(request, writer):
+def weight_spill_dir(model_dir, output):
+    """Where the backbone constants wait during the build: next to the bundle when the checkpoint is more than
+    a third of physical memory (DGX Spark and Jetson Thor share their memory with the GPU and the build also
+    places a device copy of the weights), else None."""
+    index = json.loads((Path(model_dir) / "model.safetensors.index.json").read_text())
+    weights = int((index.get("metadata") or {}).get("total_size") or 0)
+    memory = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    return Path(output).resolve().parent if weights * 3 > memory else None
+
+
+def build(request, writer, *, spill_dir=None):
     """Build independent TensorRT stages and native runtime data into one bundle."""
     from safetensors.torch import load_file
     from .cli import BuildRequest
@@ -371,7 +384,9 @@ def build(request, writer):
         del weight
     writer.add_bytes(
         "backbone.plan",
-        build_backbone(checkpoint, text, request.max_sequence_length, request.quantization),
+        build_backbone(
+            checkpoint, text, request.max_sequence_length, request.quantization, spill_dir=spill_dir
+        ),
     )
     weight = checkpoint.select("model.language_model.norm.weight")[
         "model.language_model.norm.weight"

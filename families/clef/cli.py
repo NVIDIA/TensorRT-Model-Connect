@@ -37,12 +37,12 @@ class BuildRequest:
 
 def build_bundle(request: BuildRequest, output: Path):
     from tensorrt_model_connect.bundle_writer import BundleWriter
-    from .model import build as build_model
+    from .model import build as build_model, weight_spill_dir
 
     writer = BundleWriter(output)
     writer.record_build(request)
     try:
-        build_model(request, writer)
+        build_model(request, writer, spill_dir=weight_spill_dir(request.model_dir, output))
         writer.finish()
     except BaseException:
         writer.abort()

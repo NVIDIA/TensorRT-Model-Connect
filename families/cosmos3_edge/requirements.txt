@@ -1,7 +1,7 @@
 numpy>=1.26
 safetensors>=0.4
 torch>=2.6
-transformers>=5.20.2,<6
+transformers==5.24.0
 Pillow>=13,<14
-av>=16
-accelerate>=1.1
+av==19.0.2
+accelerate==1.16.0

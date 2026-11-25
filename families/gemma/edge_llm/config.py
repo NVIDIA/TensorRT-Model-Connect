@@ -43,9 +43,13 @@ class BuildExecutionInputs:
 
     variant: str
     checkpoints: tuple[NamedCheckpoint, ...] = ()
+    draft_top_k: int | None = None
 
     def __post_init__(self) -> None:
         _validate_id("execution variant", self.variant)
+        if self.draft_top_k is not None and (type(self.draft_top_k) is not int
+                or self.draft_top_k not in (1, 4) or self.variant != "dflash"):
+            raise ValueError("Gemma --spec-draft-top-k maps the Bolt DFlash chain (1) or DDTree (4)")
         if not isinstance(self.checkpoints, tuple) or any(
             not isinstance(checkpoint, NamedCheckpoint) for checkpoint in self.checkpoints
         ):

@@ -11,7 +11,9 @@ Oracles (one per case):
   near-ties. The FP32 reference is run on the prompt plus the native tokens;
   every native token must be within ``near_tie_logit_tolerance`` of that
   step's maximum FP32 logit. The tolerance is calibrated on the official
-  ``transformers`` BF16 generation scored the same way.
+  ``transformers`` BF16 generation scored the same way. An FP8 bundle (BF16 with
+  ``quantization``) uses the same oracle with the tolerance of its thresholds
+  file.
 * ``sampling_contract``: seeded sampling is deterministic, stays within the
   vocabulary and the token budget, and decodes to the reported text.
 """
@@ -46,6 +48,7 @@ def _load_cases() -> dict[str, tuple[dict, dict]]:
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == _FAMILY and manifest["task"] == _TASK, path
         assert manifest["precision"] in {"bf16", "fp32"}, path
+        assert manifest.get("quantization") in {None, "fp8"}, path
         assert isinstance(manifest["max_sequence_length"], int), path
         # One GPU, no tensor parallelism; the bundle file name is the manifest's.
         assert manifest["tensor_parallel_size"] == 1, path
@@ -265,6 +268,7 @@ def _bundle(manifest: dict, model_dir: Path, tmp_path_factory) -> Path:
             task=_TASK,
             precision=manifest["precision"],
             max_sequence_length=manifest["max_sequence_length"],
+            quantization=manifest.get("quantization"),
         )
     )
     assert bundle.is_file() and bundle.stat().st_size > 0, bundle
@@ -439,3 +443,7 @@ def test_cases_are_well_formed_and_cover_the_contract() -> None:
             assert manifest["precision"] == "bf16", case["name"]
         if case["input"] == "random_token_ids":
             assert "generated_checkpoint" in manifest, case["name"]
+        if manifest.get("quantization"):
+            # A quantized bundle is checked against the FP32 model with its own tolerance.
+            assert case["oracle"] == "teacher_forced_near_tie", case["name"]
+            assert (_TEST_DIR / "thresholds" / f"{case['name']}.json").is_file(), case["name"]

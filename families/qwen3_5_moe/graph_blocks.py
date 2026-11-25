@@ -99,9 +99,16 @@ def apply_norm(
         return graph_ops.add_rms_norm(network, inp, hidden_size, gamma, eps_tensor, dtype=dtype)
 
 
-def add_sparse_mlp(network, inp, *, weights, prefix, hidden_size, mlp_size, dtype=np.float32):
-    """Apply this family's sparse/shared MLP; normalization/residual stay in the decoder."""
-    from .moe import add_sparse_moe
+def add_sparse_mlp(network, inp, *, weights, prefix, hidden_size, mlp_size, dtype=np.float32, rows=False):
+    """Apply this family's sparse/shared MLP; normalization/residual stay in the decoder.
+
+    ``rows`` marks a prefill graph over ``S`` token rows: GPTQ experts then run as three dense W4A16 GEMMs
+    (``moe.add_dense_moe_rows``), whose stacked weights stay in ``weights["_prefill_keep"]`` until the build.
+    """
+    from .moe import add_dense_moe_rows, add_sparse_moe, dense_rows_supported
 
     del hidden_size, mlp_size, dtype
-    return add_sparse_moe(network, inp, weights[f"{prefix}.moe"])
+    moe = weights[f"{prefix}.moe"]
+    if rows and dense_rows_supported(moe):
+        return add_dense_moe_rows(network, inp, moe, weights.setdefault("_prefill_keep", []))
+    return add_sparse_moe(network, inp, moe)

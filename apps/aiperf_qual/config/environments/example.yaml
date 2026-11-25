@@ -4,6 +4,7 @@
 # Template of a machine's environment: copy to <machine>.yaml, replace the paths, then run
 #   trtmc-aiperf-qual doctor --environment config/environments/<machine>.yaml
 # Docker and bare metal differ only in these paths (inside a container, use the container's paths).
+platform: gb300                                         # optional: config/platforms/<platform>.yaml defaults
 repo: /path/to/TensorRT-Model-Connect                   # this checkout
 data_root: /path/to/datasets                            # datasets mirror (Imagenette, COCO2017, ETTh1, ...)
 bundle_root: /path/to/engines                           # bundles are built here on demand (<name>/<bundle>)
@@ -22,13 +23,15 @@ ports: {reference: 8900, candidate: 8901}
 # acc_overlap: true                     # both sides answer Acc at once under one MPS daemon (default off)
 gpu_lock: /path/to/state/gpu.lock                       # optional: serializes timing with builds on this GPU
 build_env: {}                                           # optional extra environment of bundle builds
+# TensorRT installed only as the pip tensorrt_libs package: native plugins whose CMake looks for libnvinfer in the
+# system directories need build_env: {CMAKE_LIBRARY_PATH: <venv>/lib/python3.12/site-packages/tensorrt_libs}.
 serve_env: {}                                           # optional extra environment of servers, references and builds
 # Jetson Thor: serve_env: {LD_PRELOAD: /usr/lib/aarch64-linux-gnu/libcudnn.so.9}. torch's pip cuDNN lacks a
 # sublibrary that it then loads from the board's newer cuDNN, and every convolution fails (doctor's "cudnn" check).
 
 models:                                                 # this machine's model list (run-all, plan)
   include: all                                          # all | [profile names or glob patterns]
-  exclude: []                                           # [{profile: <name or glob>, reason: <why>}]
+  exclude: []                                           # [{profile: <name or glob>, reason: <why>}]; the platform's follow
   # max_checkpoint_gib: 30                              # optional: also exclude larger checkpoints
 
 retention:                                              # disk: both keep everything by default

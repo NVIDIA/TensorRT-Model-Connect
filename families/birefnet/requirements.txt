@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 Pillow
-einops
-kornia
-timm
+einops==0.8.2
+kornia==0.9.2
+timm==1.0.31
 transformers

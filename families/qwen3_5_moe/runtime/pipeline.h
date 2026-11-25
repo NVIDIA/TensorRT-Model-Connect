@@ -53,7 +53,8 @@ class RecurrentPipeline final : public ITextGeneration {
                       std::shared_ptr<ITokenizer> tokenizer = nullptr,
                       std::string model_id_str = "",
                       std::unique_ptr<Qwen35MoeMtpScheduler> mtp_scheduler = nullptr,
-                      std::unique_ptr<Qwen35MoePairedDraft> paired_draft = nullptr);
+                      std::unique_ptr<Qwen35MoePairedDraft> paired_draft = nullptr,
+                      std::unique_ptr<ITrtModule> prefill = nullptr);
 
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {}) override;
     int32_t default_max_new_tokens() const override { return 128; }
@@ -78,6 +79,9 @@ class RecurrentPipeline final : public ITextGeneration {
     std::string model_id_;
     std::unique_ptr<Qwen35MoeMtpScheduler> mtp_scheduler_;
     std::unique_ptr<Qwen35MoePairedDraft> paired_draft_;
+    // Multi-row prefill engine (split bundles only); decoding stays on decoder_.
+    std::unique_ptr<ITrtModule> prefill_;
+    int32_t prefill_rows_{0};
     bool media_inputs_{false};
     int32_t media_hidden_size_{0};
     DType media_dtype_{DType::kFloat16};
@@ -97,6 +101,13 @@ class RecurrentPipeline final : public ITextGeneration {
                                          const Qwen35MoeSamplingParams& params);
     void run_step(int32_t token_id, std::vector<float>& logits,
                   std::vector<float>* hidden_state_out = nullptr);
+    // Feed the prompt to prefill_ in chunks of up to prefill_rows_ tokens and
+    // return the logits of the last token.
+    void run_prefill_chunks(const std::vector<int32_t>& input_ids, std::vector<float>& logits);
+    // Media inputs of prefill rows [start, start + rows): visual rows, selectors and MRoPE offsets.
+    void prepare_prefill_media(TensorMap& inputs, int32_t start, int32_t rows,
+                               std::vector<uint8_t>& visual, std::vector<int32_t>& use_visual,
+                               std::vector<int32_t>& offsets) const;
     void* hidden_state_device_ptr_{nullptr};
     std::size_t hidden_state_numel_{0};
 

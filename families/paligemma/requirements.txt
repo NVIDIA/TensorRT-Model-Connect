@@ -9,4 +9,4 @@ transformers==5.2.0
 # Upper bounds follow the repository's own constraints (pyproject, CI image).
 # The runtime reproduces Pillow 13's resize; Pillow 12 orders the two passes differently.
 Pillow>=13,<14
-numpy>=1.26,<2.5
+numpy==2.4.6

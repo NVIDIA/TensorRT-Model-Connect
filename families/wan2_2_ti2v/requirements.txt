@@ -2,20 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 Pillow
-accelerate>=1.1.1
-dashscope
+accelerate==1.16.0
+dashscope==2.1.1
 decord2==3.4.0
-diffusers>=0.31.0
-easydict
+diffusers==0.39.0
+easydict==1.14
 einops==0.8.1
 flash-attn==2.8.3
 ftfy==6.3.1
-imageio[ffmpeg]
-librosa
+imageio[ffmpeg]==2.38.2
+librosa==1.0.1
 # The base image's opencv-python-headless 4.13 requires NumPy 2.
 numpy>=2
-opencv-python>=4.9.0.80
-peft
-tokenizers>=0.20.3
+opencv-python==5.1.0.95
+peft==0.22.0
+tokenizers==0.21.4
 tqdm
-transformers>=4.49.0,<=4.51.3
+transformers==4.51.3

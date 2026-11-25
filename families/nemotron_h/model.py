@@ -1270,9 +1270,9 @@ def _add_mamba2_mixer_rows(
     conv_w = graph_ops.add_constant(
         network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"], dtype=dtype
     )
-    conv_columns, present_conv = ssd_rows.add_short_conv_rows(
+    conv_rows, present_conv = ssd_rows.add_short_conv_rows(
         network,
-        columns=ssd_rows.shuffle(network, hidden_b_c, transpose=(1, 0)),
+        rows=hidden_b_c,
         conv_state=conv_state_in,
         weight=conv_w,
         channels=conv_dim,
@@ -1280,7 +1280,7 @@ def _add_mamba2_mixer_rows(
     )
     conv_out = graph_ops.add_bias_sum(
         network,
-        ssd_rows.shuffle(network, conv_columns, transpose=(1, 0)),
+        conv_rows,
         conv_dim,
         weights[f"{prefix}.conv1d_bias"],
         dtype=dtype,

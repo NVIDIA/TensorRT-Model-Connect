@@ -8,6 +8,7 @@
 #include "families/nemotron_h/runtime/chat_templates.h"
 #include "families/nemotron_h/runtime/paired.h"
 #include "families/nemotron_h/runtime/recurrent_generation_plan.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <chrono>
@@ -26,6 +27,18 @@ inline double elapsed_ms(TimePoint start, TimePoint end) {
 } // namespace
 
 namespace trtmc {
+
+namespace {
+
+// The next decode step would store one more K/V row. A full cache ends the
+// generation, as max_new_tokens does, instead of dropping the prompt's rows.
+// A state without a length limit (max_length() < 0) never fills.
+bool kv_cache_full(const NemotronHInferenceState& state) {
+    const int32_t max_length = state.max_length();
+    return max_length >= 0 && state.position() >= max_length;
+}
+
+} // namespace
 
 RecurrentPipeline::RecurrentPipeline(std::unique_ptr<ITrtModule> decoder,
                                      std::unique_ptr<NemotronHInferenceState> state,
@@ -104,6 +117,16 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
 
+    // The KV cache never drops rows: a prompt it cannot hold is rejected before
+    // prefill, and generation stops once the cache is full.
+    if (const int32_t capacity = state_->max_length();
+        capacity >= 0 && input_ids.size() > static_cast<std::size_t>(capacity)) {
+        throw internal::ConfigError("nemotron_h prompt has " + std::to_string(input_ids.size()) +
+                                    " tokens but the KV cache holds " + std::to_string(capacity) +
+                                    "; rebuild the bundle with a larger --max-sequence-length or "
+                                    "shorten the prompt");
+    }
+
     auto local_sampler = create_nemotron_h_sampler(params);
     auto* active_sampler = local_sampler.get();
     active_sampler->reset();
@@ -122,8 +145,8 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
 
     // ── Prefill phase ──
     auto t_prefill_start = SteadyClock::now();
-    // A prompt longer than the cache keeps the token loop, whose KV cache
-    // slides once full.
+    // Longer prompts were rejected above. A state without a length limit
+    // (max_length() < 0) keeps the token loop.
     if (prefill_ && static_cast<int64_t>(input_ids.size()) <= state_->max_length()) {
         run_prefill_chunks(input_ids, logits);
     } else {
@@ -148,6 +171,8 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
             output.push_back(result.token_id);
             if (result.is_eos)
                 break;
+            if (kv_cache_full(*state_))
+                break;
             run_step(result.token_id, logits, true);
             ++decode_steps;
         }
@@ -171,7 +196,10 @@ std::vector<int32_t> RecurrentPipeline::generate_paired(const std::vector<int32_
     };
     const auto append = [&](int32_t token) {
         output.push_back(token);
+        // A full KV cache ends generation like max_new_tokens: the last token is
+        // returned without being fed back.
         return output.size() - input_ids.size() >= static_cast<std::size_t>(max_new_tokens) ||
+               kv_cache_full(*state_) ||
                std::find(sampling.eos_token_ids.begin(), sampling.eos_token_ids.end(), token) !=
                    sampling.eos_token_ids.end();
     };

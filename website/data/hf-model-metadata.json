@@ -1021,6 +1021,15 @@
       "architecture_source": null
     },
     {
+      "hf_id": "lerobot/pi05_droid",
+      "revision": "72824c0a93f00ce5bb8bedb7feb58953ba1da364",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [],
+      "architecture_source": null
+    },
+    {
       "hf_id": "lerobot/pi05_libero_base",
       "revision": "5fcf06fc42b6717e22ab885fd381a096574b12c7",
       "revision_source": "resolved",

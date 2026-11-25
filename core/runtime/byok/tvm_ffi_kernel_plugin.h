@@ -22,9 +22,16 @@ namespace trtmc {
 
 class TvmFfiBoundFunction;
 
-// Parsed output specification from shape_spec JSON.
+struct TvmFfiDimensionSpec {
+    int32_t value{0};
+    int32_t input{-1};
+    int32_t axis{-1};
+};
+
+// Parsed output specification from shape_spec JSON. A dimension can be fixed
+// or inherit one input axis, independently of the other output dimensions.
 struct TvmFfiOutputSpec {
-    std::vector<int32_t> dims;
+    std::vector<TvmFfiDimensionSpec> dims;
     int32_t same_as_input_index{-1};
     int32_t dtype{0}; // 0 = float32, 1 = float16, 2 = bfloat16, 3 = int32
 };
