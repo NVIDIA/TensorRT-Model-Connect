@@ -1,0 +1,28 @@
+{
+  "name": "minicpm-v-4.7-1b",
+  "family": "minicpmv4_7",
+  "task": "images_text_to_text",
+  "hf_id": "openbmb/MiniCPM-V-4.7-1B",
+  "hf_revision": "ad9bf379feb71204c888b22923d63322452407f9",
+  "precision": "fp32",
+  "max_sequence_length": 4096,
+  "tensor_parallel_size": 1,
+  "bundle": "minicpm-v-4.7-1b-fp32.bundle",
+  "reference_precision": "float32",
+  "testcases": [
+    {
+      "name": "minicpm-v-4.7-1b-car-color",
+      "premerge": true,
+      "image": "data/test_img.png",
+      "prompt": "What color is the car? Answer in one word.",
+      "max_new_tokens": 8
+    },
+    {
+      "name": "minicpm-v-4.7-1b-multilingual-prompt",
+      "premerge": true,
+      "image": "data/test_img.png",
+      "prompt": "Answer in English with one word: what kind of vehicle is this? (हिंदी: यह कौन सा वाहन है? বাংলা: এটি কোন গাড়ি? ไทย: นี่คือรถอะไร? Café naïve)",
+      "max_new_tokens": 4
+    }
+  ]
+}

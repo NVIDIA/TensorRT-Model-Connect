@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Single-token MiniCPM-V 4.7 language decoder (Qwen3.5-MoE text): Gated DeltaNet, gated attention, experts.
+"""Single-token MiniCPM-V 4.7 language decoder with Gated DeltaNet and gated attention.
 
 One engine step consumes one prompt or generated token at its KV slot ``position_id``. A prompt token
 may carry a visual embedding row instead of its token embedding, and every token carries its own
@@ -70,6 +70,12 @@ class _Layer:
             self.q_norm = get(f"{mixer}.q_norm.weight", (config.head_dim,))
             self.k_norm = get(f"{mixer}.k_norm.weight", (config.head_dim,))
         mlp = f"{prefix}.mlp"
+        if not config.is_moe:
+            width = config.intermediate_size
+            self.gate_proj = get(f"{mlp}.gate_proj.weight", (width, hidden))
+            self.up_proj = get(f"{mlp}.up_proj.weight", (width, hidden))
+            self.down_proj = get(f"{mlp}.down_proj.weight", (hidden, width))
+            return
         experts, width = config.num_experts, config.moe_intermediate_size
         shared = config.shared_expert_intermediate_size
         self.router = get(f"{mlp}.gate.weight", (experts, hidden))
@@ -199,6 +205,11 @@ def _attention(g: Graph, x: trt.ITensor, cache_k: trt.ITensor, cache_v: trt.ITen
     return g.linear(gated, layer.o_proj), key, value
 
 
+def _dense_mlp(g: Graph, x: trt.ITensor, layer: _Layer) -> trt.ITensor:
+    hidden = g.mul(g.silu(g.linear(x, layer.gate_proj)), g.linear(x, layer.up_proj))
+    return g.linear(hidden, layer.down_proj)
+
+
 def _experts(g: Graph, x: trt.ITensor, layer: _Layer, config: TextConfig) -> trt.ITensor:
     """Softmax top-k routed experts plus the sigmoid-gated shared expert, for one token row."""
     work = x.dtype
@@ -297,7 +308,11 @@ def build_decoder_network(network: trt.INetworkDefinition, weights: dict, config
         hidden_state = g.add(residual, mixed)
         residual = hidden_state
         normed = g.rms_norm_centered(hidden_state, layer.post_norm, config.rms_norm_eps)
-        hidden_state = g.add(residual, _experts(g, normed, layer, config))
+        if config.is_moe:
+            feed_forward = _experts(g, normed, layer, config)
+        else:
+            feed_forward = _dense_mlp(g, normed, layer)
+        hidden_state = g.add(residual, feed_forward)
 
     hidden_state = g.rms_norm_centered(hidden_state, weights["final_norm"], config.rms_norm_eps)
     logits = g.f32(g.linear(hidden_state, weights["lm_head"]))

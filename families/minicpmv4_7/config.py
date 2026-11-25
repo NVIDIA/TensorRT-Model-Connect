@@ -33,7 +33,7 @@ def _require(raw: dict, name: str, expected) -> None:
 
 @dataclass(frozen=True)
 class TextConfig:
-    """Qwen3.5-MoE hybrid decoder: Gated DeltaNet and gated full attention, routed experts."""
+    """Qwen3.5 hybrid decoder with dense or routed feed-forward layers."""
 
     hidden_size: int
     num_hidden_layers: int
@@ -46,6 +46,7 @@ class TextConfig:
     linear_key_head_dim: int
     linear_value_head_dim: int
     linear_conv_kernel_dim: int
+    intermediate_size: int
     num_experts: int
     num_experts_per_tok: int
     moe_intermediate_size: int
@@ -56,6 +57,10 @@ class TextConfig:
     partial_rotary_factor: float
     mrope_section: tuple[int, int, int]
     max_position_embeddings: int
+
+    @property
+    def is_moe(self) -> bool:
+        return self.num_experts > 0
 
     @property
     def rotary_dim(self) -> int:
@@ -83,8 +88,9 @@ class TextConfig:
 
     @staticmethod
     def from_dict(raw: dict) -> TextConfig:
-        if raw.get("model_type") != "qwen3_5_moe_text":
-            raise ValueError("MiniCPM-V 4.7 requires a qwen3_5_moe_text language model")
+        if raw.get("model_type") not in ("qwen3_5_text", "qwen3_5_moe_text"):
+            raise ValueError("MiniCPM-V 4.7 requires a qwen3_5_text or qwen3_5_moe_text language model")
+        is_moe = raw["model_type"] == "qwen3_5_moe_text"
         for name, expected in (("hidden_act", "silu"), ("attention_bias", False), ("attn_output_gate", True),
                                ("mamba_ssm_dtype", "float32"), ("tie_word_embeddings", False)):
             _require(raw, name, expected)
@@ -112,10 +118,11 @@ class TextConfig:
             linear_key_head_dim=_int(raw, "linear_key_head_dim"),
             linear_value_head_dim=_int(raw, "linear_value_head_dim"),
             linear_conv_kernel_dim=_int(raw, "linear_conv_kernel_dim"),
-            num_experts=_int(raw, "num_experts"),
-            num_experts_per_tok=_int(raw, "num_experts_per_tok"),
-            moe_intermediate_size=_int(raw, "moe_intermediate_size"),
-            shared_expert_intermediate_size=_int(raw, "shared_expert_intermediate_size"),
+            intermediate_size=0 if is_moe else _int(raw, "intermediate_size"),
+            num_experts=_int(raw, "num_experts") if is_moe else 0,
+            num_experts_per_tok=_int(raw, "num_experts_per_tok") if is_moe else 0,
+            moe_intermediate_size=_int(raw, "moe_intermediate_size") if is_moe else 0,
+            shared_expert_intermediate_size=_int(raw, "shared_expert_intermediate_size") if is_moe else 0,
             vocab_size=_int(raw, "vocab_size"),
             rms_norm_eps=_float(raw, "rms_norm_eps"),
             rope_theta=_float(rope, "rope_theta"),
@@ -136,7 +143,7 @@ class TextConfig:
             raise ValueError("MiniCPM-V 4.7 multimodal RoPE sections must cover the rotary half dimension")
         if raw.get("partial_rotary_factor") not in (None, config.partial_rotary_factor):
             raise ValueError("MiniCPM-V 4.7 partial rotary factors disagree")
-        if not 1 <= config.num_experts_per_tok <= config.num_experts:
+        if is_moe and not 1 <= config.num_experts_per_tok <= config.num_experts:
             raise ValueError("MiniCPM-V 4.7 routes to an invalid number of experts")
         return config
 

@@ -21,7 +21,7 @@ reference text and token ids, and the checks of 1 and 2 as a reference compariso
 official FP32 model on this image: three prompts gave identical tokens, and on the fourth the BF16 model
 first left the FP32 greedy choice at an FP32 gap of 0.811, rounded up to 0.85. The value bounds that
 first BF16 near-tie flip only; later in the same diverged sequence the official BF16 model chose a
-token 1.92 below the FP32 maximum, which this check would reject. All cases use the same value.
+token 1.92 below the FP32 maximum, which this check would reject. The 35B cases use the same value. The 1B FP32 cases use a strict zero-gap gate pending hardware validation.
 
 The multilingual case holds Devanagari, Bengali and Thai text and a decomposed (NFD) sequence, so the
 host contract also covers the tokenizer's NFC normalization and Unicode pre-tokenization.
@@ -43,8 +43,15 @@ from tensorrt_model_connect import BuildRequest, build
 from tools.e2e_evidence import evidence_stage, record_evidence
 
 TEST_DIR = Path(__file__).resolve().parent
-MANIFEST = json.loads((TEST_DIR / "manifests/minicpm-v-4.7-35b-a3b.json").read_text(encoding="utf-8"))
-CASES = {case["name"]: case for case in MANIFEST["testcases"]}
+MANIFESTS = {
+    manifest["name"]: manifest
+    for path in sorted((TEST_DIR / "manifests").glob("*.json"))
+    for manifest in [json.loads(path.read_text(encoding="utf-8"))]
+}
+CASES = {
+    case["name"]: (manifest, case)
+    for manifest in MANIFESTS.values() for case in manifest["testcases"]
+}
 _FAMILY = "minicpmv4_7"
 
 
@@ -56,6 +63,7 @@ def _names(config, flag: str) -> set[str]:
 def _selected(config, case_name: str) -> bool:
     """``--e2e-testcase`` names exact cases; ``--e2e-model`` and ``--e2e-models-file`` name the family, the
     manifest or a case. Without either, ``TRTMC_E2E=1`` selects every case."""
+    manifest, _ = CASES[case_name]
     models = _names(config, "--e2e-model")
     filename = config.getoption("--e2e-models-file", default=None)
     if filename:
@@ -64,7 +72,7 @@ def _selected(config, case_name: str) -> bool:
     cases = _names(config, "--e2e-testcase")
     if not models and not cases:
         return os.environ.get("TRTMC_E2E") == "1"
-    if models and not {case_name, MANIFEST["name"], _FAMILY} & models:
+    if models and not {case_name, manifest["name"], _FAMILY} & models:
         return False
     return not cases or case_name in cases
 
@@ -192,34 +200,39 @@ def _check_host_contract(native: dict, reference: dict, patches: Path, reference
 
 
 @pytest.fixture(scope="module")
-def built(tmp_path_factory) -> tuple[Path, Path]:
-    """One fresh bundle from the pinned checkpoint, shared by the selected cases.
-
-    The 65.6 GiB checkpoint is read from the local Hugging Face cache only; the test never downloads it.
-    """
+def built(tmp_path_factory):
+    """Build each selected checkpoint once, from local artifacts only."""
     from huggingface_hub import snapshot_download
 
-    try:
-        checkpoint = Path(snapshot_download(repo_id=MANIFEST["hf_id"], revision=MANIFEST["hf_revision"],
-                                            local_files_only=True))
-    except FileNotFoundError as error:
-        raise AssertionError(
-            f"{MANIFEST['hf_id']} at revision {MANIFEST['hf_revision']} is not in the local Hugging Face cache; "
-            f"fetch it first: hf download {MANIFEST['hf_id']} --revision {MANIFEST['hf_revision']}") from error
-    bundle = tmp_path_factory.mktemp("bundle") / MANIFEST["bundle"]
-    build(BuildRequest(checkpoint, bundle, MANIFEST["family"], MANIFEST["task"], MANIFEST["precision"],
-                       max_sequence_length=MANIFEST["max_sequence_length"],
-                       tensor_parallel_size=MANIFEST["tensor_parallel_size"]))
-    return checkpoint, bundle
+    bundles = {}
+
+    def get_bundle(manifest):
+        name = manifest["name"]
+        if name not in bundles:
+            try:
+                checkpoint = Path(snapshot_download(repo_id=manifest["hf_id"], revision=manifest["hf_revision"],
+                                                    local_files_only=True))
+            except FileNotFoundError as error:
+                raise AssertionError(
+                    f"{manifest['hf_id']} at revision {manifest['hf_revision']} is not in the local Hugging Face cache; "
+                    f"fetch it first: hf download {manifest['hf_id']} --revision {manifest['hf_revision']}") from error
+            bundle = tmp_path_factory.mktemp(name) / manifest["bundle"]
+            build(BuildRequest(checkpoint, bundle, manifest["family"], manifest["task"], manifest["precision"],
+                               max_sequence_length=manifest["max_sequence_length"],
+                               tensor_parallel_size=manifest["tensor_parallel_size"]))
+            bundles[name] = checkpoint, bundle
+        return bundles[name]
+
+    return get_bundle
 
 
 @pytest.mark.parametrize("case_name", list(CASES))
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, request) -> None:
-    case = CASES[case_name]
+    manifest, case = CASES[case_name]
     if not _selected(request.config, case_name):
         pytest.skip("real family E2E requires explicit selection or TRTMC_E2E=1")
     binary, runtime, native, reference_python = _environment()
-    checkpoint, bundle = request.getfixturevalue("built")
+    checkpoint, bundle = request.getfixturevalue("built")(manifest)
     work = tmp_path / case_name
     work.mkdir()
     request_path = _request(case, work)
@@ -244,11 +257,11 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, request) -> Non
     with evidence_stage("reference"):
         _run([str(reference_python), "-m", "families.minicpmv4_7.tests.hf_reference", "--checkpoint",
               str(checkpoint), "--request", str(request_path), "--output", str(work / "reference.json"),
-              "--dtype", MANIFEST["reference_precision"], "--candidate", str(work / "candidate.json"),
+              "--dtype", manifest["reference_precision"], "--candidate", str(work / "candidate.json"),
               "--max-new-tokens", str(case["max_new_tokens"])], work / "reference.log", env=environment,
              timeout=7200, cwd=root)
     reference = json.loads((work / "reference.json").read_text())
-    record_evidence("reference", {"backend": "hf_transformers", "precision": MANIFEST["reference_precision"],
+    record_evidence("reference", {"backend": "hf_transformers", "precision": manifest["reference_precision"],
                                   "reference_text": reference["generated_text"],
                                   "reference_ids": reference["generated_ids"]})
     native_dump = json.loads((work / "native" / "dump.json").read_text())

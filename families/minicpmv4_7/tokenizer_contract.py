@@ -16,11 +16,13 @@ _SPLIT_PATTERN = (
     r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*"
     r"|\s*[\r\n]+|\s+(?!\S)|\s+"
 )
+_DENSE_SPLIT_PATTERN = (
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*"
+    r"|\s*[\r\n]+|\s+(?!\S)|\s+"
+)
 _BASE_VOCAB_SIZE = 248044
 _MERGE_COUNT = 247587
-_ADDED_TOKEN_COUNT = 100
-_SPECIAL_TOKEN_COUNT = 88
-FULL_VOCAB_SIZE = _BASE_VOCAB_SIZE + _ADDED_TOKEN_COUNT
+_VOCABULARIES = {248094: (50, 38), 248144: (100, 88)}
 # Chat and image protocol tokens: content -> (id, special).
 _PROTOCOL_TOKENS = {
     "<|endoftext|>": (248044, True),
@@ -82,8 +84,10 @@ def check_tokenizer_contract(model_dir: Path, vocab_size: int) -> None:
     ``vocab_size`` is the decoder's; it must cover exactly the tokenizer's ids, so that every prompt id has a
     decoder row and every generated id can be decoded.
     """
-    if vocab_size != FULL_VOCAB_SIZE:
-        raise ValueError(f"minicpmv4_7 decoder vocab_size {vocab_size} differs from the tokenizer's {FULL_VOCAB_SIZE} ids")
+    if type(vocab_size) is not int or vocab_size not in _VOCABULARIES:
+        raise ValueError(f"minicpmv4_7 decoder vocab_size {vocab_size} is not a released tokenizer size")
+    added_count, special_count = _VOCABULARIES[vocab_size]
+    dense = added_count == 50
     path = model_dir / "tokenizer.json"
     if not path.is_file():
         raise ValueError("minicpmv4_7 requires tokenizer.json (the runtime tokenizer reads it)")
@@ -97,10 +101,16 @@ def check_tokenizer_contract(model_dir: Path, vocab_size: int) -> None:
             and root.get("truncation") is None and root.get("padding") is None,
             "has an unexpected top-level shape, version, truncation or padding")
     require(_same(root.get("normalizer"), {"type": "NFC"}), "must use the NFC normalizer")
-    require(_same(root.get("pre_tokenizer"), _PRE_TOKENIZER),
+    pre_tokenizer = {**_PRE_TOKENIZER, "pretokenizers": [
+        {**_PRE_TOKENIZER["pretokenizers"][0],
+         "pattern": {"Regex": _DENSE_SPLIT_PATTERN if dense else _SPLIT_PATTERN}},
+        {**_PRE_TOKENIZER["pretokenizers"][1], "trim_offsets": not dense},
+    ]}
+    require(_same(root.get("pre_tokenizer"), pre_tokenizer),
             "does not hold the Split and ByteLevel pre-tokenizer the runtime implements")
     require(_same(root.get("post_processor"), _POST_PROCESSOR), "must use the ByteLevel post-processor")
-    require(_same(root.get("decoder"), _DECODER), "must use the ByteLevel decoder")
+    decoder = {**_DECODER, "add_prefix_space": False, "trim_offsets": False, "use_regex": False} if dense else _DECODER
+    require(_same(root.get("decoder"), decoder), "must use the ByteLevel decoder")
 
     model = root.get("model")
     require(isinstance(model, dict) and len(model) == 10
@@ -118,7 +128,7 @@ def check_tokenizer_contract(model_dir: Path, vocab_size: int) -> None:
             "has an unexpected BPE merge list")
 
     added = root.get("added_tokens")
-    require(isinstance(added, list) and len(added) == _ADDED_TOKEN_COUNT, "has an unexpected added-token count")
+    require(isinstance(added, list) and len(added) == added_count, "has an unexpected added-token count")
     contents: dict[str, tuple[int, bool]] = {}
     for index, entry in enumerate(added):
         require(isinstance(entry, dict) and len(entry) == 7 and type(entry.get("id")) is int
@@ -130,7 +140,7 @@ def check_tokenizer_contract(model_dir: Path, vocab_size: int) -> None:
         require(entry["content"] not in vocab and entry["content"] not in contents,
                 "contains duplicate added-token content")
         contents[entry["content"]] = (entry["id"], entry["special"])
-    require(sum(special for _, special in contents.values()) == _SPECIAL_TOKEN_COUNT,
+    require(sum(special for _, special in contents.values()) == special_count,
             "has an unexpected special-token count")
     for content, expected in _PROTOCOL_TOKENS.items():
         require(contents.get(content) == expected, f"does not hold the protocol token {content!r} as {expected}")
