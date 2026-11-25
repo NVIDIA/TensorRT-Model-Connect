@@ -794,6 +794,9 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
             record = {**record, field: str(_square_crop(Path(record[field]), Path(environment["hf_datasets_cache"])))}
         request = {**base, **(record.get("request") or {})}
         request.update(definition.get("request") or {})
+        # A null removes a field of the catalog request: a control the Task declares no config for (Stable Video
+        # Diffusion has no width or height; its frames are then fitted to the bundle's video size).
+        request = {key: value for key, value in request.items() if value is not None}
         for source_field, request_field in (definition.get("fields") or {}).items():
             request[request_field] = record[source_field] if source_field in record else _field(record, source_field)
         for field in definition.get("fit_to_request", []):  # an image at the request's width x height
