@@ -40,14 +40,15 @@ double pillow_cubic(double value) {
     return 0.0;
 }
 
-std::vector<PillowSpan> make_pillow_plan(std::int32_t input_size, std::int32_t output_size) {
+std::vector<PillowSpan> make_pillow_plan(std::int32_t input_size, std::int32_t output_size,
+                                         std::int32_t offset, std::int32_t count) {
     const double scale = static_cast<double>(input_size) / output_size;
     const double filter_scale = std::max(scale, 1.0);
     const double support = 2.0 * filter_scale;
     const double inverse_filter_scale = 1.0 / filter_scale;
-    std::vector<PillowSpan> plan(static_cast<std::size_t>(output_size));
-    for (std::int32_t output_index = 0; output_index < output_size; ++output_index) {
-        const double center = (static_cast<double>(output_index) + 0.5) * scale;
+    std::vector<PillowSpan> plan(static_cast<std::size_t>(count));
+    for (std::int32_t output_index = 0; output_index < count; ++output_index) {
+        const double center = (static_cast<double>(offset + output_index) + 0.5) * scale;
         const auto first =
             std::max<std::int32_t>(0, static_cast<std::int32_t>(center - support + 0.5));
         const auto end =
@@ -99,35 +100,45 @@ std::uint8_t apply_pillow_span(const std::uint8_t* source, std::int32_t stride,
 
 std::vector<float> resize_pillow_bicubic(const float* source, std::int32_t input_h,
                                          std::int32_t input_w, std::int32_t output_h,
-                                         std::int32_t output_w) {
+                                         std::int32_t output_w, std::int32_t crop_h,
+                                         std::int32_t crop_w) {
     std::vector<std::uint8_t> input(static_cast<std::size_t>(input_h) * input_w * 3U);
     std::transform(source, source + input.size(), input.begin(), [](float value) {
         return static_cast<std::uint8_t>(std::lround(std::clamp(value, 0.0F, 1.0F) * 255.0F));
     });
 
-    const auto horizontal_plan = make_pillow_plan(input_w, output_w);
-    std::vector<std::uint8_t> horizontal(static_cast<std::size_t>(input_h) * output_w * 3U);
-    for (std::int32_t y = 0; y < input_h; ++y) {
-        for (std::int32_t x = 0; x < output_w; ++x) {
+    // Keep full-image filter coordinates, but evaluate only the center crop
+    // and the source rows needed by its vertical filter support.
+    const auto horizontal_plan =
+        make_pillow_plan(input_w, output_w, (output_w - crop_w) / 2, crop_w);
+    auto vertical_plan = make_pillow_plan(input_h, output_h, (output_h - crop_h) / 2, crop_h);
+    const auto first_y = vertical_plan.front().first;
+    std::int32_t end_y = first_y;
+    for (const auto& span : vertical_plan)
+        end_y = std::max(end_y, span.first + static_cast<std::int32_t>(span.weights.size()));
+    std::vector<std::uint8_t> horizontal(static_cast<std::size_t>(end_y - first_y) * crop_w * 3U);
+    for (std::int32_t y = first_y; y < end_y; ++y) {
+        for (std::int32_t x = 0; x < crop_w; ++x) {
             const auto& span = horizontal_plan[static_cast<std::size_t>(x)];
             for (std::int32_t channel = 0; channel < 3; ++channel) {
                 const auto source_offset = static_cast<std::size_t>(y) * input_w * 3U + channel;
-                const auto target = (static_cast<std::size_t>(y) * output_w + x) * 3U + channel;
+                const auto target =
+                    (static_cast<std::size_t>(y - first_y) * crop_w + x) * 3U + channel;
                 horizontal[target] = apply_pillow_span(input.data() + source_offset, 3, span);
             }
         }
     }
 
-    const auto vertical_plan = make_pillow_plan(input_h, output_h);
-    std::vector<float> output(static_cast<std::size_t>(output_h) * output_w * 3U);
-    for (std::int32_t y = 0; y < output_h; ++y) {
-        const auto& span = vertical_plan[static_cast<std::size_t>(y)];
-        for (std::int32_t x = 0; x < output_w; ++x) {
+    std::vector<float> output(static_cast<std::size_t>(crop_h) * crop_w * 3U);
+    for (std::int32_t y = 0; y < crop_h; ++y) {
+        auto& span = vertical_plan[static_cast<std::size_t>(y)];
+        span.first -= first_y;
+        for (std::int32_t x = 0; x < crop_w; ++x) {
             for (std::int32_t channel = 0; channel < 3; ++channel) {
                 const auto source_offset = static_cast<std::size_t>(x) * 3U + channel;
-                const auto target = (static_cast<std::size_t>(y) * output_w + x) * 3U + channel;
+                const auto target = (static_cast<std::size_t>(y) * crop_w + x) * 3U + channel;
                 output[target] = static_cast<float>(apply_pillow_span(
-                                     horizontal.data() + source_offset, output_w * 3, span)) /
+                                     horizontal.data() + source_offset, crop_w * 3, span)) /
                                  255.0F;
             }
         }
@@ -167,8 +178,10 @@ compute_dinov2_with_registers_resize_shape(std::int32_t image_height, std::int32
     const std::int32_t target = config.shortest_edge;
     const std::int32_t shortest = std::min(image_height, image_width);
     const std::int32_t longest = std::max(image_height, image_width);
-    const auto scaled =
-        static_cast<std::int32_t>(static_cast<std::int64_t>(target) * longest / shortest);
+    const auto long_edge = static_cast<std::int64_t>(target) * longest / shortest;
+    if (long_edge > std::numeric_limits<std::int32_t>::max())
+        throw std::invalid_argument("dinov2_with_registers resized dimensions exceed int32");
+    const auto scaled = static_cast<std::int32_t>(long_edge);
     if (image_height <= image_width)
         return {target, scaled};
     return {scaled, target};
@@ -201,16 +214,13 @@ preprocess_dinov2_with_registers_image(const float* image_pixels, std::int32_t i
     const auto shape =
         compute_dinov2_with_registers_resize_shape(image_height, image_width, config);
     const auto resized =
-        resize_pillow_bicubic(image_pixels, image_height, image_width, shape.height, shape.width);
-
-    const std::int32_t crop_y = (shape.height - config.input_image_h) / 2;
-    const std::int32_t crop_x = (shape.width - config.input_image_w) / 2;
+        resize_pillow_bicubic(image_pixels, image_height, image_width, shape.height, shape.width,
+                              config.input_image_h, config.input_image_w);
     const auto plane = static_cast<std::size_t>(config.input_image_h) * config.input_image_w;
     std::vector<float> pixel_values(3U * plane);
     for (std::int32_t y = 0; y < config.input_image_h; ++y) {
         for (std::int32_t x = 0; x < config.input_image_w; ++x) {
-            const auto source =
-                static_cast<std::size_t>(((crop_y + y) * shape.width + crop_x + x) * 3);
+            const auto source = (static_cast<std::size_t>(y) * config.input_image_w + x) * 3U;
             for (std::int32_t c = 0; c < 3; ++c) {
                 const auto channel = static_cast<std::size_t>(c);
                 pixel_values[channel * plane + static_cast<std::size_t>(y) * config.input_image_w +

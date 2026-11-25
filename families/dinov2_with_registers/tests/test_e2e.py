@@ -16,6 +16,8 @@ import pytest
 from tensorrt_model_connect import BuildRequest, build
 from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
+from ._checkpoint import checkpoint_record
+
 FAMILY = "dinov2_with_registers"
 TASKS = frozenset({"image_to_token_and_pooled_features"})
 TEST_ROOT = Path(__file__).resolve().parent
@@ -236,14 +238,6 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
     record_evidence(
-        "checkpoint",
-        {
-            "repo_id": manifest["hf_id"],
-            "revision": manifest["hf_revision"],
-            "precision": manifest["precision"],
-        },
-    )
-    record_evidence(
         "thresholds",
         {
             key: value
@@ -268,6 +262,14 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
         directory = _model_dir(manifest)
+        record_evidence(
+            "checkpoint",
+            checkpoint_record(
+                directory,
+                manifest,
+                local_override=bool(os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")),
+            ),
+        )
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
@@ -370,6 +372,8 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         with evidence_stage("comparison"):
             assert payload["normalization"] == "none"
         tokens = payload["tokens"]
+        with evidence_stage("comparison"):
+            assert len(tokens) == shape[1]
         registers = case["num_register_tokens"]
         with evidence_stage("comparison"):
             assert [token["role"] for token in tokens[: registers + 1]] == ["class"] + [

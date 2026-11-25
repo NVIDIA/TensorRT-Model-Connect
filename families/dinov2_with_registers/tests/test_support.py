@@ -22,5 +22,9 @@ def test_other_backbones_and_classification_heads_are_not_claimed():
         {"model_type": "dinov2"},
         {"model_type": "dinov3_vit"},
         {"architectures": ["Dinov2WithRegistersForImageClassification"]},
+        {
+            "model_type": "dinov2_with_registers",
+            "architectures": ["Dinov2WithRegistersForImageClassification"],
+        },
     ):
         assert describe(ModelMetadata(identity, {})) is None

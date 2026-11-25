@@ -5,6 +5,7 @@
 
 #include "families/dinov2_with_registers/runtime/image_preprocess.h"
 
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
@@ -22,7 +23,7 @@ void check(bool condition, const char* name) {
 }
 
 void check_close(double actual, double expected, double tolerance, const char* name) {
-    if (std::fabs(actual - expected) > tolerance) {
+    if (!std::isfinite(actual) || std::fabs(actual - expected) > tolerance) {
         std::cerr << "FAIL: " << name << " actual=" << actual << " expected=" << expected << '\n';
         ++g_failures;
     }
@@ -93,6 +94,64 @@ void test_normalisation_is_per_channel() {
     check_close(out[2 * plane], 0.0, 1e-5, "channel 2 uses its own mean and deviation");
 }
 
+void test_nonconstant_bicubic_matches_pillow() {
+    // Independent RGB fixtures from Pillow Image.resize(BICUBIC), then a
+    // floored center crop. Cover enlargement, antialiased reduction, and
+    // odd crop offsets without using this implementation as the oracle.
+    auto run = [](int height, int width, int shortest,
+                  const std::array<unsigned char, 48>& expected) {
+        auto config = base_config();
+        config.input_image_h = config.input_image_w = 4;
+        config.shortest_edge = shortest;
+        config.image_mean = {0, 0, 0};
+        config.image_std = {1, 1, 1};
+        std::vector<float> input(static_cast<std::size_t>(height) * width * 3);
+        for (int y = 0; y < height; ++y)
+            for (int x = 0; x < width; ++x)
+                for (int c = 0; c < 3; ++c)
+                    input[(static_cast<std::size_t>(y) * width + x) * 3 + c] =
+                        static_cast<float>((y * 71 + x * 29 + c * 97) % 256) / 255.0F;
+        const auto actual =
+            trtmc::preprocess_dinov2_with_registers_image(input.data(), height, width, config);
+        for (int y = 0; y < 4; ++y)
+            for (int x = 0; x < 4; ++x)
+                for (int c = 0; c < 3; ++c)
+                    check_close(actual[c * 16 + y * 4 + x], expected[(y * 4 + x) * 3 + c] / 255.0,
+                                1e-7, "bicubic crop matches independent Pillow fixture");
+    };
+    run(3, 5, 7,
+        {
+            38,  137, 209, 51,  150, 235, 64,  163, 234, 77,  178, 145, 67,  182, 118, 80,
+            195, 138, 93,  207, 144, 105, 229, 107, 103, 200, 41,  116, 213, 54,  129, 226,
+            67,  142, 254, 80,  139, 119, 60,  152, 130, 72,  165, 149, 86,  185, 172, 106,
+        });
+    run(9, 13, 5,
+        {
+            105, 192, 119, 155, 152, 91,  179, 77,  154, 112, 107, 178, 148, 95,  158, 77,
+            123, 148, 100, 151, 150, 125, 143, 93,  98,  176, 108, 154, 143, 88,  163, 82,
+            141, 99,  91,  160, 134, 114, 147, 102, 117, 181, 92,  145, 133, 133, 168, 84,
+        });
+    run(5, 7, 5,
+        {
+            29,  126, 223, 58,  155, 252, 87,  184, 25,  116, 213, 54,  100, 197, 38,  129,
+            226, 67,  158, 255, 96,  187, 28,  125, 171, 12,  109, 200, 41,  138, 229, 70,
+            167, 2,   99,  196, 242, 83,  180, 15,  112, 209, 44,  141, 238, 73,  170, 11,
+        });
+}
+
+void test_panorama_only_retains_the_center_crop() {
+    auto config = base_config();
+    config.image_mean = {0, 0, 0};
+    config.image_std = {1, 1, 1};
+    std::vector<float> input(10000U * 3U, 0.5F);
+    const auto actual =
+        trtmc::preprocess_dinov2_with_registers_image(input.data(), 1, 10000, config);
+    check(actual.size() == 224U * 224U * 3U, "panorama returns only the requested crop");
+    for (float value : actual)
+        check_close(value, 128.0 / 255.0, 1e-7,
+                    "panorama keeps the full-image sampling coordinates");
+}
+
 void test_invalid_input_is_refused() {
     auto config = base_config();
     bool threw = false;
@@ -140,6 +199,8 @@ int main() {
     test_long_edge_is_floored_not_rounded();
     test_a_patch_maps_back_onto_the_source();
     test_normalisation_is_per_channel();
+    test_nonconstant_bicubic_matches_pillow();
+    test_panorama_only_retains_the_center_crop();
     test_invalid_input_is_refused();
     if (g_failures == 0)
         std::cout << "dinov2_with_registers image preprocess: all checks passed\n";
