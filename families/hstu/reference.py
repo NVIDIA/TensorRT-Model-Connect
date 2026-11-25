@@ -3,10 +3,13 @@
 
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 
-"""Full-sequence FP32 NumPy oracle for the official DLRMv3 dense model.
+"""Full-sequence NumPy oracle with FP64 dense accumulation for the official DLRMv3 dense model.
 
 Equations follow Meta's Apache-2.0 generative-recommenders implementation;
 this computes history and targets together, independently of serving caches.
+Dense FP32 checkpoint values are promoted to FP64 to avoid cancellation in
+long attention/residual chains. Timestamp floor/bucket operations retain their
+upstream FP32 semantics. Returned scores are FP32.
 """
 
 import numpy as np
@@ -19,7 +22,14 @@ def sigmoid(x):
 
 class Reference:
     def __init__(self, config, weights):
-        self.c, self.w = config, weights
+        self.c = config
+        timestamp_constants = {POST + "_period_units", POST + "_units_per_period"}
+        self.w = {
+            name: value.astype(np.float64)
+            if np.issubdtype(value.dtype, np.floating) and name not in timestamp_constants
+            else value
+            for name, value in weights.items()
+        }
 
     def norm(self, x, weight, bias, eps=1e-5):
         mean = x.mean(-1, keepdims=True)

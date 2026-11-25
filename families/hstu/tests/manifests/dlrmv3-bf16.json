@@ -17,21 +17,21 @@
       "name": "dlrmv3-bf16-default-b1",
       "batch": 1,
       "profile": "default",
-      "reference_precision": "fp32",
+      "reference_precision": "fp64",
       "premerge": true
     },
     {
       "name": "dlrmv3-bf16-default-b4",
       "batch": 4,
       "profile": "default",
-      "reference_precision": "fp32",
+      "reference_precision": "fp64",
       "premerge": true
     },
     {
       "name": "dlrmv3-bf16-short-b4",
       "batch": 4,
       "profile": "short",
-      "reference_precision": "fp32",
+      "reference_precision": "fp64",
       "premerge": true
     }
   ],

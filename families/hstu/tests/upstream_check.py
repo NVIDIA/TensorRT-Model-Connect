@@ -4,6 +4,7 @@
 """Independent original-model qualification with the public checkpoint."""
 
 import os
+import json
 from pathlib import Path
 import numpy as np
 import pytest
@@ -25,10 +26,18 @@ def test_original_dense_model_matches_full_sequence_reference():
     weights = load_weights(converted)
     for t, c in ((32, 8), (512, 128)):
         config = Config(serving=ServingProfile(history_length=t, candidates=c))
-        for seed in (42, 43):
+        profile = "short" if t == 32 else "default"
+        gate = json.loads(
+            (Path(__file__).parent / "thresholds" / f"dlrmv3-fp32-{profile}-b4.json").read_text()
+        )["threshold_overrides"]
+        for seed in (42, 43, 250, 1000):
             inputs = example_inputs(config, 4, seed=seed)
-            inputs["history_lengths"][:2, 0] = [0, 18]
-            inputs["num_candidates"][:2, 0] = [1, 2]
+            if seed in (42, 43):
+                inputs["history_lengths"][:2, 0] = [0, 18]
+                inputs["num_candidates"][:2, 0] = [1, 2]
             original = score_original(model, config, inputs)
             actual = Reference(config, weights).score(inputs)["scores"]
-            np.testing.assert_allclose(actual, original, atol=2e-5, rtol=2e-5)
+            np.testing.assert_allclose(
+                actual, original, atol=gate["score_atol"], rtol=gate["score_rtol"]
+            )
+            np.testing.assert_array_equal(actual.argmax(1), original.argmax(1))

@@ -71,7 +71,7 @@ def test_dlrmv3_e2e(dlrm_case, dlrm_root, dlrm_bridge_root, tmp_path):
     assert case.get("premerge", False) in (True, False)
     assert manifest["max_batch_size"] == 4
     assert manifest["tensor_parallel_size"] == manifest["context_parallel_size"] == 1
-    assert case["reference_precision"] == "fp32"
+    assert case["reference_precision"] == "fp64"
     record_evidence("external_files", manifest["external_files"])
     record_evidence("artifact", dict(bundle=manifest["bundle"], checkpoint=manifest["checkpoint"]))
     oracle = Reference(c, load_weights(directory, c))
