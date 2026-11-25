@@ -1269,6 +1269,16 @@ class BpeTokenizer final : public ITokenizer {
                 characters += (byte & 0xC0U) != 0x80U;
             mMaxTokenBytes = std::max(mMaxTokenBytes, characters);
         }
+        // Every input byte starts as its byte-level character, so each of the 256 needs a
+        // vocabulary entry: without one, encode() would drop that byte while the token budget
+        // counts it.
+        const auto& tables = byte_tables();
+        for (int byte = 0; byte < 256; ++byte) {
+            if (mTokenToId.count(tables.byte_to_utf8[byte]) == 0)
+                throw std::runtime_error("tokenizer.json vocabulary lacks the byte-level token of "
+                                         "byte " +
+                                         std::to_string(byte));
+        }
     }
 
     // The merge table as the reference reads it: one entry format for the whole table

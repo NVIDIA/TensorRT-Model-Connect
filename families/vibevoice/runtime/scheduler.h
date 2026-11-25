@@ -25,7 +25,8 @@ class DpmSolver {
 
     // Start a new latent; ``sample`` holds the initial noise.
     void reset() noexcept;
-    // Advance ``sample`` in place with the guided model output of ``step``.
+    // Advance ``sample`` in place with the guided model output of ``step``. A latent of
+    // another width than the previous step's needs reset() first.
     void step(std::int32_t step, const std::vector<float>& velocity, std::vector<float>& sample);
 
   private:
@@ -39,13 +40,14 @@ class DpmSolver {
     bool has_previous_{false};
 };
 
-// The timesteps of diffusers' "linspace" spacing over ``train_steps``.
+// The timesteps of diffusers' "linspace" spacing over ``train_steps`` (at most 2^20), as
+// numpy computes them in float64, whatever floating-point rounding mode the host selects.
 std::vector<std::int64_t> linspace_timesteps(std::int32_t train_steps, std::int32_t steps);
 
 // Throws std::invalid_argument unless ``steps`` lies in [1, train_sigmas.size()] and
-// gives a schedule whose log-SNR rises at every step: a rounded "linspace" that repeats
-// a timestep (1000 steps of a 1000-step schedule repeat 500) would divide by zero in the
-// second-order update.
+// gives a schedule of positive finite sigmas whose log-SNR rises at every step: a rounded
+// "linspace" that repeats a timestep (1000 steps of a 1000-step schedule repeat 500)
+// would divide by zero in the second-order update.
 void check_schedule(const std::vector<float>& train_sigmas, std::int32_t steps);
 
 } // namespace trtmc::vibevoice

@@ -298,6 +298,17 @@ def test_usable_gain_mirrors_the_runtime_check():
     assert not config_module.usable_gain(-1e6, 1e-6)
 
 
+def test_the_reference_keeps_the_acoustic_noise_scale():
+    transformers = pytest.importorskip("transformers")
+    if not hasattr(transformers, "VibeVoiceConfig"):
+        pytest.skip("the reference needs a Transformers with VibeVoice")
+    config, _ = reference.tiny_config()
+    config["acoustic_tokenizer_config"]["fix_std"] = 0.25
+    # The original model's noise scale, fix_std / 0.8, as the build reads it: Transformers'
+    # default (0.625) equals it only for a fix_std of 0.5.
+    assert reference.hf_config(config).audio_config.vae_std == pytest.approx(0.3125)
+
+
 def test_expected_tensors_match_the_original_layout_listing(tiny):
     raw = json.loads((tiny / "config.json").read_text())
     assert expected_tensors(config_module.load(tiny)) == reference.original_tensor_shapes(raw)
@@ -437,11 +448,14 @@ def test_the_build_refuses_a_tokenizer_the_runtime_would_refuse():
     lowercase["normalizer"] = {"type": "Lowercase"}
     worded = copy.deepcopy(good)
     worded["added_tokens"][0]["special"] = "false"
+    no_z = copy.deepcopy(good)
+    del no_z["model"]["vocab"]["z"]
     for document, match in (
         (own_regex, "pre_tokenizer is not supported"),
         (lowercase, "normalizer is not supported"),
         (worded, "special is not supported"),
         (_with_merges(good, [["a", "zz"]]), "merge is not supported"),
+        (no_z, "lacks the byte-level token of byte 122"),
     ):
         with pytest.raises(ValueError, match=match):
             model.check_tokenizer_layout(_bytes(document))

@@ -47,10 +47,14 @@ std::optional<SpokenLine> speaker_line(std::string_view line) {
         ++cursor;
     const std::size_t digits = cursor;
     std::int64_t speaker = 0;
+    bool too_large = false;
     while (cursor < line.size() && std::isdigit(static_cast<unsigned char>(line[cursor])) != 0) {
-        speaker = speaker * 10 + (line[cursor] - '0');
-        if (speaker > std::numeric_limits<std::int32_t>::max())
-            throw std::invalid_argument("vibevoice speaker id is too large");
+        // The value stops growing past the int32 range; whether the line declares a
+        // speaker, and so has an id too large, is known only at the colon.
+        if (!too_large) {
+            speaker = speaker * 10 + (line[cursor] - '0');
+            too_large = speaker > std::numeric_limits<std::int32_t>::max();
+        }
         ++cursor;
     }
     if (cursor == digits)
@@ -59,12 +63,19 @@ std::optional<SpokenLine> speaker_line(std::string_view line) {
         ++cursor;
     if (cursor >= line.size() || line[cursor] != ':')
         return std::nullopt;
+    if (too_large)
+        throw std::invalid_argument("vibevoice speaker id is too large");
     return SpokenLine{static_cast<std::int32_t>(speaker), trim(line.substr(cursor + 1))};
 }
 
 [[noreturn]] void too_long(std::size_t max_text_bytes) {
     throw std::length_error("vibevoice text holds more than " + std::to_string(max_text_bytes) +
                             " bytes to speak");
+}
+
+[[noreturn]] void too_many_turns(std::size_t max_turns) {
+    throw std::length_error("vibevoice script has more than " + std::to_string(max_turns) +
+                            " turns");
 }
 
 } // namespace
@@ -93,8 +104,7 @@ std::vector<Turn> parse_script(std::string_view text, std::size_t max_text_bytes
             if (kept > max_text_bytes)
                 too_long(max_text_bytes);
             if (spoken.size() == max_turns)
-                throw std::length_error("vibevoice script has more than " +
-                                        std::to_string(max_turns) + " turns");
+                too_many_turns(max_turns);
             spoken.push_back(*parsed);
         } else {
             plain = true;
@@ -104,8 +114,11 @@ std::vector<Turn> parse_script(std::string_view text, std::size_t max_text_bytes
                 "vibevoice scripts need every non-empty line to read 'Speaker <id>: <text>'");
     }
     if (spoken.empty()) {
+        // Plain text is one turn, under the same limits as a script.
         if (whole.size() > max_text_bytes)
             too_long(max_text_bytes);
+        if (max_turns == 0)
+            too_many_turns(max_turns);
         return {Turn{0, std::string(whole)}};
     }
     const auto lowest = std::min_element(spoken.begin(), spoken.end(),

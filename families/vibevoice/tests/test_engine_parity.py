@@ -11,14 +11,19 @@ need a CUDA GPU with TensorRT; they are skipped elsewhere.
 
 from __future__ import annotations
 
-import json
+from contextlib import contextmanager
 
 import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
 trt = pytest.importorskip("tensorrt")
-pytest.importorskip("transformers")
+transformers = pytest.importorskip("transformers")
+# The reference is Transformers' VibeVoice, which the repository's default Transformers does
+# not have: the module runs where the family's requirements are installed (the family's CI
+# job, which fails on a skip).
+if not hasattr(transformers, "VibeVoiceForConditionalGeneration"):
+    pytest.skip("engine parity needs a Transformers with VibeVoice", allow_module_level=True)
 
 from families.vibevoice import config as config_module  # noqa: E402
 from families.vibevoice.codec_engines import (  # noqa: E402
@@ -47,12 +52,16 @@ _TORCH = {trt.float32: torch.float32, trt.bfloat16: torch.bfloat16, trt.int32: t
 
 @pytest.fixture(scope="module")
 def tiny(tmp_path_factory):
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    root = reference.write_tiny_checkpoint(tmp_path_factory.mktemp("vibevoice_tiny"), seed=57)
-    cfg = config_module.load(root)
-    model = reference.load_reference(root, torch.float32, "cuda")
-    return root, cfg, Checkpoint(root, cfg), model
+    # TF32 stays off for the module's tests and comes back as it was afterwards, also when
+    # the setup fails.
+    with reference.tf32_off():
+        root = reference.write_tiny_checkpoint(tmp_path_factory.mktemp("vibevoice_tiny"), seed=57)
+        cfg = config_module.load(root)
+        # The reference loads the checkpoint strictly: every tensor of the original layout,
+        # renamed as Transformers' conversion renames it, must match a parameter of its
+        # modules in name and shape, and none may be missing.
+        model = reference.load_reference(root, torch.float32, "cuda")
+        yield root, cfg, Checkpoint(root, cfg), model
 
 
 class Engine:
@@ -264,6 +273,27 @@ def test_feedback_step_streams_the_whole_sequence(tiny):
     _close(torch.cat(embeds, dim=0), expected_embeds, 2e-5)
 
 
+@contextmanager
+def _vae_draws(scale, noise):
+    """The reference's VAE sampling draws ``scale`` (the per-sample noise scale draw) and
+    ``noise`` instead of random values."""
+    randn, randn_like = torch.randn, torch.randn_like
+
+    def fixed_randn(*size, **kwargs):
+        assert size == tuple(scale.shape), f"unexpected randn{size}"
+        return scale.to(device=kwargs.get("device"), dtype=kwargs.get("dtype"))
+
+    def fixed_randn_like(tensor, **kwargs):
+        assert tensor.shape == noise.shape, f"unexpected randn_like of {tuple(tensor.shape)}"
+        return noise.to(device=tensor.device, dtype=kwargs.get("dtype") or tensor.dtype)
+
+    torch.randn, torch.randn_like = fixed_randn, fixed_randn_like
+    try:
+        yield
+    finally:
+        torch.randn, torch.randn_like = randn, randn_like
+
+
 def test_voice_encoder(tiny):
     _, cfg, weights, model = tiny
     hop = cfg.acoustic.hop_length
@@ -277,17 +307,11 @@ def test_voice_encoder(tiny):
     scale = torch.tensor([0.7], device="cuda")
     out = engine(audio=audio.reshape(1, 1, 1, -1), noise=noise, noise_scale=scale)["embeds"]
     vv = model.model
-    with torch.no_grad():
-        latents = vv.audio_tower.encode(audio.reshape(1, 1, -1), sample=False).latents
-        latents = latents + (cfg.acoustic_vae_std * scale) * noise
+    # The reference samples with its own noise scale (from the checkpoint's fix_std), fed
+    # the engine's draws: the builder's scale is checked, not used on both sides.
+    with torch.no_grad(), _vae_draws(scale, noise):
+        latents = vv.audio_tower.encode(audio.reshape(1, 1, -1), sample=True).latents
         expected = vv.multi_modal_projector(
             (latents + vv.latent_bias_factor) * vv.latent_scaling_factor
         )
     _close(out, expected, 2e-5)
-
-
-def test_tiny_checkpoint_matches_the_original_layout_listing():
-    config, _ = reference.tiny_config()
-    shapes = reference.original_tensor_shapes(config)
-    assert json.loads(json.dumps(config))["model_type"] == "vibevoice"
-    assert "model.prediction_head.final_layer.linear.weight" in shapes

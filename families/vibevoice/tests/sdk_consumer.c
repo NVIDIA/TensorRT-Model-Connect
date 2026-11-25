@@ -11,6 +11,8 @@
  *   test_vibevoice_sdk_c <bundle_path> <runtime_root>
  */
 
+#include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -80,7 +82,8 @@ int main(int argc, char** argv) {
     trtmc_audio_result_view_v1 view;
     memset(&view, 0, sizeof(view));
     check(task->result_view(result, &view, &err), api, &err, "text_to_speech result_view");
-    if (view.audio.sample_count == 0 || view.audio.sample_rate != 24000 ||
+    if (view.audio.samples == NULL || view.audio.sample_count == 0 ||
+        view.audio.has_sample_rate != 1 || view.audio.sample_rate != 24000 ||
         view.audio.channels != 1 || view.audio.sample_count % 3200 != 0) {
         fprintf(stderr, "text_to_speech: unexpected audio (%llu samples, %u Hz, %u channels)\n",
                 (unsigned long long)view.audio.sample_count, view.audio.sample_rate,
@@ -88,6 +91,16 @@ int main(int argc, char** argv) {
         api->result_release(result);
         api->model_release(model);
         return 1;
+    }
+    /* The samples are read through the C view: every one must be a finite number. */
+    for (uint64_t index = 0; index < view.audio.sample_count; ++index) {
+        if (!isfinite(view.audio.samples[index])) {
+            fprintf(stderr, "text_to_speech: sample %llu is not finite\n",
+                    (unsigned long long)index);
+            api->result_release(result);
+            api->model_release(model);
+            return 1;
+        }
     }
     printf("text_to_speech: samples=%llu sample_rate=%u\n",
            (unsigned long long)view.audio.sample_count, view.audio.sample_rate);

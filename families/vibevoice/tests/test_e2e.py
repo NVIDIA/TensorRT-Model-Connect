@@ -368,39 +368,42 @@ def _reference(
 
     from families.vibevoice.tests import reference
 
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    dtype = {"bf16": torch.bfloat16, "fp32": torch.float32}[precision]
-    model = reference.load_reference(model_dir, dtype, "cuda")
-    processor = reference.reference_processor(tokenizer_dir, 3200)
-    turns = _turns(text)
-    voices = {index: _read_audio(path) for index, path in enumerate(voice_prompts)}
-    conversation = []
-    seen = set()
-    for speaker, body in turns:
-        content = [{"type": "text", "text": body}]
-        if speaker in voices and speaker not in seen:
-            content.append({"type": "audio", "audio": voices[speaker]})
-            seen.add(speaker)
-        conversation.append({"role": str(speaker), "content": content})
-    inputs = processor.apply_chat_template(
-        conversation,
-        tokenize=True,
-        return_dict=True,
-        add_generation_prompt=True,
-        return_tensors="pt",
-        processor_kwargs={"sampling_rate": 24000},
-    )
-    inputs = inputs.to("cuda")
-    if "input_values" in inputs:
-        inputs["input_values"] = inputs["input_values"].to(dtype)
-    frames = [int(np.ceil(len(voices[index]) / 3200)) for index in sorted(voices)]
-    try:
-        with torch.no_grad(), _injected_noise(seed, frames, model.config.audio_config.hidden_size):
-            audio = model.generate(**inputs, max_new_tokens=max_new_tokens)
-    finally:
-        del model
-        torch.cuda.empty_cache()
+    # TF32 stays off from loading to generation and comes back as it was, also after an error.
+    with reference.tf32_off():
+        dtype = {"bf16": torch.bfloat16, "fp32": torch.float32}[precision]
+        model = reference.load_reference(model_dir, dtype, "cuda")
+        processor = reference.reference_processor(tokenizer_dir, 3200)
+        turns = _turns(text)
+        voices = {index: _read_audio(path) for index, path in enumerate(voice_prompts)}
+        conversation = []
+        seen = set()
+        for speaker, body in turns:
+            content = [{"type": "text", "text": body}]
+            if speaker in voices and speaker not in seen:
+                content.append({"type": "audio", "audio": voices[speaker]})
+                seen.add(speaker)
+            conversation.append({"role": str(speaker), "content": content})
+        inputs = processor.apply_chat_template(
+            conversation,
+            tokenize=True,
+            return_dict=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            processor_kwargs={"sampling_rate": 24000},
+        )
+        inputs = inputs.to("cuda")
+        if "input_values" in inputs:
+            inputs["input_values"] = inputs["input_values"].to(dtype)
+        frames = [int(np.ceil(len(voices[index]) / 3200)) for index in sorted(voices)]
+        try:
+            with (
+                torch.no_grad(),
+                _injected_noise(seed, frames, model.config.audio_config.hidden_size),
+            ):
+                audio = model.generate(**inputs, max_new_tokens=max_new_tokens)
+        finally:
+            del model
+            torch.cuda.empty_cache()
     assert audio[0] is not None, "reference generated no speech"
     return audio[0].float().cpu().numpy().reshape(-1)
 
@@ -537,7 +540,13 @@ def _assert_contract(
     report = {"native_frames": native.size // 3200, "reference_frames": expected.size // 3200}
     checks = [_check("min_rms", "Native RMS", "contract", rms, ">=", thresholds["min_rms"])]
     if precision == "fp32":
-        frames = min(int(thresholds["fp32_matched_frames"]), report["native_frames"])
+        # The frames both syntheses have: a shorter one fails the frame count check, and the
+        # frame checks and their labels cover what was compared.
+        frames = min(
+            int(thresholds["fp32_matched_frames"]),
+            report["native_frames"],
+            report["reference_frames"],
+        )
         report["frame_snr_db"] = _frame_snr_db(native, expected, frames)
         report["frame_rms"] = [
             float(np.sqrt(np.mean(expected[index * 3200 : (index + 1) * 3200] ** 2)))
@@ -563,8 +572,13 @@ def _assert_contract(
             ),
         ]
     else:
-        frames = int(thresholds["bf16_prefix_frames"])
-        prefix = min(native.size, expected.size, references["fp32"].size, frames * 3200)
+        # The prefix all three syntheses have, at most the configured number of frames.
+        prefix = min(
+            native.size,
+            expected.size,
+            references["fp32"].size,
+            int(thresholds["bf16_prefix_frames"]) * 3200,
+        )
         report["fp32_reference_frames"] = references["fp32"].size // 3200
         report["frame_count_ratio"] = _length_span_ratio(
             report["native_frames"],
@@ -591,7 +605,7 @@ def _assert_contract(
             ),
             _check(
                 "prefix_snr_db",
-                f"SNR of the first {frames} frames against Transformers bf16, dB",
+                f"SNR of the first {prefix // 3200} frames against Transformers bf16, dB",
                 "independent_reference",
                 _recorded_db(report["prefix_snr_db"]),
                 ">=",
@@ -703,21 +717,97 @@ def test_noise_injection_follows_the_family_draw_order() -> None:
         assert np.array_equal(torch.randn(2, 4)[0].numpy(), frame)
 
 
-def test_bf16_length_is_judged_against_the_official_length_span() -> None:
-    limit = DEFAULT_THRESHOLDS["bf16_max_frame_count_ratio"]
+def _contract(monkeypatch, precision: str, native: int, reference: int, fp32: int = 0):
+    """(the checks ``_assert_contract`` records, the AssertionError it raises or None) for
+    synthetic audio of the given frame counts.
 
-    def against_official_bf16_only(native: int, official_bf16: int) -> float:
-        return max(native, official_bf16) / min(native, official_bf16)
+    The syntheses share their samples, so every frame they all have matches, and the
+    transcription is stubbed to say the script: only the frame counts can fail the contract.
+    The checks are recorded before its first assertion.
+    """
+    recorded: dict = {}
+    script = "Hello there."
+    monkeypatch.setitem(globals(), "_transcribe", lambda audio, manifest: script)
+    monkeypatch.setitem(globals(), "record_evidence", recorded.setdefault)
+    signal = 0.1 * np.random.default_rng(3).standard_normal(max(native, reference, fp32) * 3200)
+    signal = signal.astype(np.float32)
+    references = {precision: signal[: reference * 3200]}
+    if fp32:
+        references["fp32"] = signal[: fp32 * 3200]
+    error = None
+    try:
+        _assert_contract(
+            signal[: native * 3200],
+            references,
+            script,
+            {"precision": precision},
+            dict(DEFAULT_THRESHOLDS),
+            records=({"audio": Path("native.wav")}, {"audio": Path("reference.wav")}),
+        )
+    except AssertionError as caught:
+        error = caught
+    checks = recorded["reference_comparison"]["checks"]
+    return {check["name"]: check for check in checks}, error
 
-    # Dialogue: native 61 frames, official bfloat16 43 and float32 58, all three
-    # saying the whole script. The official bfloat16 run alone rejects it.
-    assert against_official_bf16_only(61, 43) > limit
-    assert _length_span_ratio(61, (43, 58)) <= limit
-    assert _length_span_ratio(45, (45, 47)) == 1.0
-    # A synthesis cut to half its length fails either way.
-    assert against_official_bf16_only(30, 43) > limit
-    assert _length_span_ratio(30, (43, 58)) > limit
-    assert _length_span_ratio(150, (43, 58)) > limit
+
+def test_bf16_length_is_judged_against_the_official_length_span(monkeypatch) -> None:
+    # Dialogue: native 61 frames, official bfloat16 43 and float32 58, all three saying the
+    # whole script; against the official bfloat16 length alone (61 / 43 = 1.42) it would fail.
+    checks, error = _contract(monkeypatch, "bf16", native=61, reference=43, fp32=58)
+    assert error is None
+    assert checks["frame_count_ratio"]["actual"] == pytest.approx(61 / 58)
+    # A synthesis cut to half its length (43 / 30 = 1.43), or two and a half times as long,
+    # fails the gate, and only that check.
+    for native in (30, 150):
+        checks, error = _contract(monkeypatch, "bf16", native=native, reference=43, fp32=58)
+        assert error is not None, native
+        assert [name for name, check in checks.items() if not check["passed"]] == [
+            "frame_count_ratio"
+        ], native
+
+
+def test_frame_checks_name_the_frames_they_compare(monkeypatch) -> None:
+    # bfloat16: four prefix frames are configured, three exist on every side.
+    checks, error = _contract(monkeypatch, "bf16", native=3, reference=4, fp32=3)
+    assert error is None
+    assert checks["prefix_snr_db"]["label"] == (
+        "SNR of the first 3 frames against Transformers bf16, dB"
+    )
+    # float32: a reference shorter than the native output fails the frame count, after the
+    # frame checks have compared the frames both have.
+    checks, error = _contract(monkeypatch, "fp32", native=5, reference=4)
+    assert "frame counts differ" in str(error)
+    assert not checks["frame_count"]["passed"]
+    assert checks["min_frame_snr_db"]["label"] == (
+        "Lowest SNR of the first 4 frames against Transformers, dB"
+    )
+
+
+def test_the_reference_restores_the_tf32_settings(monkeypatch) -> None:
+    torch = pytest.importorskip("torch")
+    from families.vibevoice.tests import reference
+
+    during = []
+
+    def failing_load(*args, **kwargs):
+        during.append((torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32))
+        raise RuntimeError("no checkpoint")
+
+    monkeypatch.setattr(reference, "load_reference", failing_load)
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", True)
+    monkeypatch.setattr(torch.backends.cudnn, "allow_tf32", True)
+    with pytest.raises(RuntimeError, match="no checkpoint"):
+        _reference(
+            Path("model"),
+            Path("tokenizer"),
+            "fp32",
+            "Hello.",
+            seed=1,
+            max_new_tokens=1,
+            voice_prompts=[],
+        )
+    assert during == [(False, False)]
+    assert torch.backends.cuda.matmul.allow_tf32 and torch.backends.cudnn.allow_tf32
 
 
 class _Options:

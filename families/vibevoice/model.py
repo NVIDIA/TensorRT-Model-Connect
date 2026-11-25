@@ -147,6 +147,16 @@ QWEN_SPLIT_PATTERN = (
 )
 
 
+def _byte_level_characters() -> list[str]:
+    """The characters the ByteLevel pre-tokenizer maps bytes 0-255 to (GPT-2's table)."""
+    direct = {*range(ord("!"), ord("~") + 1), *range(0xA1, 0xAD), *range(0xAE, 0x100)}
+    characters, extra = [], 0
+    for byte in range(256):
+        characters.append(chr(byte) if byte in direct else chr(256 + extra))
+        extra += byte not in direct
+    return characters
+
+
 def check_merges(vocab: dict, merges, unsupported) -> None:
     """The merge table as the reference reads it: one entry format for the whole table
     (pairs, or "left right" strings with exactly one space, after any "#version" header
@@ -251,6 +261,14 @@ def check_tokenizer_layout(tokenizer_json: bytes) -> None:
         or model_section.get("end_of_word_suffix") not in (None, "")
     ):
         raise unsupported("model", model_section)
+    # Every input byte starts as its byte-level character, so each of the 256 needs a
+    # vocabulary entry, as the runtime checks at load.
+    characters = _byte_level_characters()
+    missing = [byte for byte, char in enumerate(characters) if char not in bpe["vocab"]]
+    if missing:
+        raise ValueError(
+            f"{FAMILY} tokenizer.json vocabulary lacks the byte-level token of byte {missing[0]}"
+        )
     check_merges(bpe["vocab"], bpe.get("merges"), unsupported)
     added = raw.get("added_tokens", [])
     if not isinstance(added, list):

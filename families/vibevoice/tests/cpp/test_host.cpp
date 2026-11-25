@@ -21,6 +21,7 @@
 #include "families/vibevoice/runtime/voice.h"
 
 #include <algorithm>
+#include <cfenv>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -192,11 +193,44 @@ void test_noise(const nlohmann::json& fixtures) {
 }
 
 void test_timesteps(const nlohmann::json& fixtures) {
-    for (const auto& [steps, expected] : fixtures.at("timesteps").items()) {
-        const auto actual = linspace_timesteps(1000, std::stoi(steps));
-        expect(actual == expected.get<std::vector<std::int64_t>>(),
-               "timesteps for " + steps + " steps");
+    // numpy's float64 points rounded half to even: the 1000-step fixtures, and schedules
+    // whose float64 point lies one ulp off an exact half, where numpy rounds the ulp
+    // (numpy.linspace: 11 * (25 / 22) is 12.500000000000002, 7 * (29 / 14) is
+    // 14.500000000000002, 21 * (34 / 28) is 25.499999999999996).
+    std::vector<std::tuple<std::int32_t, std::int32_t, std::vector<std::int64_t>>> cases;
+    for (const auto& [steps, expected] : fixtures.at("timesteps").items())
+        cases.emplace_back(1000, std::stoi(steps), expected.get<std::vector<std::int64_t>>());
+    cases.emplace_back(1000, 2, std::vector<std::int64_t>{999, 500});
+    cases.emplace_back(26, 22,
+                       std::vector<std::int64_t>{25, 24, 23, 22, 20, 19, 18, 17, 16, 15, 14,
+                                                 13, 11, 10, 9,  8,  7,  6,  5,  3,  2,  1});
+    cases.emplace_back(
+        30, 14, std::vector<std::int64_t>{29, 27, 25, 23, 21, 19, 17, 15, 12, 10, 8, 6, 4, 2});
+    cases.emplace_back(35, 28, std::vector<std::int64_t>{34, 33, 32, 30, 29, 28, 27, 25, 24, 23,
+                                                         22, 21, 19, 18, 17, 16, 15, 13, 12, 11,
+                                                         10, 8,  7,  6,  5,  4,  2,  1});
+    // The rounding mode the host selects changes none of them, and stays as it was set.
+    const int saved = std::fegetround();
+    for (const int mode : {FE_TONEAREST, FE_DOWNWARD, FE_UPWARD, FE_TOWARDZERO}) {
+        std::vector<std::vector<std::int64_t>> actual;
+        std::fesetround(mode);
+        for (const auto& item : cases)
+            actual.push_back(linspace_timesteps(std::get<0>(item), std::get<1>(item)));
+        const bool kept = std::fegetround() == mode;
+        std::fesetround(saved);
+        const auto label = " in rounding mode " + std::to_string(mode);
+        expect(kept, "linspace_timesteps keeps the caller's rounding mode" + label);
+        for (std::size_t index = 0; index < cases.size(); ++index)
+            expect(actual[index] == std::get<2>(cases[index]),
+                   "timesteps for " + std::to_string(std::get<1>(cases[index])) + " of " +
+                       std::to_string(std::get<0>(cases[index])) + " steps" + label);
     }
+    // Up to 2^20 training steps the float64 points cannot cross a half-integer they do not
+    // lie on; longer schedules are refused.
+    check_no_throw([] { linspace_timesteps(1 << 20, 10); }, "a schedule of 2^20 training steps");
+    check_throws_as<std::invalid_argument>([] { linspace_timesteps((1 << 20) + 1, 10); },
+                                           "a schedule of 2^20 + 1 training steps",
+                                           "at most 1048576 training steps");
 }
 
 // The largest relative difference of `actual` from `expected`; infinite when the
@@ -266,6 +300,58 @@ void test_schedule_limits(const nlohmann::json& fixtures) {
                                            "repeats a noise level");
     check_throws_as<std::invalid_argument>([&] { check_schedule(sigmas, 0); }, "zero steps",
                                            "must lie in");
+    // A sigma that is not positive and finite is refused before its logarithm is taken (a
+    // host that traps division by zero would stop there); timestep 999 starts every schedule.
+    for (const float bad : {0.0F, std::numeric_limits<float>::infinity()}) {
+        auto broken = sigmas;
+        broken[999] = bad;
+        std::feclearexcept(FE_ALL_EXCEPT);
+        check_throws_as<std::invalid_argument>([&] { check_schedule(broken, 10); },
+                                               "a schedule with a sigma of " + std::to_string(bad),
+                                               "positive and finite");
+        expect(std::fetestexcept(FE_DIVBYZERO) == 0,
+               "a sigma of " + std::to_string(bad) + " is refused without a logarithm of 0");
+    }
+}
+
+void test_scheduler_state(const nlohmann::json& fixtures) {
+    const auto sigmas = fixtures.at("train_sigmas").get<std::vector<float>>();
+    // The midpoint update reads the previous step's prediction: a wider latent without
+    // reset() is refused before the solver's history changes.
+    DpmSolver solver(sigmas, 3, false);
+    DpmSolver fresh(sigmas, 3, false);
+    solver.reset();
+    fresh.reset();
+    std::vector<float> narrow = {0.5F};
+    std::vector<float> same = {0.5F};
+    solver.step(0, {0.25F}, narrow);
+    fresh.step(0, {0.25F}, same);
+    std::vector<float> wide = {0.5F, -0.5F};
+    const std::vector<float> wide_velocity = {0.25F, 0.125F};
+    check_throws_as<std::invalid_argument>([&] { solver.step(1, wide_velocity, wide); },
+                                           "a step of a wider latent without reset()",
+                                           "call reset() first");
+    for (std::int32_t step = 1; step < 3; ++step) {
+        solver.step(step, {0.25F}, narrow);
+        fresh.step(step, {0.25F}, same);
+    }
+    expect(narrow == same, "a refused step leaves the solver's history as it was");
+    solver.reset();
+    check_no_throw([&] { solver.step(0, wide_velocity, wide); }, "a wider latent after reset()");
+    // The final step goes to sigma 0 without a logarithm of 0 (the diffusers fixtures check
+    // its value: the data prediction).
+    for (const bool bf16 : {false, true}) {
+        DpmSolver last(sigmas, 2, bf16);
+        last.reset();
+        std::vector<float> sample = {0.75F, -0.5F};
+        last.step(0, {0.5F, 0.25F}, sample);
+        std::feclearexcept(FE_ALL_EXCEPT);
+        last.step(1, {0.5F, 0.25F}, sample);
+        expect(std::fetestexcept(FE_DIVBYZERO) == 0 && std::isfinite(sample[0]) &&
+                   std::isfinite(sample[1]),
+               std::string("the final step to sigma 0 takes no logarithm of 0") +
+                   (bf16 ? " (bf16)" : ""));
+    }
 }
 
 std::vector<char> read_file(const char* path) {
@@ -337,6 +423,25 @@ void test_scripts(const nlohmann::json& fixtures) {
     check_no_throw(
         [&] { parse_script(short_turns, std::numeric_limits<std::size_t>::max(), 1000); },
         "a thousand one-letter turns within a budget of 1000");
+    // Plain text is one turn, under the turn limit as well.
+    check_throws_as<std::length_error>(
+        [] { parse_script("Hello", std::numeric_limits<std::size_t>::max(), 0); },
+        "plain text where no turn may be", "more than 0 turns");
+    check_no_throw([] { parse_script("Hello", std::numeric_limits<std::size_t>::max(), 1); },
+                   "plain text where one turn may be");
+    // Only the colon makes a speaker line: digits past the int32 range without one are text,
+    // with one an id that is too large.
+    std::vector<Turn> elected;
+    check_no_throw([&] { elected = parse_script("Speaker 2147483648 was elected."); },
+                   "a number past int32 in plain text");
+    expect(elected.size() == 1 && elected[0].speaker == 0 &&
+               elected[0].text == "Speaker 2147483648 was elected.",
+           "a number past int32 without a colon stays text");
+    check_no_throw([] { parse_script("Speaker " + std::string(40, '9') + " apples"); },
+                   "forty digits without a colon");
+    check_throws_as<std::invalid_argument>([] { parse_script("Speaker 2147483648: hi"); },
+                                           "a speaker id past int32", "too large");
+    check_no_throw([] { parse_script("Speaker 2147483647: hi"); }, "the largest int32 speaker id");
     const auto voiced = render_prompt(frame(), {{0, "Hi."}}, {2});
     expect(
         voiced.find(
@@ -495,6 +600,14 @@ void test_tokenizer() {
     check_throws_as<std::invalid_argument>(
         [&] { CreateBpeTokenizer(json.data(), json.size(), false, 0); },
         "a tokenizer without a decoder vocabulary", "decoder vocabulary size");
+    // Every byte needs its byte-level token: without "z" (byte 122), encode() would drop
+    // that byte while the token budget counts it.
+    auto no_z = nlohmann::json::parse(byte_tokenizer_json());
+    no_z["model"]["vocab"].erase("z");
+    const auto no_z_text = no_z.dump();
+    check_throws_as<std::runtime_error>(
+        [&] { CreateBpeTokenizer(no_z_text.data(), no_z_text.size(), false, kVocab); },
+        "a vocabulary without the token of byte 122", "lacks the byte-level token of byte 122");
     // Base-vocabulary ids are decoder rows too: the merged tokens 262 and 263 lie
     // outside a decoder vocabulary of 262, and an id must be an integer.
     check_throws_as<std::runtime_error>(
@@ -1053,6 +1166,7 @@ int main() {
         test_timesteps(fixtures);
         test_schedulers(fixtures);
         test_schedule_limits(fixtures);
+        test_scheduler_state(fixtures);
         test_scripts(fixtures);
         test_wav();
         test_tokenizer();

@@ -71,12 +71,16 @@ in the original layout (float32). `tests/cpp/test_host.cpp` checks the host side
 parsing, prompt rendering; with `VIBEVOICE_TOKENIZER_JSON` also the token ids of the reference tokenizer);
 `tests/test_host_fixtures.py` keeps the fixtures current. `tests/test_e2e.py` builds the bundle, synthesizes with
 the native CLI, runs the reference with the injected noise and transcribes the native audio with
-`openai/whisper-large-v3-turbo`: float32 cases must match the reference frame count and each of the first 12
-frames (60 dB or more), bfloat16 cases the early frames and length of the official bfloat16 synthesis, and every
-case must say its text; the C and C++ SDK consumers (`tests/sdk_consumer.c`, `tests/sdk_consumer.cpp`) then
-synthesize from the same bundle. The voice-cloning case clones a voice the family synthesized itself, so no
-third-party recording is needed. The float32 long-prompt case (582 prompt tokens, two prefill chunks) stops at
-`max_new_tokens` before its script ends, so its transcript is compared with the reference's.
+`openai/whisper-large-v3-turbo`. Float32 cases must match the reference frame count and each of the first 12
+frames (60 dB or more). Bfloat16 cases run the official synthesis in bfloat16 and in float32: the native output
+must match the first 4 frames of the official bfloat16 one (20 dB or more), may drift from the float32 one at most
+6 dB more than the official bfloat16 one does, and its length must lie within a factor of 1.25 of the span of the
+two official lengths (the official bfloat16 length itself moves with the GPU). The transcript of every case must
+be within a word edit distance of 0.2 of its script; the C and C++ SDK consumers (`tests/sdk_consumer.c`,
+`tests/sdk_consumer.cpp`) then synthesize from the same bundle. The voice-cloning case clones a voice the family
+synthesized itself, so no third-party recording is needed. The float32 long-prompt case (582 prompt tokens, two
+prefill chunks) stops at `max_new_tokens` before its script ends, so its transcript is compared with the
+reference's instead.
 
 ## Intended use
 

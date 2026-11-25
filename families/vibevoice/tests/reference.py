@@ -14,7 +14,10 @@ rewrite of ``src/transformers/models/vibevoice/convert_vibevoice_to_hf.py``
 (huggingface/transformers commit 431e9e9d, Apache-2.0), which the Transformers
 wheel does not ship. ``CHAT_TEMPLATE`` is the ``chat_template.jinja`` that this
 script publishes with the converted checkpoint ``vibevoice/VibeVoice-1.5B-hf``
-(revision d4cd82eb, MIT), byte for byte.
+(revision d4cd82eb, MIT), byte for byte. The script means to set the acoustic
+tokenizer's ``vae_std`` to ``fix_std / 0.8``, the noise scale of the original
+model, but removes ``fix_std`` first, so it keeps the default 0.625 (equal for the
+released ``fix_std`` of 0.5); ``hf_config`` sets it from ``fix_std``.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -199,7 +203,10 @@ def hf_config(original: dict):
 
     raw = json.loads(json.dumps(original))
     semantic = _tokenizer_config(raw.pop("semantic_tokenizer_config"))
-    acoustic = _tokenizer_config(raw.pop("acoustic_tokenizer_config"))
+    acoustic_raw = raw.pop("acoustic_tokenizer_config")
+    acoustic = _tokenizer_config(acoustic_raw)
+    # The sigma-VAE draws its per-sample noise scale from N(0, fix_std / 0.8).
+    acoustic["vae_std"] = acoustic_raw["fix_std"] / 0.8
     head = raw.pop("diffusion_head_config")
     raw["diffusion_head_config"] = {
         "hidden_size": head["hidden_size"],
@@ -221,6 +228,21 @@ def hf_config(original: dict):
     raw["audio_config"] = VibeVoiceAcousticTokenizerConfig(**acoustic).to_dict()
     raw["semantic_model_config"] = VibeVoiceAcousticTokenizerEncoderConfig(**semantic).to_dict()
     return VibeVoiceConfig(**raw)
+
+
+@contextmanager
+def tf32_off():
+    """TF32 off for CUDA matmuls and cuDNN inside the block, as the reference runs in
+    float32; the previous settings come back on exit, also after an error."""
+    import torch
+
+    saved = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = saved
 
 
 def load_reference(model_dir: str | Path, dtype, device: str):

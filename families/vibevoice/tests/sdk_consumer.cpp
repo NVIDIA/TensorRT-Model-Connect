@@ -48,10 +48,16 @@ int main(int argc, char** argv) {
             if (!std::isfinite(sample))
                 throw std::runtime_error("text_to_speech audio has a non-finite sample");
         }
+        // The same request with a language: refused for the language, not for another reason.
         bool rejected = false;
         try {
-            (void)task.run({"Hello.", std::string("en")}, config);
-        } catch (const std::exception&) {
+            (void)task.run({"Speaker 1: Hello from the C plus plus SDK.", std::string("en")},
+                           config);
+        } catch (const std::exception& error) {
+            if (std::string(error.what()).find("has no language control") == std::string::npos)
+                throw std::runtime_error(std::string("text_to_speech refused the language with "
+                                                     "another error: ") +
+                                         error.what());
             rejected = true;
         }
         if (!rejected)
