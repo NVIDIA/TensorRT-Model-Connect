@@ -38,6 +38,7 @@ TextResult transcript(std::string text, const AudioView& audio, std::vector<std:
 }
 
 class AudioFixture final : public IModel,
+                           public ISpectrogramToAudio,
                            public ITextToAudio,
                            public ITextAudioTokenHistoryToAudio,
                            public IBatchTextAudioTokenHistoryToAudio,
@@ -58,6 +59,8 @@ class AudioFixture final : public IModel,
     explicit AudioFixture(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
     std::vector<TaskInstance> task_bindings() override {
+        if (mode_ == "spectrogram_only")
+            return {bind<ISpectrogramToAudio>(*this)};
         if (mode_ == "asr_only" || mode_ == "asr_new_tokens")
             return {bind<ISpeechTranscription>(*this, fields_for(ISpeechTranscription::kTask))};
         if (mode_ == "history_single_only")
@@ -155,6 +158,16 @@ class AudioFixture final : public IModel,
         return declared;
     }
 
+    AudioResult run(const SpectrogramToAudioRequest& input, ConfigView config) override {
+        validate_config({}, config);
+        AudioResult result;
+        result.samples.assign(input.spectrogram.values.begin(), input.spectrogram.values.end());
+        result.sample_rate = 22050;
+        result.channels = 1;
+        result.setup_ms = input.spectrogram.rows;
+        result.inference_ms = input.spectrogram.columns;
+        return result;
+    }
     AudioResult run(const TextToAudioRequest& input, ConfigView config) override {
         const auto options = parse(config, ITextToAudio::kTask);
         ++single_audio_;

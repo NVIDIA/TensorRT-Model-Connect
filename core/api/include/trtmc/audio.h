@@ -35,6 +35,7 @@ typedef struct {
 } trtmc_audio_result_view_v1;
 
 #define TRTMC_TASK_TEXT_TO_AUDIO "text_to_audio"
+#define TRTMC_TASK_SPECTROGRAM_TO_AUDIO "spectrogram_to_audio"
 #define TRTMC_TASK_TEXT_AUDIO_TOKEN_HISTORY_TO_AUDIO "text_audio_token_history_to_audio"
 #define TRTMC_TASK_AUDIO_CODEBOOK_TOKENS_TO_AUDIO "audio_codebook_tokens_to_audio"
 #define TRTMC_TASK_BATCH_TEXT_AUDIO_TOKEN_HISTORY_TO_AUDIO "batch_text_audio_token_history_to_audio"
@@ -54,6 +55,19 @@ typedef struct {
 typedef struct {
     trtmc_string_view prompt;
 } trtmc_text_to_audio_request_v1;
+/* Borrowed contiguous [time frame, frequency bin] spectral features. The
+ * loaded family defines its spectral convention and normalization; the shared
+ * API never computes a spectrogram, rescales values or infers a sample rate. */
+typedef struct {
+    trtmc_f32_matrix_view_v1 spectrogram;
+} trtmc_spectrogram_to_audio_request_v1;
+typedef struct {
+    trtmc_api_header header;
+    trtmc_status(TRTMC_CALL* run)(trtmc_model*, const trtmc_spectrogram_to_audio_request_v1*,
+                                  const trtmc_config_view_v1*, trtmc_result**, trtmc_error**);
+    trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_audio_result_view_v1*,
+                                          trtmc_error**);
+} trtmc_spectrogram_to_audio_api_v1;
 /* Borrowed integer history, not PCM/embeddings. Acoustic tokens are contiguous
  * [codebook, frame], with independent coarse/fine frame counts. No shared
  * codebook constants, vocabulary conversion, alignment or preset-file I/O. */
