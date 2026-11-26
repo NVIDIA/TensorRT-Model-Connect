@@ -298,52 +298,24 @@ void Qwen38KvCache::advance(int32_t n_tokens) {
     assert(n_tokens == 1 && "Qwen38KvCache::advance: only n_tokens==1 supported");
     (void)n_tokens;
 
+    // Generation stops when the cache is full (the pipeline checks before each
+    // step), so a row that does not fit is a caller error. Dropping the oldest
+    // rows instead would silently discard the prompt.
+    if (position_ >= max_length_)
+        throw std::runtime_error("Qwen38KvCache::advance: the KV cache is full");
+
     // Copy present K/V (single row) into cache at current position.
     // present_k_[layer] is [1, kv_dim] → copy to cache_k_[layer][position_, :]
-    auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
-
-    if (position_ < max_length_) {
-        // Normal append: write to position_ slot
-        auto offset = static_cast<std::size_t>(position_) * row_bytes;
-        for (int32_t i = 0; i < num_layers_; ++i) {
-            auto li = static_cast<std::size_t>(i);
-            cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset,
-                            present_k_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset,
-                            present_v_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
-        }
-        ++position_;
-    } else {
-        // Cache full: shift [1..max) → [0..max-1), then write at tail
-        auto shift_bytes = static_cast<std::size_t>(max_length_ - 1) * row_bytes;
-        auto tail_offset = shift_bytes;
-        // src and dst overlap inside the same allocation, and cudaMemcpyAsync
-        // is undefined for overlapping ranges, so stage through scratch. One
-        // buffer serves every layer because all copies are ordered on stream_.
-        DeviceTensor& scratch_tensor = shift_scratch();
-        if (shift_bytes > 0 && !scratch_tensor.ok())
-            throw std::runtime_error(
-                "Qwen38KvCache: failed to allocate scratch for the cache shift");
-        auto* scratch = static_cast<uint8_t*>(scratch_tensor.data());
-        for (int32_t i = 0; i < num_layers_; ++i) {
-            auto li = static_cast<std::size_t>(i);
-            auto* ck = static_cast<uint8_t*>(cache_k_[li].data());
-            auto* cv = static_cast<uint8_t*>(cache_v_[li].data());
-            if (shift_bytes > 0) {
-                cudaMemcpyAsync(scratch, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice,
-                                stream_);
-                cudaMemcpyAsync(ck, scratch, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-                cudaMemcpyAsync(scratch, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice,
-                                stream_);
-                cudaMemcpyAsync(cv, scratch, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            }
-            cudaMemcpyAsync(ck + tail_offset, present_k_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv + tail_offset, present_v_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-        }
-        // position_ stays at max_length_ (cache is full, all slots visible)
+    const auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
+    const auto offset = static_cast<std::size_t>(position_) * row_bytes;
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        auto li = static_cast<std::size_t>(i);
+        cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset, present_k_[li].data(),
+                        row_bytes, cudaMemcpyDeviceToDevice, stream_);
+        cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset, present_v_[li].data(),
+                        row_bytes, cudaMemcpyDeviceToDevice, stream_);
     }
+    ++position_;
 }
 
 void Qwen38KvCache::reset() {
@@ -363,12 +335,6 @@ std::size_t Qwen38KvCache::device_memory_bytes() const {
     for (const auto& t : present_v_)
         total += t.nbytes();
     return total;
-}
-
-DeviceTensor& Qwen38KvCache::shift_scratch() {
-    if (!shift_scratch_.ok() && max_length_ > 1)
-        shift_scratch_ = DeviceTensor({max_length_ - 1, kv_dim_}, cache_dtype_, stream_);
-    return shift_scratch_;
 }
 
 bool Qwen38KvCache::ok() const {
