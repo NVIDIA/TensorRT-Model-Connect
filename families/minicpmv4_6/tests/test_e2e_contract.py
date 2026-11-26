@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import math
+import sys
+import types
 
 import pytest
 
@@ -338,30 +340,44 @@ def _snapshot(tmp_path, name):
     return path
 
 
-def test_the_checkpoint_resolves_through_the_cli_path(tmp_path, monkeypatch):
-    from tensorrt_model_connect import model_support
+def _hub(monkeypatch, snapshot_download):
+    """Replace huggingface_hub, which _checkpoint imports when it runs, by a module with this snapshot_download."""
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(snapshot_download=snapshot_download))
 
+
+def test_the_checkpoint_is_read_from_the_local_cache_only(tmp_path, monkeypatch):
     calls = []
     snapshot = _snapshot(tmp_path, _MANIFEST["hf_revision"])
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    monkeypatch.setattr(model_support, "resolve_model", lambda *args: calls.append(args) or snapshot)
+    _hub(monkeypatch, lambda **kwargs: calls.append(kwargs) or str(snapshot))
     assert e2e._checkpoint(_MANIFEST) == snapshot
-    assert calls == [(_MANIFEST["hf_id"], _MANIFEST["hf_revision"])]
+    assert calls == [{"repo_id": _MANIFEST["hf_id"], "revision": _MANIFEST["hf_revision"], "local_files_only": True}]
 
 
 def test_the_checkpoint_must_be_the_pinned_snapshot(tmp_path, monkeypatch):
-    from tensorrt_model_connect import model_support
-
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    monkeypatch.setattr(model_support, "resolve_model", lambda *args: _snapshot(tmp_path, "main"))
+    _hub(monkeypatch, lambda **kwargs: str(_snapshot(tmp_path, "main")))
     with pytest.raises(AssertionError):
         e2e._checkpoint(_MANIFEST)
 
 
 def test_the_checkpoint_is_resolved_offline_only(monkeypatch):
-    from tensorrt_model_connect import model_support
-
     monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
-    monkeypatch.setattr(model_support, "resolve_model", lambda *args: pytest.fail("resolved online"))
+    _hub(monkeypatch, lambda **kwargs: pytest.fail("resolved online"))
     with pytest.raises(AssertionError, match="offline"):
         e2e._checkpoint(_MANIFEST)
+
+
+def test_a_snapshot_cached_without_its_file_listing_resolves_offline(tmp_path, monkeypatch):
+    # A cache as CI stages it: the commit's snapshot without a listing of the revision's files. Offline, the
+    # checkpoint resolves from the snapshot; asking the hub for the revision lists its files and fails offline.
+    pytest.importorskip("huggingface_hub")
+    from huggingface_hub import constants
+
+    snapshot = tmp_path / "models--openbmb--MiniCPM-V-4.6" / "snapshots" / _MANIFEST["hf_revision"]
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setattr(constants, "HF_HUB_OFFLINE", True)
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path))
+    assert e2e._checkpoint(_MANIFEST) == snapshot

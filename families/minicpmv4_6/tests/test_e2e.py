@@ -175,12 +175,18 @@ def _environment():
 
 
 def _checkpoint(manifest: dict) -> Path:
-    """The pinned snapshot, resolved as ``trtmc build <hf_id> --revision <rev>`` resolves it in CI: offline."""
-    from tensorrt_model_connect.model_support import resolve_model
+    """The pinned snapshot from the local Hugging Face cache, offline as in CI.
+
+    ``local_files_only=True`` takes a commit's snapshot from the cache alone. Without it, huggingface_hub lists the
+    revision's files first unless the cache holds that listing, which a cache staged by an older client lacks, and
+    offline the listing fails.
+    """
+    from huggingface_hub import snapshot_download
 
     assert os.environ.get("HF_HUB_OFFLINE") == "1", "selected E2E resolves the checkpoint offline, as CI does"
     try:
-        path = resolve_model(manifest["hf_id"], manifest["hf_revision"])
+        path = Path(snapshot_download(
+            repo_id=manifest["hf_id"], revision=manifest["hf_revision"], local_files_only=True))
     except Exception as error:
         raise AssertionError(
             f"selected {_FAMILY} E2E requires the exact cached checkpoint "
