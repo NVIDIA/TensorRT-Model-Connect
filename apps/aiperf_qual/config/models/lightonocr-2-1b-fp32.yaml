@@ -3,6 +3,10 @@
 
 # A page OCR model with no question input: OCRBench's text-recognition crops, the image alone (an empty prompt).
 absolute: [{name: ocrbench_text, request: {prompt: ""}}]
+# The family's official reference reads the image with the slow (Pillow) processor: with the fast one the native
+# reference reads no crop correctly.
+reference:
+  options: {processor_kwargs: {use_fast: false}}
 # Perf times the first text-recognition crop: the catalog testcases are not a request the catalog payload can build
 # (an empty prompt, images under another key, or several images).
 performance: {suite: {from_benchmark: ocrbench-text}}
