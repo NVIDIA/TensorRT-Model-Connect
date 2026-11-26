@@ -117,7 +117,12 @@ static std::vector<int32_t> encode_prompt(const ITokenizer& tokenizer,
 }
 
 namespace {
-QwenKvCache& require_kv_cache(QwenInferenceState* state);
+class QwenGenerationCapacityError final : public std::runtime_error {
+  public:
+    using std::runtime_error::runtime_error;
+};
+
+void validate_generation_capacity(const std::vector<int32_t>&, int32_t, QwenInferenceState*);
 class QwenGenerationLease {
   public:
     explicit QwenGenerationLease(std::atomic<bool>& active, bool acquire = true) : active_(active) {
@@ -184,27 +189,36 @@ QwenTextGenerationPipeline::run(const internal::TextConversationRequest& request
     }
     const auto rendered = qwen_apply_conversation_template(config_.chat_template_format, messages,
                                                            cfg.enable_thinking);
-    const auto generated = generate(rendered, cfg);
-    internal::ConversationResult result;
-    result.parts.emplace_back(internal::TextPart{generated.text});
-    result.token_ids = generated.token_ids;
-    result.setup_ms = generated.setup_ms;
-    result.prefill_ms = generated.prefill_ms;
-    result.decode_ms = generated.decode_ms;
-    result.usage.output_tokens = generated.token_ids.size();
-    return result;
+    try {
+        const auto generated = generate(rendered, cfg);
+        internal::ConversationResult result;
+        result.parts.emplace_back(internal::TextPart{generated.text});
+        result.token_ids = generated.token_ids;
+        result.setup_ms = generated.setup_ms;
+        result.prefill_ms = generated.prefill_ms;
+        result.decode_ms = generated.decode_ms;
+        result.usage.output_tokens = generated.token_ids.size();
+        return result;
+    } catch (const QwenGenerationCapacityError& error) {
+        throw std::invalid_argument(error.what());
+    }
 }
 
 TextResult QwenTextGenerationPipeline::run(const internal::TextContinuationRequest& request,
                                            internal::ConfigView config) {
     const auto cfg = qwen::parse_text_config(config);
-    if (const auto* text = std::get_if<std::string_view>(&request.prefix))
-        return generate(std::string(*text), cfg);
-    if (cfg.use_chat_template)
-        throw std::invalid_argument("Qwen token-ID input cannot apply a chat template");
-    QwenGenerationLease lease(generation_active_);
-    const auto tokens = std::get<Span<const std::int32_t>>(request.prefix);
-    return generate_from_tokens(qwen::copy_token_prefix(tokens), cfg, {});
+    try {
+        if (const auto* text = std::get_if<std::string_view>(&request.prefix))
+            return generate(std::string(*text), cfg);
+        if (cfg.use_chat_template)
+            throw std::invalid_argument("Qwen token-ID input cannot apply a chat template");
+        QwenGenerationLease lease(generation_active_);
+        const auto tokens = std::get<Span<const std::int32_t>>(request.prefix);
+        return generate_from_tokens(qwen::copy_token_prefix(tokens), cfg, {});
+    } catch (const QwenGenerationCapacityError& error) {
+        // Preserve legacy runtime errors; the Task SDK classifies invalid requests separately.
+        throw std::invalid_argument(error.what());
+    }
 }
 
 std::unique_ptr<internal::ITextStream>
@@ -226,8 +240,7 @@ QwenTextGenerationPipeline::start(const internal::TextContinuationRequest& reque
             input = qwen::copy_token_prefix(tokens);
         }
         validate_token_prefix(input, config_.vocab_size);
-        // Reject a prompt the KV cache cannot hold here, not on the stream thread.
-        require_kv_cache(state_.get()).set_prompt_length(static_cast<int32_t>(input.size()));
+        validate_generation_capacity(input, cfg.max_new_tokens, state_.get());
         int device = 0;
         if (cudaGetDevice(&device) != cudaSuccess)
             throw std::runtime_error("Qwen cannot read the current CUDA device");
@@ -268,6 +281,9 @@ QwenTextGenerationPipeline::start(const internal::TextContinuationRequest& reque
                           {}});
                 return result;
             });
+    } catch (const QwenGenerationCapacityError& error) {
+        generation_active_.store(false);
+        throw std::invalid_argument(error.what());
     } catch (...) {
         generation_active_.store(false);
         throw;
@@ -350,15 +366,19 @@ void require_batched_prefill_contract(ITrtModule& prefill, const QwenTextGenConf
         throw std::runtime_error("QwenTextGenerationPipeline: prefill requires QwenKvCache");
 }
 
-// Generation runs on the Qwen KV cache; a pipeline built on another state fails
-// here, before any state is reset. The requested output is not bounded up
-// front: set_prompt_length() rejects a prompt the cache cannot hold, and
-// generation stops once the cache is full.
-QwenKvCache& require_kv_cache(QwenInferenceState* state) {
-    auto* kv = dynamic_cast<QwenKvCache*>(state);
+void validate_generation_capacity(const std::vector<int32_t>& input_ids, int32_t max_new_tokens,
+                                  QwenInferenceState* state) {
+    const auto* kv = dynamic_cast<const QwenKvCache*>(state);
     if (kv == nullptr)
         throw std::runtime_error("Qwen generation requires QwenKvCache");
-    return *kv;
+
+    const auto capacity = static_cast<std::size_t>(kv->max_length());
+    if (input_ids.size() > capacity ||
+        (max_new_tokens > 0 &&
+         static_cast<std::size_t>(max_new_tokens) > capacity - input_ids.size())) {
+        throw QwenGenerationCapacityError(
+            "Qwen requested prompt and generation exceed the model's fixed KV cache capacity");
+    }
 }
 
 int32_t resolve_batched_prefill_chunk_limit(const QwenKvCache& kv, const QwenTextGenConfig& config,
@@ -492,7 +512,7 @@ QwenTextGenerationPipeline::TimedGenResult QwenTextGenerationPipeline::generate_
     using Clock = std::chrono::steady_clock;
     if (max_new_tokens == 0 || input_ids.empty())
         return TimedGenResult{input_ids, 0.0, 0.0};
-    require_kv_cache(state_.get());
+    validate_generation_capacity(input_ids, max_new_tokens, state_.get());
 
     const std::string mode = resolve_generation_mode(cfg);
     if (mode != "ar")
@@ -609,7 +629,7 @@ QwenTextGenerationPipeline::trace_logits(const std::string& prompt,
     if (input_ids.empty())
         throw std::invalid_argument("Qwen logits trace requires a non-empty prompt");
     const int32_t max_new_tokens = std::max(cfg.max_new_tokens, 0);
-    require_kv_cache(state_.get());
+    validate_generation_capacity(input_ids, max_new_tokens, state_.get());
     const auto params = qwen_sampling_params_from_config(cfg, config_.id_eos_ids);
     auto sampler = create_qwen_sampler(params);
     sampler->reset();

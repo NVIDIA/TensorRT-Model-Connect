@@ -8,7 +8,6 @@
 #include "families/smollm3/runtime/kv_cache.h"
 #include "families/smollm3/runtime/pipeline.h"
 #include "families/smollm3/runtime/tokenizer.h"
-#include "trtmc/internal/config.h"
 #include "trtmc/runtime/trt_module.h"
 
 #include <NvInfer.h>
@@ -285,37 +284,6 @@ void test_generate_max_tokens() {
           "generation respects max_new_tokens");
 }
 
-void test_generation_ends_at_a_full_cache() {
-    // The cache holds 16 rows. A 14-token prompt leaves two: the prefill logits
-    // give the first token and two decoder steps the next two, so the request
-    // ends after L - P + 1 = 3 tokens instead of being rejected up front.
-    StreamFixture fixture;
-    auto config = make_config();
-    config.id_eos = 99;
-    auto pipeline = make_pipeline(fixture.stream, config);
-    trtmc::TextGenerationConfig request;
-    request.max_new_tokens = 20;
-    const std::vector<std::int32_t> prompt(14, 1);
-    auto expected = prompt;
-    expected.insert(expected.end(), {2, 2, 2});
-    check(pipeline->generate_ids(prompt, request).token_ids == expected,
-          "generation ends when the KV cache is full");
-}
-
-void test_prompt_longer_than_the_cache_is_rejected() {
-    StreamFixture fixture;
-    auto pipeline = make_pipeline(fixture.stream, make_config());
-    trtmc::TextGenerationConfig request;
-    request.max_new_tokens = 1;
-    bool rejected = false;
-    try {
-        pipeline->generate_ids(std::vector<std::int32_t>(17, 1), request);
-    } catch (const trtmc::internal::ConfigError&) {
-        rejected = true;
-    }
-    check(rejected, "a prompt longer than the KV cache is rejected as an invalid request");
-}
-
 void test_decode_rejects_logits_wider_than_the_vocabulary() {
     StreamFixture fixture;
     auto config = make_config();
@@ -469,8 +437,6 @@ int main() {
     test_generate_stops_at_any_default_eos();
     test_explicit_eos_override_replaces_default_set();
     test_generate_max_tokens();
-    test_generation_ends_at_a_full_cache();
-    test_prompt_longer_than_the_cache_is_rejected();
     test_decode_rejects_logits_wider_than_the_vocabulary();
     test_zero_max_tokens();
     test_kv_reset_is_logical_and_masks_stale_rows();

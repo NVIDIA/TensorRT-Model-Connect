@@ -8,6 +8,7 @@
 #include "families/smollm3/runtime/chat_templates.h"
 #include "families/smollm3/runtime/kv_cache.h"
 #include "families/smollm3/runtime/tensor_names.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <cctype>
@@ -178,15 +179,24 @@ int32_t resolve_prefill_chunk_limit(const SmolLM3TextGenConfig& cfg) {
     return cfg.prefill_max_length;
 }
 
-// Generation runs on the SmolLM3 KV cache; a pipeline built on another state
-// fails here, before any state is reset. The requested output is not bounded
-// up front: set_prompt_length() rejects a prompt the cache cannot hold, and
-// generation stops once the cache is full.
-SmolLM3KvCache& require_kv_cache(SmolLM3InferenceState* state) {
-    auto* kv = dynamic_cast<SmolLM3KvCache*>(state);
+void validate_generation_capacity(const std::vector<int32_t>& input_ids, int32_t max_new_tokens,
+                                  SmolLM3InferenceState* state) {
+    const auto* kv = dynamic_cast<const SmolLM3KvCache*>(state);
     if (kv == nullptr)
         throw std::runtime_error("SmolLM3 generation requires SmolLM3KvCache");
-    return *kv;
+
+    const auto capacity = static_cast<std::size_t>(kv->max_length());
+    if (input_ids.size() > capacity ||
+        (max_new_tokens > 0 &&
+         static_cast<std::size_t>(max_new_tokens) > capacity - input_ids.size())) {
+        // A request error, not a runtime fault: the server answers ConfigError as
+        // an invalid request and keeps the worker. Keep the wording: AIPerf
+        // qualification matches "exceed ... KV cache" to find the capacity.
+        throw internal::ConfigError(
+            "SmolLM3 requested prompt and generation exceed the model's fixed KV cache capacity (" +
+            std::to_string(input_ids.size()) + " prompt + " + std::to_string(max_new_tokens) +
+            " new tokens > " + std::to_string(capacity) + " rows)");
+    }
 }
 } // namespace
 
@@ -308,7 +318,7 @@ SmolLM3TextGenerationPipeline::TimedGenResult SmolLM3TextGenerationPipeline::gen
     using Clock = std::chrono::steady_clock;
     if (max_new_tokens == 0 || input_ids.empty())
         return TimedGenResult{input_ids, 0.0, 0.0};
-    require_kv_cache(state_.get());
+    validate_generation_capacity(input_ids, max_new_tokens, state_.get());
 
     const std::string mode = resolve_generation_mode(cfg);
     if (mode != "ar")
