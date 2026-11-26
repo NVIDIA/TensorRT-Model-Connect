@@ -334,19 +334,19 @@ def resolve_case(
     except BenchmarkError as error:
         if not bundle_only:
             raise
-        return ResolvedCase(
+        return apply_overrides(ResolvedCase(
             name=str(testcase["name"]),
             model=model,
             testcase_name=str(testcase["name"]),
             bundle_path=bundle_path.expanduser().resolve(),
-            operation=operation or "",
+            operation=operation or default_operation(task),
             request={},
             runtime_root=None,
             measurement=MeasurementSpec(warmup=0, iterations=1),
             sources={},
             selected_task=task if task != model.task else None,
             request_error=str(error),
-        )
+        ), overrides or {})
     explicit_task = selected_task is not None or "selected_task" in testcase
     if explicit_task and resolution.task != task:
         raise BenchmarkError("operation cannot change an explicitly selected Task")

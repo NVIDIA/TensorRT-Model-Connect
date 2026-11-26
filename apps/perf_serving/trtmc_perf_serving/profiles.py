@@ -10,7 +10,7 @@ one-shot performance matrix.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -42,10 +42,15 @@ def resolve_profile(
     bundle: Path | None = None,
     runtime_root: Path | None = None,
     overrides: Mapping[str, Any] | None = None,
+    request_optional: bool = False,
 ) -> ServingProfile:
+    """``request_optional`` (a server whose clients send whole requests): a testcase that is not a request
+    trtmc-bench can build (a family test that prepares its own inputs) gives an empty base request."""
     model = ManifestCatalog(manifest_root).resolve(selector)
     case = resolve_case(model, bundle or _UNUSED_BUNDLE, case_name=testcase, operation=operation,
-                        selected_task=selected_task, overrides=overrides)
+                        selected_task=selected_task, overrides=overrides, bundle_only=request_optional)
+    if case.request_error:
+        case = replace(case, request_error=None)
     request = case.with_values(runtime_root=runtime_root or Path("/")).worker_request()
     if runtime_root is None:
         request.pop("runtime_root")
