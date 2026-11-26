@@ -8,13 +8,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from functools import cache
 from pathlib import Path
 
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.ci.environment import prepared_python
 from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 from ._checkpoint import checkpoint_record
@@ -274,6 +274,11 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         )
     binary, runtime_root = _runtime()
     with evidence_stage("reference"):
+        reference_python = prepared_python(TEST_ROOT.parents[2], FAMILY, dict(os.environ))
+        record_evidence(
+            "reference_environment",
+            {"python": str(reference_python), "requirements": TEST_ROOT / "requirements.txt"},
+        )
         tokenizer = AutoTokenizer.from_pretrained(directory)
     for text in [
         "A small test.",
@@ -304,10 +309,13 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     reference_input = tmp_path / "reference-input.json"
     reference_output = tmp_path / "reference-output.npz"
     reference_input.write_text(json.dumps(case))
+    reference_environment = os.environ.copy()
+    reference_environment.pop("PYTHONPATH", None)
+    reference_environment.pop("PYTHONHOME", None)
     with evidence_stage("reference"):
         completed = subprocess.run(
             [
-                os.environ.get("TRTMC_JINA_EMBEDDINGS_V3_REFERENCE_PYTHON", sys.executable),
+                str(reference_python),
                 str(TEST_ROOT / "reference.py"),
                 str(directory),
                 str(reference_input),
@@ -317,6 +325,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             text=True,
             check=False,
             timeout=int(case.get("runtime_timeout_s", 3600)),
+            env=reference_environment,
         )
         assert completed.returncode == 0, completed.stderr + completed.stdout
         with np.load(reference_output, allow_pickle=False) as archive:

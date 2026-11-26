@@ -14,8 +14,8 @@ def main():
 
     if transformers.__version__ != "5.20.0":
         raise RuntimeError(
-            "Prepare the isolated reference environment from tests/requirements.txt "
-            "and set TRTMC_JINA_EMBEDDINGS_V3_REFERENCE_PYTHON to its absolute Python interpreter"
+            "Prepare the isolated reference environment before offline validation with "
+            "MODEL=jina_embeddings_v3 python -m tools.ci pipeline setup"
         )
     directory = Path(sys.argv[1])
     case = json.loads(Path(sys.argv[2]).read_text())
