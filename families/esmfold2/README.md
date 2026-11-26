@@ -88,13 +88,14 @@ two diffusion samples.
 | All-atom RMSD after superposition (A) | 0.61 | 0.53 | 0.96 | 1.04 |
 | All-atom lDDT | 0.950 | 0.963 | 0.928 | 0.907 |
 
-  The native bf16 build deviates from the fp32 reference as much as the reference's own bf16 run (the all-atom rows
-  come from a second build of the same cases; their worst samples sit in the flexible ends of Trp-cage and villin). A
-  few samples per fold turn their global pose under bf16 rounding in both (frame RMSD of single samples up to 10 A), so
-  the frame check takes the median, and every sample is gated on its own atoms after superposition and by lDDT. The
-  premerge thresholds (`tests/thresholds/`) keep about 2x; a fold from another seed (median frame RMSD 15-18 A), a
-  trunk without the language-model pair (lDDT 0.40-0.46) and one sample with its side-chain atoms moved by 2 A or its
-  atoms out of order inside each residue (all-atom lDDT 0.60-0.76) fail them.
+  The native bf16 build deviates from the fp32 reference as much as the reference's own bf16 run (the all-atom rows come
+  from a second build of the same cases; their worst samples sit in the flexible ends of Trp-cage and villin). A few
+  samples per fold turn their global pose under bf16 rounding in both (frame RMSD of single samples up to 10 A), so the
+  shared-frame check takes the median (a reduction for the global pose only: the evidence keeps every sample's
+  coordinates in the shared frame), and every sample is gated on its own atoms after superposition and by lDDT. The
+  premerge thresholds (`tests/thresholds/`) keep about 2x; a fold from another seed (median frame RMSD 15-18 A), a trunk
+  without the language-model pair (lDDT 0.40-0.46) and one sample with its side-chain atoms moved by 2 A or its atoms
+  out of order inside each residue (all-atom lDDT 0.60-0.76) fail them.
 
 ## Performance
 
@@ -102,13 +103,15 @@ two diffusion samples.
 sampling steps (34 run), 32 diffusion samples. Inputs: random single-chain sequences, uniform over the 20 standard
 residues (`tests/benchmark_reference.py` defines them and writes them as FASTA). Every timed call is one complete
 request, from the sequence to the ranked structure text of all 32 samples: featurization, trunk, diffusion sampler,
-confidence head, ranking and structure text. Native: `trtmc-bench` (`public_task_call_wall` of `predict_structure`,
-mmCIF text), one bf16 bundle per row with `--max-sequence-length` equal to the length; bundle load (9 to 11 s) and
-engine build (about 7 min) excluded. Eager and `torch.compile`: `tests/benchmark_reference.py`, the reference
-`EsmFold2Model` in bf16 (PyTorch 2.15, transformers 5.24.1) through `prepare_protein_features`, `fold` and
-`output_to_pdb` (PDB text; the reference has no mmCIF writer), between CUDA synchronizations; `torch.compile` compiles
-the trunk, the diffusion module and the confidence head (default mode) in its first, excluded calls. Median of 5 calls
-after 2 warmups; peak memory: `nvidia-smi` device memory, sampled every 100 ms.
+confidence head, ranking and structure text. Native: `trtmc-bench` (`public_task_call_wall` of `predict_structure`:
+mmCIF text, plus a metadata JSON per sample with the scores and per-residue pLDDT, 3 KB at 128 and 21 KB at 1024
+residues), one bf16 bundle per row with `--max-sequence-length` equal to the length; bundle load (9 to 11 s) and engine
+build (about 7 min) excluded. Eager and `torch.compile`: `tests/benchmark_reference.py`, the reference `EsmFold2Model`
+in bf16 (PyTorch 2.15, transformers 5.24.1) through `prepare_protein_features`, `fold` and `output_to_pdb` (PDB text;
+the reference has no mmCIF writer), between CUDA synchronizations; `torch.compile` compiles the trunk, the diffusion
+module and the confidence head (default mode) in its first, excluded calls. Both sides make 2 warmup calls, then report
+the median of 5 timed calls (`--warmup 2 --iterations 5` on both); peak memory: `nvidia-smi` device memory, sampled
+every 100 ms.
 
 | Residues | Native | Eager PyTorch | `torch.compile` | Native peak | Eager peak | `torch.compile` peak |
 |---|---|---|---|---|---|---|

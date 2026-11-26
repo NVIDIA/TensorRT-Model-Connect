@@ -170,7 +170,8 @@ def main() -> None:
                 record["warmup_seconds"] = [request(sequence)[0] for _ in range(args.warmup)]
                 timed = [request(sequence) for _ in range(args.iterations)]
             record["seconds"] = [seconds for seconds, _ in timed]
-            record["structures"] = len(timed[-1][1])
+            # Structure texts of one call, one per sample (a native request returns all of them too).
+            record["pdb_texts_per_call"] = len(timed[-1][1])
             record["p50_ms"] = 1000 * statistics.median(record["seconds"])
             record["samples_per_s"] = args.samples * 1000 / record["p50_ms"]
             record["memory_samples"] = sampler.samples
