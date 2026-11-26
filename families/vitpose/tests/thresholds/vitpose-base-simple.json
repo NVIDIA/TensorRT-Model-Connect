@@ -1,0 +1,6 @@
+{
+  "threshold_overrides": {
+    "max_keypoint_error_px": 0.005,
+    "max_score_error": 0.0001
+  }
+}
