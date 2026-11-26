@@ -41,6 +41,7 @@ import subprocess
 import sys
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -93,7 +94,8 @@ def _case_index() -> dict[str, tuple[Path, dict, dict]]:
 CASES = _case_index()
 
 
-def _selected_cases(config) -> tuple[list[str], bool]:
+def _filters(config) -> tuple[set[str], set[str]]:
+    """Names selected by --e2e-model or --e2e-models-file, and testcases selected by --e2e-testcase."""
     model_filters = set()
     for raw in config.getoption("--e2e-model") or []:
         model_filters.update(item.strip() for item in str(raw).split(",") if item.strip())
@@ -107,6 +109,39 @@ def _selected_cases(config) -> tuple[list[str], bool]:
     testcase_filters = set()
     for raw in config.getoption("--e2e-testcase") or []:
         testcase_filters.update(item.strip() for item in str(raw).split(",") if item.strip())
+    return model_filters, testcase_filters
+
+
+def _testcases_of_another_family(config) -> set[str]:
+    """The --e2e-testcase names of a selection made by them alone that names no case of this
+    family, which another family collected in the session must own; empty otherwise."""
+    model_filters, testcase_filters = _filters(config)
+    if model_filters or testcase_filters & set(CASES):
+        return set()
+    return testcase_filters
+
+
+def _collected_cases(items) -> set[str]:
+    """The E2E cases of every family collected in this session: the ``case_name`` parameter of
+    each ``test_*e2e`` item."""
+    cases = set()
+    for item in items:
+        parameters = getattr(getattr(item, "callspec", None), "params", {})
+        if re.fullmatch(r"test_.*e2e", getattr(item, "originalname", "") or "") and "case_name" in parameters:
+            cases.add(str(parameters["case_name"]))
+    return cases
+
+
+def _require_another_owner(testcases: set[str], collected: set[str]) -> None:
+    """Skip when an E2E case of another family collected in this session matches ``testcases``;
+    fail otherwise, so a selection that matches no case cannot pass by running none."""
+    if testcases & collected:
+        pytest.skip(f"--e2e-testcase {sorted(testcases & collected)} belongs to another family")
+    pytest.fail(f"--e2e-testcase {sorted(testcases)} matches no E2E case collected in this session")
+
+
+def _selected_cases(config) -> tuple[list[str], bool]:
+    model_filters, testcase_filters = _filters(config)
     if not model_filters and not testcase_filters:
         return sorted(CASES), False
     selected = []
@@ -145,6 +180,10 @@ def pytest_generate_tests(metafunc) -> None:
                 )
                 for name in names
             ]
+        elif not names and _testcases_of_another_family(metafunc.config):
+            # Checked when the cases run, against every family's collected cases
+            # (_require_another_owner): a testcase no family owns fails instead of skipping.
+            names = parameters = sorted(CASES)
         metafunc.parametrize("case_name", parameters, ids=names)
 
 
@@ -998,6 +1037,48 @@ def test_an_explicit_selection_without_a_case_is_an_error() -> None:
     assert _selected_cases(Options(**{"--e2e-testcase": ["other-case"]})) == ([], True)
 
 
+def test_a_testcase_selection_that_no_collected_family_owns_fails() -> None:
+    def config(**options):
+        return SimpleNamespace(getoption=options.get)
+
+    # A selection by testcases alone that names no case of this family still gives this
+    # family's cases, which then check the session (pytest would skip an empty one).
+    calls = []
+    pytest_generate_tests(
+        SimpleNamespace(
+            fixturenames=["case_name"],
+            config=config(**{"--e2e-testcase": ["typo"]}),
+            parametrize=lambda name, values, ids: calls.append((name, values, ids)),
+        )
+    )
+    assert calls == [("case_name", sorted(CASES), sorted(CASES))]
+    assert _testcases_of_another_family(config(**{"--e2e-testcase": ["typo"]})) == {"typo"}
+    for options in (
+        {"--e2e-testcase": [sorted(CASES)[0]]},
+        {"--e2e-model": ["other_family"], "--e2e-testcase": ["typo"]},
+        {},
+    ):
+        assert _testcases_of_another_family(config(**options)) == set(), options
+
+    def item(name: str, **params):
+        return SimpleNamespace(originalname=name, callspec=SimpleNamespace(params=params))
+
+    collected = _collected_cases(
+        [
+            item("test_e2e", case_name=sorted(CASES)[0]),
+            item("test_e2e", case_name="other-case"),
+            item("test_helper", case_name="not-an-e2e-case"),
+            item("test_e2e", case="no-case-name"),
+            SimpleNamespace(originalname="test_e2e"),
+        ]
+    )
+    assert collected == {sorted(CASES)[0], "other-case"}
+    with pytest.raises(pytest.fail.Exception, match="matches no E2E case"):
+        _require_another_owner({"typo"}, collected)
+    with pytest.raises(pytest.skip.Exception, match="another family"):
+        _require_another_owner({"other-case"}, collected)
+
+
 def test_first_difference_counts_an_early_stop() -> None:
     assert _first_difference([1, 2, 3], [1, 2, 3]) is None
     assert _first_difference([1, 2, 4], [1, 2, 3]) == 2
@@ -1281,7 +1362,10 @@ def bundle_root(tmp_path_factory) -> Path:
     return tmp_path_factory.mktemp("vibevoice-asr-bundles")
 
 
-def test_e2e(tmp_path: Path, bundle_root: Path, case_name: str) -> None:
+def test_e2e(tmp_path: Path, bundle_root: Path, case_name: str, request) -> None:
+    other = _testcases_of_another_family(request.config)
+    if other:
+        _require_another_owner(other, _collected_cases(request.session.items))
     manifest_path, manifest, case = CASES[case_name]
     assert manifest_path.is_file()
     binary, runtime_root = _runtime()
