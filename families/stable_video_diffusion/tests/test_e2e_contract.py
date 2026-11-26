@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -36,6 +38,14 @@ def _generate(**options):
     return metafunc.parametrized
 
 
+class _Item:
+    """A collected test item with the given parameters."""
+
+    def __init__(self, originalname="test_e2e", **params):
+        self.originalname = originalname
+        self.callspec = type("Callspec", (), {"params": params})()
+
+
 def test_an_explicit_selection_fails_when_no_testcase_matches(tmp_path):
     models_file = tmp_path / "models.txt"
     models_file.write_text("stable_video_diffusion\n", encoding="utf-8")
@@ -55,6 +65,62 @@ def test_an_explicit_selection_fails_when_no_testcase_matches(tmp_path):
     # A selection of another family still skips this module.
     assert _generate(**{"--e2e-model": ["wavlm"],
                         "--e2e-testcase": ["wavlm-libri-clean-100h-large"]}) == [("case_name", [])]
+
+
+def test_a_testcase_only_selection_matching_no_case_fails_at_run_time():
+    # Without --e2e-model another family of the session may own the testcase: one item decides at
+    # run time instead of an empty parametrization that pytest would skip.
+    assert _generate(**{"--e2e-testcase": ["svd-xt-fp32-typo"]}) == [
+        ("case_name", [e2e.UNMATCHED_TESTCASES])]
+    assert _generate(**{"--e2e-testcase": ["svd-xt-fp32"]}) == [("case_name", ["svd-xt-fp32"])]
+    session = [_Item(case_name=e2e.UNMATCHED_TESTCASES),
+               _Item(case_name="wavlm-libri-clean-100h-large"),
+               _Item(manifest={}, case={"name": "clef-flash-invoice"})]
+    typo = _Config(**{"--e2e-testcase": ["svd-xt-fp32-typo"]})
+    with pytest.raises(pytest.fail.Exception, match="matches no E2E case collected in this"):
+        e2e._require_collected_testcases(typo, session)
+    # The placeholder item does not count as a case.
+    placeholder = _Config(**{"--e2e-testcase": [e2e.UNMATCHED_TESTCASES]})
+    with pytest.raises(pytest.fail.Exception, match="matches no E2E case collected in this"):
+        e2e._require_collected_testcases(placeholder, session)
+    # Another family of the session owns the testcase, as a case name or a case's name: nothing
+    # to run here.
+    for owned_case in ("wavlm-libri-clean-100h-large", "clef-flash-invoice"):
+        owned = _Config(**{"--e2e-testcase": [owned_case]})
+        with pytest.raises(pytest.skip.Exception, match="no stable_video_diffusion testcase"):
+            e2e._require_collected_testcases(owned, session)
+    # A test that is not an E2E does not own a case.
+    with pytest.raises(pytest.fail.Exception):
+        e2e._require_collected_testcases(
+            owned, [_Item(originalname="test_support", case={"name": "clef-flash-invoice"})])
+
+
+def test_the_official_run_restores_the_tf32_settings(monkeypatch):
+    torch = pytest.importorskip("torch")
+    diffusers = pytest.importorskip("diffusers")
+    during = []
+
+    class _Refused:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            during.append((torch.get_float32_matmul_precision(), torch.backends.cudnn.allow_tf32))
+            raise RuntimeError("no checkpoint in this test")
+
+    monkeypatch.setattr(diffusers, "StableVideoDiffusionPipeline", _Refused)
+    _, manifest, case = e2e.CASES["svd-xt-fp32"]
+    saved = torch.get_float32_matmul_precision(), torch.backends.cudnn.allow_tf32
+    try:
+        for matmul in ("high", "medium"):
+            torch.set_float32_matmul_precision(matmul)
+            torch.backends.cudnn.allow_tf32 = True
+            with pytest.raises(RuntimeError, match="no checkpoint"):
+                e2e._official(Path("unused"), manifest, case, Path("unused.png"), "fp32")
+            assert torch.get_float32_matmul_precision() == matmul
+            assert torch.backends.cudnn.allow_tf32 is True
+    finally:
+        torch.set_float32_matmul_precision(saved[0])
+        torch.backends.cudnn.allow_tf32 = saved[1]
+    assert during == [("highest", False), ("highest", False)]
 
 
 def test_frame_comparisons_refuse_clips_of_different_shapes():

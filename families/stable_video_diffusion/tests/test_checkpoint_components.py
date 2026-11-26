@@ -75,11 +75,12 @@ def model_dir() -> Path:
 
 @pytest.fixture(autouse=True)
 def _exact_fp32():
-    matmul, cudnn = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
-    torch.backends.cuda.matmul.allow_tf32 = False
+    matmul, cudnn = torch.get_float32_matmul_precision(), torch.backends.cudnn.allow_tf32
+    torch.set_float32_matmul_precision("highest")
     torch.backends.cudnn.allow_tf32 = False
     yield
-    torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = matmul, cudnn
+    torch.set_float32_matmul_precision(matmul)
+    torch.backends.cudnn.allow_tf32 = cudnn
 
 
 def _check_io(engine, inputs: dict, outputs: dict) -> None:

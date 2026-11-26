@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -51,9 +52,13 @@ def _case_index() -> dict[str, tuple[Path, dict, dict]]:
 CASES = _case_index()
 # Names that select this family explicitly: the family, its manifests and its cases.
 OWN_NAMES = frozenset({FAMILY, *CASES, *(manifest["name"] for _, manifest, _ in CASES.values())})
+# Parametrized when only --e2e-testcase selects and it names no case of this family: whether
+# another family of the session owns those testcases is known only once collection ends.
+UNMATCHED_TESTCASES = "unmatched-testcase-selection"
 
 
-def _selected_cases(config) -> tuple[list[str], bool]:
+def _filters(config) -> tuple[set[str], set[str]]:
+    """(--e2e-model and --e2e-models-file names, --e2e-testcase names)."""
     model_filters = set()
     for raw in config.getoption("--e2e-model") or []:
         model_filters.update(item.strip() for item in str(raw).split(",") if item.strip())
@@ -67,6 +72,39 @@ def _selected_cases(config) -> tuple[list[str], bool]:
     testcase_filters = set()
     for raw in config.getoption("--e2e-testcase") or []:
         testcase_filters.update(item.strip() for item in str(raw).split(",") if item.strip())
+    return model_filters, testcase_filters
+
+
+def _collected_cases(items) -> set[str]:
+    """The E2E cases collected in this session: of every ``test_*e2e`` item, its ``case_name``
+    parameter or the ``name`` of its ``case`` parameter, the two forms families parametrize.
+    ``UNMATCHED_TESTCASES`` is a placeholder, not a case."""
+    cases = set()
+    for item in items:
+        if not re.fullmatch(r"test_.*e2e", getattr(item, "originalname", "") or ""):
+            continue
+        parameters = getattr(getattr(item, "callspec", None), "params", {})
+        if "case_name" in parameters:
+            cases.add(str(parameters["case_name"]))
+        elif isinstance(parameters.get("case"), dict) and "name" in parameters["case"]:
+            cases.add(str(parameters["case"]["name"]))
+    cases.discard(UNMATCHED_TESTCASES)
+    return cases
+
+
+def _require_collected_testcases(config, items) -> None:
+    """A testcase-only selection naming no case of this family fails unless another family of
+    the session owns one of the testcases; then this family has nothing to run and skips."""
+    _, testcase_filters = _filters(config)
+    if not testcase_filters & _collected_cases(items):
+        pytest.fail(f"--e2e-testcase {', '.join(sorted(testcase_filters))} matches no E2E case "
+                    f"collected in this session; {FAMILY}'s testcases are "
+                    f"{', '.join(sorted(CASES))}")
+    pytest.skip(f"no {FAMILY} testcase is selected")
+
+
+def _selected_cases(config) -> tuple[list[str], bool]:
+    model_filters, testcase_filters = _filters(config)
     if not model_filters and not testcase_filters:
         return sorted(CASES), False
     selected = []
@@ -80,6 +118,10 @@ def _selected_cases(config) -> tuple[list[str], bool]:
         raise pytest.UsageError(
             f"no {FAMILY} testcase matches the explicit selection (--e2e-testcase "
             f"{', '.join(sorted(testcase_filters))}); its testcases are {', '.join(sorted(CASES))}")
+    if not selected and not model_filters:
+        # The same for a testcase-only selection, unless another family owns the testcases;
+        # test_e2e decides once the session is collected.
+        return [UNMATCHED_TESTCASES], True
     return sorted(selected), True
 
 
@@ -226,33 +268,38 @@ def _official(model_dir: Path, manifest: dict, case: dict, image: Path,
     from diffusers import StableVideoDiffusionPipeline
     from PIL import Image
 
-    torch.backends.cuda.matmul.allow_tf32 = False
+    # The reference runs without TF32; the caller's settings come back, also on failure.
+    matmul, cudnn = torch.get_float32_matmul_precision(), torch.backends.cudnn.allow_tf32
+    torch.set_float32_matmul_precision("highest")
     torch.backends.cudnn.allow_tf32 = False
-    assert torch.get_float32_matmul_precision() == "highest"
-    dtype = torch.float32 if precision == "fp32" else torch.float16
-    pipeline = StableVideoDiffusionPipeline.from_pretrained(str(model_dir), torch_dtype=dtype)
-    pipeline.to("cuda")
-    pipeline.set_progress_bar_config(disable=True)
-    height, width = int(manifest["image_height"]), int(manifest["image_width"])
-    frames = int(manifest["video_num_frames"])
-    overrides = {name: case[name] for name in CONFIG_OVERRIDES if name in case}
-    # The pipeline's first draw is the float32 conditioning-image noise and its second
-    # the latents, in the pipeline dtype. Both precisions are given the float32 second
-    # draw the native runtime makes, cast to the pipeline dtype, so their starting
-    # point is the same by construction.
-    generator = torch.Generator("cpu").manual_seed(int(case["seed"]))
-    torch.randn((1, 3, height, width), generator=generator)
-    factor = pipeline.vae_scale_factor
-    latents = torch.randn((1, frames, pipeline.unet.config.in_channels // 2, height // factor,
-                           width // factor), generator=generator)
-    with torch.no_grad():
-        output = pipeline(
-            Image.open(image).convert("RGB"), height=height, width=width, num_frames=frames,
-            num_inference_steps=int(case["num_steps"]), decode_chunk_size=frames,
-            generator=torch.Generator("cpu").manual_seed(int(case["seed"])),
-            latents=latents.to(dtype), output_type="np", **overrides).frames[0]
-    del pipeline
-    torch.cuda.empty_cache()
+    try:
+        dtype = torch.float32 if precision == "fp32" else torch.float16
+        pipeline = StableVideoDiffusionPipeline.from_pretrained(str(model_dir), torch_dtype=dtype)
+        pipeline.to("cuda")
+        pipeline.set_progress_bar_config(disable=True)
+        height, width = int(manifest["image_height"]), int(manifest["image_width"])
+        frames = int(manifest["video_num_frames"])
+        overrides = {name: case[name] for name in CONFIG_OVERRIDES if name in case}
+        # The pipeline's first draw is the float32 conditioning-image noise and its second
+        # the latents, in the pipeline dtype. Both precisions are given the float32 second
+        # draw the native runtime makes, cast to the pipeline dtype, so their starting
+        # point is the same by construction.
+        generator = torch.Generator("cpu").manual_seed(int(case["seed"]))
+        torch.randn((1, 3, height, width), generator=generator)
+        factor = pipeline.vae_scale_factor
+        latents = torch.randn((1, frames, pipeline.unet.config.in_channels // 2, height // factor,
+                               width // factor), generator=generator)
+        with torch.no_grad():
+            output = pipeline(
+                Image.open(image).convert("RGB"), height=height, width=width, num_frames=frames,
+                num_inference_steps=int(case["num_steps"]), decode_chunk_size=frames,
+                generator=torch.Generator("cpu").manual_seed(int(case["seed"])),
+                latents=latents.to(dtype), output_type="np", **overrides).frames[0]
+        del pipeline
+        torch.cuda.empty_cache()
+    finally:
+        torch.set_float32_matmul_precision(matmul)
+        torch.backends.cudnn.allow_tf32 = cudnn
     return np.asarray(output, dtype=np.float32)
 
 
@@ -325,7 +372,9 @@ def _record_reference(references: dict[str, np.ndarray], fps: int, tmp_path: Pat
         "native": native_video, "reference": videos["fp32"], "checks": checks})
 
 
-def test_e2e(case_name: str, tmp_path: Path) -> None:
+def test_e2e(case_name: str, tmp_path: Path, request) -> None:
+    if case_name == UNMATCHED_TESTCASES:
+        _require_collected_testcases(request.config, request.session.items)
     _, manifest, case = CASES[case_name]
     assert manifest["trust_remote_code"] is False
     thresholds = _thresholds(case_name)
