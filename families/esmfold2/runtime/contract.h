@@ -19,7 +19,7 @@ namespace trtmc::esmfold2 {
 struct TensorFacts {
     bool input{true};
     DType dtype{DType::kFloat32};
-    // Outputs: the shape the module reports (-1 for a dynamic dimension).
+    // Outputs: the shape the module allocated, for the inputs' largest profile.
     std::vector<std::int64_t> shape;
     // Inputs: the profile's smallest and largest shapes.
     std::vector<std::int64_t> min_profile;
@@ -28,9 +28,9 @@ struct TensorFacts {
 using PlanFacts = std::map<std::string, TensorFacts>;
 
 // Checks one plan against the I/O contract that runtime.json implies: exactly the expected tensor
-// names, their element types, ranks and fixed widths, and each input's profile up to the bundle's
-// maximum token, atom and sample counts. Throws std::invalid_argument naming the plan and the
-// tensor.
+// names, their element types, each input's profile up to the bundle's maximum token, atom and
+// sample counts, and each output's shape for that maximum. Throws std::invalid_argument naming the
+// plan and the tensor.
 void check_plan_contract(const std::string& plan, const PlanFacts& facts,
                          const BundleConfig& config);
 

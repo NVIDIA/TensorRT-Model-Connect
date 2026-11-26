@@ -113,6 +113,10 @@ def test_released_configuration_parses() -> None:
         (("esmc_config", "rope_parameters", "rope_type"), "yarn"),
         (("structure_head", "diffusion_module", "head_dim"), 32),
         (("parcae", "coda_n_layers"), 3),
+        (("esmc_config", "rope_parameters", "rope_theta"), 1.0e-100),  # float32 frequencies overflow
+        (("atom_encoder", "spatial_rope_base_frequency"), 1.0e-100),
+        (("atom_encoder", "uid_rope_base_frequency"), 1.0e-100),
+        (("structure_head", "diffusion_module", "atom_encoder", "uid_rope_base_frequency"), 1.0e-100),
     ],
 )
 def test_configurations_the_graph_cannot_honor_are_rejected(path: tuple[str, ...], value: object) -> None:
@@ -196,3 +200,47 @@ def test_runtime_values_the_loader_rejects_fail_the_build() -> None:
         target[path[-1]] = value
         with pytest.raises(ValueError):
             model.check_runtime_json(broken)
+
+
+@pytest.mark.parametrize(
+    ("edits", "message"),
+    [
+        # Each edit keeps every older relation (feature widths follow the changed depth), so only the bound rejects it.
+        ({("num_res_types",): 22, ("single_inputs_size",): 429}, "unknown residue type"),
+        ({("max_chars",): 3, ("atom_feature_dim",): 325}, "four name characters"),
+        ({("char_vocab_size",): 58, ("atom_feature_dim",): 365}, "name character 58"),
+        ({("max_atomic_number",): 16, ("atom_feature_dim",): 277}, "sulfur"),
+        ({("esmc_config", "vocab_size"): 23}, "residue tokens"),
+        # Spatial RoPE positions are conformer coordinates (up to 4.52), not token positions (4 here).
+        (
+            {("esmc_config", "max_position_embeddings"): 4, ("atom_encoder", "spatial_rope_base_frequency"): 1.6e-76},
+            "spatial_rope_base_frequency gives RoPE angles",
+        ),
+    ],
+)
+def test_one_hot_depths_must_cover_the_featurizer_tables(edits: dict, message: str) -> None:
+    raw = copy.deepcopy(released_config())
+    for path, value in edits.items():
+        target = raw
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = value
+    with pytest.raises(ConfigError, match=message):
+        parse_config(raw)
+
+
+def test_rope_checks_do_not_scale_with_the_head_width() -> None:
+    import tracemalloc
+
+    raw = copy.deepcopy(released_config())
+    width = 1 << 24
+    raw["esmc_config"].update(head_dim=width, num_attention_heads=1, num_key_value_heads=1, hidden_size=width)
+    raw["lm_d_model"] = width
+    tracemalloc.start()
+    try:
+        config = parse_config(raw)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert config.esmc.head_dim == width  # the checkpoint's tensor shapes reject it later, not this parser
+    assert peak < 1 << 20, peak  # one float per RoPE pair would be 8 M floats

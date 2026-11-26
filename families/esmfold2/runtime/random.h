@@ -7,6 +7,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <thread>
 #include <vector>
 
 namespace trtmc::esmfold2 {
@@ -52,5 +54,19 @@ class RandomStreams {
 std::uint32_t keep_threshold(double dropout);
 
 std::uint64_t splitmix64_mix(std::uint64_t value);
+
+// Work on the item range [begin, end) of a chunked loop, and what starts one worker thread for it.
+using ChunkWork = std::function<void(std::size_t, std::size_t)>;
+using ChunkLauncher = std::function<std::thread(const ChunkWork&, std::size_t, std::size_t)>;
+
+// Worker count for ``count`` items: one (inline) below 2^16 items, else the hardware threads, at
+// most 32.
+std::size_t chunk_workers(std::size_t count);
+
+// Runs ``work`` over [0, count) in ``workers`` contiguous chunks (inline for one worker). Workers
+// already started are joined before an exception, a failed launch included, leaves the call.
+// ``launch`` defaults to ``std::thread``.
+void run_in_chunks(std::size_t count, std::size_t workers, const ChunkWork& work,
+                   const ChunkLauncher& launch = {});
 
 } // namespace trtmc::esmfold2

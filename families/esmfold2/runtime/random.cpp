@@ -61,28 +61,44 @@ bool RandomStreams::keep(Stream stream, std::uint64_t index, std::uint32_t keep_
 }
 
 void RandomStreams::fill_normal(Stream stream, std::uint64_t first, std::vector<float>& out) const {
-    const std::size_t count = out.size();
-    const unsigned hardware = std::max(1U, std::thread::hardware_concurrency());
-    const std::size_t workers = count < (1U << 16U) ? 1U : std::min<std::size_t>(hardware, 32U);
-    auto work = [&](std::size_t begin, std::size_t end) {
+    run_in_chunks(out.size(), chunk_workers(out.size()), [&](std::size_t begin, std::size_t end) {
         for (std::size_t i = begin; i < end; ++i)
             out[i] = normal(stream, first + i);
-    };
-    if (workers == 1) {
+    });
+}
+
+std::size_t chunk_workers(std::size_t count) {
+    const unsigned hardware = std::max(1U, std::thread::hardware_concurrency());
+    return count < (std::size_t{1} << 16U) ? 1U : std::min<std::size_t>(hardware, 32U);
+}
+
+void run_in_chunks(std::size_t count, std::size_t workers, const ChunkWork& work,
+                   const ChunkLauncher& launch) {
+    if (workers <= 1) {
         work(0, count);
         return;
     }
     std::vector<std::thread> threads;
     threads.reserve(workers);
+    auto join = [&threads] {
+        for (auto& thread : threads)
+            if (thread.joinable())
+                thread.join();
+    };
     const std::size_t chunk = (count + workers - 1) / workers;
-    for (std::size_t worker = 0; worker < workers; ++worker) {
-        const std::size_t begin = worker * chunk;
-        const std::size_t end = std::min(count, begin + chunk);
-        if (begin < end)
-            threads.emplace_back(work, begin, end);
+    try {
+        for (std::size_t worker = 0; worker < workers; ++worker) {
+            const std::size_t begin = worker * chunk;
+            const std::size_t end = std::min(count, begin + chunk);
+            if (begin < end)
+                threads.push_back(launch ? launch(work, begin, end)
+                                         : std::thread(work, begin, end));
+        }
+    } catch (...) {
+        join();
+        throw;
     }
-    for (auto& thread : threads)
-        thread.join();
+    join();
 }
 
 std::uint32_t keep_threshold(double dropout) {

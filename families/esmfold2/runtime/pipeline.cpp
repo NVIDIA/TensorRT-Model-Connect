@@ -20,7 +20,6 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <utility>
 
 namespace trtmc::esmfold2 {
@@ -90,22 +89,7 @@ void* output(ITrtModule& module, const char* name) {
 
 template <typename Function>
 void parallelFor(std::size_t count, Function function) {
-    const unsigned hardware = std::max(1U, std::thread::hardware_concurrency());
-    const std::size_t workers = count < (1U << 16U) ? 1U : std::min<std::size_t>(hardware, 32U);
-    if (workers == 1) {
-        function(std::size_t{0}, count);
-        return;
-    }
-    std::vector<std::thread> threads;
-    const std::size_t chunk = (count + workers - 1) / workers;
-    for (std::size_t worker = 0; worker < workers; ++worker) {
-        const std::size_t begin = worker * chunk;
-        const std::size_t end = std::min(count, begin + chunk);
-        if (begin < end)
-            threads.emplace_back(function, begin, end);
-    }
-    for (auto& thread : threads)
-        thread.join();
+    run_in_chunks(count, chunk_workers(count), function);
 }
 
 std::vector<std::uint8_t> pairStateBytes(const RandomStreams& random, std::size_t count, float std,

@@ -223,3 +223,29 @@ def test_reference_numerics_are_restored_after_a_failure() -> None:
             assert state() == ("highest", False, False, False)
             raise RuntimeError("reference failed")
     assert state() == before
+
+
+def test_the_featurizer_bounds_match_the_reference_tables() -> None:
+    from transformers.models.esmfold2 import protein_utils
+
+    from ..config import (
+        FEATURIZER_MAX_ABS_COORDINATE,
+        FEATURIZER_MAX_ELEMENT,
+        FEATURIZER_MAX_NAME_CHAR,
+        FEATURIZER_MAX_RES_TYPE,
+        FEATURIZER_MAX_TOKEN_ID,
+        FEATURIZER_NAME_CHARS,
+    )
+
+    names = [name for atoms in protein_utils.PROTEIN_HEAVY_ATOMS.values() for name in atoms]
+    res_types = [*protein_utils.PROTEIN_RESIDUE_TO_RES_TYPE.values(), protein_utils.PROTEIN_UNK_RES_TYPE]
+    assert max(res_types) == FEATURIZER_MAX_RES_TYPE
+    assert max(len(name) for name in names) <= FEATURIZER_NAME_CHARS
+    assert max(ord(char) - 32 for name in names for char in name) == FEATURIZER_MAX_NAME_CHAR
+    atomic_numbers = {"C": 6, "N": 7, "O": 8, "S": 16}
+    assert {name[0] for name in names} <= set(atomic_numbers)
+    assert max(atomic_numbers[name[0]] for name in names) == FEATURIZER_MAX_ELEMENT
+    assert max(protein_utils.ESM_PROTEIN_VOCAB.values()) == FEATURIZER_MAX_TOKEN_ID
+    coordinates = [abs(float(np.float32(value))) for atoms in protein_utils.PROTEIN_REF_POS.values()
+                   for position in (atoms.values() if isinstance(atoms, dict) else atoms) for value in position]
+    assert max(coordinates) == FEATURIZER_MAX_ABS_COORDINATE

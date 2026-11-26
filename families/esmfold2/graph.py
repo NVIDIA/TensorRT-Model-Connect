@@ -260,7 +260,7 @@ class Net:
         shape = (1,) * (rank - 1) + (width,)
 
         def parameter(suffix: str, present: bool, fill: float) -> Any:
-            key = ("norm", prefix, suffix, rank, present)
+            key = ("norm", prefix, suffix, rank, width, present)
             if key not in self._named:
                 values = self.weight(f"{prefix}.{suffix}") if present else np.full(width, fill, np.float32)
                 self._named[key] = self.constant(values, shape=shape)
@@ -311,13 +311,15 @@ class Net:
         rank = len(tensor.shape)
         key = ("linear", prefix, rank, str(dtype))
         if weight is not None or key not in self._named:
-            if weight is None:
+            # Only checkpoint weights are shared under the prefix; an explicit weight is used for this call alone.
+            from_checkpoint = weight is None
+            if from_checkpoint:
                 if prefix is None:
                     raise ValueError("linear needs a checkpoint prefix or an explicit weight")
                 weight = self.weight(f"{prefix}.weight")
             out_features, in_features = weight.shape
             rhs = self.constant(weight.T, dtype, shape=(1,) * (rank - 2) + (in_features, out_features))
-            if prefix is not None:
+            if from_checkpoint:
                 self._named[key] = rhs
         else:
             rhs = self._named[key]

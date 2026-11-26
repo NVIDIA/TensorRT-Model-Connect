@@ -16,6 +16,7 @@
 #include "families/esmfold2/runtime/sampler.h"
 #include "families/esmfold2/runtime/structure_io.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -25,6 +26,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -137,6 +140,32 @@ void checkRandom() {
     expect(std::fabs(sum / count) < 0.01 && std::fabs(square / count - 1.0) < 0.02,
            "normal moments");
     expect(largest <= 6.0F && largest > 5.0F, "truncated normal bound");
+}
+
+void checkChunks() {
+    std::vector<int> hits(100000, 0);
+    run_in_chunks(hits.size(), 4, [&](std::size_t begin, std::size_t end) {
+        for (std::size_t i = begin; i < end; ++i)
+            hits[i] += 1;
+    });
+    expect(std::all_of(hits.begin(), hits.end(), [](int hit) { return hit == 1; }),
+           "every item of a chunked loop runs once");
+    int launches = 0;
+    bool propagated = false;
+    try {
+        run_in_chunks(
+            hits.size(), 4, [](std::size_t, std::size_t) {},
+            [&](const ChunkWork& work, std::size_t begin, std::size_t end) {
+                if (++launches == 2)
+                    throw std::system_error(
+                        std::make_error_code(std::errc::resource_unavailable_try_again));
+                return std::thread(work, begin, end);
+            });
+    } catch (const std::system_error&) {
+        propagated = true;
+    }
+    // Without the join, unwinding destroys a joinable thread and std::terminate ends the process.
+    expect(propagated && launches == 2, "a failed worker launch reaches the caller");
 }
 
 void checkSampler() {
@@ -303,6 +332,9 @@ void checkPlanContract() {
     broken([](PlanFacts& facts) { facts["extra"] = facts["denoised"]; }, "an extra output");
     broken([](PlanFacts& facts) { facts["denoised"].shape = {32, a, 4}; },
            "an output of another width");
+    // Outputs are allocated for the largest inputs; a smaller buffer would be read past its end.
+    broken([](PlanFacts& facts) { facts["denoised"].shape = {1, 32, 3}; },
+           "an output smaller than the maximum");
     broken([](PlanFacts& facts) { facts["denoised"].dtype = DType::kBFloat16; },
            "a bf16 coordinate output");
     broken([](PlanFacts& facts) { facts["atom_mask"].input = false; },
@@ -314,11 +346,46 @@ void checkPlanContract() {
                       {"base_pair", pair(bf16)},
                       {"lm_pair", pair(bf16)},
                       {"lm_keep", pair(DType::kFloat32)},
-                      {"next_state", output(bf16, {1, -1, -1, 256})}};
+                      {"next_state", output(bf16, {1, t, t, 256})}};
     check_plan_contract("loop", loop, config);
     loop["lm_keep"].max_profile = {1, t, t, 128};
     expectThrows([&] { check_plan_contract("loop", loop, config); },
                  "plan contract rejects a mask of another width");
+
+    // A bundle for two tokens: the token profiles' ends coincide, the inputs stay dynamic (-1 in
+    // the plan's shape).
+    Json two_tokens = runtimeJson();
+    two_tokens["max_tokens"] = 2;
+    two_tokens["max_atoms"] = 32;
+    const BundleConfig smallest = parse_bundle_config(two_tokens.dump());
+    auto dynamic = [](DType dtype, Shape declared, Shape profile) {
+        return TensorFacts{true, dtype, declared, profile, profile};
+    };
+    const PlanFacts msa = {
+        {"initial_pair", dynamic(bf16, {1, -1, -1, 256}, {1, 2, 2, 256})},
+        {"single_inputs", dynamic(bf16, {1, -1, 451}, {1, 2, 451})},
+        {"res_type", dynamic(DType::kInt32, {1, -1}, {1, 2})},
+        {"msa_pair", output(bf16, {1, 2, 2, 256})},
+    };
+    check_plan_contract("msa", msa, smallest);
+
+    // The pTM bin weights are the one fixed-shape input: no profile, the shape itself is checked.
+    PlanFacts confidence = {
+        {"single_inputs", input(bf16, {1, 2, 451}, {1, t, 451})},
+        {"pair_trunk", input(DType::kFloat32, {1, 2, 2, 256}, {1, t, t, 256})},
+        {"relpos", input(bf16, {1, 2, 2, 256}, {1, t, t, 256})},
+        {"coords", input(DType::kFloat32, {1, 32, 3}, {1, a, 3})},
+        {"rep_atom", input(DType::kInt32, {1, 2}, {1, t})},
+        {"atom_to_token", input(DType::kInt32, {1, 32}, {1, a})},
+        {"intra_index", input(DType::kInt32, {1, 32}, {1, a})},
+        {"tm_per_bin", TensorFacts{true, DType::kFloat32, {64}, {}, {}}},
+        {"plddt_atom", output(DType::kFloat32, {1, a})},
+        {"ptm_rows", output(DType::kFloat32, {1, t})},
+    };
+    check_plan_contract("confidence", confidence, config);
+    confidence["tm_per_bin"].shape = {32};
+    expectThrows([&] { check_plan_contract("confidence", confidence, config); },
+                 "plan contract rejects pTM weights of another width");
 }
 
 void checkBundleConfig() {
@@ -338,8 +405,15 @@ void checkBundleConfig() {
         broken[key] = bad;
         expectThrows([&] { parse_bundle_config(broken.dump()); }, "runtime.json rejects " + key);
     }
-    expectThrows([&] { parse_bundle_config(R"({"format": 1, "format": 1})"); },
-                 "duplicate runtime.json key");
+    // The valid document with one key repeated: only the duplicate can be the reason it fails.
+    const std::string document = runtimeJson().dump();
+    expect(parse_bundle_config(document).max_tokens == 64,
+           "the document without the duplicate parses");
+    std::string duplicated = document;
+    duplicated.insert(1, "\"format\":1,");
+    expect(duplicated.find("\"format\":1,") == 1 && duplicated.rfind("\"format\":1") > 1,
+           "the duplicate key is in the document twice");
+    expectThrows([&] { parse_bundle_config(duplicated); }, "duplicate runtime.json key");
 
     trtmc::StructurePredictionConfig requested;
     const FoldControls controls = resolve_controls(requested, config);
@@ -492,6 +566,7 @@ int main(int argc, char** argv) {
         checkDocuments();
         checkFeatures();
         checkRandom();
+        checkChunks();
         checkSampler();
         checkConfidence();
         checkWriters();

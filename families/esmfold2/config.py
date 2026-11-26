@@ -11,9 +11,44 @@ from __future__ import annotations
 
 import json
 import math
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+# Bounds of the native featurizer's tables (runtime/residue_table.h, generated from the reference featurizer): residue
+# types up to 22 (unknown), elements up to sulfur (16), four atom-name characters with codes up to 58, ESM token ids up
+# to 23. The one-hot depths and the ESMC vocabulary of a checkpoint must cover them.
+FEATURIZER_MAX_RES_TYPE = 22
+FEATURIZER_MAX_ELEMENT = 16
+FEATURIZER_NAME_CHARS = 4
+FEATURIZER_MAX_NAME_CHAR = 58
+FEATURIZER_MAX_TOKEN_ID = 23
+# The largest absolute reference-conformer coordinate (float32), the bound of the spatial RoPE positions.
+FEATURIZER_MAX_ABS_COORDINATE = 4.523719787597656
+
+
+def _float32(value: float) -> float:
+    """``value`` rounded to float32 (infinite when it overflows)."""
+
+    try:
+        return struct.unpack("f", struct.pack("f", value))[0]
+    except OverflowError:
+        return math.inf
+
+
+def _rope_angles_fit_float32(base: float, exponents: list[float], position: float) -> bool:
+    """The plans multiply a float32 position by float32 ``1 / base**exponent``: both must stay finite in float32."""
+
+    for exponent in exponents:
+        try:
+            frequency = _float32(1.0 / base**exponent)
+        except (OverflowError, ZeroDivisionError):
+            return False
+        if not math.isfinite(frequency) or not math.isfinite(_float32(frequency * _float32(position))):
+            return False
+    return True
 
 
 class ConfigError(ValueError):
@@ -335,6 +370,23 @@ def _validate_relations(
     _require(config.sigma_min_ratio < config.sigma_max_ratio, "the noise schedule bounds are inverted")
     _require(config.confidence_distance_bins >= 2, "confidence distogram_bins must be at least 2")
     _require(config.max_atoms_per_token >= 14, "max_atoms_per_token must cover the largest amino acid")
+    _require(config.num_res_types > FEATURIZER_MAX_RES_TYPE, "num_res_types must cover the unknown residue type 22")
+    _require(config.max_chars == FEATURIZER_NAME_CHARS, "max_chars must equal the featurizer's four name characters")
+    _require(config.char_vocab_size > FEATURIZER_MAX_NAME_CHAR, "char_vocab_size must cover atom-name character 58")
+    _require(config.max_atomic_number > FEATURIZER_MAX_ELEMENT, "max_atomic_number must cover sulfur (16)")
+    _require(config.esmc.vocab_size > FEATURIZER_MAX_TOKEN_ID, "esmc_config.vocab_size must cover the residue tokens")
+    # Token positions and atom uids stay below the ESMC context; spatial positions are reference-conformer coordinates.
+    # For a positive base the frequency is monotonic in the exponent, so the first and last pair bound every pair.
+    positions = float(config.esmc.max_positions)
+    head = config.esmc.head_dim
+    rope_bases = [("esmc_config rope_theta", config.esmc.rope_theta, [0.0, (head - 2) / head], positions)]
+    for label, stack in (("atom_encoder", config.trunk_atoms), ("diffusion atom_encoder", config.diffusion_atoms)):
+        spatial, uid = stack.spatial_pairs_per_axis, stack.uid_pairs
+        rope_bases.append((f"{label} spatial_rope_base_frequency", stack.spatial_rope_base,
+                           [0.0, (spatial - 1) / spatial], FEATURIZER_MAX_ABS_COORDINATE))
+        rope_bases.append((f"{label} uid_rope_base_frequency", stack.uid_rope_base, [0.0, (uid - 1) / uid], positions))
+    for label, base, exponents, bound in rope_bases:
+        _require(_rope_angles_fit_float32(base, exponents, bound), f"{label} gives RoPE angles outside float32")
     _require(
         config.esmc.hidden_size == raw.get("lm_d_model") and config.esmc.num_layers == raw.get("lm_num_layers"),
         "lm_d_model / lm_num_layers must describe the bundled ESMC trunk",

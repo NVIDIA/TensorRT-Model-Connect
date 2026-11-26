@@ -15,7 +15,6 @@ namespace trtmc::esmfold2 {
 namespace {
 
 using Shape = std::vector<std::int64_t>;
-constexpr std::int64_t kDynamic = -1;
 
 // kMask is TensorRT bool, which the backend's DType cannot name: its shapes are checked, not its
 // type.
@@ -26,6 +25,9 @@ struct Input {
     Kind kind;
     Shape min;
     Shape max;
+    // Declared without a dynamic dimension (no profile); every other input is checked against its
+    // profile, also when the profile's ends coincide (a bundle built for two tokens).
+    bool fixed{false};
 };
 
 struct Output {
@@ -57,7 +59,9 @@ Contract contractOf(const std::string& plan, const BundleConfig& config) {
     const std::int64_t head = config.atom_head_dim;
     const std::int64_t layers = config.diffusion_layers;
     const std::int64_t heads = config.diffusion_heads;
-    const Shape pair_out{1, kDynamic, kDynamic, pair};
+    // Outputs as allocated for the inputs' largest profile: every request up to the maximum fits in
+    // them.
+    const Shape pair_out{1, tokens, tokens, pair};
     auto token = [&](std::string name, Kind kind = Kind::kInt) {
         return Input{std::move(name), kind, {1, kMinTokens}, {1, tokens}};
     };
@@ -83,7 +87,7 @@ Contract contractOf(const std::string& plan, const BundleConfig& config) {
     Contract contract;
     if (plan == "esmc") {
         contract.inputs = {{"input_ids", Kind::kInt, {1, kMinTokens + 2}, {1, tokens + 2}}};
-        contract.outputs = {{"lm_single", Kind::kCompute, {1, kDynamic, pair}}};
+        contract.outputs = {{"lm_single", Kind::kCompute, {1, tokens + 2, pair}}};
     } else if (plan == "embed") {
         contract.inputs = {tokenRow("lm_single", Kind::kCompute, pair),
                            token("res_type"),
@@ -94,7 +98,7 @@ Contract contractOf(const std::string& plan, const BundleConfig& config) {
                            token("entity_id")};
         contract.inputs.insert(contract.inputs.end(), atom_features.begin(), atom_features.end());
         contract.inputs.push_back(atom("atom_to_token", Kind::kInt));
-        contract.outputs = {{"single_inputs", Kind::kCompute, {1, kDynamic, single}},
+        contract.outputs = {{"single_inputs", Kind::kCompute, {1, tokens, single}},
                             {"initial_pair", Kind::kCompute, pair_out},
                             {"relpos", Kind::kCompute, pair_out},
                             {"lm_pair", Kind::kCompute, pair_out}};
@@ -116,11 +120,11 @@ Contract contractOf(const std::string& plan, const BundleConfig& config) {
                            tokenRow("single_inputs", Kind::kCompute, single)};
         contract.inputs.insert(contract.inputs.end(), atom_features.begin(), atom_features.end());
         contract.outputs = {
-            {"token_bias", Kind::kCompute, {layers, heads, kDynamic, kDynamic}},
-            {"cond_single", Kind::kCompute, {1, kDynamic, config.diffusion_hidden_size}},
-            {"atom_embeds", Kind::kCompute, {1, kDynamic, width}},
-            {"rope_cos", Kind::kCompute, {1, kDynamic, head}},
-            {"rope_sin", Kind::kCompute, {1, kDynamic, head}}};
+            {"token_bias", Kind::kCompute, {layers, heads, tokens, tokens}},
+            {"cond_single", Kind::kCompute, {1, tokens, config.diffusion_hidden_size}},
+            {"atom_embeds", Kind::kCompute, {1, atoms, width}},
+            {"rope_cos", Kind::kCompute, {1, atoms, head}},
+            {"rope_sin", Kind::kCompute, {1, atoms, head}}};
     } else if (plan == "denoise") {
         contract.inputs = {
             {"noisy_coords", Kind::kFloat, {1, kAtomBlock, 3}, {config.max_samples, atoms, 3}},
@@ -135,18 +139,19 @@ Contract contractOf(const std::string& plan, const BundleConfig& config) {
             atom("rope_sin", Kind::kCompute, {head}),
             atom("atom_mask", Kind::kFloat),
             atom("atom_to_token", Kind::kInt)};
-        contract.outputs = {{"denoised", Kind::kFloat, {kDynamic, kDynamic, 3}}};
+        contract.outputs = {{"denoised", Kind::kFloat, {config.max_samples, atoms, 3}}};
     } else if (plan == "confidence") {
-        contract.inputs = {tokenRow("single_inputs", Kind::kCompute, single),
-                           pairInput("pair_trunk", Kind::kFloat),
-                           pairInput("relpos", Kind::kCompute),
-                           atom("coords", Kind::kFloat, {3}),
-                           token("rep_atom"),
-                           atom("atom_to_token", Kind::kInt),
-                           atom("intra_index", Kind::kInt),
-                           {"tm_per_bin", Kind::kFloat, {config.pae_bins}, {config.pae_bins}}};
-        contract.outputs = {{"plddt_atom", Kind::kFloat, {1, kDynamic}},
-                            {"ptm_rows", Kind::kFloat, {1, kDynamic}}};
+        contract.inputs = {
+            tokenRow("single_inputs", Kind::kCompute, single),
+            pairInput("pair_trunk", Kind::kFloat),
+            pairInput("relpos", Kind::kCompute),
+            atom("coords", Kind::kFloat, {3}),
+            token("rep_atom"),
+            atom("atom_to_token", Kind::kInt),
+            atom("intra_index", Kind::kInt),
+            {"tm_per_bin", Kind::kFloat, {config.pae_bins}, {config.pae_bins}, true}};
+        contract.outputs = {{"plddt_atom", Kind::kFloat, {1, atoms}},
+                            {"ptm_rows", Kind::kFloat, {1, tokens}}};
     } else {
         throw std::invalid_argument("ESMFold2 bundle has no plan named " + plan);
     }
@@ -190,8 +195,7 @@ void check_plan_contract(const std::string& plan, const PlanFacts& facts,
         const TensorFacts& actual = factsFor(plan, facts, expected.name, true);
         if (expected.kind != Kind::kMask && actual.dtype != dtypeOf(expected.kind, config))
             fail(expected.name, "element type does not match runtime.json");
-        if (expected.min == expected.max) {
-            // A fixed shape: TensorRT reports no profile for it.
+        if (expected.fixed) {
             if (actual.shape != expected.max ||
                 (!actual.max_profile.empty() && actual.max_profile != expected.max))
                 fail(expected.name,
@@ -206,11 +210,7 @@ void check_plan_contract(const std::string& plan, const PlanFacts& facts,
         const TensorFacts& actual = factsFor(plan, facts, expected.name, false);
         if (actual.dtype != dtypeOf(expected.kind, config))
             fail(expected.name, "element type does not match runtime.json");
-        bool matches = actual.shape.size() == expected.shape.size();
-        for (std::size_t axis = 0; matches && axis < expected.shape.size(); ++axis)
-            matches = expected.shape[axis] == kDynamic || actual.shape[axis] == kDynamic ||
-                      actual.shape[axis] == expected.shape[axis];
-        if (!matches)
+        if (actual.shape != expected.shape)
             fail(expected.name,
                  "shape " + text(actual.shape) + ", expected " + text(expected.shape));
     }
