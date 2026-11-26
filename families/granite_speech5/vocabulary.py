@@ -64,6 +64,11 @@ def byte_value(token: str) -> int | None:
 
 
 def _tokenizer(model_dir: Path) -> dict:
+    config_path = Path(model_dir) / "tokenizer_config.json"
+    if config_path.is_file() and read_json(config_path).get("fast_tokenizer_files"):
+        # Transformers would load the newest versioned tokenizer.<version>.json the list names instead.
+        raise NotImplementedError("granite_speech5 reads tokenizer.json; tokenizer_config.json fast_tokenizer_files "
+                                  "would make the reference read another tokenizer file")
     tokenizer = read_json(Path(model_dir) / "tokenizer.json")
     model = tokenizer.get("model")
     if not isinstance(model, dict) or model.get("type") != "BPE" or not isinstance(model.get("vocab"), dict):
@@ -112,12 +117,11 @@ def _token_table(tokenizer: dict) -> tuple[dict[int, str], dict[str, int], set[s
             raise ValueError(f"granite_speech5 tokenizer.json gives two pieces the id {token_id}")
         by_id[token_id] = piece
         pieces[piece] = token_id
-    size, resolved_ids, special = len(vocab), [], set()
+    size, top, special = len(vocab), None, set()  # top: the highest id resolved so far
     for stored, content, is_special in _added_tokens(tokenizer):
         if content in pieces:
             resolved = pieces[content]
         else:
-            top = max(resolved_ids, default=None)
             resolved = size if top is None or (top < size and size > 0) else top + 1
             if resolved in by_id:
                 raise ValueError(f"granite_speech5 added token {content!r} would take the id {resolved} "
@@ -125,7 +129,7 @@ def _token_table(tokenizer: dict) -> tuple[dict[int, str], dict[str, int], set[s
         if resolved != stored:
             raise ValueError(f"granite_speech5 tokenizer.json stores the added token {content!r} with id "
                              f"{stored}, but the tokenizer gives it {resolved}")
-        resolved_ids.append(resolved)
+        top = resolved if top is None else max(top, resolved)
         by_id[resolved], pieces[content] = content, resolved
         if is_special:
             special.add(content)
@@ -161,59 +165,109 @@ def _check_against_library(library, vocabulary: Vocabulary, by_id: dict[int, str
                              f"from the tokenizers library")
 
 
-_SPECIAL_LISTS = ("additional_special_tokens", "extra_special_tokens", "model_specific_special_tokens")
+_NAMED_SPECIAL = ("bos_token", "eos_token", "unk_token", "sep_token", "pad_token", "cls_token", "mask_token")
 _ADDED_TOKEN_FIELDS = ("content", "single_word", "lstrip", "rstrip", "normalized", "special")
 
 
-def _registered_special(config: dict, name: str) -> set[str]:
-    """The tokens Transformers registers as special from one configuration file.
+class _Added(str):
+    """A legacy-map value Transformers turned into an AddedToken."""
 
-    Every ``*_token`` key holding a token (``bos_token`` ... ``mask_token`` and model-specific ones such
-    as ``image_token``; a boolean like ``add_bos_token`` is not a token) and every entry of
-    ``additional_special_tokens``, ``extra_special_tokens`` and ``model_specific_special_tokens``.
+
+def _is_token(value) -> bool:
+    """A value Transformers takes as a token: a string or a serialized AddedToken (``"__type"``)."""
+    return isinstance(value, str) or (isinstance(value, dict) and value.get("__type") == "AddedToken")
+
+
+def _content(value, where: str) -> str:
+    if isinstance(value, dict) and value.get("__type") == "AddedToken":
+        value = value.get("content")
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"granite_speech5 {where} is not a token Transformers loads: {value!r}")
+    return str(value)
+
+
+def _legacy_item(token):
+    """An ``extra_special_tokens`` entry of the legacy map: Transformers makes a dict an AddedToken."""
+    if not isinstance(token, dict):
+        return token
+    if "special" in token:  # AddedToken(**token, special=True) receives it twice
+        raise ValueError(f"granite_speech5 special_tokens_map.json extra token {token!r} sets special itself "
+                         "(Transformers refuses it)")
+    return _Added(token.get("content") or "")
+
+
+def _registered_special(config: dict, legacy: dict | None) -> set[str]:
+    """The tokens Transformers 5.22.2 registers as special when it loads the tokenizer.
+
+    Mirrors its loading of ``tokenizer_config.json``: ``additional_special_tokens`` becomes
+    ``extra_special_tokens``; model-specific ``*_token`` keys holding a string (``image_token``, not
+    ``add_bos_token``) and a dict of extra tokens move aside. On the legacy path (``legacy``: ``special_tokens_map.json`` when the
+    configuration has no ``added_tokens_decoder``) the map then replaces the named tokens (``bos_token`` ...
+    ``mask_token``, a null removes one), appends to the extra list, adds model-specific keys and a dict of
+    extra tokens of its own, while a model-specific key of the configuration keeps its value. A value
+    Transformers refuses is refused here.
     """
+    kwargs = dict(config)
+    if "additional_special_tokens" in kwargs and not kwargs.get("extra_special_tokens"):
+        kwargs["extra_special_tokens"] = kwargs.pop("additional_special_tokens")
+    # Only strings move aside here: a serialized AddedToken becomes one after the legacy merge.
+    specific = {key: kwargs.pop(key) for key in list(kwargs)
+                if key not in _NAMED_SPECIAL and key.endswith("_token") and isinstance(kwargs[key], str)}
+    if isinstance(kwargs.get("extra_special_tokens"), dict):
+        specific.update(kwargs.pop("extra_special_tokens"))
+    if specific:
+        kwargs["model_specific_special_tokens"] = specific
+    if legacy is not None:
+        for key, value in legacy.items():
+            if isinstance(value, dict) and key != "extra_special_tokens":
+                value = _Added(value.get("content") or "")
+            elif key == "extra_special_tokens" and isinstance(value, list):
+                existing = list(kwargs.get("extra_special_tokens") or [])
+                value = existing + [token for token in map(_legacy_item, value) if token not in existing]
+            kwargs[key] = value
+        if isinstance(kwargs.get("extra_special_tokens"), dict):
+            kwargs.setdefault("model_specific_special_tokens", {}).update(kwargs.pop("extra_special_tokens"))
+    if "additional_special_tokens" in kwargs and "extra_special_tokens" not in kwargs:
+        kwargs["extra_special_tokens"] = kwargs.pop("additional_special_tokens")
+    explicit = kwargs.pop("model_specific_special_tokens", None)
+    explicit = {} if explicit is None else explicit
+    if not isinstance(explicit, dict):
+        raise ValueError("granite_speech5 model_specific_special_tokens must be an object (Transformers refuses it)")
     registered: set[str] = set()
-
-    def add(value, key: str) -> None:
-        if isinstance(value, dict):
-            value = value.get("content")
-        if not isinstance(value, str) or not value:
-            raise ValueError(f"granite_speech5 {name} {key} is not a token: {value!r}")
-        registered.add(value)
-
-    for key, value in config.items():
-        if value is None:
-            continue
-        if key in _SPECIAL_LISTS:
+    automatic: dict = {}
+    for key, value in kwargs.items():
+        if key in _NAMED_SPECIAL and value is not None:
+            if not _is_token(value):
+                raise ValueError(f"granite_speech5 {key} must be a token (Transformers refuses {value!r})")
+            registered.add(_content(value, key))
+        elif key == "extra_special_tokens" and value is not None:
             if not isinstance(value, (list, dict)):
-                raise ValueError(f"granite_speech5 {name} {key} must be a list or an object, not {value!r}")
-            for item in value.values() if isinstance(value, dict) else value:
-                add(item, key)
-        elif key.endswith("_token") and isinstance(value, (str, dict)):
-            add(value, key)
+                raise ValueError(f"granite_speech5 extra_special_tokens must be a list or an object, not {value!r}")
+            registered.update(_content(item, key) for item in (value.values() if isinstance(value, dict) else value))
+        elif key not in _NAMED_SPECIAL and key.endswith("_token") and _is_token(value):
+            automatic[key] = value
+    registered.update(_content(value, key) for key, value in {**automatic, **explicit}.items())
     return registered
 
 
 def check_tokenizer_config(model_dir: Path, tokenizer: dict, special: set[str]) -> None:
     """Refuse token metadata that Transformers applies on load and ``tokenizer.json`` does not hold.
 
-    The tokens ``tokenizer_config.json`` and ``special_tokens_map.json`` register as special make the
-    reference skip them, and every ``added_tokens_decoder`` entry is added with its flags (a special flag
-    skips the token, a normalized flag changes its spacing). The bundle's table comes from
-    ``tokenizer.json``, so each registered token must be special there and each entry must be one of its
-    added tokens, unchanged; ``added_tokens.json`` is refused.
+    The tokens ``tokenizer_config.json`` registers as special, and ``special_tokens_map.json`` when the
+    configuration has no ``added_tokens_decoder`` (Transformers reads the map only then), make the reference
+    skip them, and every ``added_tokens_decoder`` entry is added with its flags (a special flag skips the
+    token, a normalized flag changes its spacing). The bundle's table comes from ``tokenizer.json``, so each
+    registered token must be special there and each entry must be one of its added tokens, unchanged;
+    ``added_tokens.json`` is refused.
     """
     model_dir = Path(model_dir)
     if (model_dir / "added_tokens.json").is_file():
         raise NotImplementedError("granite_speech5 does not read added_tokens.json; Transformers would add its "
                                   "tokens to the reference's tokenizer")
-    registered: set[str] = set()
-    config: dict = {}
-    for name in ("tokenizer_config.json", "special_tokens_map.json"):
-        if (model_dir / name).is_file():
-            content = read_json(model_dir / name)
-            registered |= _registered_special(content, name)
-            config = content if name == "tokenizer_config.json" else config
+    config_path, legacy_path = model_dir / "tokenizer_config.json", model_dir / "special_tokens_map.json"
+    config = read_json(config_path) if config_path.is_file() else {}
+    legacy = read_json(legacy_path) if "added_tokens_decoder" not in config and legacy_path.is_file() else None
+    registered = _registered_special(config, legacy)
     extra = registered - special
     if extra:
         raise NotImplementedError(f"granite_speech5 tokenizer configuration makes {sorted(extra)} special, which "

@@ -71,6 +71,7 @@ static void print_json_string(trtmc_string_view text) {
 
 int main(int argc, char** argv) {
     trtmc_error* error = NULL;
+    trtmc_status status;
     trtmc_model* model = NULL;
     trtmc_load_options_v1 options;
     const trtmc_api_header* header = NULL;
@@ -97,10 +98,12 @@ int main(int argc, char** argv) {
     memset(&options, 0, sizeof(options));
     options.struct_size = sizeof(options);
     options.runtime_root = view(argv[2]);
-    fail(api->model_load(view(argv[1]), &options, &model, &error), error, "model_load");
-    fail(api->model_get_task_api(model, view(TRTMC_TASK_SPEECH_TRANSCRIPTION), 1, 0, &header,
-                                 &error),
-         error, "get speech_transcription");
+    /* Each status is stored before `error` is read: argument evaluation order is unspecified. */
+    status = api->model_load(view(argv[1]), &options, &model, &error);
+    fail(status, error, "model_load");
+    status = api->model_get_task_api(model, view(TRTMC_TASK_SPEECH_TRANSCRIPTION), 1, 0, &header,
+                                     &error);
+    fail(status, error, "get speech_transcription");
     task = (const trtmc_speech_transcription_api_v1*)header;
 
     memset(&request, 0, sizeof(request));
@@ -109,9 +112,11 @@ int main(int argc, char** argv) {
     request.audio.has_sample_rate = 1;
     request.audio.sample_rate = (uint32_t)rate;
     request.audio.channels = (uint32_t)channels;
-    fail(task->run(model, &request, NULL, &result, &error), error, "speech_transcription run");
+    status = task->run(model, &request, NULL, &result, &error);
+    fail(status, error, "speech_transcription run");
     memset(&output, 0, sizeof(output));
-    fail(task->result_view(result, &output, &error), error, "speech_transcription result_view");
+    status = task->result_view(result, &output, &error);
+    fail(status, error, "speech_transcription result_view");
 
     printf("{\"text\":");
     print_json_string(output.text);

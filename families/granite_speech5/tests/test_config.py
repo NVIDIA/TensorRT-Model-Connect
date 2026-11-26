@@ -252,23 +252,38 @@ def test_sample_limits(tmp_path):
 
 
 def test_frame_counts_match_the_feature_extractor(tmp_path):
-    """Stacked frames and the tail sample, as the official extractor computes them, at many lengths."""
+    """Stacked frames and the tail sample, as the official extractor computes them, at many lengths.
+
+    The waveform the extractor hands its mel transform is captured: it must be the clip followed by
+    exactly the zero samples ``needs_tail_sample`` predicts (one at 1120 samples, none at 1121).
+    """
+    import torch
     from transformers import GraniteSpeech5FeatureExtractor
 
     cfg = _resolve(tmp_path)
     fe = cfg.front_end
     extractor = GraniteSpeech5FeatureExtractor(**{key: value for key, value in PROCESSOR["feature_extractor"].items()
                                                   if key != "feature_extractor_type"})
+    seen: list[np.ndarray] = []
+    transform = extractor.mel_filters
+
+    class Recording(torch.nn.Module):
+        def forward(self, audio):
+            seen.append(audio.detach().cpu().numpy().copy())
+            return transform(audio)
+
+    extractor.mel_filters = Recording()
     rng = np.random.default_rng(0)
     lengths = list(range(1100, 1700)) + [int(value) for value in rng.integers(1700, 200000, 40)] + [373040]
     tails = 0
     for length in lengths:
-        features = extractor(rng.standard_normal(length).astype(np.float32), sampling_rate=16000,
-                             return_tensors="np")["input_features"]
+        clip = rng.standard_normal(length).astype(np.float32)
+        seen.clear()
+        features = extractor(clip, sampling_rate=16000, return_tensors="np")["input_features"]
         assert features.shape == (1, fe.stacked_frames(length), 320), length
-        hop_frames = length // fe.hop_length
-        stacked = 2 * -(-hop_frames // 2)
-        assert fe.needs_tail_sample(length) == (length < (stacked - 1) * fe.hop_length + 1), length
+        assert len(seen) == 1 and seen[0].shape == (1, length + fe.needs_tail_sample(length)), (length, seen)
+        assert np.array_equal(seen[0][0, :length], clip) and not seen[0][0, length:].any(), length
         tails += fe.needs_tail_sample(length)
+    assert fe.needs_tail_sample(1120) and not fe.needs_tail_sample(1121)
     assert tails > 0, "no length exercised the tail sample"
     assert cfg.output_frames(373040) == 291

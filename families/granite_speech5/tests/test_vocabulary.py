@@ -14,6 +14,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from families.granite_speech5 import config as config_module
 from families.granite_speech5 import vocabulary as vocabulary_module
 from families.granite_speech5.tests._snapshot import model_dir
 
@@ -216,7 +217,8 @@ def test_the_table_is_checked_against_the_library(checkpoint, tmp_path, monkeypa
         vocabulary_module.read_vocabulary(checkpoint, 16384, 0)
 
 
-_PROBES = [[2236, 2043, 2043, 3], [2043, 2236], [320, 2043, 320], [482, 384, 385, 2043], [2043], [320], [3, 1, 2236]]
+_PROBES = [[2236, 2043, 2043, 3], [2043, 2236], [320, 2043, 320], [482, 384, 385, 2043], [2043], [320], [3, 1, 2236],
+           [3091, 728]]  # the last is "word .", which Transformers' clean-up would turn into "word."
 
 
 def _reference_decodes(directory: Path) -> list[str]:
@@ -227,8 +229,11 @@ def _reference_decodes(directory: Path) -> list[str]:
 
 
 def _variant(checkpoint: Path, directory: Path, config: dict, files: dict | None = None) -> Path:
-    """The checkpoint's tokenizer files, ``config`` merged into tokenizer_config.json, ``files`` added."""
+    """The checkpoint's configuration and tokenizer files, ``config`` merged into tokenizer_config.json, ``files``
+    added."""
     _write(directory, _tokenizer_json(checkpoint))
+    for name in ("config.json", "processor_config.json"):
+        (directory / name).write_text((checkpoint / name).read_text(encoding="utf-8"), encoding="utf-8")
     content = json.loads((checkpoint / "tokenizer_config.json").read_text(encoding="utf-8"))
     content.update(config)
     (directory / "tokenizer_config.json").write_text(json.dumps(content), encoding="utf-8")
@@ -303,3 +308,97 @@ def test_added_tokens_decoder_keys_are_canonical_ids(checkpoint, tmp_path):
         directory = _variant(checkpoint, tmp_path / "key", {"added_tokens_decoder": {key: entry}})
         with pytest.raises(ValueError, match="is not a canonical decimal id"):
             vocabulary_module.read_vocabulary(directory, 16384, 0)
+
+
+_CLEAN_UP = {"clean_up_tokenization_spaces": True,
+             "clean_up_tokenization_spaces_for_bpe_even_though_it_will_corrupt_output": True}
+
+
+def test_a_legacy_special_tokens_map_that_turns_on_the_clean_up_is_refused(checkpoint, tmp_path):
+    """Without an added_tokens_decoder, Transformers merges special_tokens_map.json into its settings."""
+    directory = _variant(checkpoint, tmp_path / "map", {}, {"special_tokens_map.json": _CLEAN_UP})
+    assert _reference_decodes(directory)[-1] == "word." != _reference_decodes(checkpoint)[-1]
+    with pytest.raises(NotImplementedError, match="clean_up_tokenization_spaces"):
+        config_module.resolve(directory)
+
+
+@pytest.mark.parametrize("case", ["special-tokens", "ignored-map"])
+def test_a_legacy_special_tokens_map_the_reference_reads_alike_is_accepted(checkpoint, tmp_path, case):
+    """A map that repeats the special tokens, or one Transformers skips because the configuration has an
+    added_tokens_decoder, leaves the reference's decoding as it is."""
+    if case == "special-tokens":
+        config, files = {}, {"special_tokens_map.json": {"pad_token": "<unk>", "unk_token": "<unk>"}}
+    else:
+        ignored = {**_CLEAN_UP, "eos_token": "▁the"}  # would be refused if Transformers read it
+        config, files = {"added_tokens_decoder": _decoder_entries(checkpoint)}, {"special_tokens_map.json": ignored}
+    directory = _variant(checkpoint, tmp_path / case, config, files)
+    assert config_module.resolve(directory).blank_id == 0
+    vocabulary = vocabulary_module.read_vocabulary(directory, 16384, 0)
+    ours = [vocabulary_module.decode(vocabulary, vocabulary_module.collapse(ids, 0)) for ids in _PROBES]
+    assert ours == _reference_decodes(directory) == _reference_decodes(checkpoint)
+
+
+def test_a_versioned_tokenizer_file_the_reference_would_read_is_refused(checkpoint, tmp_path):
+    """fast_tokenizer_files makes Transformers load tokenizer.<version>.json instead of tokenizer.json."""
+    versioned = _tokenizer_json(checkpoint)
+    versioned["decoder"]["decoders"][-1]["start"] = 0  # keeps the leading space
+    directory = _variant(checkpoint, tmp_path / "versioned", {"fast_tokenizer_files": ["tokenizer.5.0.0.json"]},
+                         {"tokenizer.5.0.0.json": versioned})
+    assert _reference_decodes(directory) != _reference_decodes(checkpoint)
+    for read in (vocabulary_module.read_pieces, lambda path: vocabulary_module.read_vocabulary(path, 16384, 0)):
+        with pytest.raises(NotImplementedError, match="fast_tokenizer_files"):
+            read(directory)
+
+
+def _added_token(content: str) -> dict:
+    return {"__type": "AddedToken", "content": content, "lstrip": False, "rstrip": False, "normalized": False,
+            "single_word": False, "special": True}
+
+
+# tokenizer_config.json changes and special_tokens_map.json, each naming "▁the" (an ordinary piece) or a token
+# tokenizer.json already holds as special, in the ways Transformers 5.22.2 merges, overrides or refuses them.
+_MERGES = {
+    "config-named": ({"eos_token": "▁the"}, None),
+    "map-replaces-named": ({"eos_token": "▁the"}, {"eos_token": "<|endoftext|>"}),
+    "map-names": ({"eos_token": "<|endoftext|>"}, {"eos_token": "▁the"}),
+    "map-removes-named": ({"eos_token": "▁the"}, {"eos_token": None}),
+    "config-specific-wins": ({"image_token": "<|endoftext|>"}, {"image_token": "▁the"}),
+    "config-specific-kept": ({"image_token": "▁the"}, {"image_token": "<|endoftext|>"}),
+    "map-specific": ({}, {"image_token": "▁the"}),
+    "map-additional-dropped": ({"additional_special_tokens": ["<|nospeech|>"]}, {"additional_special_tokens": ["▁the"]}),
+    "map-additional": ({}, {"additional_special_tokens": ["▁the"]}),
+    "map-extra-appended": ({"extra_special_tokens": ["<|nospeech|>"]}, {"extra_special_tokens": ["▁the"]}),
+    "map-extra-dict-replaces": ({"extra_special_tokens": {"x": "▁the"}}, {"extra_special_tokens": {"x": "<|endoftext|>"}}),
+    "map-named-dict": ({}, {"eos_token": {"content": "▁the"}}),
+    "map-specific-dict-refused": ({}, {"model_specific_special_tokens": {"audio_token": "▁the"}}),
+    "config-specific-added-token": ({"image_token": _added_token("▁the")}, None),
+    "config-specific-plain-dict": ({"image_token": {"content": "▁the"}}, None),
+    "config-named-plain-dict": ({"eos_token": {"content": "▁the"}}, None),
+    "map-extra-dict-item": ({}, {"extra_special_tokens": [{"content": "<|nospeech|>"}]}),
+    "map-extra-dict-item-named": ({}, {"extra_special_tokens": [{"content": "▁the"}]}),
+    "map-extra-dict-item-special": ({}, {"extra_special_tokens": [{"content": "<|nospeech|>", "special": True}]}),
+    "config-extra-plain-dict": ({"extra_special_tokens": [{"content": "<|nospeech|>"}]}, None),
+    "map-additional-plain-dict": ({}, {"additional_special_tokens": [{"content": "▁the"}]}),
+    "map-extra-dict-of-dicts": ({}, {"extra_special_tokens": {"x": {"content": "▁the"}}}),
+    "config-extra-added-token": ({"extra_special_tokens": [_added_token("▁the")]}, None),
+    "map-replaces-specific-added-token": ({"image_token": _added_token("<|endoftext|>")}, {"image_token": "▁the"}),
+    "map-replaces-specific-added-token-named": ({"image_token": _added_token("▁the")}, {"image_token": "<|endoftext|>"}),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_MERGES))
+def test_special_tokens_merge_as_transformers_merges_them(checkpoint, tmp_path, case):
+    """Refused exactly when the reference skips "▁the" or cannot load; otherwise decoded like the reference."""
+    config, legacy = _MERGES[case]
+    files = {} if legacy is None else {"special_tokens_map.json": legacy}
+    directory = _variant(checkpoint, tmp_path / case, config, files)
+    try:
+        reference = _reference_decodes(directory)
+    except (TypeError, ValueError):
+        reference = None
+    if reference is None or reference != _reference_decodes(checkpoint):
+        with pytest.raises((NotImplementedError, ValueError)):
+            vocabulary_module.read_vocabulary(directory, 16384, 0)
+        return
+    vocabulary = vocabulary_module.read_vocabulary(directory, 16384, 0)
+    assert [vocabulary_module.decode(vocabulary, vocabulary_module.collapse(ids, 0)) for ids in _PROBES] == reference

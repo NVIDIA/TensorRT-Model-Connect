@@ -305,8 +305,18 @@ def _blank_id(top: dict, tokenizer_config: dict, pieces: dict[str, int], vocab_s
     return pad
 
 
+def tokenizer_settings(model_dir: Path) -> dict:
+    """The tokenizer settings Transformers 5 loads: ``tokenizer_config.json``, with ``special_tokens_map.json``
+    merged over it when the configuration has no ``added_tokens_decoder`` (its legacy path)."""
+    settings = read_json(Path(model_dir) / "tokenizer_config.json")
+    legacy = Path(model_dir) / "special_tokens_map.json"
+    if "added_tokens_decoder" not in settings and legacy.is_file():
+        settings = {**settings, **read_json(legacy)}
+    return settings
+
+
 def resolve(model_dir: Path, pieces: dict[str, int] | None = None) -> GraniteSpeech5Config:
-    """Read config.json, processor_config.json and tokenizer_config.json; raise naming what is not built.
+    """Read config.json, processor_config.json and the tokenizer settings; raise naming what is not built.
 
     ``pieces`` maps every token string to its id (from :mod:`.vocabulary`); it resolves the
     tokenizer's pad token, which is the CTC blank.
@@ -328,14 +338,15 @@ def resolve(model_dir: Path, pieces: dict[str, int] | None = None) -> GraniteSpe
     tokenizer_config = read_json(model_dir / "tokenizer_config.json")
     _require(tokenizer_config.get("tokenizer_class") == TOKENIZER_CLASS,
              f"tokenizer_class {tokenizer_config.get('tokenizer_class')!r} (the CTC decoding is ParakeetTokenizer's)")
+    settings = tokenizer_settings(model_dir)
     # Transformers' clean-up rewrites spaces before punctuation after decoding; the runtime does not.
-    _require(not _bool(tokenizer_config, "clean_up_tokenization_spaces", False, "tokenizer_config"),
+    _require(not _bool(settings, "clean_up_tokenization_spaces", False, "tokenizer settings"),
              "clean_up_tokenization_spaces true (the runtime decodes without the clean-up)")
     if pieces is None:
         from .vocabulary import read_pieces
 
         pieces = read_pieces(model_dir)
-    blank = _blank_id(top, tokenizer_config, pieces, vocab)
+    blank = _blank_id(top, settings, pieces, vocab)
     return GraniteSpeech5Config(front_end=front, encoder=encoder, vocab_size=vocab, blank_id=blank)
 
 

@@ -127,7 +127,16 @@ class Checkpoint:
         return handle
 
     def _check_headers(self) -> None:
-        """Dtype and shape of every tensor from the headers, before any value is read."""
+        """Each shard holds exactly the tensors mapped to it; dtype and shape from the headers, before any value."""
+        by_shard: dict[str, set[str]] = {}
+        for name, shard in self._map.items():
+            by_shard.setdefault(shard, set()).add(name)
+        for shard, names in sorted(by_shard.items()):
+            stored = set(self._handle(next(iter(names))).keys())
+            if stored != names:
+                raise NotImplementedError(
+                    f"granite_speech5 checkpoint shard {shard} does not hold exactly the tensors the index maps to it: "
+                    f"unlisted {sorted(stored - names)[:8]}, missing {sorted(names - stored)[:8]}")
         for name, shape in self._expected.items():
             header = self._handle(name).get_slice(name)
             dtype, stored = str(header.get_dtype()), tuple(int(v) for v in header.get_shape())

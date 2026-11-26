@@ -43,6 +43,27 @@ void check_throws(F&& call, const char* what) {
     ++failures;
 }
 
+// Passes only for the expected exception type whose message holds `needle`, so another failure
+// further down the path cannot stand in for the check under test.
+template <class Expected, class F>
+void check_throws_exactly(F&& call, const char* needle, const char* what) {
+    try {
+        call();
+    } catch (const Expected& error) {
+        if (std::string(error.what()).find(needle) == std::string::npos) {
+            std::printf("FAIL: %s threw \"%s\"\n", what, error.what());
+            ++failures;
+        }
+        return;
+    } catch (const std::exception& error) {
+        std::printf("FAIL: %s threw another error: %s\n", what, error.what());
+        ++failures;
+        return;
+    }
+    std::printf("FAIL: %s did not throw\n", what);
+    ++failures;
+}
+
 const char* kRuntime =
     R"({"precision": "bf16", "sample_rate": 16000, "n_fft": 512, "hop_length": 160,
   "frame_stacking": 2, "subsampling_layers": 2, "min_samples": 1120, "max_samples": 480000,
@@ -209,14 +230,29 @@ void engine_results_are_checked() {
     auto built = healthy();
     const std::vector<float> clip(16000, 0.25F);
     built.engine->ids = std::vector<std::int32_t>(11, 2);
-    check_throws([&] { built.pipeline->run(request(clip), {}); },
-                 "a frame count the geometry does not give");
+    check_throws_exactly<std::runtime_error>([&] { built.pipeline->run(request(clip), {}); },
+                                             "did not return 12 int32 frame ids",
+                                             "a frame count the geometry does not give");
     built.engine->ids = std::vector<std::int32_t>(12, 2);
     built.engine->ids[5] = 10;
-    check_throws([&] { built.pipeline->run(request(clip), {}); },
-                 "an id beyond the vocabulary (NaN logits)");
+    check_throws_exactly<std::runtime_error>([&] { built.pipeline->run(request(clip), {}); },
+                                             "outside the vocabulary",
+                                             "an id beyond the vocabulary (non-finite logits)");
     built.engine->ids[5] = -1;
-    check_throws([&] { built.pipeline->run(request(clip), {}); }, "a negative id");
+    check_throws_exactly<std::runtime_error>([&] { built.pipeline->run(request(clip), {}); },
+                                             "outside the vocabulary", "a negative id");
+}
+
+// A refused request never reaches the engine and throws std::invalid_argument naming its reason.
+void check_refused(const Built& built, const internal::SpeechTranscriptionRequest& refused,
+                   internal::ConfigView options, const char* needle, const char* what) {
+    built.engine->seen = -1;
+    check_throws_exactly<std::invalid_argument>([&] { built.pipeline->run(refused, options); },
+                                                needle, what);
+    if (built.engine->seen != -1) {
+        std::printf("FAIL: %s reached the engine\n", what);
+        ++failures;
+    }
 }
 
 void requests_outside_the_contract_are_refused() {
@@ -225,24 +261,28 @@ void requests_outside_the_contract_are_refused() {
     const std::vector<float> clip(16000, 0.25F);
     auto wrong_rate = request(clip);
     wrong_rate.audio.sample_rate = 48000;
-    check_throws([&] { built.pipeline->run(wrong_rate, {}); }, "48 kHz audio");
-    check_throws([&] { built.pipeline->run(request(std::vector<float>(1119, 0.25F)), {}); },
-                 "1119 samples");
-    check_throws([&] { built.pipeline->run(request(std::vector<float>(480001, 0.25F)), {}); },
-                 "480001 samples");
-    check_throws([&] { built.pipeline->run(request(std::vector<float>(16001, 0.25F), 2), {}); },
-                 "a partial stereo frame");
+    check_refused(built, wrong_rate, {}, "not 48000 Hz", "48 kHz audio");
+    const std::vector<float> short_clip(1119, 0.25F), long_clip(480001, 0.25F);
+    check_refused(built, request(short_clip), {}, "not 1119", "1119 samples");
+    check_refused(built, request(long_clip), {}, "not 480001", "480001 samples");
+    const std::vector<float> odd(16001, 0.25F);
+    check_refused(built, request(odd, 2), {}, "whole number of audio frames",
+                  "a partial stereo frame");
     auto broken = clip;
     broken[100] = std::numeric_limits<float>::quiet_NaN();
-    check_throws([&] { built.pipeline->run(request(broken), {}); }, "a NaN sample");
+    check_refused(built, request(broken), {}, "non-finite", "a NaN sample");
     broken[100] = std::numeric_limits<float>::infinity();
-    check_throws([&] { built.pipeline->run(request(broken), {}); }, "an infinite sample");
+    check_refused(built, request(broken), {}, "non-finite", "an infinite sample");
     auto language = request(clip);
     language.source_language = "en";
-    check_throws([&] { built.pipeline->run(language, {}); }, "a source language");
+    check_refused(built, language, {}, "source_language", "a source language");
     const internal::ConfigEntry beam[]{{"beam_size", internal::ConfigValue{std::int64_t{2}}}};
-    check_throws([&] { built.pipeline->run(request(clip), {beam, 1}); }, "an unknown option");
-    check_throws([&] { built.pipeline->run(request({}), {}); }, "no samples");
+    check_refused(built, request(clip), {beam, 1}, "beam_size", "an unknown option");
+    const std::vector<float> none;
+    check_refused(built, request(none), {}, "float32 PCM", "no samples");
+    built.engine->seen = -1;
+    built.pipeline->run(request(clip), {});
+    check(built.engine->seen == 16000 + 512, "the same pipeline still transcribes a valid clip");
 }
 
 } // namespace
