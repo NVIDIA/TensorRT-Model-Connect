@@ -159,7 +159,7 @@ RecurrentPipeline::generate_media_ids(const std::vector<int32_t>& input_ids,
     if (capacity <= 0 || count == 0 || cfg.max_new_tokens <= 0 ||
         count > static_cast<std::size_t>(capacity) ||
         static_cast<std::size_t>(cfg.max_new_tokens) > static_cast<std::size_t>(capacity) - count)
-        throw std::invalid_argument("Qwen media prompt and output exceed decoder capacity");
+        throw internal::ConfigError("Qwen media prompt and output exceed decoder capacity");
     if (media.positions.size() != count || media.feature_rows.size() != count ||
         media.hidden_size != media_hidden_size_ || media.dtype != media_dtype_ ||
         media.features.size() % zero_visual_.size() != 0)
@@ -172,14 +172,14 @@ RecurrentPipeline::generate_media_ids(const std::vector<int32_t>& input_ids,
             throw std::invalid_argument("Qwen media prompt has an invalid token or feature row");
         for (const auto position : media.positions[i]) {
             if (position < 0 || position >= capacity)
-                throw std::invalid_argument(
+                throw internal::ConfigError(
                     "Qwen media rotary coordinate exceeds decoder capacity");
             maximum = std::max(maximum, position);
         }
     }
     if (media.decode_position != maximum + 1 ||
         static_cast<int64_t>(media.decode_position) + cfg.max_new_tokens > capacity)
-        throw std::invalid_argument("Qwen media decode rotary positions exceed decoder capacity");
+        throw internal::ConfigError("Qwen media decode rotary positions exceed decoder capacity");
     media_prompt_ = &media;
     if (mtp_scheduler_)
         mtp_scheduler_->set_media_prompt(&media);
@@ -281,7 +281,7 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids_speculative(
     if (max_new_tokens < 0 || input_ids.size() > static_cast<std::size_t>(capacity) ||
         static_cast<std::size_t>(max_new_tokens) >
             static_cast<std::size_t>(capacity) - input_ids.size())
-        throw std::runtime_error(std::string(name_) + ": prompt and output exceed MTP capacity");
+        throw internal::ConfigError(std::string(name_) + ": prompt and output exceed MTP capacity");
 
     state_->reset();
     state_->bind_to(*decoder_);

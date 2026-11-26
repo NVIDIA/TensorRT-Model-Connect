@@ -5,6 +5,8 @@
 
 #include "families/k2_horizon/runtime/pipeline.h"
 
+#include "trtmc/internal/config.h"
+
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -155,7 +157,7 @@ K2HorizonTextGenerationPipeline::TimedGenResult K2HorizonTextGenerationPipeline:
     const auto capacity = static_cast<std::size_t>(cache_->max_length());
     if (input_ids.size() > capacity ||
         static_cast<std::size_t>(max_new_tokens) > capacity - input_ids.size()) {
-        throw std::invalid_argument(
+        throw internal::ConfigError(
             "K2-Horizon prompt and generation exceed the fixed KV cache capacity");
     }
 

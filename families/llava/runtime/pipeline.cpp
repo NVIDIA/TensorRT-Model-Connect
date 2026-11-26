@@ -8,6 +8,7 @@
 #include "families/llava/runtime/image_preprocessor.h"
 #include "families/llava/runtime/rope_regime.h"
 #include "families/llava/runtime/tensor_names.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <chrono>
@@ -60,7 +61,7 @@ TextResult LlavaPipeline::generate(const std::string& prompt, const TextGenerati
     auto input_ids = tokenizer_->encode(prompt);
     auto [max_new, eos] = resolve_gen_limits(cfg);
     if (static_cast<int64_t>(input_ids.size()) + max_new > config_.prefill_max_length)
-        throw std::invalid_argument(
+        throw internal::ConfigError(
             "LLaVA prompt plus generated tokens exceeds the bundle context");
     auto sp = llava_sampling_params_from_config(cfg, eos);
     if (cfg.eos_token_id < 0)
@@ -434,11 +435,11 @@ TextResult LlavaPipeline::generate(const std::string& prompt, const float* image
     auto [max_new, eos] = resolve_gen_limits(cfg);
     if (config_.prefill_max_length > 0 &&
         static_cast<int64_t>(input_ids.size()) + std::max(max_new, 0) > config_.prefill_max_length)
-        throw std::runtime_error("LlavaPipeline: the prompt (" + std::to_string(input_ids.size()) +
-                                 " tokens with " + std::to_string(nf) + " image tokens) plus " +
-                                 std::to_string(max_new) +
-                                 " new tokens exceeds the bundle context of " +
-                                 std::to_string(config_.prefill_max_length) + " tokens");
+        throw internal::ConfigError(
+            "LlavaPipeline: the prompt (" + std::to_string(input_ids.size()) + " tokens with " +
+            std::to_string(nf) + " image tokens) plus " + std::to_string(max_new) +
+            " new tokens exceeds the bundle context of " +
+            std::to_string(config_.prefill_max_length) + " tokens");
     auto sp_vl = llava_sampling_params_from_config(cfg, eos);
     if (cfg.eos_token_id < 0)
         sp_vl.additional_eos_token_ids = config_.eos_token_ids;

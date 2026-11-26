@@ -7,6 +7,7 @@
 #include "families/llama/runtime/chat_templates.h"
 #include "families/llama/runtime/plugin_helpers.h"
 #include "families/llama/runtime/speculative/eagle3.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <chrono>
@@ -126,7 +127,7 @@ TextResult Pipeline::generate_ids(const std::vector<std::int32_t>& prompt, int c
             "prototype supports a chain or a two-child tree within the query profile");
     if (prompt.empty() || count < 0 || prompt.size() > static_cast<std::size_t>(tc.capacity) ||
         static_cast<std::size_t>(count) > static_cast<std::size_t>(tc.capacity) - prompt.size())
-        throw std::invalid_argument("prompt and output exceed speculative cache capacity");
+        throw internal::ConfigError("prompt and output exceed speculative cache capacity");
     for (auto id : prompt) {
         if (id < 0 || id >= tc.vocab)
             throw std::invalid_argument("prompt token is outside the target vocabulary");

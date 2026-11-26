@@ -6,6 +6,7 @@
 #include "families/lfm3/runtime/pipeline.h"
 
 #include "families/lfm3/runtime/chat_templates.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <chrono>
@@ -106,7 +107,7 @@ Lfm3TextGenerationPipeline::generate_from_ids(const std::vector<int32_t>& input_
     const auto capacity = static_cast<std::size_t>(state_->max_length());
     if (input_ids.size() > capacity ||
         static_cast<std::size_t>(max_new_tokens) > capacity - input_ids.size()) {
-        throw std::runtime_error(
+        throw internal::ConfigError(
             "LFM3 prompt and generation exceed the fixed native KV cache capacity");
     }
 

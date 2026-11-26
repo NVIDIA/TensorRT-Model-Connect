@@ -6,6 +6,7 @@
 
 #include "families/nemotron_h/runtime/edge_llm/request.h"
 #include "families/nemotron_h/runtime/edge_llm/tokenizer.h"
+#include "trtmc/internal/config.h"
 
 #include <NvInferRuntime.h>
 #include <algorithm>
@@ -288,7 +289,7 @@ class EdgeTask final : public ITextGeneration {
         if (count == 0)
             return {};
         if (count > static_cast<std::size_t>(input_limit_))
-            throw std::invalid_argument("Nemotron-H Edge input exceeds bundle capacity");
+            throw internal::ConfigError("Nemotron-H Edge input exceeds bundle capacity");
         std::lock_guard<std::mutex> lock(mutex_);
         validate_capacity(static_cast<int>(count), input_limit_, capacity_,
                           request.maxGenerateLength);

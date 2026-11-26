@@ -5,6 +5,8 @@
 
 #include "families/minicpm_ocr/runtime/decoder.h"
 
+#include "trtmc/internal/config.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -218,7 +220,7 @@ DecoderOutput Decoder::generate(const DecoderPrompt& prompt, const SamplingOptio
         throw std::invalid_argument("Invalid MiniCPM-OCR decoder prompt");
     if (prompt.token_ids.size() + static_cast<std::size_t>(max_new_tokens) - 1 >
         static_cast<std::size_t>(g.max_cache_length))
-        throw std::invalid_argument(
+        throw internal::ConfigError(
             "MiniCPM-OCR prompt (" + std::to_string(prompt.token_ids.size()) +
             " tokens) plus max_new_tokens (" + std::to_string(max_new_tokens) +
             ") exceeds the bundle's sequence capacity (" + std::to_string(g.max_cache_length) +

@@ -5,6 +5,7 @@
 #include "families/flint/runtime/diagnostics.h"
 #include "families/flint/runtime/sampler.h"
 #include "families/flint/runtime/tokenizer.h"
+#include "trtmc/internal/config.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
@@ -243,7 +244,7 @@ class Pipeline final : public ITextGeneration, public Diagnostics {
             throw std::invalid_argument("Flint requires a non-empty prompt");
         if (ids.size() + static_cast<std::size_t>(cfg.max_new_tokens) >
             static_cast<std::size_t>(limit_))
-            throw std::invalid_argument("Flint request exceeds the built context capacity");
+            throw internal::ConfigError("Flint request exceeds the built context capacity");
         reset();
         TextResult result;
         if (cfg.max_new_tokens == 0)

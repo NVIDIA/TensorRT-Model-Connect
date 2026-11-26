@@ -9,6 +9,7 @@
 #include "families/hunyuan/runtime/edge_llm/tokenizer.h"
 #endif
 #include "families/hunyuan/runtime/pipeline.h"
+#include "trtmc/internal/config.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -29,6 +30,16 @@ void rejects(F action) {
     }
     throw std::runtime_error("Hunyuan invalid request was accepted");
 }
+// The server keeps a worker only for a request rejected with ConfigError.
+template <class F>
+void rejects_request(F action) {
+    try {
+        action();
+    } catch (const trtmc::internal::ConfigError&) {
+        return;
+    }
+    throw std::runtime_error("Hunyuan capacity overflow is not a request error");
+}
 
 void test_native_contracts() {
     using trtmc::hunyuan_validate_native_capacity;
@@ -38,6 +49,7 @@ void test_native_contracts() {
     rejects([] { hunyuan_validate_native_capacity(129, 1, 128); });
     rejects([] { hunyuan_validate_native_capacity(static_cast<std::size_t>(-1), 1, 128); });
     rejects([] { hunyuan_validate_native_capacity(1, -1, 128); });
+    rejects_request([] { hunyuan_validate_native_capacity(128, 2, 128); });
     require(trtmc::hunyuan_detect_chat_template_format("").empty());
     rejects([] { trtmc::hunyuan_apply_chat_template("", "raw", false); });
     for (char32_t cp : {0x85, 0x1680, 0x2001, 0x2009, 0x2028, 0x2029, 0x202F, 0x205F})
@@ -256,6 +268,7 @@ int main() {
         require(request.maxGenerateLength == 128);
         validate_capacity(25, 512, 1024, 128);
         rejects([] { validate_capacity(500, 512, 512, 128); });
+        rejects_request([] { validate_capacity(500, 512, 512, 128); });
 #endif
         trtmc::HunyuanTextGenConfig native_config;
         native_config.eos_token_ids = {127960, 127967};
