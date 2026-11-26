@@ -3,7 +3,8 @@
 
 find_package(ICU REQUIRED COMPONENTS uc i18n)
 
-add_library(trtmc_model_muse_glimmer SHARED plugin.cpp native_pipeline.cpp tokenizer.cpp sampler.cpp)
+add_library(trtmc_model_muse_glimmer SHARED plugin.cpp native_pipeline.cpp tokenizer.cpp sampler.cpp
+  dflash2_tree.cpp media_request.cpp native_vision.cpp vision_geometry.cpp vision_pixels.cpp)
 target_include_directories(trtmc_model_muse_glimmer PRIVATE
   ${PROJECT_SOURCE_DIR}
   ${PROJECT_SOURCE_DIR}/core/runtime/include

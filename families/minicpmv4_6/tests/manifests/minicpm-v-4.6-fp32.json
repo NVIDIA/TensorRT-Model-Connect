@@ -1,0 +1,30 @@
+{
+  "name": "minicpm-v-4.6-fp32",
+  "hf_id": "openbmb/MiniCPM-V-4.6",
+  "hf_revision": "97328f3c2d70c4645b6a35594807eb6932068635",
+  "bundle": "minicpm-v-4.6-fp32.bundle",
+  "family": "minicpmv4_6",
+  "task": "images_text_to_text",
+  "precision": "fp32",
+  "max_sequence_length": 2048,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "minicpm-v-4.6-fp32-car-color",
+      "premerge": true,
+      "images": ["families/minicpmv4_6/tests/data/test_img.jpeg"],
+      "prompt": "What color is the car? Answer in one word.",
+      "max_new_tokens": 8,
+      "oracle": "token_exact",
+      "expected_answer": "white"
+    },
+    {
+      "name": "minicpm-v-4.6-fp32-ocr-first-line",
+      "images": ["families/minicpmv4_6/tests/data/orc_test_img.jpeg"],
+      "prompt": "What is the first line of text in the image? Reply with the text only.",
+      "max_new_tokens": 32,
+      "oracle": "token_exact",
+      "expected_mentions": ["DeepSeek-OCR-2"]
+    }
+  ]
+}

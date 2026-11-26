@@ -8,6 +8,7 @@
 #include "families/llama/runtime/chat_templates.h"
 #include "families/llama/runtime/kv_cache.h"
 #include "families/llama/runtime/tensor_names.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <cctype>
@@ -218,8 +219,13 @@ void validate_generation_capacity(const std::vector<int32_t>& input_ids, int32_t
     if (input_ids.size() > capacity ||
         (max_new_tokens > 0 &&
          static_cast<std::size_t>(max_new_tokens) > capacity - input_ids.size())) {
-        throw std::runtime_error(
-            "Llama requested prompt and generation exceed the model's fixed KV cache capacity");
+        // A request error, not a runtime fault: the server answers ConfigError as
+        // an invalid request and keeps the worker. Keep the wording: AIPerf
+        // qualification matches "exceed ... KV cache" to find the capacity.
+        throw internal::ConfigError(
+            "Llama requested prompt and generation exceed the model's fixed KV cache capacity (" +
+            std::to_string(input_ids.size()) + " prompt + " + std::to_string(max_new_tokens) +
+            " new tokens > " + std::to_string(capacity) + " rows)");
     }
 }
 } // namespace

@@ -135,7 +135,7 @@ def serve(arguments: argparse.Namespace) -> int:
     profile = resolve_profile(
         arguments.profile, manifest_root=arguments.manifest_root, testcase=arguments.testcase,
         operation=arguments.operation, selected_task=arguments.selected_task, bundle=arguments.bundle,
-        runtime_root=arguments.runtime_root, overrides=_overrides(arguments.sets))
+        runtime_root=arguments.runtime_root, overrides=_overrides(arguments.sets), request_optional=True)
     revision = profile.model.hf_revision or arguments.revision or None
     # The baseline must be taken before the backend loads its model.
     memory_probe = None

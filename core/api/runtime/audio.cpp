@@ -51,6 +51,26 @@ trtmc_status TRTMC_CALL audio_result_view(const trtmc_result* result,
 
 namespace {
 
+trtmc_status TRTMC_CALL spectrogram_audio_run(trtmc_model* model,
+                                              const trtmc_spectrogram_to_audio_request_v1* input,
+                                              const trtmc_config_view_v1* config,
+                                              trtmc_result** output, trtmc_error** error) noexcept {
+    if (output)
+        *output = nullptr;
+    return guarded(error, [&] {
+        require(input && output, "spectrogram request and output are required");
+        const internal::SpectrogramToAudioRequest request{matrix_input(input->spectrogram)};
+        const ConvertedConfig options(config);
+        std::lock_guard<std::mutex> lock(model_mutex(model));
+        auto& family = require_interface<internal::ISpectrogramToAudio>(
+            model, internal::ISpectrogramToAudio::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::ISpectrogramToAudio>(),
+                             options.view());
+        *output = make_result<AudioResultStorage>(family.run(request, options.view()));
+    });
+}
+
 internal::AudioCodebookTokensView
 codebook_history(const trtmc_audio_codebook_tokens_view_v1& input) {
     const auto tokens = checked_span(input.tokens.data, input.tokens.size);
@@ -664,6 +684,9 @@ trtmc_status TRTMC_CALL text_speech_batch_run(trtmc_model* model,
 
 const trtmc_text_to_audio_api_v1 text_audio_api{
     {1, 0, sizeof(text_audio_api)}, text_to_audio_run, audio_result_view};
+const trtmc_spectrogram_to_audio_api_v1 spectrogram_audio_api{
+    {1, 0, sizeof(spectrogram_audio_api)}, spectrogram_audio_run, audio_result_view};
+static_assert(offsetof(trtmc_spectrogram_to_audio_api_v1, header) == 0);
 const trtmc_text_audio_token_history_to_audio_api_v1 history_audio_api{
     {1, 0, sizeof(history_audio_api)}, history_audio_run, audio_result_view};
 static_assert(offsetof(trtmc_text_audio_token_history_to_audio_api_v1, header) == 0);
@@ -714,6 +737,7 @@ const trtmc_batch_text_audio_token_history_to_audio_api_v1 history_audio_batch_a
 static_assert(offsetof(trtmc_batch_text_audio_token_history_to_audio_api_v1, header) == 0);
 
 const TaskBinding bindings[] = {
+    {internal::ISpectrogramToAudio::kTask, 1, 0, &spectrogram_audio_api.header},
     {internal::IBatchTextAudioTokenHistoryToAudio::kTask, 1, 0, &history_audio_batch_api.header},
     {internal::ITextAudioTokenHistoryToAudio::kTask, 1, 0, &history_audio_api.header},
     {internal::ITextToAudio::kTask, 1, 0, &text_audio_api.header},

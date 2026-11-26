@@ -24,12 +24,17 @@ def canonical_module(name: str) -> str:
 class Checkpoint:
     """Family-local indexed safetensors reader; never calibrates or rewrites weights."""
 
-    def __init__(self, model_dir: Path):
+    def __init__(self, model_dir: Path, *, source_format: str = "nvfp4"):
         self.path = Path(model_dir)
-        descriptor = json.loads((self.path / "hf_quant_config.json").read_text(encoding="utf-8"))
-        layers = descriptor.get("quantization", {}).get("quantized_layers")
-        if not isinstance(layers, dict):
-            raise ValueError("Muse requires an explicit per-module quantization descriptor")
+        if source_format == "floating":
+            layers = {}
+        elif source_format == "nvfp4":
+            descriptor = json.loads((self.path / "hf_quant_config.json").read_text(encoding="utf-8"))
+            layers = descriptor.get("quantization", {}).get("quantized_layers")
+            if not isinstance(layers, dict):
+                raise ValueError("Muse requires an explicit per-module quantization descriptor")
+        else:
+            raise ValueError(f"Unknown Muse source weight format: {source_format}")
         self.formats = {}
         for name, policy in layers.items():
             name = canonical_module(name)

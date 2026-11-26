@@ -4,8 +4,12 @@
  */
 #include "families/muse_glimmer/runtime/native_pipeline.h"
 
+#include "families/muse_glimmer/runtime/dflash2_tree.h"
+#include "families/muse_glimmer/runtime/native_vision.h"
 #include "families/muse_glimmer/runtime/sampler.h"
 #include "families/muse_glimmer/runtime/tokenizer.h"
+#include "trtmc/internal/model.h"
+#include "trtmc/internal/text.h"
 #include "trtmc/runtime/trt_backend.h"
 
 #include <algorithm>
@@ -32,14 +36,18 @@ using Clock = std::chrono::steady_clock;
 double milliseconds(Clock::time_point start) {
     return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
-class NativePipeline final : public ITextGeneration {
+class NativePipeline : public ITextGeneration {
   public:
     explicit NativePipeline(const FamilyContext& context)
         : config_(nlohmann::json::parse(section_text(context.reader, "runtime.json"))),
           tokenizer_(section_text(context.reader, "tokenizer.json")) {
         const auto variant = config_.at("execution_variant").get<std::string>();
-        if (config_.at("version") != 1 || (variant != "autoregressive" && variant != "dflash") ||
-            config_.at("precision") != "fp16" || config_.at("weight_format") != "nvfp4_mxfp8")
+        tree_ = variant == "dflash_tree";
+        if (config_.at("version") != 1 ||
+            (variant != "autoregressive" && variant != "dflash" && !tree_) ||
+            config_.at("precision") != "fp16" ||
+            (config_.at("weight_format") != "nvfp4_mxfp8" &&
+             config_.at("weight_format") != "floating"))
             throw std::invalid_argument("Muse native bundle has an incompatible runtime contract");
         capacity_ = config_.at("max_cache_length");
         input_limit_ = config_.at("max_input_length");
@@ -73,8 +81,20 @@ class NativePipeline final : public ITextGeneration {
                                                 name);
             }
         bind_prefill_caches();
+        if (config_.contains("vision")) {
+            visual_width_ = config_.at("hidden_size");
+            if (!prefill_ || config_.at("vision").at("text_width") != visual_width_ ||
+                !decoder_->has_input("is_visual") ||
+                decoder_->tensor_dtype("is_visual") != DType::kInt32 ||
+                !decoder_->has_input("visual_embeddings") ||
+                decoder_->tensor_dtype("visual_embeddings") != DType::kFloat16)
+                throw std::invalid_argument("Missing Muse visual inputs on the native decoder");
+            auto plan = context.reader.read_section("vision.plan");
+            vision_ = std::make_unique<NativeVision>(
+                context.backend.create_module(plan.data(), plan.size(), {}), config_.at("vision"));
+        }
         decoder_->set_timing_label("muse_glimmer_native_target");
-        if (variant == "dflash") {
+        if (variant == "dflash" || tree_) {
             draft_version_ = config_.at("dflash_version");
             block_ = config_.at("dflash_block_size");
             feature_width_ = config_.at("feature_width");
@@ -82,6 +102,9 @@ class NativePipeline final : public ITextGeneration {
             draft_window_ = config_.at("draft_window");
             rank_ = config_.at("selector_rank");
             candidates_ = config_.at("selector_top_k");
+            if (tree_ && (draft_version_ != 2 || candidates_ != 16 || rank_ != 256 ||
+                          config_.at("dflash_top_k") != 4 || config_.at("dflash_verify") != 32))
+                throw std::invalid_argument("Invalid Muse native DFlash2 DDTree profile");
             if ((draft_version_ != 1 && draft_version_ != 2) || block_ != 16 ||
                 capacity_ < block_ || feature_width_ <= 0 || mask_token_ < 0 ||
                 mask_token_ >= vocab_ ||
@@ -145,17 +168,38 @@ class NativePipeline final : public ITextGeneration {
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg) override {
         const std::lock_guard<std::mutex> guard(mutex_);
         validate(cfg);
+        const auto setup = Clock::now();
+        const auto text = cfg.use_chat_template ? render_atem(prompt, cfg.system_prompt, bos_text_,
+                                                              cfg.enable_thinking)
+                                                : prompt;
+        auto input = tokenizer_.encode(text);
+        if (input.empty())
+            input.push_back(bos_);
+        return decode(input, cfg, setup, nullptr);
+    }
+
+    TextResult generate_media(const MediaTurns& turns, const TextGenerationConfig& cfg) {
+        const std::lock_guard<std::mutex> guard(mutex_);
+        validate(cfg);
+        if (!vision_ || cfg.max_new_tokens > capacity_)
+            throw std::invalid_argument("Invalid Muse visual bundle or generation budget");
+        const auto setup = Clock::now();
+        const auto prefix =
+            vision_->prepare(turns, tokenizer_, bos_text_, cfg,
+                             std::min(input_limit_, capacity_ - cfg.max_new_tokens));
+        return decode(prefix.ids, cfg, setup, &prefix);
+    }
+
+  private:
+    TextResult decode(const std::vector<int32_t>& input, const TextGenerationConfig& cfg,
+                      Clock::time_point setup, const MediaPrefix* media) {
         const auto params = muse_sampling_params_from_config(cfg, eos_.front());
+        if (tree_ && !muse_is_greedy(params))
+            throw std::invalid_argument("Muse-Glimmer DFlash2 DDTree requires greedy generation");
         if (draft_version_ == 1 && !muse_is_greedy(params))
             throw std::invalid_argument("Muse-Glimmer DFlash V1 requires greedy generation");
         if (cfg.eos_token_id < -1 || cfg.eos_token_id >= vocab_ || cfg.seed < -1)
             throw std::invalid_argument("Muse native EOS override or seed is out of range");
-        const auto setup = Clock::now();
-        const auto text =
-            cfg.use_chat_template ? render_atem(prompt, cfg.system_prompt, bos_text_) : prompt;
-        auto input = tokenizer_.encode(text);
-        if (input.empty())
-            input.push_back(bos_);
         if (input.size() > static_cast<std::size_t>(input_limit_) ||
             input.size() + static_cast<std::size_t>(cfg.max_new_tokens) >
                 static_cast<std::size_t>(capacity_))
@@ -167,7 +211,7 @@ class NativePipeline final : public ITextGeneration {
         const double setup_ms = milliseconds(setup);
         auto start = Clock::now();
         std::vector<float> logits(vocab_);
-        prefill(input, logits);
+        prefill(input, logits, media);
         int position = static_cast<int>(input.size());
         const double prefill_ms = milliseconds(start);
         start = Clock::now();
@@ -179,8 +223,29 @@ class NativePipeline final : public ITextGeneration {
             int rounds = 0, proposed = 0, accepted_count = 0;
             while (static_cast<int>(output.size()) < cfg.max_new_tokens &&
                    !is_eos(output.back(), cfg)) {
-                const auto proposals = propose(output.back(), position, params, rng);
+                VerifyTree tree;
+                const auto proposals = propose(output.back(), position, params, rng, tree);
                 ++rounds;
+                if (tree_) {
+                    proposed += static_cast<int>(tree.size()) - 1;
+                    int parent = 0;
+                    do {
+                        // Only verified target tokens are ever committed to the KV cache.
+                        step(output.back(), position++, logits);
+                        const int token = sampler->sample(logits.data(), vocab_, params).token_id;
+                        output.push_back(token);
+                        const auto child =
+                            std::find_if(tree.begin() + 1, tree.end(), [&](const TreeNode& n) {
+                                return n.parent == parent && n.token == token;
+                            });
+                        if (child == tree.end())
+                            break;
+                        ++accepted_count;
+                        parent = static_cast<int>(child - tree.begin());
+                    } while (static_cast<int>(output.size()) < cfg.max_new_tokens &&
+                             !is_eos(output.back(), cfg));
+                    continue;
+                }
                 proposed += static_cast<int>(proposals.size());
                 bool all_accepted = true;
                 for (const auto& proposal : proposals) {
@@ -206,7 +271,8 @@ class NativePipeline final : public ITextGeneration {
                         muse_probabilities(logits.data(), vocab_, params), rng));
                 }
             }
-            std::clog << "[muse_glimmer] native DFlash v" << draft_version_ << " rounds=" << rounds
+            std::clog << "[muse_glimmer] native DFlash v" << draft_version_
+                      << (tree_ ? " DDTree" : "") << " rounds=" << rounds
                       << " proposed=" << proposed << " accepted=" << accepted_count << '\n';
         } else {
             for (int i = 0; i < cfg.max_new_tokens; ++i) {
@@ -220,7 +286,8 @@ class NativePipeline final : public ITextGeneration {
                 step(sampled.token_id, position++, logits);
             }
         }
-        TextResult result(tokenizer_.decode(output), output, prefill_ms, milliseconds(start));
+        // Display text omits declared special pieces, but the public IDs remain lossless.
+        TextResult result(tokenizer_.decode(output, true), output, prefill_ms, milliseconds(start));
         result.setup_ms = setup_ms;
         return result;
     }
@@ -236,7 +303,8 @@ class NativePipeline final : public ITextGeneration {
     }
 
     std::vector<Proposal> propose(int32_t anchor, int32_t position,
-                                  const MuseSamplingParams& params, uint64_t& rng) {
+                                  const MuseSamplingParams& params, uint64_t& rng,
+                                  VerifyTree& tree) {
         std::vector<int32_t> tokens(block_, mask_token_), positions(block_);
         tokens.front() = anchor;
         const int width = capacity_ + block_;
@@ -298,8 +366,7 @@ class NativePipeline final : public ITextGeneration {
         draft_params.top_p = 1;
         draft_params.min_p = 0;
         draft_params.seed = 0;
-        int32_t previous = anchor;
-        for (int row = 0; row < rows; ++row) {
+        auto select_row = [&](int32_t row, int32_t previous) {
             int32_t* row_ids = ids.data() + row * candidates_;
             if (std::any_of(row_ids, row_ids + candidates_,
                             [&](int id) { return id < 0 || id >= vocab_; }))
@@ -320,6 +387,16 @@ class NativePipeline final : public ITextGeneration {
             if (std::any_of(scores.begin(), scores.end(),
                             [](float x) { return !std::isfinite(x); }))
                 throw std::runtime_error("Muse native V2 selector produced nonfinite scores");
+            return scores;
+        };
+        if (tree_) {
+            tree = dflash2_tree(anchor, ids, select_row);
+            return {};
+        }
+        int32_t previous = anchor;
+        for (int row = 0; row < rows; ++row) {
+            const auto* row_ids = ids.data() + row * candidates_;
+            const auto scores = select_row(row, previous);
             std::vector<float> q(vocab_, 0);
             if (greedy) {
                 int best = 0;
@@ -419,16 +496,17 @@ class NativePipeline final : public ITextGeneration {
             }
     }
 
-    void prefill(const std::vector<std::int32_t>& input, std::vector<float>& logits) {
+    void prefill(const std::vector<std::int32_t>& input, std::vector<float>& logits,
+                 const MediaPrefix* media) {
         const int total = static_cast<int>(input.size());
         if (!prefill_) {
             for (int position = 0; position < total; ++position)
-                run_rows(*decoder_, &input[position], 1, position, logits);
+                run_rows(*decoder_, &input[position], 1, position, logits, media);
             return;
         }
         for (int start = 0; start < total; start += prefill_rows_)
             run_rows(*prefill_, &input[start], std::min(prefill_rows_, total - start), start,
-                     logits);
+                     logits, media);
     }
 
     void step(int32_t token, int32_t position, std::vector<float>& logits) {
@@ -439,7 +517,7 @@ class NativePipeline final : public ITextGeneration {
     // commits their K/V (and draft features) to the shared caches, and returns
     // the logits of the last row.
     void run_rows(ITrtModule& module, const int32_t* tokens, int rows, int32_t position,
-                  std::vector<float>& logits) {
+                  std::vector<float>& logits, const MediaPrefix* media = nullptr) {
         if (rows < 1 || position < 0 || position + rows > capacity_ ||
             std::any_of(tokens, tokens + rows, [&](int32_t t) { return t < 0 || t >= vocab_; }))
             throw std::out_of_range("Muse token or cache position is out of range");
@@ -454,6 +532,28 @@ class NativePipeline final : public ITextGeneration {
         TensorMap inputs{{"token_id", {const_cast<int32_t*>(tokens), {rows}, DType::kInt32}},
                          {"position_id", {positions.data(), {rows}, DType::kInt32}},
                          {"attention_mask", {mask.data(), {rows, capacity_}, DType::kFloat32}}};
+        std::vector<int32_t> visual_mask;
+        std::vector<uint16_t> visual_values;
+        if (vision_) {
+            visual_mask.assign(rows, 0);
+            visual_values.assign(static_cast<std::size_t>(rows) * visual_width_, 0);
+            if (media)
+                for (int row = 0; row < rows; ++row) {
+                    const int feature = media->feature_at.at(position + row);
+                    if (feature < 0)
+                        continue;
+                    const auto start = static_cast<std::size_t>(feature) * visual_width_;
+                    if (start + visual_width_ > media->features.size())
+                        throw std::runtime_error("Missing native Muse feature row");
+                    std::copy_n(media->features.data() + start, visual_width_,
+                                visual_values.data() +
+                                    static_cast<std::size_t>(row) * visual_width_);
+                    visual_mask[row] = 1;
+                }
+            inputs.emplace("is_visual", Tensor{visual_mask.data(), {rows, 1}, DType::kInt32});
+            inputs.emplace("visual_embeddings",
+                           Tensor{visual_values.data(), {rows, visual_width_}, DType::kFloat16});
+        }
         module.forward_async(inputs);
         for (int i = 0; i < layers_; ++i)
             for (const char* stem : {"k", "v"}) {
@@ -485,6 +585,9 @@ class NativePipeline final : public ITextGeneration {
     Tokenizer tokenizer_;
     std::unique_ptr<ITrtModule> decoder_, prefill_, draft_, selector_;
     int prefill_rows_{1};
+    int visual_width_{};
+    std::unique_ptr<NativeVision> vision_;
+    bool tree_{false};
     int draft_version_{}, block_{}, feature_width_{}, mask_token_{}, draft_window_{}, rank_{},
         candidates_{};
     std::mutex mutex_;
@@ -492,8 +595,48 @@ class NativePipeline final : public ITextGeneration {
     std::vector<std::int32_t> eos_;
     std::string bos_text_;
 };
+class NativeMediaPipeline final : public NativePipeline,
+                                  public internal::IModel,
+                                  public internal::ITextContinuation,
+                                  public internal::IImagesTextToText,
+                                  public internal::IVideoTextToText {
+  public:
+    explicit NativeMediaPipeline(const FamilyContext& c)
+        : NativePipeline(c), task_(c.reader.info().task) {}
+    const char* task() const noexcept override { return task_.c_str(); }
+    std::vector<internal::TaskInstance> task_bindings() override {
+        return {internal::bind<internal::ITextContinuation>(*this, media_fields()),
+                internal::bind<internal::IImagesTextToText>(*this, media_fields()),
+                internal::bind<internal::IVideoTextToText>(*this, media_fields())};
+    }
+    TextResult run(const internal::TextContinuationRequest& r, internal::ConfigView v) override {
+        const auto* text = std::get_if<std::string_view>(&r.prefix);
+        if (!text)
+            throw std::invalid_argument("Muse-Glimmer text continuation requires UTF-8 text");
+        return generate(std::string(*text), media_config(v));
+    }
+    TextResult run(const internal::ImagesTextToTextRequest& r, internal::ConfigView view) override {
+        auto cfg = media_config(view);
+        return generate_media(media_turns(r, cfg), cfg);
+    }
+    TextResult run(const internal::VideoTextToTextRequest& r, internal::ConfigView view) override {
+        auto cfg = media_config(view);
+        return generate_media(media_turns(r, cfg), cfg);
+    }
+
+  private:
+    std::string task_;
+};
 } // namespace
 ITask* create_native(const FamilyContext& context) {
+    const auto& task = context.reader.info().task;
+    if (task == "images_text_to_text" || task == "video_text_to_text") {
+        if (!context.reader.find_section("vision.plan"))
+            throw std::invalid_argument("Muse media bundle has no visual encoder");
+        return new NativeMediaPipeline(context);
+    }
+    if (task != "text_generation")
+        throw std::invalid_argument("Unsupported Muse native task");
     return new NativePipeline(context);
 }
 } // namespace trtmc::muse_glimmer

@@ -5,7 +5,9 @@
 
 #include "runtime/tensorrt/trt_logger.h"
 
+#include <cuda_runtime_api.h>
 #include <iostream>
+#include <stdexcept>
 
 namespace trtmc {
 
@@ -54,6 +56,14 @@ void TrtLogger::clear_error() {
 }
 
 TrtUniquePtr<nvinfer1::IRuntime> create_trt_runtime() {
+    // When CUDA cannot initialize (no device, or no memory left for the context), TensorRT 11.4's
+    // createInferRuntime logs an API usage error but returns a non-null, unusable pointer, so a
+    // null check passes and the first deserialization crashes. Initialize CUDA first and report
+    // its error instead. createInferRuntime creates the current device's context anyway.
+    const cudaError_t status = cudaFree(nullptr);
+    if (status != cudaSuccess)
+        throw std::runtime_error(std::string("[trtmc] CUDA initialization failed: ") +
+                                 cudaGetErrorName(status) + ": " + cudaGetErrorString(status));
     static TrtLogger logger;
     return TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(logger));
 }

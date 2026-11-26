@@ -17,6 +17,7 @@
 #include <unicode/regex.h>
 #include <unicode/unistr.h>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace trtmc::muse_glimmer {
 namespace {
@@ -70,6 +71,7 @@ void replace_all(std::string& text, const std::string& from, const std::string& 
 } // namespace
 
 struct Tokenizer::Impl {
+    std::unordered_set<std::int32_t> special_ids;
     std::unordered_map<std::string, std::int32_t> vocab;
     std::unordered_map<Pair, std::size_t, PairHash> merges;
     std::vector<std::string> decoded;
@@ -181,6 +183,8 @@ Tokenizer::Tokenizer(const std::string& text) : impl_(std::make_unique<Impl>()) 
         if (content.empty() || id < 0)
             throw std::invalid_argument("Muse added token has invalid content or ID");
         impl_->added.emplace_back(content, id);
+        if (item.value("special", false))
+            impl_->special_ids.insert(id);
         if (impl_->decoded.size() <= static_cast<std::size_t>(id))
             impl_->decoded.resize(static_cast<std::size_t>(id) + 1);
         impl_->decoded[id] = content;
@@ -210,17 +214,17 @@ std::vector<std::int32_t> Tokenizer::encode(const std::string& text) const {
     }
     return output;
 }
-std::string Tokenizer::decode(const std::vector<std::int32_t>& ids) const {
+std::string Tokenizer::decode(const std::vector<std::int32_t>& ids, bool skip_special) const {
     std::string result;
     for (const auto id : ids) {
         if (id < 0 || static_cast<std::size_t>(id) >= impl_->decoded.size())
             throw std::out_of_range("Muse token ID is outside the vocabulary");
-        result += impl_->decoded[id];
+        if (!skip_special || !impl_->special_ids.count(id))
+            result += impl_->decoded[id];
     }
     return result;
 }
-std::string render_atem(const std::string& prompt, const std::string& system,
-                        const std::string& bos) {
+std::string render_atem_system(const std::string& system, const std::string& bos) {
     auto text = system;
     if (text.empty())
         text = "You are a helpful AI assistant.\nKnowledge cutoff: 2026-01-04.\nCurrent date: " +
@@ -236,7 +240,19 @@ std::string render_atem(const std::string& prompt, const std::string& system,
     if (lower.find("reasoning strength") == std::string::npos)
         text += "\n\nReasoning strength: high.";
     return bos + "<|start|>system<|message|>" + text +
-           "\n\n# Valid recipients: \"self\", \"user\".<|eot|>" + "<|start|>user<|message|>" +
-           prompt + "<|eot|><|start|>assistant";
+           "\n\n# Valid recipients: \"self\", \"user\".<|eot|>";
+}
+std::string render_atem_generation(bool enable_thinking) {
+    std::string rendered = "<|start|>assistant";
+    if (!enable_thinking) {
+        // Start decoding in the public channel, not inside a private reasoning turn.
+        rendered += " to=self<|message|><|eom|><|start|>assistant to=user<|message|>";
+    }
+    return rendered;
+}
+std::string render_atem(const std::string& prompt, const std::string& system,
+                        const std::string& bos, bool enable_thinking) {
+    return render_atem_system(system, bos) + "<|start|>user<|message|>" + prompt + "<|eot|>" +
+           render_atem_generation(enable_thinking);
 }
 } // namespace trtmc::muse_glimmer

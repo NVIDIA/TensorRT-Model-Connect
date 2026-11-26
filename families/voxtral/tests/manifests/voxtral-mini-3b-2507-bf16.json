@@ -1,0 +1,19 @@
+{
+  "name": "voxtral-mini-3b-2507-bf16",
+  "hf_id": "mistralai/Voxtral-Mini-3B-2507",
+  "hf_revision": "3060fe34b35ba5d44202ce9ff3c097642914f8f3",
+  "bundle": "voxtral-mini-3b-2507-bf16.bundle",
+  "family": "voxtral",
+  "task": "speech_transcription",
+  "precision": "bf16",
+  "max_sequence_length": 4096,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "voxtral-mini-3b-2507-bf16-librispeech",
+      "premerge": false,
+      "test_input_audio": "data/librispeech-test-clean-6930-75918-0003.wav",
+      "max_new_tokens": 256
+    }
+  ]
+}

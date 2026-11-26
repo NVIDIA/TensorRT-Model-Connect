@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import sys
+from io import BytesIO
 from contextvars import Context
 from types import SimpleNamespace
 
@@ -197,3 +198,65 @@ def test_transform_does_not_leak_into_an_unrelated_context(monkeypatch) -> None:
 
     assert plan == b"engine"
     assert transformed == []
+
+
+def test_streamed_and_memory_serializations_share_transform_order(monkeypatch) -> None:
+    events = []
+
+    class Builder(_Builder):
+        def build_serialized_network_to_stream(self, network, config, writer):
+            events.append(("stream", network.name, config))
+            writer.write(network.name.encode())
+            return True
+
+        def build_serialized_network(self, network, config):
+            events.append(("memory", network.name, config))
+            return network.name.encode()
+
+    fake_trt = SimpleNamespace(Builder=Builder)
+    monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
+
+    def transform(network, index):
+        events.append(("transform", index))
+        network.name = f"transformed-{index}"
+
+    stream = BytesIO()
+    with graph_transform(transform):
+        builder = fake_trt.Builder("logger")
+        assert (
+            builder.build_serialized_network(SimpleNamespace(name="old"), "config-0")
+            == b"transformed-0"
+        )
+        assert (
+            builder.build_serialized_network_to_stream(
+                SimpleNamespace(name="old"), "config-1", stream
+            )
+            is True
+        )
+    assert stream.getvalue() == b"transformed-1"
+    assert events == [
+        ("transform", 0),
+        ("memory", "transformed-0", "config-0"),
+        ("transform", 1),
+        ("stream", "transformed-1", "config-1"),
+    ]
+    assert fake_trt.Builder is Builder
+
+
+def test_transform_failure_prevents_streamed_serialization(monkeypatch) -> None:
+    class Builder(_Builder):
+        def build_serialized_network_to_stream(self, network, config, writer):
+            pytest.fail("serialization must not run after a failed graph transform")
+
+    fake_trt = SimpleNamespace(Builder=Builder)
+    monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
+
+    def fail(network, index):
+        raise ValueError("invalid streamed replacement")
+
+    with pytest.raises(ValueError, match="invalid streamed replacement"):
+        with graph_transform(fail):
+            fake_trt.Builder("logger").build_serialized_network_to_stream(
+                "net", "config", BytesIO()
+            )
+    assert fake_trt.Builder is Builder

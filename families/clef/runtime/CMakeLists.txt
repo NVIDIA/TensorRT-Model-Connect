@@ -17,7 +17,7 @@ install(TARGETS trtmc_cli_clef LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 if(TRTMC_BUILD_TESTS)
 add_executable(clef_record_probe ../tests/record_probe.cpp record.cpp bpe_tokenizer.cpp)
-target_include_directories(clef_record_probe PRIVATE ${PROJECT_SOURCE_DIR})
+target_include_directories(clef_record_probe PRIVATE ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include)
 target_link_libraries(clef_record_probe PRIVATE nlohmann_json::nlohmann_json)
 set_target_properties(clef_record_probe PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 

@@ -18,33 +18,39 @@ def build(request, writer):
     generation_path = model_dir / "generation_config.json"
     generation = json.loads(generation_path.read_text(encoding="utf-8")) if generation_path.is_file() else None
     config = TextConfig.from_dict(raw, generation)
-    # Source admission is identical to the existing owning Edge route. This
-    # checker reads the source recipe only; it does not query hardware or run Edge.
-    from .edge_llm.builder import request_weight_format
+    from .weight_format import request_weight_format
 
-    request_weight_format(request, raw)
+    source_format = request_weight_format(request, raw)
     capacity = request.max_sequence_length or 1024
     if type(capacity) is not int or not 1 <= capacity <= config.max_position_embeddings:
         raise ValueError("Muse native capacity must fit the checkpoint context")
-    if request.execution_variant == "dflash" and capacity < 16:
+    paired = request.execution_variant in {"dflash", "dflash_tree"}
+    tree = request.execution_variant == "dflash_tree"
+    if paired and capacity < 16:
         raise ValueError("Muse native DFlash capacity must fit the complete block of 16")
+    from .vision import media_contract
+    vision = media_contract(request, raw, source_format, capacity)
     draft_config = None
-    if request.execution_variant == "dflash":
+    if paired:
         from .draft import DraftConfig, load_draft_weights, build_draft_engine, build_selector_engine
         from .edge_llm.paired import companion_version
 
         companion = Path(request.companion)
-        companion_version(companion)
+        companion_version(companion, tree=tree)
         draft_config = DraftConfig.from_dict(json.loads((companion / "config.json").read_text()), config)
         draft_weights = load_draft_weights(companion, draft_config)
     for name in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja"):
         if not (model_dir / name).is_file():
             raise ValueError(f"Muse native bundle requires {name}")
-    with Checkpoint(model_dir) as checkpoint:
+    with Checkpoint(model_dir, source_format=source_format) as checkpoint:
         features = draft_config.feature_layers if draft_config else ()
-        engine = build_target(config, checkpoint, capacity, target_layer_ids=features, verbose=request.verbose)
+        kwargs = {"visual_inputs": True} if vision else {}
+        engine = build_target(config, checkpoint, capacity, target_layer_ids=features, verbose=request.verbose, **kwargs)
         writer.add_bytes("engine.plan", engine)
         del engine
+        if vision:
+            from .visual_graph import build_visual
+            writer.add_bytes("vision.plan", build_visual(raw, checkpoint, vision["max_patches"], verbose=request.verbose))
         if draft_config:
             head = checkpoint.projection("lm_head", config.vocab_size, config.hidden_size)
             embedding = checkpoint.projection("embed_tokens", config.vocab_size, config.hidden_size)
@@ -55,6 +61,8 @@ def build(request, writer):
                     draft_config, draft_weights, verbose=request.verbose))
     writer.add_json("runtime.json", {
         "version": 1,
+        **({"vision": vision} if vision else {}),
+        **({"dflash_top_k": 4, "dflash_verify": 32} if tree else {}),
         "dflash_version": draft_config.version if draft_config else 0,
         "dflash_block_size": draft_config.query_rows if draft_config else 0,
         "feature_width": len(draft_config.feature_layers) * config.hidden_size if draft_config else 0,
@@ -64,9 +72,9 @@ def build(request, writer):
         "selector_top_k": draft_config.selector_top_k if draft_config else 0,
         "execution_variant": request.execution_variant,
         "precision": "fp16",
-        "weight_format": "nvfp4_mxfp8",
+        "weight_format": "floating" if source_format == "floating" else "nvfp4_mxfp8",
         "max_cache_length": capacity,
-        "max_input_length": min(capacity, 512),
+        "max_input_length": capacity if vision else min(capacity, 512),
         # One target engine: a multi-row prefill profile and a one-row decode profile.
         "decoder_engine_layout": "dual_profile",
         "hidden_size": config.hidden_size,

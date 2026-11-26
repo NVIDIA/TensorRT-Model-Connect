@@ -318,15 +318,35 @@ def resolve_case(
     operation: str | None = None,
     selected_task: str | None = None,
     overrides: Mapping[str, Any] | None = None,
+    bundle_only: bool = False,
 ) -> ResolvedCase:
+    """The testcase as a benchmark case. ``bundle_only`` (preparing or listing bundles, which need no request):
+    a testcase that is not a request trtmc-bench can build still resolves, with ``request_error`` set."""
     testcase = _select_testcase(model, case_name)
     task = selected_task_for_case(model, case_name, selected_task=selected_task)
-    resolution = resolve_task_case(
-        task,
-        testcase,
-        model.manifest_path.parent.parent,
-        operation=operation,
-    )
+    try:
+        resolution = resolve_task_case(
+            task,
+            testcase,
+            model.manifest_path.parent.parent,
+            operation=operation,
+        )
+    except BenchmarkError as error:
+        if not bundle_only:
+            raise
+        return apply_overrides(ResolvedCase(
+            name=str(testcase["name"]),
+            model=model,
+            testcase_name=str(testcase["name"]),
+            bundle_path=bundle_path.expanduser().resolve(),
+            operation=operation or default_operation(task),
+            request={},
+            runtime_root=None,
+            measurement=MeasurementSpec(warmup=0, iterations=1),
+            sources={},
+            selected_task=task if task != model.task else None,
+            request_error=str(error),
+        ), overrides or {})
     explicit_task = selected_task is not None or "selected_task" in testcase
     if explicit_task and resolution.task != task:
         raise BenchmarkError("operation cannot change an explicitly selected Task")

@@ -4,6 +4,7 @@
  */
 
 #include "families/roberta/runtime/pipeline.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <cmath>
@@ -137,6 +138,17 @@ int oversized_requests(EncoderPipeline& pipeline, Engine& engine) {
             std::cerr << "oversize route " << route << " reached forward or was accepted\n";
             ++failures;
         }
+    }
+    // The server keeps a worker only for a request rejected with ConfigError.
+    bool request_error = false;
+    try {
+        pipeline.encode_ids({0, 3, 4, 5, 2});
+    } catch (const trtmc::internal::ConfigError&) {
+        request_error = true;
+    }
+    if (!request_error) {
+        std::cerr << "oversize input is not rejected as a request error\n";
+        ++failures;
     }
     return failures;
 }
