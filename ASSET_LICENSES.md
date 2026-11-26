@@ -42,6 +42,7 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 - `families/internvl/tests/data/test_img.jpeg`
 - `families/lance/tests/data/test_img.jpeg`
 - `families/locateanything/tests/data/test_img.jpeg`
+- `families/minicpmv4_6/tests/data/test_img.jpeg`
 - `families/moge/tests/data/test_img.jpeg`
 - `families/molmo2/tests/data/test_img.jpeg`
 - `families/oneformer/tests/data/test_img.jpeg`
@@ -104,6 +105,9 @@ distributed under the Apache License 2.0 with the rest of the project:
   single-line GLM-OCR E2E cases
 - `families/lighton_ocr/tests/data/invoice.png` — synthetic invoice with
   invented data rendered by the family-owned `generate_fixture.py`
+- `families/minicpmv4_6/tests/data/orc_test_img.jpeg` — byte-identical copy of
+  `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the input of the text-reading
+  E2E cases
 - `families/phi4_multimodal/tests/data/dynamic-hd/synthetic-*.png` (7 images) —
   synthetic test patterns written by the checked-in
   `families/phi4_multimodal/tests/data/dynamic-hd/generate.py` for Dynamic-HD
