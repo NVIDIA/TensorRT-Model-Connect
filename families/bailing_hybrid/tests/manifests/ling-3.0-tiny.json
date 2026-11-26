@@ -8,6 +8,7 @@
   "precision": "fp32",
   "max_sequence_length": 128,
   "tensor_parallel_size": 1,
+  "reference_environment": "isolated",
   "testcases": [
     {
       "name": "ling-3.0-tiny",

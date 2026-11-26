@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from functools import cache
 from pathlib import Path
 
@@ -95,6 +94,20 @@ def _required_path(value: str | None, label: str) -> Path:
     path = Path(value)
     assert path.exists(), f"selected {FAMILY} E2E {label} does not exist: {path}"
     return path
+
+
+def _reference_python() -> Path:
+    variable = "TRTMC_BAILING_HYBRID_REFERENCE_PYTHON"
+    if variable in os.environ:
+        python = _required_path(os.environ[variable], variable).absolute()
+        assert python.is_file() and os.access(python, os.X_OK), (
+            f"{variable} is not an executable file"
+        )
+        return python
+    from tools.ci.environment import prepared_python
+
+    # Preserve the venv path; resolving its symlink selects the base Python.
+    return prepared_python(TEST_ROOT.parents[2], FAMILY, dict(os.environ))
 
 
 @cache
@@ -228,9 +241,13 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     reference_output = tmp_path / "reference-output.json"
     reference_input.write_text(json.dumps(case))
     with evidence_stage("reference"):
+        python = _reference_python()
+        record_evidence(
+            "reference_environment", {"python": str(python), "transformers_version": "4.57.6"}
+        )
         completed = subprocess.run(
             [
-                os.environ.get("TRTMC_BAILING_HYBRID_REFERENCE_PYTHON", sys.executable),
+                str(python),
                 str(TEST_ROOT / "reference.py"),
                 str(directory),
                 str(reference_input),
