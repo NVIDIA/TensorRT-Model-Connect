@@ -202,6 +202,11 @@ void test_contract() {
         {"repeated merge", mutated([](auto& j) { j["model"]["merges"].push_back("a a"); })},
         {"merge without a pair", mutated([](auto& j) { j["model"]["merges"].push_back("aa"); })},
         {"merge with two spaces", mutated([](auto& j) { j["model"]["merges"].push_back("a  a"); })},
+        // The reference reads strings or pairs, never a mix, and only serialization version 1.0.
+        {"mixed merge formats",
+         mutated([](auto& j) { j["model"]["merges"][0] = nlohmann::json::array({"a", "a"}); })},
+        {"serialization version", mutated([](auto& j) { j["version"] = "2.0"; })},
+        {"numeric version", mutated([](auto& j) { j["version"] = 1.0; })},
         {"added token outside the vocabulary",
          mutated([](auto& j) { j["added_tokens"][0]["content"] = "<pad>"; })},
         {"added token id", mutated([](auto& j) { j["added_tokens"][0]["id"] = 1; })},
@@ -217,10 +222,29 @@ void test_contract() {
     };
     for (const auto& [what, json] : refused)
         expect_throw<std::runtime_error>([&] { Tokenizer tokenizer(json); }, "refuses " + what);
-    // The merge list may also hold [left, right] pairs.
-    const Tokenizer pairs(
-        mutated([](auto& j) { j["model"]["merges"][0] = nlohmann::json::array({"a", "a"}); }));
+    // The merge list may also hold [left, right] pairs, every rule as one.
+    const Tokenizer pairs(mutated([](nlohmann::json& j) {
+        for (auto& merge : j["model"]["merges"]) {
+            const auto text = merge.get<std::string>();
+            const auto space = text.find(' ');
+            merge = nlohmann::json::array({text.substr(0, space), text.substr(space + 1)});
+        }
+    }));
     check(pairs.encode("aaa", 8) == Ids{36}, "merge pairs as lists");
+    // A string that starts with "#version" is a header the reference skips, even when its parts
+    // would make a rule: here the unknown token "#version" before "b</w>" (id 27).
+    const Tokenizer header(mutated([](nlohmann::json& j) {
+        auto& vocab = j["model"]["vocab"];
+        vocab.erase("<unk>");
+        vocab["#version"] = 0;
+        vocab["#versionb</w>"] = 49;
+        j["model"]["unk_token"] = "#version";
+        j["added_tokens"][0]["content"] = "#version";
+        auto& merges = j["model"]["merges"];
+        merges.insert(merges.begin(), "#version b</w>");
+        merges.insert(merges.begin(), "#version: 0.2");
+    }));
+    check(header.encode("xb", 8) == Ids{0, 27}, "#version merge strings are headers");
 }
 
 void test_sampler() {

@@ -73,9 +73,10 @@ def _positive_float32(raw: dict, name: str) -> float:
     return float(stored)
 
 
-def _eos_token_ids(raw: dict, generation: dict, vocab_size: int) -> tuple[int, ...]:
-    # transformers generates with generation_config.json when the checkpoint has one.
-    source = generation if "eos_token_id" in generation else raw
+def _eos_token_ids(raw: dict, generation: dict | None, vocab_size: int) -> tuple[int, ...]:
+    # transformers generates with generation_config.json when the checkpoint has one (a key
+    # missing there means no EOS) and reads config.json only when that file is missing.
+    source = raw if generation is None else generation
     value = source.get("eos_token_id")
     if value is None:
         return ()
@@ -87,8 +88,9 @@ def _eos_token_ids(raw: dict, generation: dict, vocab_size: int) -> tuple[int, .
     return tuple(dict.fromkeys(values))
 
 
-def parse_config(raw: dict, generation: dict) -> OpenAIGPTConfig:
-    """Validate ``config.json`` and ``generation_config.json`` for the native graph."""
+def parse_config(raw: dict, generation: dict | None) -> OpenAIGPTConfig:
+    """Validate ``config.json`` and ``generation_config.json`` (``None`` when the checkpoint has
+    none) for the native graph."""
     if raw.get("model_type") != MODEL_TYPE:
         raise ValueError(f"OpenAI GPT requires model_type={MODEL_TYPE!r}, got {raw.get('model_type')!r}")
     if raw.get("architectures") != [ARCHITECTURE]:
@@ -167,5 +169,5 @@ def _read_object(path: Path) -> dict:
 
 def load_config(model_dir: Path) -> OpenAIGPTConfig:
     generation_path = model_dir / "generation_config.json"
-    generation = _read_object(generation_path) if generation_path.is_file() else {}
+    generation = _read_object(generation_path) if generation_path.is_file() else None
     return parse_config(_read_object(model_dir / "config.json"), generation)

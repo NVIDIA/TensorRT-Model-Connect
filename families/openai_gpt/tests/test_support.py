@@ -3,6 +3,7 @@
 
 """Checkpoint identity and default Task of the OpenAI GPT family, without TensorRT."""
 
+from families.openai_gpt.support import describe
 from tensorrt_model_connect.model_support import ModelMetadata, resolve_family
 
 
@@ -28,10 +29,9 @@ def test_openai_gpt_architecture_alone_resolves_to_the_family():
     assert support.default_task == "text_continuation"
 
 
-def test_gpt2_stays_with_its_own_family():
-    family, _ = resolve_family(
-        ModelMetadata(
-            config={"model_type": "gpt2", "architectures": ["GPT2LMHeadModel"]}, model_index={}
-        )
+def test_gpt2_checkpoints_are_not_claimed():
+    # GPT-2 shares the LM head's layout, not the architecture: this family declares no GPT-2 identity.
+    metadata = ModelMetadata(
+        config={"model_type": "gpt2", "architectures": ["GPT2LMHeadModel"]}, model_index={}
     )
-    assert family == "gpt2"
+    assert describe(metadata) is None

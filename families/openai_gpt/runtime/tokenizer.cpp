@@ -254,6 +254,10 @@ struct Tokenizer::Impl {
 void Tokenizer::Impl::parse(const nlohmann::json& json) {
     if (!json.is_object())
         throw contract_error("must contain one JSON object");
+    // The reference refuses any other serialization version; an absent one is accepted.
+    const auto version = json.find("version");
+    if (version != json.end() && (!version->is_string() || version->get<std::string>() != "1.0"))
+        throw contract_error("version must be \"1.0\"");
     if (!is_null_or_absent(json, "truncation") || !is_null_or_absent(json, "padding"))
         throw contract_error("must neither truncate nor pad");
     const auto normalizer = json.find("normalizer");
@@ -336,12 +340,21 @@ void Tokenizer::Impl::read_merges(const nlohmann::json& merges_json) {
     if (!merges_json.is_array() ||
         merges_json.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()))
         throw contract_error("BPE merges must be a list");
+    // The reference reads "left right" strings or [left, right] pairs, never a mix (without a
+    // model type it then loads another model), and skips a string that starts with "#version".
+    const bool strings = std::all_of(merges_json.begin(), merges_json.end(),
+                                     [](const nlohmann::json& entry) { return entry.is_string(); });
+    if (!strings && !std::all_of(merges_json.begin(), merges_json.end(),
+                                 [](const nlohmann::json& entry) { return entry.is_array(); }))
+        throw contract_error("BPE merges must be all strings or all pairs");
     std::int32_t rank = 0;
     for (const auto& entry : merges_json) {
         std::string left;
         std::string right;
-        if (entry.is_string()) {
-            const auto text = entry.get<std::string>();
+        if (strings) {
+            const auto& text = entry.get_ref<const std::string&>();
+            if (text.rfind("#version", 0) == 0)
+                continue;
             const auto space = text.find(' ');
             if (space != std::string::npos && text.find(' ', space + 1) == std::string::npos) {
                 left = text.substr(0, space);

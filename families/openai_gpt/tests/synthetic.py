@@ -73,6 +73,28 @@ def _replace_token(tokenizer: dict, token: str) -> None:
     tokenizer["model"]["merges"].remove("th e</w>")
 
 
+def _first_merge_as_pair(tokenizer: dict) -> None:
+    tokenizer["model"]["merges"][0] = tokenizer["model"]["merges"][0].split(" ")
+
+
+def merge_variants() -> dict[str, dict]:
+    """Variants of ``TOKENIZER`` with merge lists the reference reads in its other ways: every
+    rule as a [left, right] pair, and "#version" strings, which it skips as headers."""
+    pairs = copy.deepcopy(TOKENIZER)
+    pairs["model"]["merges"] = [merge.split(" ") for merge in pairs["model"]["merges"]]
+    header = copy.deepcopy(TOKENIZER)
+    header["model"]["merges"].insert(0, "#version: 0.2")
+    # A header whose parts would make a rule: the unknown token "#version" before "b</w>".
+    rule_header = copy.deepcopy(TOKENIZER)
+    vocab = rule_header["model"]["vocab"]
+    vocab["#version"] = vocab.pop("<unk>")
+    vocab["#versionb</w>"] = len(vocab)
+    rule_header["model"]["unk_token"] = "#version"
+    rule_header["added_tokens"][0]["content"] = "#version"
+    rule_header["model"]["merges"].insert(0, "#version b</w>")
+    return {"pairs": pairs, "version header": header, "header that names tokens": rule_header}
+
+
 def mutations() -> dict[str, dict]:
     """Variants of ``TOKENIZER`` that the native tokenizer refuses, by name."""
     changes = {
@@ -106,6 +128,10 @@ def mutations() -> dict[str, dict]:
         "repeated merge": lambda t: t["model"]["merges"].append("a a"),
         "merge without a pair": lambda t: t["model"]["merges"].append("aa"),
         "merge with two spaces": lambda t: t["model"]["merges"].append("a  a"),
+        # The reference reads strings or pairs, never a mix, and only serialization version 1.0.
+        "mixed merge formats": _first_merge_as_pair,
+        "serialization version": lambda t: t.update(version="2.0"),
+        "numeric version": lambda t: t.update(version=1.0),
         "added token outside the vocabulary": lambda t: t["added_tokens"][0].update(
             content="<pad>"
         ),

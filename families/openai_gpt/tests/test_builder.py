@@ -15,8 +15,8 @@ import pytest
 from safetensors.numpy import save_file
 
 from families.openai_gpt import model as builder
-from families.openai_gpt.config import parse_config, parse_json_object
-from families.openai_gpt.tests.synthetic import TOKENIZER, mutations
+from families.openai_gpt.config import load_config, parse_config, parse_json_object
+from families.openai_gpt.tests.synthetic import TOKENIZER, merge_variants, mutations
 from families.openai_gpt.tokenizer_contract import check_tokenizer
 from families.openai_gpt.weights import expected_shapes, load_weights
 from tensorrt_model_connect import BuildRequest
@@ -95,14 +95,37 @@ def test_config_rejects_what_the_graph_cannot_build(change: dict) -> None:
 
 
 def test_eos_tokens_follow_transformers_generation_config() -> None:
-    assert parse_config({**PUBLISHED, "eos_token_id": 3}, {}).eos_token_ids == (3,)
+    # Without generation_config.json, config.json names the EOS tokens.
+    assert parse_config({**PUBLISHED, "eos_token_id": 3}, None).eos_token_ids == (3,)
     assert parse_config(PUBLISHED, {"eos_token_id": [5, 4, 5]}).eos_token_ids == (5, 4)
-    # generation_config.json wins, an explicit null included.
+    # With the file, the file decides: its value, an explicit null, or no key (no EOS).
     assert parse_config({**PUBLISHED, "eos_token_id": 3}, {"eos_token_id": 7}).eos_token_ids == (7,)
     assert parse_config({**PUBLISHED, "eos_token_id": 3}, {"eos_token_id": None}).eos_token_ids == ()
+    assert parse_config({**PUBLISHED, "eos_token_id": 3}, {}).eos_token_ids == ()
     for bad in (40478, -1, True, 1.0, [1, "2"]):
         with pytest.raises(ValueError):
             parse_config(PUBLISHED, {"eos_token_id": bad})
+
+
+@pytest.mark.parametrize(
+    "generation",
+    [None, {}, {"_from_model_config": True}, {"eos_token_id": 7}, {"eos_token_id": None}],
+)
+def test_eos_tokens_match_transformers_loading(generation: dict | None, tmp_path: Path) -> None:
+    """The checkpoint directory read the way ``from_pretrained`` reads it for ``generate()``."""
+    transformers = pytest.importorskip("transformers")
+    (tmp_path / "config.json").write_text(json.dumps({**PUBLISHED, "eos_token_id": 3}))
+    if generation is not None:
+        (tmp_path / "generation_config.json").write_text(json.dumps(generation))
+    try:
+        reference = transformers.GenerationConfig.from_pretrained(tmp_path)
+    except OSError:  # no generation_config.json: transformers derives one from config.json
+        reference = transformers.GenerationConfig.from_pretrained(
+            tmp_path, config_file_name="config.json", _from_model_config=True
+        )
+    expected = reference.eos_token_id
+    expected = () if expected is None else tuple(expected if isinstance(expected, list) else [expected])
+    assert load_config(tmp_path).eos_token_ids == expected
 
 
 def test_json_objects_refuse_repeated_keys() -> None:
@@ -139,6 +162,12 @@ def test_synthetic_tokenizer_meets_the_contract() -> None:
 def test_tokenizer_contract_refusals(name: str) -> None:
     with pytest.raises(ValueError):
         check_tokenizer(mutations()[name], 49)
+
+
+@pytest.mark.parametrize("name", sorted(merge_variants()))
+def test_tokenizer_contract_reads_merges_like_the_reference(name: str) -> None:
+    variant = merge_variants()[name]
+    check_tokenizer(variant, len(variant["model"]["vocab"]))
 
 
 @pytest.mark.parametrize("rows", [48, 50])
@@ -269,7 +298,7 @@ def test_build_rejects_options_it_cannot_honor(tmp_path: Path, changes: dict) ->
 
 
 def test_runtime_config_carries_the_cache_and_eos_contract() -> None:
-    config = parse_config({**PUBLISHED, "eos_token_id": [1, 2]}, {})
+    config = parse_config({**PUBLISHED, "eos_token_id": [1, 2]}, None)
     assert builder.runtime_config(config, 300) == {
         "vocab_size": 40478,
         "num_hidden_layers": 12,

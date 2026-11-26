@@ -113,6 +113,12 @@ def _check_model(model: object) -> tuple[dict, str]:
     merges = model["merges"]
     if not isinstance(merges, list):
         raise ValueError("OpenAI GPT tokenizer merges must be a list")
+    # The reference reads "left right" strings or [left, right] pairs, never a mix (without a
+    # model type it then loads another model), and skips a string that starts with "#version".
+    if all(isinstance(entry, str) for entry in merges):
+        merges = [entry for entry in merges if not entry.startswith("#version")]
+    elif not all(isinstance(entry, list) for entry in merges):
+        raise ValueError("OpenAI GPT tokenizer merges must be all strings or all pairs")
     seen = set()
     for entry in merges:
         left, right = _merge_pair(entry)
@@ -162,6 +168,9 @@ def check_tokenizer(tokenizer: object, vocab_size: int) -> None:
     """Raise unless ``tokenizer`` (parsed ``tokenizer.json``) is what the runtime accepts."""
     if not isinstance(tokenizer, dict):
         raise ValueError("OpenAI GPT tokenizer.json must contain one JSON object")
+    # The reference refuses any other serialization version; an absent one is accepted.
+    if "version" in tokenizer and tokenizer["version"] != "1.0":
+        raise ValueError('OpenAI GPT tokenizer.json version must be "1.0"')
     if tokenizer.get("truncation") is not None or tokenizer.get("padding") is not None:
         raise ValueError("OpenAI GPT tokenizer.json must neither truncate nor pad")
     _check_normalizer(tokenizer)

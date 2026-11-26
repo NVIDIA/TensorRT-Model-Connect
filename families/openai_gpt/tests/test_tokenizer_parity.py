@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from families.openai_gpt.tests.synthetic import TOKENIZER, mutations
+from families.openai_gpt.tests.synthetic import TOKENIZER, merge_variants, mutations
 
 _TEST_DIR = Path(__file__).resolve().parent
 _BINARY = "test_openai_gpt_text_runtime"
@@ -167,6 +167,19 @@ def test_synthetic_tokenizer_matches_the_reference(tmp_path: Path) -> None:
         for _ in range(500)
     ]
     _compare(binary, path, _CASES + texts, tmp_path)
+
+
+@pytest.mark.parametrize("name", sorted(merge_variants()))
+def test_merge_list_variants_match_the_reference(name: str, tmp_path: Path) -> None:
+    from tokenizers import Tokenizer
+
+    variant = merge_variants()[name]
+    # Read as BPE: without a model type, a merge list the reference cannot read loads another model.
+    assert type(Tokenizer.from_str(json.dumps(variant)).model).__name__ == "BPE"
+    path = tmp_path / "tokenizer.json"
+    path.write_text(json.dumps(variant), encoding="utf-8")
+    texts = ["xb", "hello xb world", "aaa xb the thing", "x b", "bx"]
+    _compare(_binary(), path, _CASES + texts, tmp_path)
 
 
 def test_cpp_unit_test_uses_the_synthetic_tokenizer() -> None:
