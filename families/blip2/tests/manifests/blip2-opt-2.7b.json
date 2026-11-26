@@ -1,0 +1,23 @@
+{
+  "name": "blip2-opt-2.7b",
+  "hf_id": "Salesforce/blip2-opt-2.7b",
+  "hf_revision": "59a1ef6c1e5117b3f65523d1c6066825bcf315e3",
+  "family": "blip2",
+  "bundle": "blip2-opt-2.7b.bundle",
+  "task": "images_text_to_text",
+  "precision": "fp32",
+  "max_sequence_length": 128,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "blip2-opt-2.7b",
+      "premerge": true,
+      "image": "test_img.jpeg",
+      "questions": [
+        "Question: What vehicle is shown? Answer:",
+        "Question: What color is the car? Answer:"
+      ],
+      "max_new_tokens": 16
+    }
+  ]
+}
