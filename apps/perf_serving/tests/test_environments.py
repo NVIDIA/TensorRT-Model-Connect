@@ -58,6 +58,101 @@ def test_environments_are_keyed_by_requirements_and_reused(tmp_path, monkeypatch
     assert created.parent.parent.name.endswith("-r1") and (stale / "keep.txt").read_text() == "x"  # never overlaid
 
 
+def test_a_preparation_script_alone_gets_an_environment_without_installs(tmp_path, monkeypatch):
+    prepare = tmp_path / "fam" / "prepare_checkpoint.py"
+    prepare.parent.mkdir()
+    prepare.write_text("pass\n")
+    commands = []
+
+    def run(command, log, timeout):
+        commands.append(command)
+        if command[1:3] == ["-m", "venv"]:
+            environment = Path(command[-1])
+            (environment / "bin").mkdir(parents=True)
+            (environment / "bin/python").write_text("")
+            (environment / "lib/python3/site-packages").mkdir(parents=True)
+
+    monkeypatch.setattr(environments, "_run", run)
+    monkeypatch.setattr(environments, "_freeze", lambda python: "numpy==1\n")
+    python = environments.reference_python(None, tmp_path / "envs", prepare=prepare)
+    environment = python.parent.parent
+    assert environment.name.startswith("prepare_checkpoint-")
+    assert not any(command[1:4] == ["-m", "pip", "install"] for command in commands)  # nothing to install
+    assert commands[-1] == [str(python), str(prepare.resolve()), str(environment)]
+    assert environments.reference_python(None, tmp_path / "envs", prepare=prepare) == python  # reused
+    with pytest.raises(RuntimeError, match="requirements or a preparation script"):
+        environments.reference_python(None, tmp_path / "envs")
+
+
+def test_a_change_to_a_preparation_input_prepares_a_fresh_environment(tmp_path, monkeypatch):
+    family = tmp_path / "fam"
+    (family / "scales").mkdir(parents=True)
+    prepare, quantizer, scales = family / "prepare_checkpoint.py", family / "quantization.py", family / "scales"
+    prepare.write_text("pass\n")
+    quantizer.write_text("BLOCK = 128\n")
+    (scales / "m.npz").write_bytes(b"\x00\x01")
+    prepared = []
+
+    def run(command, log, timeout):
+        if command[1:3] == ["-m", "venv"]:
+            environment = Path(command[-1])
+            (environment / "bin").mkdir(parents=True)
+            (environment / "bin/python").write_text("")
+            (environment / "lib/python3/site-packages").mkdir(parents=True)
+        elif command[1] == str(prepare.resolve()):
+            prepared.append(Path(command[2]))
+
+    monkeypatch.setattr(environments, "_run", run)
+    monkeypatch.setattr(environments, "_freeze", lambda python: "numpy==1\n")
+
+    def environment():
+        return environments.reference_python(None, tmp_path / "envs", prepare=prepare,
+                                             prepare_inputs=[quantizer, scales])
+
+    first = environment()
+    assert environment() == first and len(prepared) == 1  # unchanged inputs: reused, not prepared again
+    (scales / "m.npz").write_bytes(b"\x00\x02")  # new scales
+    second = environment()
+    (scales / "other.npz").write_bytes(b"\x03")  # a new file in an input directory
+    third = environment()
+    quantizer.write_text("BLOCK = 64\n")  # a changed input file
+    fourth = environment()
+    assert len({first, second, third, fourth}) == 4 and len(prepared) == 4
+    assert environments.reference_python(None, tmp_path / "envs", prepare=prepare) not in {first, second, third, fourth}
+    with pytest.raises(RuntimeError, match="preparation input not found"):
+        environments.reference_python(None, tmp_path / "envs", prepare=prepare, prepare_inputs=[family / "missing"])
+    with pytest.raises(RuntimeError, match="need a preparation script"):
+        environments.reference_python(family / "requirements.txt", tmp_path / "envs", prepare_inputs=[quantizer])
+
+
+def test_a_non_isolated_install_provides_the_build_backend_first(tmp_path, monkeypatch):
+    requirements = tmp_path / "fam" / "requirements.txt"
+    requirements.parent.mkdir()
+    requirements.write_text("flash-attn\n")
+    commands = []
+
+    def run(command, log, timeout):
+        commands.append(command)
+        if command[1:3] == ["-m", "venv"]:
+            environment = Path(command[-1])
+            (environment / "bin").mkdir(parents=True)
+            (environment / "bin/python").write_text("")
+            (environment / "lib/python3/site-packages").mkdir(parents=True)
+
+    monkeypatch.setattr(environments, "_run", run)
+    monkeypatch.setattr(environments, "_freeze", lambda python: "torch==2\n")
+    environments.reference_python(requirements, tmp_path / "envs", build_isolation=False)
+    pip = [command for command in commands if command[1:4] == ["-m", "pip", "install"]]
+    assert [command[-2:] for command in pip] == [["setuptools", "wheel"], ["-r", str(requirements.resolve())]]
+    assert all("--no-build-isolation" in command for command in pip)
+
+    commands.clear()
+    environments.reference_python(requirements, tmp_path / "isolated", build_isolation=True)
+    pip = [command for command in commands if command[1:4] == ["-m", "pip", "install"]]
+    assert [command[-2:] for command in pip] == [["-r", str(requirements.resolve())]]
+    assert "--no-build-isolation" not in pip[0]  # an isolated install keeps pip's build isolation
+
+
 def test_the_serving_cli_has_no_script_backend():
     parser = cli.build_parser()
     with pytest.raises(SystemExit):

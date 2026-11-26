@@ -78,6 +78,7 @@ def upstream_fixture(monkeypatch, *, fail=False):
     monkeypatch.setattr(adapter.reference, "_require_reference", lambda root: root)
     monkeypatch.setattr(adapter.reference, "_configure_upstream_vae", lambda *args: None)
     monkeypatch.setattr(adapter.reference, "_load_upstream", lambda root: upstream)
+    monkeypatch.setattr(adapter.reference, "_use_sdpa_without_flash_kernels", lambda: False)
     monkeypatch.setattr(adapter.reference, "_sdpa_vit_path", lambda root, vit: vit)
     monkeypatch.setattr(adapter.reference, "_working_directory", lambda root: nullcontext())
     return loads, generations

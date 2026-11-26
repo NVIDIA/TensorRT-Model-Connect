@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The bundle generates 512 x 512 only, while ChromaPipeline defaults to 1024 x 1024: stated so the reference
+# generates the bundle's size. chroma1-hd-512, -fp8 and -nvfp4 take this configuration: this is their
+# highest-precision sibling.
+request: {height: 512, width: 512}

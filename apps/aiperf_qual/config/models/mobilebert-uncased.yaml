@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  adapter: families/mobilebert/reference/adapter.py  # [CLS] text [SEP] unpadded; the [MASK] rows, else every row
+  options: {max_sequence_length: 512}  # the manifest's window
+benchmarks:
+  token_score_parity:
+    # English text for an English masked LM (the Task's UniRef50 protein sequences are ESM-2's): every row of each
+    # STS Benchmark sentence, which carries no [MASK]. The sentences fit the window, so nothing is cut.
+    suite_definition: stsbenchmark-sentences-400
+    truncate_tokens: null

@@ -1,0 +1,25 @@
+{
+  "name": "xlm-roberta-base-bf16",
+  "hf_id": "FacebookAI/xlm-roberta-base",
+  "hf_revision": "e73636d4f797dec63c3081bb6ed5c7b0bb3f2089",
+  "bundle": "xlm-roberta-base-bf16.bundle",
+  "family": "roberta",
+  "task": "encoding",
+  "precision": "bf16",
+  "testcases": [
+    {
+      "name": "xlm-roberta-base-bf16",
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is Paris.",
+      "premerge": true
+    },
+    {
+      "name": "xlm-roberta-base-bf16-zh",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "法国的首都是巴黎。"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512
+}

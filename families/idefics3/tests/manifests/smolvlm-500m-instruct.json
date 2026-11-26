@@ -1,0 +1,23 @@
+{
+  "name": "smolvlm-500m-instruct",
+  "hf_id": "HuggingFaceTB/SmolVLM-500M-Instruct",
+  "hf_revision": "a7da5b986cb59b408707209984f360a5f4ad7e47",
+  "bundle": "smolvlm-500m-instruct.bundle",
+  "family": "idefics3",
+  "task": "images_text_to_text",
+  "precision": "fp32",
+  "max_sequence_length": 1536,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "smolvlm-500m-instruct",
+      "test_image": "data/test_img.jpeg",
+      "prompt": "What type of vehicle is shown?",
+      "premerge": true,
+      "max_new_tokens": 32,
+      "questions": [
+        "What color is the car?"
+      ]
+    }
+  ]
+}

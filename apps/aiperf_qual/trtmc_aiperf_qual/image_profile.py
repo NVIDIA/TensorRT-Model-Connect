@@ -213,8 +213,9 @@ def profile(environment: Environment, name: str, bundle: Path, inputs: Path, out
     entry, = [e for e in ManifestCatalog(repo / "families").entries() if e.name == name]
     out.mkdir(parents=True, exist_ok=False)
     prepared = out / "inputs.jsonl"
-    base = {**dict(resolve_case(entry.model, bundle).request),
-            **resolve_model(name, environment).get("catalog_request", {})}
+    base = {key: value for key, value in {**dict(resolve_case(entry.model, bundle).request),
+                                          **resolve_model(name, environment).get("catalog_request", {})}.items()
+            if value is not None}  # config/models' null: a control the model takes on neither side
     controls = prepare_inputs(inputs, prepared, base, image_edit=image_edit)
     client = str(environment["aiperf_python"])
     worker = Path(environment.values.get("image_worker", runtime / "trtmc-server"))

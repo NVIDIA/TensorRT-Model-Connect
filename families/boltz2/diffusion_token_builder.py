@@ -4,8 +4,11 @@
 """Direct TensorRT segments for the Boltz-2 diffusion token transformer.
 
 The token state, norms, attention and residual adds run in fp32 as in upstream
-Boltz-2. ``projection_precision="bf16"`` (the bundle default) runs only the
-projection matmuls in bf16; ``"fp32"`` keeps the upstream fp32 graph.
+Boltz-2. ``projection_precision="fp16"`` (the bundle default) or ``"bf16"`` runs
+only the projection matmuls in that type; ``"fp32"`` keeps the upstream fp32 graph.
+fp16 is as fast as bf16 and its three extra mantissa bits keep the diffusion
+trajectory closer to the fp32 reference; the projection inputs and outputs stay
+far inside the fp16 range (see the family README).
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ TOKEN_HEAD_WIDTH = TOKEN_CHANNELS // TOKEN_HEADS
 TOKEN_LAYERS = 24
 TOKEN_SEGMENT_SIZE = 6
 TOKEN_BIAS_CHANNELS = TOKEN_LAYERS * TOKEN_HEADS
-PROJECTION_PRECISIONS = ("bf16", "fp32")
+PROJECTION_PRECISIONS = ("fp16", "bf16", "fp32")
 
 
 @dataclass(frozen=True)
@@ -100,7 +103,7 @@ def define_diffusion_token_network(
     token_count: int,
     first_layer: int,
     layer_count: int,
-    projection_precision: str = "bf16",
+    projection_precision: str = "fp16",
 ):
     """Define one contiguous score token-transformer segment."""
 
@@ -112,7 +115,7 @@ def define_diffusion_token_network(
         raise ValueError(
             f"Boltz-2 diffusion token projection precision must be one of {PROJECTION_PRECISIONS}"
         )
-    linear_dtype = trt.bfloat16 if projection_precision == "bf16" else None
+    linear_dtype = {"fp16": trt.float16, "bf16": trt.bfloat16, "fp32": None}[projection_precision]
     graph = Graph(network, trt, weights, linear_dtype=linear_dtype)
     a = network.add_input("a", trt.float32, (1, token_count, TOKEN_CHANNELS))
     condition = network.add_input("single_condition", trt.float32, (1, token_count, TOKEN_CHANNELS))
@@ -172,7 +175,7 @@ def build_diffusion_token_engine(
     workspace_bytes: int = 16 << 30,
     verbose: bool = False,
     verify_checkpoint: bool = True,
-    projection_precision: str = "bf16",
+    projection_precision: str = "fp16",
 ) -> DiffusionTokenBuildResult:
     """Build one direct score token-transformer segment."""
 
@@ -216,6 +219,8 @@ def build_diffusion_token_engine(
         layer_count=layer_count,
         token_count=token_count,
         precision=(
-            "fp32-bf16-projections" if projection_precision == "bf16" else "fp32-upstream-exact"
+            "fp32-upstream-exact"
+            if projection_precision == "fp32"
+            else f"fp32-{projection_precision}-projections"
         ),
     )

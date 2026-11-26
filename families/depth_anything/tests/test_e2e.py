@@ -122,7 +122,7 @@ def _runtime() -> tuple[Path, Path]:
 
 
 def _asset(name: str) -> Path:
-    path = TEST_ROOT / "data" / str(name)
+    path = TEST_ROOT / str(name)  # relative to tests/, as the benchmark resolves it
     assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
     return path
 
@@ -135,6 +135,7 @@ def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
             family=FAMILY,
             task=manifest["task"],
             precision=manifest["precision"],
+            quantization=manifest.get("quantization"),
             tensor_parallel_size=manifest["tensor_parallel_size"],
             max_sequence_length=manifest["max_sequence_length"],
         )

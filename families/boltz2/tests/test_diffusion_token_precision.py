@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Precision of the diffusion token-transformer projections (bf16 default, fp32 upstream)."""
+"""Precision of the diffusion token-transformer projections (fp16 default, bf16, fp32 upstream)."""
 
 from __future__ import annotations
 
@@ -123,6 +123,7 @@ class _Network:
 def _stub_trt():
     return SimpleNamespace(
         float32="float32",
+        float16="float16",
         bfloat16="bfloat16",
         Weights=lambda array: array,
         MatrixOperation=SimpleNamespace(NONE="none", TRANSPOSE="transpose"),
@@ -187,39 +188,39 @@ def test_fp32_projection_precision_keeps_the_upstream_fp32_graph():
     assert len(_matmuls(network)) == 2 * (PROJECTIONS_PER_LAYER + 2)
 
 
-def test_bf16_projection_precision_casts_only_the_projections():
-    network, output = _define("bf16")
+@pytest.mark.parametrize("precision, dtype", [("fp16", "float16"), ("bf16", "bfloat16")])
+def test_reduced_projection_precision_casts_only_the_projections(precision, dtype):
+    network, output = _define(precision)
     assert output.dtype == "float32" and output.shape == (1, 5, TOKEN_CHANNELS)
     matmuls = _matmuls(network)
-    projections = [layer for layer in matmuls if layer.output.dtype == "bfloat16"]
+    projections = [layer for layer in matmuls if layer.output.dtype == dtype]
     attention = [layer for layer in matmuls if layer.output.dtype == "float32"]
     assert len(projections) == 2 * PROJECTIONS_PER_LAYER
     # Attention scores and the probability-weighted sum stay fp32.
     assert len(attention) == 2 * 2
     for layer in projections:
-        assert [tensor.dtype for tensor in layer.inputs] == ["bfloat16", "bfloat16"]
+        assert [tensor.dtype for tensor in layer.inputs] == [dtype, dtype]
     # Norms, softmax, activations and every elementwise op (bias, gates, residual) stay fp32.
     for layer in network.layers:
         if layer.kind in {"normalization", "softmax", "activation", "elementwise"}:
             assert layer.output.dtype == "float32", layer.kind
-    bf16_casts = [
-        layer
-        for layer in network.layers
-        if layer.kind == "cast" and layer.output.dtype == "bfloat16"
+    reduced_casts = [
+        layer for layer in network.layers if layer.kind == "cast" and layer.output.dtype == dtype
     ]
     back_casts = [
         layer
         for layer in network.layers
         if layer.kind == "cast" and layer.output.dtype == "float32"
     ]
-    assert len(bf16_casts) == 2 * 2 * PROJECTIONS_PER_LAYER  # activation and weight per projection
+    # One activation and one weight cast per projection.
+    assert len(reduced_casts) == 2 * 2 * PROJECTIONS_PER_LAYER
     assert len(back_casts) == 2 * PROJECTIONS_PER_LAYER
     assert all(layer.inputs[0].layer.kind == "matmul" for layer in back_casts)
 
 
 def test_unknown_projection_precision_is_rejected():
     with pytest.raises(ValueError, match="projection precision"):
-        _define("fp16")
+        _define("fp8")
 
 
 def test_graph_linear_without_dtype_adds_no_cast():
@@ -261,34 +262,28 @@ def test_graph_linear_with_bf16_adds_bias_in_the_input_dtype():
     ]
 
 
-def test_build_defaults_to_bf16_token_projections(monkeypatch, tmp_path):
+def test_build_defaults_to_fp16_token_projections(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(cli, "build_bundle", lambda request, output: calls.append(request))
     output = str(tmp_path / "model.bundle")
     assert family_cli.main(["boltz2", "build", str(tmp_path), "-o", output]) == 0
-    assert (
-        family_cli.main(
-            ["boltz2", "build", str(tmp_path), "-o", output, "--diffusion-token-precision", "fp32"]
-        )
-        == 0
-    )
-    assert [request.diffusion_token_precision for request in calls] == ["bf16", "fp32"]
+    command = ["boltz2", "build", str(tmp_path), "-o", output, "--diffusion-token-precision"]
+    for precision in ("bf16", "fp32"):
+        assert family_cli.main([*command, precision]) == 0
+    assert [request.diffusion_token_precision for request in calls] == ["fp16", "bf16", "fp32"]
     with pytest.raises(SystemExit):
-        family_cli.main(
-            ["boltz2", "build", str(tmp_path), "-o", output, "--diffusion-token-precision", "fp16"]
-        )
+        family_cli.main([*command, "fp8"])
 
 
 def test_request_validates_token_precision_and_legacy_request_uses_default(tmp_path):
-    assert cli.BuildRequest(tmp_path).diffusion_token_precision == "bf16"
-    assert (
-        cli.BuildRequest(tmp_path, diffusion_token_precision="fp32").diffusion_token_precision
-        == "fp32"
-    )
+    assert cli.BuildRequest(tmp_path).diffusion_token_precision == "fp16"
+    for precision in ("bf16", "fp32"):
+        request = cli.BuildRequest(tmp_path, diffusion_token_precision=precision)
+        assert request.diffusion_token_precision == precision
     with pytest.raises(ValueError, match="diffusion_token_precision"):
-        cli.BuildRequest(tmp_path, diffusion_token_precision="fp16")
+        cli.BuildRequest(tmp_path, diffusion_token_precision="fp8")
     legacy = LegacyRequest(tmp_path, tmp_path / "out", "boltz2", "structure_prediction", "bf16")
-    assert cli.coerce_request(legacy).diffusion_token_precision == "bf16"
+    assert cli.coerce_request(legacy).diffusion_token_precision == "fp16"
 
 
 def test_model_build_passes_token_precision_to_the_token_plans(monkeypatch, tmp_path):
@@ -305,6 +300,6 @@ def test_model_build_passes_token_precision_to_the_token_plans(monkeypatch, tmp_
     writer = SimpleNamespace(
         set_header=lambda **_: None, add_bytes=lambda *_: None, add_json=lambda *_: None
     )
-    for precision in ("fp32", "bf16"):
+    for precision in ("fp32", "bf16", "fp16"):
         model.build(cli.BuildRequest(tmp_path, diffusion_token_precision=precision), writer)
         assert seen["diffusion_token_precision"] == precision

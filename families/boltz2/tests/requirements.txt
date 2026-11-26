@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The AIPerf reference: the family's pins and the UniRef50 shard reader (reference/inputs.py).
+boltz==2.2.1
+huggingface-hub==1.16.1
+ml-dtypes==0.5.4
+onnx==1.22.0
+typer==0.23.1
+typer-slim==0.23.1
+# The last pyarrow line that still runs on NumPy 1 (boltz 2.2.1 pins numpy<2).
+pyarrow==18.1.0

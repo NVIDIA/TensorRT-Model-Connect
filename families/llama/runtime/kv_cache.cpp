@@ -5,6 +5,7 @@
 
 #include "families/llama/runtime/kv_cache.h"
 
+#include "trtmc/internal/config.h"
 #include "trtmc/runtime/trt_module.h"
 
 #include <algorithm>
@@ -113,6 +114,26 @@ LlamaKvCache::LlamaKvCache(int32_t num_layers, int32_t max_length, int32_t kv_di
         cache_v_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
         if (!cache_v_.back().ok())
             return;
+    }
+
+    if (cache_dtype_ == DType::kFloat8E4M3) {
+        // Packed prefill dequantizes unwritten rows before applying the mask.
+        // Seed them with finite zero once, rather than clearing on each request.
+        for (int32_t i = 0; i < num_layers; ++i) {
+            for (auto* tensor : {&cache_k_[i], &cache_v_[i]}) {
+                const auto status = cudaMemsetAsync(tensor->data(), 0, tensor->nbytes(), stream_);
+                if (status != cudaSuccess)
+                    throw std::runtime_error(
+                        std::string("Cannot initialize packed Llama KV cache: ") +
+                        cudaGetErrorString(status));
+            }
+        }
+        // The prefill module may consume these buffers on a different stream.
+        const auto status = cudaStreamSynchronize(stream_);
+        if (status != cudaSuccess)
+            throw std::runtime_error(
+                std::string("Cannot complete packed Llama KV initialization: ") +
+                cudaGetErrorString(status));
     }
 
     // Pre-allocate mask buffer: [max_length + 1] for dense causal mask.
@@ -320,9 +341,16 @@ void LlamaKvCache::write_bidirectional_mask(TensorMap& inputs, int32_t seq_len) 
 }
 
 void LlamaKvCache::write_decode_mask(TensorMap& inputs) {
+    // Note (Jiaxin Deng): Prefill buffers start at profile OPT, so validate a one-row mask
+    // against the profile minimum instead of the current buffer shape.
     if (bound_module_ == nullptr ||
-        (!dynamic_binding_enabled_ && bound_module_->tensor_shape(names_.attention_mask) !=
-                                          std::vector<int64_t>{1, max_length_ + 1})) {
+        (!dynamic_binding_enabled_ &&
+         bound_module_->tensor_shape(names_.attention_mask) !=
+             std::vector<int64_t>{1, max_length_ + 1} &&
+         (!bound_module_->input_is_dynamic(names_.attention_mask) ||
+          bound_module_->input_profile_shape(names_.attention_mask, bound_module_->profile_idx(),
+                                             ProfileShapeSelector::kMin) !=
+              std::vector<int64_t>{1, max_length_ + 1}))) {
         throw std::runtime_error("Llama standard decoder has an invalid attention-mask contract");
     }
 
@@ -398,6 +426,10 @@ void LlamaKvCache::bind_to(ITrtModule& module) {
             (!dynamic_binding_enabled_ &&
              (module.tensor_shape(names_.cache_k[layer]) != cache_shape ||
               module.tensor_shape(names_.cache_v[layer]) != cache_shape)) ||
+            module.tensor_dtype(names_.cache_k[layer]) != cache_dtype_ ||
+            module.tensor_dtype(names_.cache_v[layer]) != cache_dtype_ ||
+            module.tensor_dtype(names_.present_k[layer]) != cache_dtype_ ||
+            module.tensor_dtype(names_.present_v[layer]) != cache_dtype_ ||
             module.tensor_shape(names_.present_k[layer]) != present_shape ||
             module.tensor_shape(names_.present_v[layer]) != present_shape) {
             throw std::runtime_error("Llama standard decoder has an invalid KV contract");
@@ -520,37 +552,34 @@ void LlamaKvCache::advance(int32_t n_tokens) {
         return;
     }
 
+    // Generation stops when the cache is full (the pipeline checks before each
+    // step), so a row that does not fit is a caller error. Dropping the oldest
+    // rows instead would silently discard the prompt.
+    if (position_ >= max_length_)
+        throw std::runtime_error("LlamaKvCache::advance: the KV cache is full");
+
     // Copy present K/V (single row) into cache at current position.
     // present_k_[layer] is [1, kv_dim] → copy to cache_k_[layer][position_, :]
     auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
 
-    if (position_ < max_length_) {
-        // Normal append: write to position_ slot
-        auto offset = static_cast<std::size_t>(position_) * row_bytes;
-        for (int32_t i = 0; i < num_layers_; ++i) {
-            auto li = static_cast<std::size_t>(i);
-            cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset,
-                            present_k_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset,
-                            present_v_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
-        }
-        ++position_;
-    } else {
-        // Cache full: shift [1..max) → [0..max-1), then write at tail
-        auto shift_bytes = static_cast<std::size_t>(max_length_ - 1) * row_bytes;
-        auto tail_offset = shift_bytes;
-        for (int32_t i = 0; i < num_layers_; ++i) {
-            auto li = static_cast<std::size_t>(i);
-            auto* ck = static_cast<uint8_t*>(cache_k_[li].data());
-            auto* cv = static_cast<uint8_t*>(cache_v_[li].data());
-            cudaMemcpyAsync(ck, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(ck + tail_offset, present_k_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv + tail_offset, present_v_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-        }
-        // position_ stays at max_length_ (cache is full, all slots visible)
+    auto offset = static_cast<std::size_t>(position_) * row_bytes;
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        auto li = static_cast<std::size_t>(i);
+        cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset, present_k_[li].data(),
+                        row_bytes, cudaMemcpyDeviceToDevice, stream_);
+        cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset, present_v_[li].data(),
+                        row_bytes, cudaMemcpyDeviceToDevice, stream_);
+    }
+    ++position_;
+}
+
+void LlamaKvCache::set_prompt_length(int32_t prompt_length) {
+    if (prompt_length > max_length_) {
+        throw internal::ConfigError("llama prompt has " + std::to_string(prompt_length) +
+                                    " tokens but the KV cache holds " +
+                                    std::to_string(max_length_) +
+                                    "; rebuild the bundle with a larger --max-sequence-length or "
+                                    "shorten the prompt");
     }
 }
 

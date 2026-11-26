@@ -49,6 +49,153 @@ void rejects(Function function, trtmc_status expected, const char* message) {
     check(rejected, message);
 }
 
+void video_features(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
+    using namespace trtmc;
+    const auto path = root / "features_video_tokens.bundle";
+    bundle(path, "video_tokens");
+    const float first[]{0.25F, 0, 0}, second[]{0.75F, 0, 0};
+    VideoToTokenFeaturesRequest input;
+    input.video.frames = {ImageInput({first, 3}, 1, 1), ImageInput({second, 3}, 1, 1)};
+    input.video.timestamps_seconds = {2.0, 2.5};
+    auto retained = Model::load(path.string(), options).task<VideoToTokenFeatures>().run(input);
+    check(
+        retained.features().rows == 3 && retained.features().columns == 2 &&
+            retained.features().values[2] == 0.25F && retained.features().values[4] == 0.75F &&
+            retained.features().values[3] == 2 && retained.features().values[5] == 2.5F &&
+            retained.tokens().size() == 3 && retained.tokens()[0].role == TRTMC_VIDEO_TOKEN_CLASS &&
+            retained.tokens()[1].frame_begin == 0 && retained.tokens()[1].frame_end == 1 &&
+            retained.tokens()[2].frame_begin == 1 && retained.tokens()[2].frame_end == 2 &&
+            retained.grid_frames() == 2 && retained.source_frame_count() == 2,
+        "video feature values, frame order, times and patch spans reach the correct owned result");
+    const auto model = Model::load(path.string(), options);
+    const auto task = model.task<VideoToTokenFeatures>();
+    check(model.tasks().size() == 1 && !model.supports<ImageToTokenFeatures>(),
+          "video features are advertised independently from image features");
+    rejects([&] { (void)task.run(input, {{"fps", 30.0}}); }, TRTMC_INVALID_CONFIG,
+            "shared video feature runtime does not infer an undeclared frame-rate control");
+    auto invalid = input;
+    invalid.video.timestamps_seconds = {0.0};
+    rejects([&] { (void)task.run(invalid); }, TRTMC_INVALID_ARGUMENT,
+            "video feature timeline length mismatch rejected");
+    invalid.video.timestamps_seconds = {1.0, 0.0};
+    rejects([&] { (void)task.run(invalid); }, TRTMC_INVALID_ARGUMENT,
+            "video feature nonmonotonic time rejected");
+    for (const auto* mode : {"video_bad_span", "video_bad_grid", "video_bad_count"}) {
+        const auto bad = root / (std::string(mode) + ".bundle");
+        bundle(bad, mode);
+        const auto bad_model = Model::load(bad.string(), options);
+        const auto bad_task = bad_model.task<VideoToTokenFeatures>();
+        rejects([&] { (void)bad_task.run(input); }, TRTMC_INTERNAL_ERROR,
+                "invalid family video feature geometry rejected");
+        std::filesystem::remove(bad);
+    }
+    input.video.frames.clear();
+    input.video.timestamps_seconds.clear();
+    auto moved = std::move(retained);
+    check(moved.tokens()[2].grid_frame == 1 && moved.features().values[4] == 0.75F &&
+              retained.tokens().empty(),
+          "video token metadata and features retain ownership after model/input release and result "
+          "move");
+    std::filesystem::remove(path);
+}
+
+void spectral_features(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
+    using namespace trtmc;
+    const auto path = root / "spectral_frames.bundle";
+    bundle(path, "spectral_frames");
+    const float values[]{-2, 1, 3, 7, -5, 9, 2, 0, 6};
+    const SpectrogramToFrameFeaturesRequest input{{{values, 9}, 3, 3}};
+    const auto model = Model::load(path.string(), options);
+    const auto task = model.task<SpectrogramToFrameFeatures>();
+    auto retained =
+        Model::load(path.string(), options).task<SpectrogramToFrameFeatures>().run(input);
+    const std::vector<float> expected_values{-2, 3, 2, 6};
+    const std::vector<uint64_t> expected_indices{0, 2};
+    const auto actual_values = retained.features().values;
+    const auto actual_indices = retained.input_frame_indices();
+    check(retained.features().rows == 2 && retained.features().columns == 2 &&
+              actual_values.size() == expected_values.size() &&
+              std::equal(actual_values.begin(), actual_values.end(), expected_values.begin()) &&
+              actual_indices.size() == expected_indices.size() &&
+              std::equal(actual_indices.begin(), actual_indices.end(), expected_indices.begin()) &&
+              retained.source_frame_count() == 3,
+          "spectral input values and temporal row mapping remain family-owned");
+    check(model.tasks().size() == 1 && !model.supports<TextToTokenFeatures>() &&
+              task.config_fields().empty(),
+          "spectral feature Task is independently discoverable");
+    rejects([&] { task.run(input, {{"normalize", true}}); }, TRTMC_INVALID_CONFIG,
+            "undeclared spectral options rejected");
+    rejects([&] { task.run({{{values, 9}, 4, 3}}); }, TRTMC_INVALID_ARGUMENT,
+            "spectral shape mismatch rejected");
+    rejects([&] { task.run({{{nullptr, 9}, 3, 3}}); }, TRTMC_INVALID_ARGUMENT,
+            "spectral null storage rejected");
+    rejects([&] { task.run({{{values, 9}, UINT64_MAX, 3}}); }, TRTMC_INVALID_ARGUMENT,
+            "spectral shape overflow rejected");
+    rejects([&] { task.run({{{}, 0, 3}}); }, TRTMC_INVALID_ARGUMENT,
+            "empty spectral input rejected");
+    for (const char* mode : {"spectral_bad_source", "spectral_bad_index", "spectral_bad_count",
+                             "spectral_bad_shape"}) {
+        const auto bad = root / (std::string(mode) + ".bundle");
+        bundle(bad, mode);
+        rejects(
+            [&] {
+                Model::load(bad.string(), options).task<SpectrogramToFrameFeatures>().run(input);
+            },
+            TRTMC_INTERNAL_ERROR, "invalid family spectral row mapping rejected");
+        std::filesystem::remove(bad);
+    }
+    auto moved = std::move(retained);
+    check(moved.input_frame_indices()[1] == 2 && moved.features().values[3] == 6 &&
+              retained.input_frame_indices().empty(),
+          "spectral result retains matrix and row mapping ownership across moves");
+    std::filesystem::remove(path);
+}
+
+void document_features(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
+    using namespace trtmc;
+    const auto path = root / "document_features.bundle";
+    bundle(path, "document_features");
+    const float pixels[18]{};
+    const DocumentWordsToTokenFeaturesRequest input{
+        ImageInput({pixels}, 2, 3), {{"First", {0.25F, 0, 1, 1}}, {"Last", {1, 1, 3, 2}}}};
+    const auto model = Model::load(path.string(), options);
+    const auto task = model.task<DocumentWordsToTokenFeatures>();
+    auto result =
+        Model::load(path.string(), options).task<DocumentWordsToTokenFeatures>().run(input);
+    check(result.features().rows == 4 && result.features().values[2] == 0.25F &&
+              result.features().values[4] == 2 && result.tokens()[0].word_index == -1 &&
+              result.tokens()[2].word_index == 1 && result.tokens()[3].word_index == -2 &&
+              result.source_word_count() == 2,
+          "document words preserve order, original pixel boxes and explicit text-token mapping");
+    check(model.tasks().size() == 1 && !model.supports<TextToTokenFeatures>(),
+          "document features retain their own Task identity");
+    auto bad = input;
+    bad.words[0].box.x_min = -1;
+    rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT, "document box outside source rejected");
+    bad = input;
+    bad.words[0].text.clear();
+    rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT, "empty document word rejected");
+    bad = input;
+    bad.words.clear();
+    rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT, "empty document words rejected");
+    rejects([&] { task.run(input, {{"ocr", true}}); }, TRTMC_INVALID_CONFIG,
+            "shared API does not invent OCR options");
+    for (const char* mode : {"document_bad_word", "document_bad_source", "document_bad_count"}) {
+        const auto file = root / (std::string(mode) + ".bundle");
+        bundle(file, mode);
+        const auto bad_model = Model::load(file.string(), options);
+        const auto bad_task = bad_model.task<DocumentWordsToTokenFeatures>();
+        rejects([&] { bad_task.run(input); }, TRTMC_INTERNAL_ERROR,
+                "invalid family document mapping rejected");
+        std::filesystem::remove(file);
+    }
+    auto moved = std::move(result);
+    check(moved.tokens()[2].word_index == 1 && moved.features().values[2] == 0.25F &&
+              result.tokens().empty(),
+          "document result retains feature and token ownership across moves");
+    std::filesystem::remove(path);
+}
+
 template <class Function>
 void rejects_index(Function function, trtmc_status code, size_t index, const char* message) {
     bool matched = false;
@@ -185,7 +332,7 @@ void global_pooled_contracts(const std::filesystem::path& root, const trtmc::Loa
 void exercise(const trtmc::Model& model) {
     const float pixels[] = {0.5F, 0.25F, 0.125F};
     const trtmc::ImageInput image({pixels, 3}, 1, 1);
-    check(model.tasks().size() == 28, "all 28 distinct typed feature contracts are discoverable");
+    check(model.tasks().size() == 29, "all 29 distinct typed feature contracts are discoverable");
     const trtmc::BatchImageToClassScoresRequest batch_input{
         {{{image}, {}}, {{image}, {{"scale", 2.0}}}}};
     auto batch_classes = model.task<trtmc::BatchImageToClassScores>().run(batch_input);
@@ -398,6 +545,21 @@ void exercise(const trtmc::Model& model) {
     auto joint = model.task<trtmc::ImageTextToEmbedding>().run({image, "doc"});
     check(joint.values().size() == 3 && joint.values()[0] == 14 && joint.values()[2] == 3,
           "joint image/text embedding is one complete input");
+    // Two points of three floats: six floats, so the float count differs from num_points.
+    const float cloud[6]{1, 2, 3, 4, 5, 6};
+    const auto cloud_task = model.task<trtmc::PointsToEmbedding>();
+    auto cloud_embedded = cloud_task.run({{cloud}, 2, 3});
+    check(cloud_embedded.values().size() == 4 && cloud_embedded.values()[0] == 19 &&
+              cloud_embedded.values()[1] == 4 && cloud_embedded.values()[2] == 2 &&
+              cloud_embedded.values()[3] == 3 &&
+              cloud_embedded.embedding_space() == "fixture.embedding" &&
+              cloud_embedded.pooling() == "mean" && cloud_embedded.normalization() == "none",
+          "point-cloud embedding sends num_points, not the float count, across the C ABI");
+    auto cloud_pairs = cloud_task.run({{cloud}, 3, 2}, {{"scale", 2.0}});
+    check(cloud_pairs.values().size() == 4 && cloud_pairs.values()[0] == 38 &&
+              cloud_pairs.values()[1] == 5 && cloud_pairs.values()[2] == 3 &&
+              cloud_pairs.values()[3] == 2,
+          "the same floats split by input_dim into a different point count");
     auto text_score = model.task<trtmc::TextPairToRelevance>().run({"q", "doc"});
     check(text_score.score() == 46 && text_score.kind() == TRTMC_SCORE_UNBOUNDED,
           "text query/document roles survive");
@@ -435,8 +597,71 @@ void exercise(const trtmc::Model& model) {
     wrong_image.wire.byte_size = 1;
     rejects([&] { model.task<trtmc::ImageToEmbedding>().run({wrong_image}); },
             TRTMC_INVALID_ARGUMENT, "malformed image uses the existing checked HWC converter");
+    rejects([&] { cloud_task.run({{cloud}, 3, 3}); }, TRTMC_INVALID_ARGUMENT,
+            "num_points * input_dim beyond the caller span is rejected before the call");
+    rejects([&] { cloud_task.run({{cloud}, 1, 3}); }, TRTMC_INVALID_ARGUMENT,
+            "a span longer than num_points * input_dim is rejected");
+    rejects([&] { cloud_task.run({{cloud}, 2, 0}); }, TRTMC_INVALID_ARGUMENT,
+            "a zero input_dim never matches a nonempty point span");
+    rejects([&] { cloud_task.run({{cloud}, 2, 3}, {{"scale", "bad"}}); }, TRTMC_INVALID_CONFIG,
+            "point-cloud embedding config types use the family field table");
 }
 } // namespace
+
+static int spatial_contracts(int argc, char** argv) {
+    if (argc != 2)
+        return 2;
+    try {
+        const std::filesystem::path root(argv[1]);
+        auto load = [&](const char* mode) {
+            const auto path = root / (std::string("spatial-cpp-") + mode + ".bundle");
+            bundle(path, mode);
+            trtmc::LoadOptions options;
+            options.runtime_root = root.string();
+            return trtmc::Model::load(path.string(), options);
+        };
+        float a[2]{0.2F, 0.8F}, b[2]{0.7F, 0.9F};
+        trtmc::SpatialFeaturesToClassScoresRequest input{
+            {{"first", {a}, 1, 1, 2}, {"second", {b}, 1, 1, 2}}};
+        auto model = load("spatial_features_to_class_scores");
+        auto task = model.task<trtmc::SpatialFeaturesToClassScores>();
+        auto first = task.run(input);
+        auto view = first.view();
+        check(view.values.size == 4 && view.classes == 2 && view.height == 1 && view.width == 2,
+              "retain class-major output shape");
+        check(view.values.data[1] + view.values.data[3] > 1.0F,
+              "independent class probabilities are not normalized");
+        check(view.class_names.size == 2 && std::string_view(view.class_names.data[1].data,
+                                                             view.class_names.data[1].size) == "b",
+              "preserve class names in score order");
+        a[0] = 0.1F;
+        auto second = task.run(input);
+        check(first.view().values.data[0] == 0.2F && second.view().values.data[0] == 0.1F,
+              "results own storage across calls");
+        auto invalid = input;
+        invalid.inputs[0].width = 3;
+        rejects([&] { (void)task.run(invalid); }, TRTMC_INVALID_ARGUMENT,
+                "reject inconsistent CHW input sizes");
+        invalid = input;
+        invalid.inputs[1].name = "first";
+        rejects([&] { (void)task.run(invalid); }, TRTMC_INVALID_ARGUMENT,
+                "reject duplicate input names");
+        invalid = input;
+        invalid.inputs[0].channels = UINT64_MAX;
+        invalid.inputs[0].height = 2;
+        rejects([&] { (void)task.run(invalid); }, TRTMC_INVALID_ARGUMENT,
+                "reject overflowing shapes before reading input values");
+        for (const char* mode :
+             {"spatial_bad_shape", "spatial_bad_names", "spatial_bad_probability"})
+            rejects(
+                [&] { (void)load(mode).task<trtmc::SpatialFeaturesToClassScores>().run(input); },
+                TRTMC_INTERNAL_ERROR, "reject a malformed family result");
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
+    return failures ? 1 : 0;
+}
 
 int main(int argc, char** argv) {
     if (argc != 2)
@@ -445,6 +670,10 @@ int main(int argc, char** argv) {
         const std::filesystem::path root(argv[1]);
         trtmc::LoadOptions options;
         options.runtime_root = root.string();
+        video_features(root, options);
+        spectral_features(root, options);
+
+        document_features(root, options);
         global_pooled_contracts(root, options);
         for (const std::string mode :
              {"all", "none", "missing", "bad_shape", "bad_count", "missing_pooler",
@@ -590,5 +819,6 @@ int main(int argc, char** argv) {
         std::cerr << "unexpected: " << error.what() << '\n';
         return 1;
     }
+    check(spatial_contracts(argc, argv) == 0, "spatial feature contracts");
     return failures == 0 ? 0 : 1;
 }

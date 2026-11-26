@@ -1,0 +1,38 @@
+Nemotron 3 Diarization checkpoint and model configuration:
+https://huggingface.co/nvidia/Nemotron-3-Diarization
+Revision 52a432672732425e4c19765b9fec9b5810e6f4ba.
+The checkpoint is distributed under its own license (OpenMDW-1.1) and is not
+part of this repository.
+
+Nemotron3DiarizationForAudioFrameClassification, Nemotron3DiarizationSpeakerCache
+and Nemotron3DiarizationProcessor (src/transformers/models/nemotron3_diarization/)
+and NemotronAsrStreamingFeatureExtractor
+(src/transformers/models/nemotron_asr_streaming/) reference implementation in
+Hugging Face Transformers 5.22.2, https://github.com/huggingface/transformers.
+The family transcribes the encoder and the speaker head (graph.py, model.py,
+rotary.py), the log-mel front end (frontend.py, runtime/frontend.cpp), the
+Arrival-Order Speaker Cache with its score boosts and compression and the
+offline chunk loop (runtime/speaker_cache.cpp, runtime/pipeline.cpp), and the
+speaker segments (runtime/pipeline.cpp):
+Copyright 2026 The HuggingFace Inc. team. All rights reserved.
+Licensed under the Apache License, Version 2.0.
+
+The Slaney mel filterbank in frontend.py (Slaney mel scale and Slaney area
+normalization) follows librosa.filters.mel of librosa 1.0.0,
+https://github.com/librosa/librosa, which is licensed as follows:
+
+ISC License
+
+Copyright (c) 2013--2026, librosa development team.
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.

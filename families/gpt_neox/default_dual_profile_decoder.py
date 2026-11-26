@@ -208,6 +208,7 @@ def build_dual_profile_decoder_engine(
 
     builder_context = create_builder_context(
         verbose=verbose,
+        disable_tf32=precision == "fp32",  # an FP32 bundle keeps FP32 matmuls
     )
     builder = builder_context.builder
     network = builder_context.network

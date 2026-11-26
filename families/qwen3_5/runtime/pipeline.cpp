@@ -6,6 +6,7 @@
 #include "families/qwen3_5/runtime/pipeline.h"
 
 #include "families/qwen3_5/runtime/chat_templates.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <chrono>
@@ -25,20 +26,44 @@ inline double elapsed_ms(TimePoint start, TimePoint end) {
 
 namespace trtmc {
 
+namespace {
+
+// The next decode step would store one more K/V row. A full cache ends the
+// generation, as max_new_tokens does, instead of dropping the prompt's rows.
+// A state without a length limit (max_length() < 0) never fills.
+bool kv_cache_full(const Qwen35InferenceState& state) {
+    const int32_t max_length = state.max_length();
+    return max_length >= 0 && state.position() >= max_length;
+}
+
+} // namespace
+
 RecurrentPipeline::RecurrentPipeline(std::unique_ptr<ITrtModule> decoder,
                                      std::unique_ptr<Qwen35InferenceState> state,
                                      RecurrentGenConfig config, cudaStream_t stream,
                                      const char* name, std::shared_ptr<ITokenizer> tokenizer,
                                      std::string model_id_str,
                                      std::unique_ptr<Qwen35MtpScheduler> mtp_scheduler,
-                                     std::unique_ptr<Qwen35PairedDraft> paired_draft)
+                                     std::unique_ptr<Qwen35PairedDraft> paired_draft,
+                                     std::unique_ptr<ITrtModule> prefill)
     : decoder_(std::move(decoder)), state_(std::move(state)), config_(config), stream_(stream),
       name_(name), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
-      mtp_scheduler_(std::move(mtp_scheduler)), paired_draft_(std::move(paired_draft)) {
+      mtp_scheduler_(std::move(mtp_scheduler)), paired_draft_(std::move(paired_draft)),
+      prefill_(std::move(prefill)) {
     if (mtp_scheduler_ && paired_draft_)
         throw std::runtime_error("Qwen3.5 cannot combine MTP and external draft schedulers");
     if (!decoder_ || !decoder_->ok())
         throw std::runtime_error(std::string(name_) + ": invalid decoder module");
+    if (prefill_) {
+        if (!prefill_->ok() || mtp_scheduler_ || paired_draft_)
+            throw std::runtime_error(std::string(name_) +
+                                     ": batched prefill needs a plain text decoder");
+        const auto rows = prefill_->input_profile_shape("token_id", prefill_->profile_idx(),
+                                                        ProfileShapeSelector::kMax);
+        if (rows.size() != 1 || rows[0] < 1)
+            throw std::runtime_error(std::string(name_) + ": invalid prefill token profile");
+        prefill_rows_ = static_cast<int32_t>(std::min<int64_t>(rows[0], state_->max_length()));
+    }
     // Inspect declared inputs rather than optional Edge metadata. Older text
     // bundles remain loadable and never receive media-only bindings.
     int media_bindings = 0;
@@ -195,6 +220,16 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
     if (mtp_scheduler_)
         return generate_from_ids_speculative(input_ids, max_new_tokens, params, *active_sampler);
 
+    // The KV cache never drops rows: a prompt it cannot hold is rejected before
+    // prefill, and generation stops once the cache is full.
+    if (const int32_t capacity = state_->max_length();
+        capacity >= 0 && input_ids.size() > static_cast<std::size_t>(capacity)) {
+        throw internal::ConfigError("qwen3_5 prompt has " + std::to_string(input_ids.size()) +
+                                    " tokens but the KV cache holds " + std::to_string(capacity) +
+                                    "; rebuild the bundle with a larger --max-sequence-length or "
+                                    "shorten the prompt");
+    }
+
     state_->reset();
     state_->bind_to(*decoder_);
 
@@ -205,10 +240,14 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
 
     // ── Prefill phase ──
     auto t_prefill_start = SteadyClock::now();
-    for (std::size_t i = 0; i + 1 < input_ids.size(); ++i)
-        run_step(input_ids[i], logits);
-
-    run_step(input_ids.back(), logits);
+    // Longer prompts were rejected above. A state without a length limit
+    // (max_length() < 0) keeps the token loop.
+    if (prefill_ && static_cast<int64_t>(input_ids.size()) <= state_->max_length()) {
+        run_prefill_chunks(input_ids, logits);
+    } else {
+        for (const auto token : input_ids)
+            run_step(token, logits);
+    }
     auto t_prefill_end = SteadyClock::now();
 
     // ── Decode phase ──
@@ -221,6 +260,8 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
         Qwen35SampleResult result = active_sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
         if (result.is_eos || step + 1 == max_new_tokens)
+            break;
+        if (kv_cache_full(*state_))
             break;
         run_step(result.token_id, logits);
         ++decode_steps;
@@ -447,6 +488,41 @@ void RecurrentPipeline::report_timing(SteadyClock::time_point t_prefill_start,
                   << (output_bytes / (1024.0 * 1024.0)) << " MB (" << decoder_->output_info().size()
                   << " tensors)\n";
     }
+}
+
+void RecurrentPipeline::run_prefill_chunks(const std::vector<int32_t>& input_ids,
+                                           std::vector<float>& logits) {
+    const auto total = static_cast<int32_t>(input_ids.size());
+    state_->bind_prefill(*prefill_);
+    try {
+        for (int32_t start = 0; start < total; start += prefill_rows_) {
+            const int32_t rows = std::min(prefill_rows_, total - start);
+            TensorMap inputs;
+            inputs["token_id"] =
+                Tensor{const_cast<int32_t*>(input_ids.data() + start), {rows}, DType::kInt32};
+            state_->prepare_step(inputs, rows);
+            prefill_->forward_async(inputs);
+            state_->commit_prefill(*prefill_, rows);
+        }
+    } catch (...) {
+        // Queued chunks may still read the request's tokens: drain them before the error
+        // releases the request. A failure of the drain must not replace the original error.
+        try {
+            prefill_->sync();
+        } catch (...) {
+        }
+        throw;
+    }
+    prefill_->sync();
+    const auto* device_logits = prefill_->device_ptr("logits");
+    if (device_logits == nullptr)
+        throw std::runtime_error(std::string(name_) + ": prefill context has no logits output");
+    logits.resize(static_cast<std::size_t>(config_.vocab_size));
+    const cudaError_t copied = cudaMemcpy(logits.data(), device_logits,
+                                          logits.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    if (copied != cudaSuccess)
+        throw std::runtime_error(std::string(name_) +
+                                 ": failed to copy prefill logits: " + cudaGetErrorString(copied));
 }
 
 void RecurrentPipeline::run_step(int32_t token_id, std::vector<float>& logits,

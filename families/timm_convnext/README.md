@@ -94,3 +94,18 @@ trtmc build timm/convnext_tiny.in12k_ft_in1k --precision fp16 --quantization fp8
 
 The `convnext-tiny-in12k-ft-in1k-fp8` manifest runs the same top-1 E2E check as
 the fp16 case.
+
+### NVFP4
+
+NVFP4 is not used. TensorRT has no FP4 convolution (block-scaled FP4 needs a
+2-D GEMM input), so only the 1x1 MLP convolutions could take NVFP4, after a
+rewrite to matrix multiplies with a channels-last layout. They are less than
+half of the time: on B300, batch 1, `convnext_tiny`, the fp16 engine spends
+0.475 ms of GPU kernel time per run, of which about 0.22 ms are in the layers
+that FP8 quantizes.
+
+On the closest measured case (timm Swin, same widths 96 to 1024, batch 1 to 32,
+B200 and B300, TensorRT 11.4), every NVFP4 layout was 3% to 14% slower than FP8,
+because each FP4 projection adds a dynamic-quantize kernel and the GELU stops
+fusing, and its KL divergence was 5x to 14x the FP8 KL divergence. NVFP4 was not
+built for ConvNeXt.

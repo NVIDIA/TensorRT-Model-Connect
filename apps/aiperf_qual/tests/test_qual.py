@@ -312,9 +312,9 @@ def test_models_are_derived_from_the_catalog_and_task_defaults():
         assert resolve_model("sana-wm-bidirectional", environment, root=root)["reference"]["backend"] == "unsupported"
 
 
-def test_a_family_definition_is_merged_over_config_models(tmp_path):
-    """sana-wm-bidirectional: its native adapter in config/models, its reference build policy in the family's own
-    definition (families/sana_wm/tests/aiperf). The resolved reference has both."""
+def test_config_models_is_the_only_definition_of_a_profile(tmp_path):
+    """sana-wm-bidirectional: its native adapter and its reference build policy both come from config/models; without
+    that file the profile has its Task defaults alone (a family holds no AIPerf settings)."""
     import shutil
 
     from trtmc_aiperf_qual.config import CONFIG_ROOT
@@ -326,7 +326,7 @@ def test_a_family_definition_is_merged_over_config_models(tmp_path):
     shutil.copytree(CONFIG_ROOT, root)
     (root / "models/sana-wm-bidirectional.yaml").unlink()
     alone = resolve_model("sana-wm-bidirectional", _environment(), root=root)["reference"]
-    assert "adapter" not in alone and alone["build_isolation"] is False
+    assert "adapter" not in alone and "build_isolation" not in alone
 
 
 def test_task_sdk_migrations_keep_their_tasks_qualification():
@@ -378,6 +378,34 @@ def test_migrated_text_encoders_keep_their_benchmarks():
     assert tasks["text_to_token_features"] == {**tasks["encoding"], "reference": {"options": {"all_tokens": True}}}
 
 
+def test_migrated_decoder_language_models_keep_their_benchmarks():
+    """text_continuation (the qwen3 profiles migrated to the Task SDK) keeps text_generation's benchmarks."""
+    import yaml
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+
+    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
+    assert tasks["text_continuation"] == tasks["text_generation"]
+
+
+def test_a_benchmark_without_its_suite_is_a_configuration_error_of_the_profile(tmp_path):
+    """A Task's benchmark whose suite each profile states (action_chunk_parity), named by a profile that states none:
+    the profile's configuration error, never an exception that stops a campaign's other profiles."""
+    import yaml
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT, ConfigError, Environment
+    from trtmc_aiperf_qual.models import resolve_model
+
+    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())
+    tasks["benchmarks"]["stated_per_profile"] = {"suite": "parity", "metric": "action_parity", "gate": {}}
+    tasks["tasks"]["text_continuation"] = {**tasks["tasks"]["text_continuation"], "absolute": ["stated_per_profile"]}
+    root = tmp_path / "config"
+    root.mkdir()
+    (root / "tasks.yaml").write_text(yaml.safe_dump(tasks))
+    with pytest.raises(ConfigError, match="qwen3-0.6b-fp16: benchmark 'parity' names no suite_definition"):
+        resolve_model("qwen3-0.6b-fp16", Environment({"repo": str(REPOSITORY)}), root=root)
+
+
 def test_text_encoders_the_generic_references_cannot_serve_are_excluded_with_a_reason():
     from trtmc_aiperf_qual.selection import catalog
 
@@ -388,22 +416,29 @@ def test_text_encoders_the_generic_references_cannot_serve_are_excluded_with_a_r
     assert not any(excluded[name] for name in ("nemotron-embed-vl-1b-v2", "albert-base-token-features"))
 
 
-def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
-    """A ready profile whose Task has no defaults is a configuration error that reports leave out, so a Task SDK
-    rename drops its profiles without a trace: alias the old entry in config/tasks.yaml, or state the gap here."""
-    import yaml
-
-    from trtmc_aiperf_qual.config import CONFIG_ROOT
+def test_profiles_whose_only_native_reference_is_vllm_are_excluded():
+    # The family's independent native reference is a pinned vLLM snapshot, and AIPerf has no vLLM native backend.
+    # Drop this test with the exclusion once AIPerf can serve that reference.
     from trtmc_aiperf_qual.selection import catalog
 
-    not_qualified = {  # Tasks no generic native reference or benchmark serves yet
-        "structured_decision": "no generic native adapter for decide",
-        "image_text_to_boxes": "no generic native adapter for detect_prompted",
-        "image_to_token_and_pooled_features": "no image feature benchmark outside the families that state one",
-        "speech_transcription": "the generic transcribe reference loads Whisper-style speech-seq2seq models only",
-    }
+    profiles = {profile.name: profile for profile in catalog(REPOSITORY)}
+    assert "vLLM" in profiles["nemotron-omni-nvfp4-text-image"].excluded
+    assert "nemotron-omni-nvfp4-native" not in profiles  # the catalog does not mark it ready
+
+
+def test_every_task_entry_serves_a_catalog_task():
+    """A Task SDK rename leaves the old entry of config/tasks.yaml serving no catalog profile, and the renamed
+    profiles without defaults (left out: no Task defaults): alias the old entry under the new name. A Task new to the
+    catalog has no entry yet, and its profiles are left out with that reason."""
+    import yaml
+
+    from trtmc_benchmark.catalog import ManifestCatalog
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+
     tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
-    assert {profile.task for profile in catalog(REPOSITORY)} - set(tasks) == set(not_qualified)
+    used = {entry.model.task for entry in ManifestCatalog(REPOSITORY / "families").entries() if entry.model} & set(tasks)
+    # An alias is the same entry: the old name stays as its YAML anchor.
+    assert not [name for name, entry in tasks.items() if not any(entry is tasks[task] for task in used)]
 
 
 def test_top1_near_tie_tolerance_is_opt_in():
@@ -657,6 +692,23 @@ def test_a_quantized_profile_is_qualified_as_its_models_highest_precision_profil
     assert qualified_as("m", entries) == "m"  # not quantized: its own configuration
     assert qualified_as("x-fp8", entries) == "x-fp8"  # nothing ranks higher
     assert qualified_as("y-nvfp4", entries) == "y-fp8"  # the highest precision there is, quantized too
+    entries["m-int4-awq"] = entry("m-int4-awq", precision="fp16", quantization="int4_awq")
+    assert qualified_as("m-int4-awq", entries) == "m-bf16"  # both name parts name the quantization
+    from trtmc_aiperf_qual.models import highest_precision_sibling
+
+    # An unquantized precision variant is not qualified as its sibling, but can take its sibling's configuration.
+    assert highest_precision_sibling("m", entries) == "m-bf16"
+    assert highest_precision_sibling("m-bf16", entries) == "m-bf16"  # nothing ranks higher
+
+
+def test_only_the_profiles_own_suffix_marks_an_l0_or_regression_variant():
+    from trtmc_aiperf_qual.models import smoke_variant
+
+    assert smoke_variant("qwen3-0.6b-regression-native-kv-chunked-prefill", "Qwen/Qwen3-0.6B")
+    assert smoke_variant("cosmos3-nano-l0", "nvidia/Cosmos3-Nano") and smoke_variant("ltx-video-fp8-l0", "")
+    # A regression model, not a regression variant: the word is its checkpoint's name.
+    assert not smoke_variant("patchtst-etth1-regression-distribution",
+                             "ibm-research/patchtst-etth1-regression-distribution")
 
 
 def test_quantized_profiles_take_their_bases_native_reference_and_benchmarks():
@@ -715,6 +767,18 @@ def test_stable_diffusion_uses_explicit_controls_on_its_actual_request(tmp_path)
     assert not unstated_defaults(request)
 
 
+def test_wan22_states_the_negative_prompt_its_runtime_would_substitute():
+    """TRTMC's Wan 2.2 runtime replaces an empty negative prompt with the official one; Diffusers encodes "".
+    Every suite built on the catalog request must state it so both sides denoise with the same guidance."""
+    from trtmc_aiperf_qual.models import model_suite, resolve_model
+
+    model = resolve_model("wan22-ti2v-5b", _environment())
+    stated = model["catalog_request"]["negative_prompt"]
+    assert stated.strip()  # left empty, each side would apply its own default
+    assert model_suite("vbench-objects-20", model)["request"]["negative_prompt"] == stated
+    assert model["performance"]["suite"]["request"]["negative_prompt"] == stated
+
+
 def test_rwkv_qualification_build_and_selection_use_the_same_capacity():
     from trtmc_aiperf_qual.models import resolve_model
 
@@ -724,12 +788,24 @@ def test_rwkv_qualification_build_and_selection_use_the_same_capacity():
 
 
 def test_timing_reference_precision_can_differ_from_the_candidate_precision():
-    from trtmc_aiperf_qual.models import resolve_model
     from trtmc_aiperf_qual.runner import timing_precisions
 
-    z_image = resolve_model("z-image-turbo", _environment())["reference"]
-    assert z_image["perf_precision"] == "fp16" and timing_precisions(z_image) == ["bf16"]
+    # A native model with no valid output at the candidate precision is timed at the declared one alone.
+    declared = {"perf_precision": "fp16", "precision": "fp32", "timing_precision": "bf16"}
+    assert timing_precisions(declared) == ["bf16"]
     assert timing_precisions({"perf_precision": "fp16", "precision": "fp32"}) == ["fp16", "fp32"]
+
+
+def test_report_reference_names_the_precision_the_native_model_ran_at():
+    from trtmc_aiperf_qual.runner import reported_reference
+
+    reference = {"backend": "reference", "perf_precision": "fp16", "precision": "fp32", "timing_precision": None}
+    accuracy = [{"suite": "encoder-parity", "native": {"backend": "reference", "precision": "fp16", "mode": "eager"}}]
+    reported = reported_reference(reference, [], accuracy)
+    assert reported["precision"] == "fp16" and reported["fallback_precision"] == "fp32"
+    timed = [{"reference": {"precision": "fp32", "precision_fallback": "fp16 failed"}}]
+    assert reported_reference(reference, timed, accuracy)["precision"] == "fp32"  # as timed, after a fallback
+    assert reported_reference(reference, [], [])["precision"] == "fp16"  # nothing ran: the first it would time at
 
 
 def test_always_sampling_tts_models_compare_duration_in_perf():
@@ -1014,19 +1090,30 @@ def test_sampled_speech_is_valid_by_its_median_duration_not_each_utterance():
     assert validity([], [], [])["status"] == "error"
 
 
-def test_silent_speech_failure_reports_the_paired_native_baseline():
+def test_silence_the_native_model_shares_is_reported_not_failed():
     from trtmc_aiperf_qual.intelligibility import validity
 
-    problem = [{"sample_id": "same-request"}]
+    problems = [{"sample_id": "same-request"}, {"sample_id": "voiced"}]
     quiet = {"finite": True, "dbfs": -56.58, "seconds": 6.69}
-    native = {"finite": True, "dbfs": -56.52, "seconds": 6.69}
-    result = validity(problem, [quiet], [native])
-    assert result["status"] == "fail" and result["passed"] == 0
-    assert "native also silent (-56.5 dBFS)" in result["failures"][0]["explanation"]
-    assert result["failures"][0]["native_audio"] == native
-    # Native validity is evidence, not an additional absolute-quality floor.
+    native_quiet = {"finite": True, "dbfs": -56.52, "seconds": 6.69}
     good = {"finite": True, "dbfs": -20.0, "seconds": 6.69}
-    assert validity(problem, [good], [native])["status"] == "pass"
+    shared = validity(problems, [quiet, good], [native_quiet, good])
+    assert shared["status"] == "pass" and shared["passed"] == 2 and not shared["failures"]
+    assert "1 of 2 sentences silent on both sides (the model's own output): same-request" in shared["notes"]
+    # TRTMC silent where the native model speaks is still a failure, reported with the native baseline.
+    alone = validity(problems, [quiet, good], [good, good])
+    assert alone["status"] == "fail" and alone["passed"] == 1
+    assert alone["failures"][0]["explanation"] == "silent (-56.6 dBFS)" and alone["failures"][0]["native_audio"] == good
+    # Native silence never excuses missing or non-finite TRTMC audio.
+    broken = validity(problems, [{"finite": False, "dbfs": None, "seconds": 6.69}, good], [native_quiet, good])
+    assert broken["status"] == "fail" and broken["failures"][0]["explanation"] == "non-finite samples"
+    assert validity(problems, [None, good], [native_quiet, good])["status"] == "fail"
+    # Empty audio is not silence: it fails even where the native model is quiet.
+    empty = validity(problems, [{"finite": True, "dbfs": -1000.0, "seconds": 0.0}, good], [native_quiet, good])
+    assert empty["status"] == "fail" and empty["failures"][0]["explanation"] == "empty audio"
+    assert not any("silent on both sides" in note for note in empty["notes"])
+    # Native validity is evidence, not an additional absolute-quality floor.
+    assert validity(problems[:1], [good], [native_quiet])["status"] == "pass"
 
 
 def test_reports_label_a_timing_normalized_per_audio_second(tmp_path):
@@ -1041,6 +1128,34 @@ def test_reports_label_a_timing_normalized_per_audio_second(tmp_path):
     assert "40.000 per audio second</td><td>90.000 per audio second" in report_html._performance([item])
 
 
+def test_a_profile_configuration_adds_an_outlier_allowance_to_a_shared_benchmark_gate(tmp_path):
+    from trtmc_aiperf_qual.models import deep_merge, profile_override
+
+    definition = tmp_path / "config" / "models" / "enc.yaml"
+    definition.parent.mkdir(parents=True)
+    definition.write_text("benchmarks:\n  encoder_parity:\n"
+                          "    gate: {outliers: {max_fraction: 0.01, gate: {max_relative_l2: 0.04}}}\n")
+    shared = {"encoder_parity": {"metric": "vector_parity", "gate": {"min_cosine": 0.999, "max_relative_l2": 0.02}}}
+    override = profile_override("enc", root=tmp_path / "config")
+    gate = deep_merge(shared, override["benchmarks"])["encoder_parity"]["gate"]
+    assert gate == {"min_cosine": 0.999, "max_relative_l2": 0.02,
+                    "outliers": {"max_fraction": 0.01, "gate": {"max_relative_l2": 0.04}}}
+
+
+def test_reports_name_the_tolerated_outliers(tmp_path):
+    from trtmc_aiperf_qual import report_html
+    from trtmc_aiperf_qual.report import write_report
+
+    item = {"suite": "encoder-parity", "source": "absolute", "benchmark": "vector_parity", "status": "pass",
+            "samples": 400, "expected_samples": 400, "passed": 399, "required_passes": 396,
+            "notes": ["1 of 400 outputs outside the tolerance but within the outlier gate (at most 4 allowed)"],
+            "outliers": [{"sample_id": "136:sentence1", "explanation": "cosine 0.99940, relative L2 0.0346"}]}
+    write_report(tmp_path, {"model": "m", "provenance": {}, "accuracy": [item]})
+    assert "| tolerated outlier 136:sentence1: cosine 0.99940, relative L2 0.0346 |" in (tmp_path / "report.md").read_text()
+    page = report_html._accuracy([item])
+    assert "tolerated outlier" in page and "136:sentence1" in page and "relative L2 0.0346" in page
+
+
 def test_lance_qualification_has_a_native_path_and_sizes_the_multimodal_benchmark():
     from trtmc_aiperf_qual.config import Environment
     from trtmc_aiperf_qual.models import resolve_model
@@ -1051,3 +1166,15 @@ def test_lance_qualification_has_a_native_path_and_sizes_the_multimodal_benchmar
     assert (repository / model["reference"]["adapter"]).is_file()
     assert model["candidate"]["benchmark_sequence_length"]["extra_tokens"] == 288
     assert model["candidate"]["tokenizer_subfolder"] == "Lance_3B"
+
+
+def test_internlm2_counts_prompts_with_the_bundles_tokenizer_json():
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.models import resolve_model
+
+    repository = Path(__file__).resolve().parents[3]
+    model = resolve_model("internlm2-1.8b", Environment({"repo": str(repository)}))
+    assert model["reference"]["trust_remote_code"]
+    # The repository families/internlm/tokenizer_json.py builds the bundle's tokenizer from.
+    assert model["candidate"]["tokenizer_json"] == {
+        "repo": "internlm/internlm2-step-prover", "revision": "9e24972976836edf59be9eb14050437c60f50a6c"}

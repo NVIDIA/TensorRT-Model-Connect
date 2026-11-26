@@ -1,0 +1,35 @@
+{
+  "name": "nemotron-3.5-embed-1b",
+  "hf_id": "nvidia/Nemotron-3.5-Embed-1B-BF16",
+  "hf_revision": "e24ca1e346bcc53572bd7bdc02b3e8ebf66c197c",
+  "bundle": "nemotron-3.5-embed-1b.bundle",
+  "family": "nemotron_embed",
+  "task": "text_to_embedding",
+  "precision": "fp32",
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "nemotron-3.5-embed-1b",
+      "premerge": true,
+      "inputs": [
+        {
+          "text": "Embedding documents with context.",
+          "role": "default"
+        },
+        {
+          "text": "How do plants absorb sunlight?",
+          "role": "query"
+        },
+        {
+          "text": "Plants use photosynthesis to convert sunlight into energy.",
+          "role": "document"
+        },
+        {
+          "text": "多言語の文章と café １２３.",
+          "role": "document"
+        }
+      ]
+    }
+  ]
+}

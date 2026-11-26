@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The Idefics3 runtime decodes greedily and declares only max_new_tokens and do_sample: OCRBench's sampling fields
+# (already greedy: temperature 0, top_k 1) and enable_thinking are removed (a null removes the suite's field).
+absolute: [{name: ocrbench, request: {enable_thinking: null, temperature: null, top_k: null, top_p: null}}]

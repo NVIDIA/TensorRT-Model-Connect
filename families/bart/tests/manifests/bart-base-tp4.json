@@ -4,7 +4,7 @@
   "hf_revision": "aadd2ab0ae0c8268c7c9693540e9904811f36177",
   "bundle": "bart-base-tp4.bundle",
   "family": "bart",
-  "task": "text_generation",
+  "task": "conditional_text_generation",
   "testcases": [
     {
       "name": "bart-base-tp4",

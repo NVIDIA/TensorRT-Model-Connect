@@ -58,7 +58,7 @@ class TrtBackend final : public IBackend {
     BackendDualProfileModules
     create_dual_profile_modules(const void* plan_data, size_t plan_size,
                                 const ModuleCreateOptions& options) override {
-        auto* engine_raw = runtime_->deserializeCudaEngine(plan_data, plan_size);
+        auto* engine_raw = deserialize(plan_data, plan_size);
         if (!engine_raw)
             throw std::runtime_error("[trtmc] Failed to deserialize engine (TRT)");
         std::shared_ptr<nvinfer1::ICudaEngine> engine(engine_raw,
@@ -98,10 +98,19 @@ class TrtBackend final : public IBackend {
     const char* name() const override { return "trt"; }
 
   private:
+    // TensorRT allocates engine weights with cudaMallocAsync from the device's current pool; on
+    // Thor the default pool stops at a third of the memory (see use_full_size_mem_pool).
+    nvinfer1::ICudaEngine* deserialize(const void* plan_data, size_t plan_size) {
+        int device = 0;
+        if (cudaGetDevice(&device) == cudaSuccess)
+            use_full_size_mem_pool(device);
+        return runtime_->deserializeCudaEngine(plan_data, plan_size);
+    }
+
     std::unique_ptr<ITrtModule>
     create_module_impl(const void* plan_data, size_t plan_size, const ModuleCreateOptions& options,
                        const std::vector<ModuleExternalBinding>& external_bindings) {
-        auto* engine = runtime_->deserializeCudaEngine(plan_data, plan_size);
+        auto* engine = deserialize(plan_data, plan_size);
         if (!engine)
             throw std::runtime_error("[trtmc] Failed to deserialize engine (TRT)");
 

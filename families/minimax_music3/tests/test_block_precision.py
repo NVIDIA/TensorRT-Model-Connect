@@ -203,9 +203,19 @@ def test_build_one_passes_the_block_precision(monkeypatch, precision: str) -> No
     seen = {}
 
     def fake_dit(
-        network, trt_, latents, condition, embedded, *, latent_length, weights, dtype=None
+        network,
+        trt_,
+        latents,
+        condition,
+        embedded,
+        *,
+        latent_length,
+        weights,
+        dtype=None,
+        quant=None,
     ):
         seen["dit"] = dtype
+        assert quant is None
         # Every input reaches the output, so the stand-in network builds.
         pooled = network.add_reduce(condition, trt.ReduceOperation.AVG, 1 << 2, True).get_output(0)
         turned = network.add_shuffle(pooled)
@@ -215,8 +225,9 @@ def test_build_one_passes_the_block_precision(monkeypatch, precision: str) -> No
             total.get_output(0), embedded, trt.ElementWiseOperation.SUM
         ).get_output(0)
 
-    def fake_decoder(network, trt_, inputs_embeds, *, steps, weights, dtype=None):
+    def fake_decoder(network, trt_, inputs_embeds, *, steps, weights, dtype=None, quant=None):
         seen["depth"] = dtype
+        assert quant is None
         return network.add_identity(inputs_embeds).get_output(0)
 
     depth_engine = importlib.import_module("families.minimax_music3.depth_decoder_engine")

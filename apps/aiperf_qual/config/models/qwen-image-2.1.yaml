@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Diffusers 0.42.1 provides QwenImage21Pipeline; the serving interpreter has 0.39.0.
+reference:
+  requirements: families/qwen_image2_1/requirements.txt  # the family's dependencies, layered on the serving interpreter
+
+# Qwen-Image 2.1 has no guidance_scale on either side (TRTMC's Task declares none and QwenImage21Pipeline takes
+# none), so null removes it from every request. Its classifier-free guidance is cfg_scale (the pipeline's
+# true_cfg_scale), off at 1.0 on both sides by default; the bundle and the pipeline both generate 1024 x 1024.
+request: {guidance_scale: null, cfg_scale: 1.0, height: 1024, width: 1024}

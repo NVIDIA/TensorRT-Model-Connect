@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 from .config import ModelConfig
 from .engine_builder import Qwen38Model, _owned
+from .weight_spill import host_weight_bytes, spill_if_large
 
 
 _BUNDLE_FILES = (
@@ -180,6 +182,42 @@ def _native_prefill_chunk_len(request, capacity, *, visual=False, external_draft
     return chunk if chunk >= 2 else 0
 
 
+# Share of GPU memory that the decode and prefill engines' weights may take together.
+_TWO_ENGINE_MEMORY_FRACTION = 0.8
+
+
+def _decoder_engine_layout(chunk: int, weight_bytes: int, gpu_bytes: int | None, *, has_mtp: bool) -> str:
+    """Which decoder engines a single-GPU bundle ships.
+
+    ``"single"``: ``engine.plan`` decodes and, when ``chunk`` >= 2, ``prefill_engine.plan`` takes the prompt
+    ``chunk`` rows per call. Each engine carries its own copy of the weights: a 27B FP16 checkpoint needs about
+    108 GB for both, more than a 128 GB unified-memory GPU leaves after the runtime. Such a bundle is
+    ``"chunked"``: it ships only ``prefill_engine.plan``, which also decodes, one row per call, so a prompt
+    still reads the weights once per chunk instead of once per token. MTP verification reads the decode
+    engine's hidden states, so an MTP bundle keeps both engines.
+    """
+    if chunk < 2 or has_mtp or gpu_bytes is None:
+        return "single"
+    needed = 2 * weight_bytes
+    if needed <= gpu_bytes * _TWO_ENGINE_MEMORY_FRACTION:
+        return "single"
+    print(f"Building the prefill engine only: the decode and prefill engines need about "
+          f"{needed / 1024**3:.0f} GiB of weights and the GPU has {gpu_bytes / 1024**3:.0f} GiB; "
+          "the prefill engine also decodes", file=sys.stderr)
+    return "chunked"
+
+
+def _gpu_memory_bytes() -> int | None:
+    """Total memory of the current CUDA device, or None when no device can be queried."""
+    try:
+        import torch
+    except ImportError:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    return int(torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory)
+
+
 def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path | None = None,
                   draft_variant: str = "dspark") -> None:
     """Build the requested family-native topology without precision or task downgrade."""
@@ -285,6 +323,8 @@ def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path
     weights = model.load_weights(
         str(model_dir), config, precision=precision,
         quant_ctx=quant_ctx, readers=readers)
+    # A 27B checkpoint's host weights plus TensorRT's device copy exceed a 128 GB unified-memory GPU.
+    spill_if_large(weights, request.output_path)
     # Embedded draft weights alone do not request speculative execution.
     # Ordinary Edge fallback must not add duplicate verification engines.
     has_mtp = _mtp_enabled(request, weights, quant_ctx, require_mtp=require_mtp)
@@ -293,33 +333,42 @@ def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path
         fp8_cache=bool(weights.get("_fp8_kv_cache", False)),
         prepared_mtp=has_mtp and _owned(quant_ctx, "mtp_layer.fc"),
     )
+    layout = "single"
+    if request.tensor_parallel_size == 1 and quant_ctx is None:  # host bytes size an unquantized engine only
+        layout = _decoder_engine_layout(
+            prefill_chunk_len, host_weight_bytes(weights), _gpu_memory_bytes(), has_mtp=has_mtp)
     if request.tensor_parallel_size == 2:
         _build_tensor_parallel(request, writer, model_dir, config, model, weights,
                                max_sequence_length, visual_config, visual_metadata, readers)
         return
-    plan = model.build_engine(
-        config,
-        weights,
-        max_sequence_length,
-        precision=precision,
-        quant_ctx=quant_ctx,
-        verbose=bool(request.verbose),
-        debug_layer_outputs=False,
-        **({"target_feature_layers": draft_config.feature_layers} if draft_config else {}),
-        **({"media_inputs": True} if visual else {}),
-    )
+    # Every plan embeds the full weight set: TensorRT streams the target and prefill plans straight into the
+    # bundle, so a 27B build never holds a serialized plan in host memory next to the builder's own copies.
+    _publish_native_header(request, writer)
+    if layout == "single":
+        with writer.open_section("engine.plan") as section:
+            model.build_engine(
+                config,
+                weights,
+                max_sequence_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                verbose=bool(request.verbose),
+                debug_layer_outputs=False,
+                plan_stream=section,
+                **({"target_feature_layers": draft_config.feature_layers} if draft_config else {}),
+                **({"media_inputs": True} if visual else {}),
+            )
 
-    prefill_plan = None
     if prefill_chunk_len >= 2:
-        prefill_plan = model.build_engine_prefill(
-            config, weights, max_sequence_length, prefill_chunk_len,
-            precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
-        )
+        with writer.open_section("prefill_engine.plan") as section:
+            model.build_engine_prefill(
+                config, weights, max_sequence_length, prefill_chunk_len,
+                precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
+                plan_stream=section,
+            )
     else:
         prefill_chunk_len = 0
 
-    mtp_plan = None
-    multi_token_plan = None
     # Built only with --mtp-seq-len. mtp_seq_len = 1 real token + (mtp_seq_len-1) drafted tokens verified
     # per speculative-decode round. Default of 2 (1 draft) matches the
     # only configuration validated end-to-end on real hardware so far;
@@ -328,44 +377,32 @@ def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path
     # a more expensive recovery path on any non-full-accept round (see
     # Qwen38MtpScheduler's class-level comment in mtp_scheduler.h).
     mtp_seq_len = int(request.mtp_seq_len) if request.mtp_seq_len is not None else 2
-    mtp_prefill_plan = None
     if has_mtp and prefill_chunk_len >= 2:
-        mtp_prefill_plan = model.build_mtp_prefill_engine(
+        writer.add_bytes("mtp_prefill_engine.plan", model.build_mtp_prefill_engine(
             config, weights, max_sequence_length + mtp_seq_len - 2, prefill_chunk_len,
             precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
-        )
+        ))
+    if visual:
+        from .vision import build_vision_engine, load_vision_weights
+        visual_weights, visual_quant = load_vision_weights(model_dir, visual_config, readers=readers)
+        writer.add_bytes("native_visual.plan", build_vision_engine(
+            visual_config, visual_weights, visual_metadata["max_tokens"] * visual_config.merge ** 2,
+            quant_ctx=visual_quant))
+        del visual_weights, visual_quant
+        writer.add_json("native_visual.json", visual_metadata)
     if has_mtp:
-        mtp_plan = model.build_mtp_engine(
+        writer.add_bytes("mtp_engine.plan", model.build_mtp_engine(
             # Scratch draft suffixes must fit even at the target's last
             # admitted position, without evicting the confirmed prefix.
             config, weights, max_sequence_length + mtp_seq_len - 2,
             precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
             media_inputs=visual,
-        )
-        multi_token_plan = model.build_engine_multi_token(
+        ))
+        writer.add_bytes("multi_token_engine.plan", model.build_engine_multi_token(
             config, weights, max_sequence_length, mtp_seq_len,
             precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
             media_inputs=visual,
-        )
-
-    _publish_native_header(request, writer)
-    writer.add_bytes("engine.plan", plan)
-    if prefill_plan is not None:
-        writer.add_bytes("prefill_engine.plan", prefill_plan)
-    if mtp_prefill_plan is not None:
-        writer.add_bytes("mtp_prefill_engine.plan", mtp_prefill_plan)
-    if visual:
-        from .vision import build_vision_engine, load_vision_weights
-        visual_weights, visual_quant = load_vision_weights(model_dir, visual_config, readers=readers)
-        visual_plan = build_vision_engine(
-            visual_config, visual_weights, visual_metadata["max_tokens"] * visual_config.merge ** 2,
-            quant_ctx=visual_quant)
-        writer.add_bytes("native_visual.plan", visual_plan)
-        writer.add_json("native_visual.json", visual_metadata)
-    if mtp_plan is not None:
-        writer.add_bytes("mtp_engine.plan", mtp_plan)
-    if multi_token_plan is not None:
-        writer.add_bytes("multi_token_engine.plan", multi_token_plan)
+        ))
     writer.add_json(
         "runtime.json",
         _runtime_config(
@@ -374,7 +411,7 @@ def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path
             model,
             precision=precision,
             max_cache_length=max_sequence_length,
-            decoder_engine_layout="single",
+            decoder_engine_layout=layout,
             has_mtp=has_mtp,
             mtp_num_draft_tokens=(mtp_seq_len - 1) if has_mtp else 0,
             prefill_chunk_len=prefill_chunk_len,

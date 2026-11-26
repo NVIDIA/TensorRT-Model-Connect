@@ -55,6 +55,7 @@ if(TRTMC_BUILD_TESTS)
       test_qwen_sampler
       test_qwen_tensor_names
       test_qwen_text_stream
+      test_qwen_task_pipeline
   )
     add_executable(${test_name}
       ${PROJECT_SOURCE_DIR}/families/qwen/tests/cpp/${test_name}.cpp
@@ -93,6 +94,29 @@ if(TRTMC_BUILD_TESTS)
 endif()
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_qwen_task_config
+    ${PROJECT_SOURCE_DIR}/families/qwen/tests/cpp/test_task_config.cpp
+  )
+  target_include_directories(test_qwen_task_config PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_compile_options(test_qwen_task_config PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME qwen_task_config COMMAND test_qwen_task_config)
+  set_tests_properties(qwen_task_config PROPERTIES LABELS "cpu")
+
+  foreach(_language IN ITEMS c cpp)
+    add_executable(test_qwen_sdk_${_language}
+      ${PROJECT_SOURCE_DIR}/families/qwen/tests/sdk_consumer.${_language}
+    )
+    target_link_libraries(test_qwen_sdk_${_language} PRIVATE trtmc_c)
+    target_compile_options(test_qwen_sdk_${_language} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    set_target_properties(test_qwen_sdk_${_language} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
+  endforeach()
+  add_dependencies(test_qwen_task_config test_qwen_sdk_c test_qwen_sdk_cpp)
+  add_dependencies(trtmc_model_qwen test_qwen_sdk_c test_qwen_sdk_cpp)
+
   add_executable(qwen_embedding_consumer
     ${PROJECT_SOURCE_DIR}/families/qwen/tests/cpp/qwen_embedding_consumer.cpp)
   target_link_libraries(qwen_embedding_consumer PRIVATE trtmc_c)
@@ -103,4 +127,21 @@ if(TRTMC_BUILD_TESTS)
     ${PROJECT_SOURCE_DIR}/families/qwen/tests/cpp/qwen_text_stream_consumer.cpp)
   target_link_libraries(qwen_text_stream_consumer PRIVATE trtmc_c)
   target_compile_options(qwen_text_stream_consumer PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
+
+if(TRTMC_BUILD_TESTS)
+  # CPU-backed KV-cache test: CUDA calls are served from host memory, and an
+  # overlapping copy fails the test.
+  add_executable(test_qwen_kv_cache
+    ${PROJECT_SOURCE_DIR}/families/qwen/tests/cpp/test_kv_cache.cpp
+    kv_cache.cpp
+    ${PROJECT_SOURCE_DIR}/core/runtime/primitives/device_tensor.cpp
+  )
+  target_include_directories(test_qwen_kv_cache PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_qwen_kv_cache SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_qwen_kv_cache PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME qwen_kv_cache COMMAND test_qwen_kv_cache)
 endif()

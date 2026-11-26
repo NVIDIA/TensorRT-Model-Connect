@@ -154,6 +154,19 @@ def test_the_near_capacity_prompt_shrinks_until_trtmc_accepts_it(monkeypatch):
         runner.near_capacity_request(None, model, greedy, 224, {"url": "u"})
 
 
+def test_the_near_capacity_request_covers_the_text_generation_task_under_either_name():
+    from trtmc_aiperf_qual import runner
+
+    def model(task):
+        return {"task": task, "candidate": {"max_sequence_length": 4096}}
+
+    assert runner.near_capacity_applies(model("text_generation"), {"prompt": "x"})
+    assert runner.near_capacity_applies(model("text_continuation"), {"prompt": "x"})
+    assert runner.near_capacity_applies(model("conditional_text_generation"), {"prompt": "x"})
+    assert not runner.near_capacity_applies(model("text_continuation"), {"prompt": "x", "image": "i"})
+    assert not runner.near_capacity_applies(model("vision_language_generation"), {"prompt": "x"})
+
+
 def _order_check(tmp_path, monkeypatch, measurements):
     """The real order check and native timing (``_time_reference``) over stubbed servers; ``measurements`` are
     the four timed runs' stats in the order they run: native first, TRTMC second, TRTMC first, native second."""
@@ -312,3 +325,248 @@ def test_the_order_check_command_builds_a_missing_bundle_and_skips_a_failed_buil
     assert code == 0 and built == ["broken", "ok"] and checked == ["ok"]
     assert lines[0]["status"] == "build-failed" and lines[1]["status"] == "within-limit"
     assert json.loads((tmp_path / "order" / "ok" / "build.json").read_text())["status"] == "built"
+
+
+def test_cer_counts_characters_without_spaces_or_punctuation():
+    """Japanese has no word boundaries: the error rate is over NFKC characters, spaces and punctuation dropped."""
+    problems = [{"gold": "インターネットで 敵対的環境コース について"}, {"gold": "ＡＢ、C"}]
+    units = gold_metrics.cer_units(problems, {0: {"text": "インターネットで敵対的環境コースについて。"},
+                                              1: {"text": "abd"}})
+    assert units == [(0.0, 20.0), (1.0, 3.0)]  # full-width letters fold to ASCII; one substitution
+    assert gold_metrics.wer(units) == pytest.approx(100.0 / 23.0)
+    assert gold_metrics.CORPUS["cer"][2] is False  # lower is better
+
+
+def test_decision_parity_needs_the_same_choices_within_the_family_tolerance():
+    native = {"scores": [{"question_id": "status", "option_ids": ["paid", "overdue"], "probabilities": [0.2, 0.8]},
+                         {"question_id": "large", "probabilities": [0.6, 0.4]}]}
+
+    def candidate(status, large):
+        return {"scores": [{"question_id": "status", "option_ids": ["paid", "overdue"], "probabilities": status},
+                           {"question_id": "large", "option_ids": ["false", "true"], "probabilities": large}]}
+
+    gate = {"atol": 0.015, "rtol": 0.01}
+    assert gold_metrics.decision_parity(candidate([0.21, 0.79], [0.59, 0.41]), native, gate)[0] is True
+    assert gold_metrics.decision_parity(candidate([0.25, 0.75], [0.6, 0.4]), native, gate)[0] is False
+    assert gold_metrics.decision_parity(candidate([0.2, 0.8], [0.49, 0.51]), native, gate)[0] is False
+    assert gold_metrics.decision_parity({"scores": []}, native, gate)[0] is None
+    missing = {"scores": native["scores"][:1]}
+    assert gold_metrics.decision_parity(missing, native, gate)[0] is False
+    assert gold_metrics.decision_parity({"scores": []}, {"scores": []}, gate)[0] is True  # no questions
+    assert gold_metrics.decision_parity({}, {"scores": []}, gate)[0] is None
+
+
+def test_open_vocabulary_detections_score_by_their_category_names():
+    """coco-names-80: text labels map to contiguous COCO classes; a phrase naming no category drops its box."""
+    output = {"boxes": [0, 0, 10, 10, 5, 5, 20, 20, 1, 1, 2, 2], "scores": [0.9, 0.8, 0.7],
+              "labels": ["Dining Table", "car truck", "person."]}
+    named = gold_metrics._named_detections(output)
+    assert named["class_ids"] == [60, 0] and named["scores"] == [0.9, 0.7]
+    assert named["boxes"] == [[0, 0, 10, 10], [1, 1, 2, 2]]
+    problems = [{"gold": {"bbox": [[0, 0, 10, 10]], "category": [60], "area": [100.0]}}]
+    units = gold_metrics.coco_units(problems, {0: output}, {"label_space": "coco-names-80"})
+    assert units[0][1]["class_ids"] == [60, 0] and units[0][2] == "category_index"
+    assert len(gold_metrics.COCO_NAMES) == len(gold_metrics.COCO_IDS) == 80
+
+
+def test_lossless_images_send_the_decoded_pixels_as_png():
+    import base64
+    import io
+
+    from PIL import Image
+
+    from trtmc_aiperf_qual.suites import _encoded_media
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 6), (200, 30, 90)).save(buffer, format="JPEG")
+    jpeg = {"bytes": buffer.getvalue()}
+    assert _encoded_media(jpeg, ".png")["$file"]["suffix"] == ".jpg"
+    media = _encoded_media(jpeg, ".png", lossless=True)["$file"]
+    assert media["suffix"] == ".png"
+    with Image.open(io.BytesIO(base64.b64decode(media["b64"]))) as decoded, \
+            Image.open(io.BytesIO(jpeg["bytes"])) as original:
+        assert decoded.format == "PNG" and decoded.tobytes() == original.convert("RGB").tobytes()
+
+
+def test_max_audio_seconds_drops_longer_clips_for_both_sides(tmp_path):
+    import base64
+    import io
+
+    import numpy as np
+    import soundfile
+
+    from trtmc_aiperf_qual.absolute import _audio_fitted
+    from trtmc_aiperf_qual.config import Environment
+
+    def clip(seconds):
+        buffer = io.BytesIO()
+        soundfile.write(buffer, np.zeros(int(16000 * seconds), dtype=np.float32), 16000, format="WAV")
+        return {"$file": {"suffix": ".wav", "b64": base64.b64encode(buffer.getvalue()).decode()}}
+
+    samples = [{"sample_id": name, "request": {"audio_path": clip(seconds)}}
+               for name, seconds in (("short", 12.0), ("limit", 30.0), ("long", 33.9))]
+    kept = _audio_fitted(Environment({}), samples, 30.0)
+    assert [sample["sample_id"] for sample in kept] == ["short", "limit"]
+
+
+def test_label_hit_and_query_hit_score_the_best_class_by_name():
+    clip = {"scores": [0.1, 0.9, 0.3], "labels": ["Speech", "Dog", "Music"]}
+    assert gold_metrics.label_hit(["Animal", "dog"], clip) == (True, "Dog")
+    assert gold_metrics.label_hit(["Music"], clip)[0] is False
+    assert gold_metrics.label_hit(["Dog"], {"scores": [], "labels": []}) == (False, "")
+    zero_shot = {"top_class": 2, "queries": ["a photo of a tench", "a photo of a church", "a photo of a golf ball"]}
+    assert gold_metrics.query_hit("golf ball", zero_shot)[0] is True
+    assert gold_metrics.query_hit("ball", zero_shot)[0] is True  # a suffix that is a whole word
+    assert gold_metrics.query_hit("church", zero_shot)[0] is False
+
+
+def test_depth_parity_applies_the_family_correlation_and_error_gate():
+    rng = np.random.default_rng(1)
+    depth = rng.uniform(1.0, 10.0, size=12)
+
+    def side(values):
+        return {"depth": list(values), "height": 3, "width": 4}
+
+    gate = {"min_correlation": 0.998, "max_relative_error": 0.01}
+    assert gold_metrics.depth_parity(side(depth * 1.0005), side(depth), gate)[0] is True
+    assert gold_metrics.depth_parity(side(depth + 0.5), side(depth), gate)[0] is False
+    assert gold_metrics.depth_parity(side(depth[::-1]), side(depth), gate)[0] is False
+    assert gold_metrics.depth_parity({"depth": [1.0], "height": 3, "width": 4}, side(depth), gate)[0] is None
+
+
+def test_vector_parity_reads_the_gate_field():
+    logits = {"logits": [1.0, 2.0, 3.0]}
+    assert gold_metrics.vector_parity(logits, {"logits": [1.0, 2.0, 3.001]}, {"field": "logits"})[0] is True
+    assert gold_metrics.vector_parity(logits, {"logits": [3.0, 2.0, 1.0]}, {"field": "logits"})[0] is False
+
+
+def test_point_miou_scores_per_point_classes_over_the_corpus():
+    problems = [{"gold": {"labels": [0, 0, 1, 2], "num_classes": 3}},
+                {"gold": {"labels": [1, 1, 2, 2], "num_classes": 3}}]
+    exact = {0: {"labels": [0, 0, 1, 2]}, 1: {"labels": [1, 1, 2, 2]}}
+    assert gold_metrics.miou(gold_metrics.point_miou_units(problems, exact)) == 100.0
+    swapped = {0: {"labels": [0, 0, 1, 2]}, 1: {"labels": [1, 1, 1, 2]}}
+    # class 1: 3 of 4 in the union; class 2: 2 of 3; class 0: exact
+    expected = 100.0 * (1.0 + 3 / 4 + 2 / 3) / 3
+    assert abs(gold_metrics.miou(gold_metrics.point_miou_units(problems, swapped)) - expected) < 1e-9
+    short = {0: {"labels": [0]}, 1: {"labels": [1, 1, 2, 2]}}
+    assert gold_metrics.answered("point_miou", problems, short) == {1: short[1]}
+
+
+def test_point_label_parity_is_the_share_of_identical_labels():
+    from trtmc_aiperf_plugins.accuracy import COMPARATORS
+
+    compare = COMPARATORS["parity_labels"]
+    assert compare({"labels": [1] * 100}, {"labels": [1] * 98 + [2, 2]})[0] is True
+    assert compare({"labels": [1] * 100}, {"labels": [1] * 97 + [2] * 3})[0] is False
+    assert compare({"labels": [1]}, {"labels": [1, 1]})[0] is False
+
+
+def test_s3dis_blocks_select_the_area_and_write_each_block_once(tmp_path, monkeypatch):
+    import zipfile
+
+    import h5py
+    import huggingface_hub
+
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.suites import _s3dis_block_records
+
+    rooms = ["Area_1_office_1", "Area_5_office_2", "Area_5_office_2", "Area_5_hallway_1"]
+    staging = tmp_path / "staging" / "indoor3d_sem_seg_hdf5_data"
+    staging.mkdir(parents=True)
+    for index, (start, stop) in enumerate([(0, 2), (2, 4)]):
+        with h5py.File(staging / f"ply_data_all_{index}.h5", "w") as handle:
+            handle["data"] = np.arange(start, stop, dtype="<f4")[:, None, None] * np.ones((1, 3, 9), "<f4")
+            handle["label"] = np.full((stop - start, 3), start, dtype=np.uint8)
+    (staging / "all_files.txt").write_text("".join(f"{staging.name}/ply_data_all_{i}.h5\n" for i in range(2)))
+    (staging / "room_filelist.txt").write_text("\n".join(rooms) + "\n")
+    archive = tmp_path / "s3dis.zip"
+    with zipfile.ZipFile(archive, "w") as handle:
+        for path in staging.iterdir():
+            handle.write(path, f"{staging.name}/{path.name}")
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda *args, **kwargs: str(archive))
+    source = {"repo": "r", "revision": "0123456789abcdef", "filename": "s3dis.zip", "area": "Area_5"}
+    environment = Environment({"hf_datasets_cache": str(tmp_path / "cache")})
+    records = _s3dis_block_records(source, {"method": "first", "count": 10}, environment)
+    assert [record["id"] for record in records] == ["Area_5_office_2/1", "Area_5_office_2/2", "Area_5_hallway_1/3"]
+    assert [record["cluster"] for record in records] == ["Area_5_office_2", "Area_5_office_2", "Area_5_hallway_1"]
+    third = records[2]
+    assert third["request"] == {"num_points": 3, "input_dim": 9}
+    assert third["label"] == {"labels": [2, 2, 2], "num_classes": 13}
+    assert np.fromfile(third["points"], dtype="<f4").reshape(3, 9).tolist() == [[3.0] * 9] * 3
+
+
+def test_action_parity_takes_an_absolute_tolerance_in_robot_units():
+    native = {"actions": [0.0, 1.0, 2.0, 3.0]}
+    close = {"actions": [0.0, 1.0, 2.0, 3.02]}
+    assert gold_metrics.action_parity(close, native, {"max_error_of_range": 0.001})[0] is False
+    assert gold_metrics.action_parity(close, native, {"max_error_of_range": 0.001, "max_abs_error": 0.03})[0] is True
+    assert gold_metrics.action_parity(close, native, {"max_abs_error": 0.01})[0] is False
+
+
+def test_action_parity_compares_a_gripper_by_sign_and_bounds_the_arm():
+    native = {"action_dim": 3, "actions": [0.0, 1.0, 0.9, 0.5, 1.5, -0.8]}  # 2 steps of [arm, arm, gripper]
+    gate = {"max_abs_error": 0.03, "gripper_component": -1}
+    same_sign = {"actions": [0.0, 1.02, 0.2, 0.5, 1.5, -0.1]}  # the gripper moves by 0.7, same direction
+    ok, reason = gold_metrics.action_parity(same_sign, native, gate)
+    assert ok is True and "arm max abs error 0.02" in reason and "gripper sign changes 0" in reason
+    assert gold_metrics.action_parity(same_sign, native, {"max_abs_error": 0.03})[0] is False  # all components
+    arm_off = {"actions": [0.0, 1.05, 0.9, 0.5, 1.5, -0.8]}
+    assert gold_metrics.action_parity(arm_off, native, gate)[0] is False
+    flipped = {"actions": [0.0, 1.0, -0.1, 0.5, 1.5, -0.8]}  # the other direction at one step
+    assert gold_metrics.action_parity(flipped, native, gate)[0] is False
+    assert gold_metrics.action_parity(flipped, native, {**gate, "max_gripper_sign_changes": 1})[0] is True
+    assert gold_metrics.action_parity(flipped, native, {**gate, "gripper_component": 2})[0] is False
+    assert gold_metrics.action_parity(native, native, gate)[0] is True  # a valid output agrees with itself
+    assert gold_metrics.action_parity(flipped, {"actions": native["actions"]}, gate)[0] is None  # no action_dim
+
+
+def test_a_fitted_image_covers_the_video_size_and_keeps_its_center(tmp_path):
+    from PIL import Image
+
+    from trtmc_aiperf_qual.suites import _cover_crop
+
+    source = tmp_path / "wide.png"
+    pixels = np.zeros((40, 80, 3), np.uint8)
+    pixels[:, 30:50] = 255  # a white band in the middle third
+    Image.fromarray(pixels).save(source)
+    fitted = _cover_crop(source, tmp_path / "cache", 16, 32)
+    with Image.open(fitted) as image:
+        assert image.size == (16, 32)
+        assert np.asarray(image)[16, 8].tolist() == [255, 255, 255]
+    assert _cover_crop(source, tmp_path / "cache", 16, 32) == fitted
+    import base64
+
+    inline = {"$file": {"suffix": ".png", "b64": base64.b64encode(source.read_bytes()).decode()}}
+    assert _cover_crop(inline, tmp_path / "cache", 16, 32) == fitted  # a decoded dataset image column
+
+
+def test_structure_parity_compares_the_written_structure_with_the_native_coordinates(tmp_path):
+    import json
+
+    atoms = [[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [3.0, 0.5, 0.0], [4.0, 2.0, 1.0]]
+    cif = tmp_path / "out.cif"
+    cif.write_text("data_x\n" + "".join(
+        f"ATOM {i + 1} C CA ALA A 1 {x} {y} {z} 1.0 50.0 1\n" for i, (x, y, z) in enumerate(atoms)))
+    metadata = tmp_path / "out.metadata.json"
+    metadata.write_text(json.dumps({"plddt": [0.8, 0.9], "confidence_score": 0.85}))
+    candidate = {"structure_artifact": str(cif), "metadata_artifact": str(metadata)}
+    native = {"coords": [value for atom in atoms for value in atom],
+              "confidence": {"plddt": [0.8, 0.9], "confidence_score": 0.84}}
+    ok, message = gold_metrics.structure_parity(candidate, native, {})
+    assert ok is True and message.startswith("lDDT 1.000, RMSD 0.00")
+    moved = {**native, "coords": [value * 3 for value in native["coords"]]}
+    assert gold_metrics.structure_parity(candidate, moved, {})[0] is False
+    assert gold_metrics.structure_parity({}, native, {})[0] is None
+
+
+def test_pose_parity_compares_refined_poses_scores_and_their_ranking():
+    identity = [1.0, 0, 0, 0.1, 0, 1.0, 0, 0.2, 0, 0, 1.0, 0.3, 0, 0, 0, 1.0]
+    native = {"refined_poses": identity * 2, "scores": [0.9, 0.1]}
+    moved = identity[:3] + [identity[3] + 0.001] + identity[4:]  # a translation 1 mm off
+    close = {"refined_poses": moved + identity, "scores": [0.88, 0.1]}
+    assert gold_metrics.pose_parity(close, native, {})[0] is True
+    swapped = {**close, "scores": [0.1, 0.9]}
+    ok, message = gold_metrics.pose_parity(swapped, native, {"max_score_abs_error": 1.0})
+    assert ok is False and "ranking differs" in message
+    assert gold_metrics.pose_parity({}, native, {})[0] is None

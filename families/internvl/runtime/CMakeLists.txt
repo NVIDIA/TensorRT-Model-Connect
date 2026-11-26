@@ -31,6 +31,7 @@ target_include_directories(trtmc_model_internvl SYSTEM PRIVATE
 target_link_libraries(trtmc_model_internvl PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
+  Threads::Threads
   ${TRTMC_CUDART_LIBRARY}
   ${CMAKE_DL_LIBS}
 )
@@ -81,7 +82,24 @@ if(TRTMC_BUILD_TESTS)
   target_include_directories(test_internvl_tiling SYSTEM PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/stb
   )
-  target_link_libraries(test_internvl_tiling PRIVATE nlohmann_json::nlohmann_json)
+  target_link_libraries(test_internvl_tiling PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
   add_test(NAME internvl_tiling COMMAND test_internvl_tiling)
   set_tests_properties(internvl_tiling PROPERTIES LABELS "cpu")
+endif()
+
+if(TRTMC_BUILD_TESTS)
+  # CPU-backed KV-cache test: CUDA calls are served from host memory, and an
+  # overlapping copy fails the test.
+  add_executable(test_internvl_kv_cache
+    ${PROJECT_SOURCE_DIR}/families/internvl/tests/cpp/test_kv_cache.cpp
+    kv_cache.cpp
+    ${PROJECT_SOURCE_DIR}/core/runtime/primitives/device_tensor.cpp
+  )
+  target_include_directories(test_internvl_kv_cache PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_internvl_kv_cache SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_internvl_kv_cache PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME internvl_kv_cache COMMAND test_internvl_kv_cache)
 endif()

@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A regression model on six ETTh1 load columns, not a forecaster: the Task's ETTh1 forecast MSE does not apply.
+# Both sides answer the same test-range windows; the regression output is compared with the family's E2E gate.
+reference:
+  adapter: families/patchtst/reference/adapter.py  # PatchTSTForRegression, as tests/test_e2e.py runs it
+benchmarks:
+  regression_parity:
+    suite: etth1-regression-parity
+    suite_definition:
+      suite: etth1-regression-windows-100
+      version: 1
+      source:
+        kind: etth1_windows
+        path: ETTh1/ETTh1.csv
+        sha256: f18de3ad269cef59bb07b5438d79bb3042d3be49bdeecf01c1cd6d29695ee066
+        seed: 20260715
+        window: {columns: [HUFL, HULL, MUFL, MULL, LUFL, LULL], context_length: 512, prediction_length: 1,
+                 stride: 24, test_target_start: 11520, test_end: 14400, frequency: 0}
+      selection: {method: first, count: 100}
+    metric: vector_parity
+    gate: {field: values, min_cosine: 0.999, max_relative_l2: 0.001}  # tests/etth1.py: relative L2 1e-3
+absolute: [regression_parity]
+performance: {suite: {from_benchmark: etth1-regression-parity}, output_grader: parity_numeric}

@@ -1,4 +1,39 @@
-# Hunyuan Edge 0.11 integration
+# Hunyuan Edge integration
+
+When the installed Model Connect wheel includes a native runner and Edge SDK,
+the family uses that SDK. A different SDK on `CMAKE_PREFIX_PATH` cannot
+override the wheel's native runner. To select another release, install a
+Model Connect wheel built for it, or use a matching standalone Model Connect
+builder and runner in an environment without the wheel. For standalone
+installations, `CMAKE_PREFIX_PATH` selects the SDK as usual.
+
+## Opt-in Edge 0.12 build
+
+The normal Model Connect installation remains native or uses the default 0.11
+SDK. For an MC installation built with the 0.12 SDK, keep the matching PyPI or
+source-installed Edge builder in its own Python environment and pass it to
+the family build command:
+
+```bash
+trtmc hunyuan build tencent/Hy-MT2-1.8B --precision fp16 --max-sequence-length 1024 \
+  --edge-builder-python /path/to/edge-env/bin/python -o translation.bundle
+```
+
+The builder must match the installed SDK and TensorRT. An Edge preparation
+failure warns and retries the same native request; successful runtime loads do
+not retry generation on a different backend. The existing generic build API remains available.
+
+On SM80 with 0.12, the original HY-MT1.5-7B, Hy-MT2-1.8B, and Hy-MT2-7B
+checkpoints each passed both owning translation cases through Edge and through
+warned native TensorRT fallback. All twelve outputs matched the independent
+FP32/eager reference text and generated IDs. These results cover FP16 compute,
+TP1/batch 1, capacity 1024 and the two greedy translations per manifest, not
+other capacities, sampling policies, quantizations or GPU architectures.
+
+## Earlier 0.11 integration
+
+The results below are for 0.11; they are not 0.12 qualification.
+
 
 This family owns dense Hunyuan metadata, graph/weight semantics, tokenizer,
 runtime and validation. It imports no other model family.

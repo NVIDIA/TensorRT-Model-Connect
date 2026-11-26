@@ -100,6 +100,7 @@ int main() {
     const nlohmann::json marker{
         {"version", 1},
         {"edge_revision", edge::kRevision},
+        {"edge_release", edge::kRelease},
         {"task", "vision_language_generation"},
         {"max_sequence_length", 1024},
         {"max_input_length", 1024},
@@ -117,6 +118,31 @@ int main() {
         {"checkpoint_layout", {{"layout", "int4"}, {"tensor_count", 1}, {"shard_count", 1}}},
         {"visual_profile", {{"min", 4}, {"max", 1024}, {"per_image", 512}}}};
     edge::validate_marker(marker, "qwen3_5_moe", "vision_language_generation", "trt");
+    auto onnx = marker;
+    onnx["edge_build_flow"] = "onnx";
+    try {
+        edge::validate_marker(onnx, "qwen3_5_moe", "vision_language_generation", "trt");
+        check(false, "An ONNX producer was accepted for a packed checkpoint");
+    } catch (const std::runtime_error&) {
+    }
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+    onnx["weight_format"] = "none";
+    onnx["source_policy"] = {{"weights", "none"},
+                             {"llm", "original_bf16_experts"},
+                             {"visual", "fp16"},
+                             {"kv", "fp16"},
+                             {"group_size", 0}};
+    onnx["checkpoint_layout"]["layout"] = "none";
+    edge::validate_marker(onnx, "qwen3_5_moe", "vision_language_generation", "trt");
+    onnx["task"] = "text_generation";
+    onnx["visual_profile"] = nullptr;
+    onnx["dflash_block_size"] = 16;
+    onnx["execution_variant"] = "dflash";
+    edge::validate_marker(onnx, "qwen3_5_moe", "text_generation", "trt");
+    onnx["execution_variant"] = "jetspec";
+    onnx["jet_draft_top_k"] = 7;
+    edge::validate_marker(onnx, "qwen3_5_moe", "text_generation", "trt");
+#endif
     auto text_marker = marker;
     text_marker["task"] = "text_generation";
     text_marker["visual_profile"] = nullptr;
@@ -133,6 +159,15 @@ int main() {
         } catch (const std::exception&) {
         }
     }
+    auto jet = marker;
+    jet["execution_variant"] = "jetspec";
+    jet["dflash_block_size"] = 16;
+    jet["jet_draft_top_k"] = 7;
+    try {
+        edge::validate_marker(jet, "qwen3_5_moe", "vision_language_generation", "trt");
+        check(false, "An incompatible JetSpec tree was accepted");
+    } catch (const std::runtime_error&) {
+    }
     auto mtp = marker;
     mtp["execution_variant"] = "mtp";
     mtp["mtp_draft_steps"] = 3;
@@ -145,7 +180,24 @@ int main() {
                             {"group_size", 16},
                             {"llm", "mixed_nvfp4_experts_shared_head_fp8_attention_gdn"}};
     mtp["checkpoint_layout"]["layout"] = "nvfp4";
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+    mtp["checkpoint_layout"]["text_kv_dtype"] = "fp8";
+    mtp["source_policy"]["sidecar_kv"] = "fp8";
+#endif
     edge::validate_marker(mtp, "qwen3_5_moe", "vision_language_generation", "trt");
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+    jet["weight_format"] = mtp["weight_format"];
+    jet["source_policy"] = mtp["source_policy"];
+    jet["checkpoint_layout"] = mtp["checkpoint_layout"];
+    jet["target"] = {{"sm", 103}};
+    edge::validate_marker(jet, "qwen3_5_moe", "vision_language_generation", "trt");
+    jet["jet_draft_top_k"] = 1;
+    try {
+        edge::validate_marker(jet, "qwen3_5_moe", "vision_language_generation", "trt");
+        check(false, "A linear JetSpec draft was accepted");
+    } catch (const std::runtime_error&) {
+    }
+#endif
     for (const auto* field : {"mtp_draft_steps", "mtp_verify_size", "max_sequence_length"}) {
         auto invalid = mtp;
         invalid[field] = 0;

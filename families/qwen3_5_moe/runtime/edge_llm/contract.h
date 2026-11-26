@@ -17,44 +17,97 @@
 
 namespace trtmc::qwen3_5_moe::edge_llm {
 
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+inline constexpr const char* kRelease = "0.12.0";
+inline constexpr const char* kRevision = "513dcd18291e587c80928911a480761352f3c2d8";
+#else
+inline constexpr const char* kRelease = "0.11.0";
 inline constexpr const char* kRevision = "95515c2f87fba8982db5a519f9022277667b3cc9";
+#endif
 
 /// Reject inconsistent task, source precision and complete-network resource markers.
 inline void validate_marker(const nlohmann::json& m, const std::string& family,
                             const std::string& task, const std::string& backend) {
+    const auto& revision = m.at("edge_revision");
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+    const bool compatible =
+        m.at("edge_release") == kRelease && (revision.is_null() || revision == kRevision);
+#else
+    const bool compatible = revision == kRevision;
+#endif
     const bool vision = task == IVisionLanguageGeneration::kTask;
     if (family != "qwen3_5_moe" || backend != "trt" ||
         (!vision && task != ITextGeneration::kTask) || m.at("task") != task ||
-        m.at("version") != 1 || m.at("edge_revision") != kRevision ||
-        m.at("max_sequence_length").get<int>() <= 1 || m.at("max_input_length").get<int>() <= 0 ||
+        m.at("version") != 1 || !compatible || m.at("max_sequence_length").get<int>() <= 1 ||
+        m.at("max_input_length").get<int>() <= 0 ||
         m.at("max_input_length").get<int>() > m.at("max_sequence_length").get<int>() ||
         m.at("max_batch_size") != 1 || m.at("precision") != "fp16" ||
         !m.at("artifacts").is_array() || m.at("eos_token_ids") != nlohmann::json({248044, 248046}))
         throw std::runtime_error("Invalid Qwen3.5-MoE Edge bundle contract");
     const auto variant = m.value("execution_variant", "autoregressive");
     const bool mtp = variant == "mtp";
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+    const bool jetspec = variant == "jetspec" && m.value("jet_draft_top_k", 0) == 7;
+#else
+    constexpr bool jetspec = false;
+#endif
     if (mtp ? (m.at("weight_format") != "nvfp4" || m.value("mtp_draft_steps", 0) != 3 ||
                m.value("mtp_verify_size", 0) != 4 || m.at("max_sequence_length").get<int>() <= 4)
             : (variant != "autoregressive" &&
-               ((variant != "dflash" && variant != "dflash_ddtree") ||
+               ((variant != "dflash" && variant != "dflash_ddtree" && !jetspec) ||
                 m.value("dflash_block_size", 0) != 16 ||
                 m.at("max_sequence_length").get<int>() <= 16)))
         throw std::runtime_error("Invalid Qwen3.5-MoE speculative bundle contract");
     const auto weight = m.at("weight_format").get<std::string>();
     const auto& policy = m.at("source_policy");
     const bool nvfp4 = weight == "nvfp4";
-    if ((!nvfp4 && weight != "int4") || policy.at("weights") != weight ||
-        policy.at("visual") != "fp16" || policy.at("kv") != (nvfp4 ? "fp8" : "fp16") ||
-        policy.at("group_size") != (nvfp4 ? 16 : 128) ||
-        policy.at("llm") != (nvfp4 ? "mixed_nvfp4_experts_shared_head_fp8_attention_gdn"
-                                   : "gptq_experts_original_shared_attention") ||
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+    const bool original = weight == "none";
+    const bool routed_only =
+        nvfp4 && policy.at("llm") == "nvfp4_routed_experts_original_shared_head_attention";
+#else
+    constexpr bool original = false;
+    constexpr bool routed_only = false;
+#endif
+    const auto flow = m.value("edge_build_flow", "direct");
+    const bool original_onnx =
+        original && (variant == "autoregressive" || variant == "dflash" || jetspec);
+    if (flow != "direct" && !(flow == "onnx" && original_onnx))
+        throw std::runtime_error("Invalid Qwen3.5-MoE Edge build flow");
+    std::string expected_kv = nvfp4 ? "fp8" : "fp16";
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+    if (nvfp4) {
+        expected_kv = m.at("checkpoint_layout").at("text_kv_dtype").get<std::string>();
+        if ((expected_kv != "fp8" && expected_kv != "fp16") ||
+            (routed_only && expected_kv != "fp16") || policy.at("sidecar_kv") != "fp8")
+            throw std::runtime_error("Invalid NVFP4 checkpoint KV precision");
+    }
+#endif
+    if ((!original && !nvfp4 && weight != "int4") || policy.at("weights") != weight ||
+        policy.at("visual") != "fp16" || policy.at("kv") != expected_kv ||
+        policy.at("group_size") != (original ? 0
+                                    : nvfp4  ? 16
+                                             : 128) ||
+        policy.at("llm") != (routed_only ? "nvfp4_routed_experts_original_shared_head_attention"
+                             : original  ? "original_bf16_experts"
+                             : nvfp4     ? "mixed_nvfp4_experts_shared_head_fp8_attention_gdn"
+                                         : "gptq_experts_original_shared_attention") ||
         m.at("checkpoint_layout").at("layout") != weight ||
         m.at("checkpoint_layout").at("tensor_count").get<int>() <= 0 ||
         m.at("checkpoint_layout").at("shard_count").get<int>() <= 0)
         throw std::runtime_error("Invalid Qwen3.5-MoE component precision contract");
+    if (jetspec && !original && (!nvfp4 || routed_only))
+        throw std::runtime_error("Unsupported Qwen3.6-MoE JetSpec target precision");
+    if (routed_only && variant != "autoregressive")
+        throw std::runtime_error("No speculative contract for routed-only 122B NVFP4");
     if (nvfp4) {
         const int sm = m.at("target").at("sm").get<int>();
-        if (sm != 100 && sm != 110 && sm != 120 && sm != 121)
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+        const bool gb300 = sm == 103;
+#else
+        constexpr bool gb300 = false;
+#endif
+        if (sm != 100 && sm != 110 && sm != 120 && sm != 121 && !gb300)
             throw std::runtime_error(
                 "NVFP4 and FP8 components require a supported Blackwell target");
     }

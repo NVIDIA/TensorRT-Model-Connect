@@ -560,16 +560,13 @@ def _add_xlnet_layer(
     # Actually, the einsum "ibnd,hnd->ibh" contracts over n,d producing [i,b,h].
     # With our flattened version: context_flat @ W_o^T where W_o is [hidden, attn_size]
     # So we need to use TRANSPOSE on the rhs.
-    attn_out = quantized("rel_attn.o", context_flat.get_output(0))
-    if attn_out is not None:
-        (attn_out,) = attn_out
-    else:
-        w_o = graph_ops.add_constant(
-            network, (hidden_size, attn_size), weights[f"{prefix}.w_o"],
-            dtype=dtype)
-        attn_out = network.add_matrix_multiply(
-            context_flat.get_output(0), trt.MatrixOperation.NONE,
-            w_o, trt.MatrixOperation.TRANSPOSE).get_output(0)
+    # It stays in the work type in FP8 builds too (see quantization.py).
+    w_o = graph_ops.add_constant(
+        network, (hidden_size, attn_size), weights[f"{prefix}.w_o"],
+        dtype=dtype)
+    attn_out = network.add_matrix_multiply(
+        context_flat.get_output(0), trt.MatrixOperation.NONE,
+        w_o, trt.MatrixOperation.TRANSPOSE).get_output(0)
 
     # POST-norm: LayerNorm(h + attn_out)
     residual1 = network.add_elementwise(

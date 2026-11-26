@@ -15,7 +15,7 @@
       "name": "qwen35-27b-edge-image-tp2",
       "premerge": false,
       "prompt": "What color is the car? Answer in one word.",
-      "image": "families/qwen3_5/tests/data/test_img.jpeg",
+      "image": "data/test_img.jpeg",
       "max_new_tokens": 10,
       "temperature": 0.0,
       "top_k": 1,

@@ -66,6 +66,7 @@ from .checkpoint_mapper import (
     _transpose_2d,
 )
 from . import graph_ops
+from . import wkv_rows
 from .parallel import normalize_parallel_config
 
 
@@ -236,8 +237,14 @@ class _RwkvModel:
         verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
+        prefill_rows: int | None = None,
     ) -> bytes:
         """Build TRT engine for RWKV linear attention.
+
+        ``prefill_rows`` builds the prefill engine of a split bundle instead:
+        ``token_id`` is ``[S]`` with one profile ``1..prefill_rows``, every layer
+        mixes the ``S`` rows in one launch (see :mod:`.wkv_rows`), the logits
+        come from the last row and the present states are those after it.
 
         max_cache_length is accepted for the shared build signature but is not used
         by RWKV (recurrent state is constant size regardless of sequence length).
@@ -259,6 +266,14 @@ class _RwkvModel:
           present_max_0..N: float32 [1, hidden_size]
         """
         parallel = normalize_parallel_config(parallel_config)
+        if prefill_rows is not None and (
+            parallel.enabled or debug_layer_outputs or quant_ctx is not None
+        ):
+            raise NotImplementedError(
+                "RWKV prefill engines are single-GPU, unquantized and without debug outputs"
+            )
+        if prefill_rows is not None and not 1 <= prefill_rows <= wkv_rows.MAX_ROWS:
+            raise ValueError(f"RWKV prefill_rows must be in 1..{wkv_rows.MAX_ROWS}")
         if parallel.enabled:
             parallel.validate()
             if quant_ctx is not None:
@@ -298,7 +313,14 @@ class _RwkvModel:
         # -----------------------------------------------------------
         # Inputs
         # -----------------------------------------------------------
-        token_id = network.add_input("token_id", trt.int32, (1,))
+        rows = 1 if prefill_rows is None else None
+        token_id = network.add_input("token_id", trt.int32, (1 if rows else -1,))
+        if prefill_rows is not None:
+            profile = builder.create_optimization_profile()
+            profile.set_shape(
+                "token_id", (1,), (min(PREFILL_OPT_TOKENS, prefill_rows),), (prefill_rows,)
+            )
+            trt_config.add_optimization_profile(profile)
 
         attn_state_inputs = []
         ff_state_inputs = []
@@ -402,6 +424,7 @@ class _RwkvModel:
                 intermediate_size=intermediate,
                 dtype=work_np_dtype,
                 quant_ctx=quant_ctx,
+                sequence_length=rows,
             )
 
             hidden_state = result["hidden"]
@@ -413,6 +436,10 @@ class _RwkvModel:
 
             if debug_layer_outputs:
                 _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
+
+        if rows is None:
+            # Only the last row can affect the next token.
+            hidden_state = wkv_rows.last_row(network, hidden_state, hidden)
 
         # -----------------------------------------------------------
         # Final LayerNorm
@@ -520,8 +547,10 @@ def _add_rwkv_layer(
     intermediate_size: int,
     dtype: np.dtype = np.float32,
     quant_ctx=None,
+    sequence_length: int | None = 1,
 ) -> dict[str, trt.ITensor]:
-    """Add one RWKV layer (time-mixing + channel-mixing).
+    """Add one RWKV layer (time-mixing + channel-mixing) over one row, or ``S`` rows
+    when ``sequence_length`` is None.
 
     ``quant_ctx`` (FP8 builds only) routes the projections it quantizes through Q/DQ;
     every other projection is the unchanged 16/32-bit matmul.
@@ -555,6 +584,11 @@ def _add_rwkv_layer(
 
     # The normed output before time-shift becomes present_attn for next step
     present_attn = normed_attn
+    attn_prev = attn_state_in
+    if sequence_length is None:
+        # Row t blends with row t - 1; row 0 with the incoming state.
+        present_attn = wkv_rows.last_row(network, normed_attn, hidden_size)
+        attn_prev = wkv_rows.shifted_rows(network, normed_attn, attn_state_in, hidden_size)
 
     # ===== 2. Time-shift blending for R, K, V =====
     # For each of R, K, V: blended = mix * normed + (1 - mix) * attn_state_in
@@ -574,9 +608,9 @@ def _add_rwkv_layer(
         )
         return blended.get_output(0)
 
-    xk = _time_shift_blend(normed_attn, attn_state_in, f"{prefix}.time_mix_key")
-    xv = _time_shift_blend(normed_attn, attn_state_in, f"{prefix}.time_mix_value")
-    xr = _time_shift_blend(normed_attn, attn_state_in, f"{prefix}.time_mix_receptance")
+    xk = _time_shift_blend(normed_attn, attn_prev, f"{prefix}.time_mix_key")
+    xv = _time_shift_blend(normed_attn, attn_prev, f"{prefix}.time_mix_value")
+    xr = _time_shift_blend(normed_attn, attn_prev, f"{prefix}.time_mix_receptance")
 
     # ===== 3. Projections =====
     # R = sigmoid(xr @ w_attn_r)
@@ -603,95 +637,118 @@ def _add_rwkv_layer(
     time_decay = graph_ops.add_constant(network, (1, hidden_size), weights[f"{prefix}.time_decay"])
     time_first = graph_ops.add_constant(network, (1, hidden_size), weights[f"{prefix}.time_first"])
 
-    # decay_plus_max = max_state_in + time_decay
-    decay_plus_max = network.add_elementwise(max_state_in, time_decay, trt.ElementWiseOperation.SUM)
+    def _wkv_step():
+        """One row: ``(wkv, num, den, max)`` with the max-shifted exponentials."""
+        # decay_plus_max = max_state_in + time_decay
+        decay_plus_max = network.add_elementwise(max_state_in, time_decay, trt.ElementWiseOperation.SUM)
 
-    # tf_plus_k = time_first + K
-    tf_plus_k = network.add_elementwise(time_first, k_recur, trt.ElementWiseOperation.SUM)
+        # tf_plus_k = time_first + K
+        tf_plus_k = network.add_elementwise(time_first, k_recur, trt.ElementWiseOperation.SUM)
 
-    # ---- WKV output (uses time_first as bonus, NO decay) ----
-    # HF: max_for_output = max(max_state, key + time_first)
-    # time_decay is ONLY used in the state update, not the output.
-    q_out = network.add_elementwise(
-        tf_plus_k.get_output(0), max_state_in, trt.ElementWiseOperation.MAX
-    )
+        # ---- WKV output (uses time_first as bonus, NO decay) ----
+        # HF: max_for_output = max(max_state, key + time_first)
+        # time_decay is ONLY used in the state update, not the output.
+        q_out = network.add_elementwise(
+            tf_plus_k.get_output(0), max_state_in, trt.ElementWiseOperation.MAX
+        )
 
-    # e2 = exp(key + time_first - q)
-    tf_k_minus_q = network.add_elementwise(
-        tf_plus_k.get_output(0), q_out.get_output(0), trt.ElementWiseOperation.SUB
-    )
-    exp_tf_k = network.add_unary(tf_k_minus_q.get_output(0), trt.UnaryOperation.EXP)
+        # e2 = exp(key + time_first - q)
+        tf_k_minus_q = network.add_elementwise(
+            tf_plus_k.get_output(0), q_out.get_output(0), trt.ElementWiseOperation.SUB
+        )
+        exp_tf_k = network.add_unary(tf_k_minus_q.get_output(0), trt.UnaryOperation.EXP)
 
-    # e1 = exp(max_state - q)  (NO time_decay here)
-    ms_minus_q = network.add_elementwise(
-        max_state_in, q_out.get_output(0), trt.ElementWiseOperation.SUB
-    )
-    exp_dpm = network.add_unary(ms_minus_q.get_output(0), trt.UnaryOperation.EXP)
+        # e1 = exp(max_state - q)  (NO time_decay here)
+        ms_minus_q = network.add_elementwise(
+            max_state_in, q_out.get_output(0), trt.ElementWiseOperation.SUB
+        )
+        exp_dpm = network.add_unary(ms_minus_q.get_output(0), trt.UnaryOperation.EXP)
 
-    # wkv_num = exp(tf+k-q) * V + exp(dpm-q) * num_state
-    term1_num = network.add_elementwise(
-        exp_tf_k.get_output(0), v_recur, trt.ElementWiseOperation.PROD
-    )
-    term2_num = network.add_elementwise(
-        exp_dpm.get_output(0), num_state_in, trt.ElementWiseOperation.PROD
-    )
-    wkv_num = network.add_elementwise(
-        term1_num.get_output(0), term2_num.get_output(0), trt.ElementWiseOperation.SUM
-    )
+        # wkv_num = exp(tf+k-q) * V + exp(dpm-q) * num_state
+        term1_num = network.add_elementwise(
+            exp_tf_k.get_output(0), v_recur, trt.ElementWiseOperation.PROD
+        )
+        term2_num = network.add_elementwise(
+            exp_dpm.get_output(0), num_state_in, trt.ElementWiseOperation.PROD
+        )
+        wkv_num = network.add_elementwise(
+            term1_num.get_output(0), term2_num.get_output(0), trt.ElementWiseOperation.SUM
+        )
 
-    # wkv_den = exp(tf+k-q) + exp(dpm-q) * den_state
-    term2_den = network.add_elementwise(
-        exp_dpm.get_output(0), den_state_in, trt.ElementWiseOperation.PROD
-    )
-    wkv_den = network.add_elementwise(
-        exp_tf_k.get_output(0), term2_den.get_output(0), trt.ElementWiseOperation.SUM
-    )
+        # wkv_den = exp(tf+k-q) + exp(dpm-q) * den_state
+        term2_den = network.add_elementwise(
+            exp_dpm.get_output(0), den_state_in, trt.ElementWiseOperation.PROD
+        )
+        wkv_den = network.add_elementwise(
+            exp_tf_k.get_output(0), term2_den.get_output(0), trt.ElementWiseOperation.SUM
+        )
 
-    # wkv = wkv_num / wkv_den
-    wkv = network.add_elementwise(
-        wkv_num.get_output(0), wkv_den.get_output(0), trt.ElementWiseOperation.DIV
-    )
+        # wkv = wkv_num / wkv_den
+        wkv = network.add_elementwise(
+            wkv_num.get_output(0), wkv_den.get_output(0), trt.ElementWiseOperation.DIV
+        )
 
-    # ---- State update (does NOT use time_first) ----
-    # q2 = max(K, decay_plus_max)
-    q2 = network.add_elementwise(
-        k_recur, decay_plus_max.get_output(0), trt.ElementWiseOperation.MAX
-    )
+        # ---- State update (does NOT use time_first) ----
+        # q2 = max(K, decay_plus_max)
+        q2 = network.add_elementwise(
+            k_recur, decay_plus_max.get_output(0), trt.ElementWiseOperation.MAX
+        )
 
-    # exp(K - q2)
-    k_minus_q2 = network.add_elementwise(k_recur, q2.get_output(0), trt.ElementWiseOperation.SUB)
-    exp_k_q2 = network.add_unary(k_minus_q2.get_output(0), trt.UnaryOperation.EXP)
+        # exp(K - q2)
+        k_minus_q2 = network.add_elementwise(k_recur, q2.get_output(0), trt.ElementWiseOperation.SUB)
+        exp_k_q2 = network.add_unary(k_minus_q2.get_output(0), trt.UnaryOperation.EXP)
 
-    # exp(decay_plus_max - q2)
-    dpm_minus_q2 = network.add_elementwise(
-        decay_plus_max.get_output(0), q2.get_output(0), trt.ElementWiseOperation.SUB
-    )
-    exp_dpm_q2 = network.add_unary(dpm_minus_q2.get_output(0), trt.UnaryOperation.EXP)
+        # exp(decay_plus_max - q2)
+        dpm_minus_q2 = network.add_elementwise(
+            decay_plus_max.get_output(0), q2.get_output(0), trt.ElementWiseOperation.SUB
+        )
+        exp_dpm_q2 = network.add_unary(dpm_minus_q2.get_output(0), trt.UnaryOperation.EXP)
 
-    # present_num = exp(K-q2)*V + exp(dpm-q2)*num_state
-    st_term1 = network.add_elementwise(
-        exp_k_q2.get_output(0), v_recur, trt.ElementWiseOperation.PROD
-    )
-    st_term2 = network.add_elementwise(
-        exp_dpm_q2.get_output(0), num_state_in, trt.ElementWiseOperation.PROD
-    )
-    present_num = network.add_elementwise(
-        st_term1.get_output(0), st_term2.get_output(0), trt.ElementWiseOperation.SUM
-    )
+        # present_num = exp(K-q2)*V + exp(dpm-q2)*num_state
+        st_term1 = network.add_elementwise(
+            exp_k_q2.get_output(0), v_recur, trt.ElementWiseOperation.PROD
+        )
+        st_term2 = network.add_elementwise(
+            exp_dpm_q2.get_output(0), num_state_in, trt.ElementWiseOperation.PROD
+        )
+        present_num = network.add_elementwise(
+            st_term1.get_output(0), st_term2.get_output(0), trt.ElementWiseOperation.SUM
+        )
 
-    # present_den = exp(K-q2) + exp(dpm-q2)*den_state
-    st_den_term2 = network.add_elementwise(
-        exp_dpm_q2.get_output(0), den_state_in, trt.ElementWiseOperation.PROD
-    )
-    present_den = network.add_elementwise(
-        exp_k_q2.get_output(0), st_den_term2.get_output(0), trt.ElementWiseOperation.SUM
-    )
+        # present_den = exp(K-q2) + exp(dpm-q2)*den_state
+        st_den_term2 = network.add_elementwise(
+            exp_dpm_q2.get_output(0), den_state_in, trt.ElementWiseOperation.PROD
+        )
+        present_den = network.add_elementwise(
+            exp_k_q2.get_output(0), st_den_term2.get_output(0), trt.ElementWiseOperation.SUM
+        )
 
-    # present_max = q2
-    present_max = q2.get_output(0)
+        # present_max = q2
+        present_max = q2.get_output(0)
+        return (
+            wkv.get_output(0),
+            present_num.get_output(0),
+            present_den.get_output(0),
+            present_max,
+        )
+
+    if sequence_length is None:
+        wkv_out, present_num, present_den, present_max = wkv_rows.add_wkv_rows(
+            network,
+            k=k_recur,
+            v=v_recur,
+            time_decay=time_decay,
+            time_first=time_first,
+            num_state=num_state_in,
+            den_state=den_state_in,
+            max_state=max_state_in,
+            width=hidden_size,
+        )
+    else:
+        wkv_out, present_num, present_den, present_max = _wkv_step()
 
     # ===== 5. Gated output + residual =====
-    wkv_for_gate = wkv.get_output(0)
+    wkv_for_gate = wkv_out
     if wkv_for_gate.dtype != r_gate.get_output(0).dtype:
         wkv_for_gate = network.add_cast(wkv_for_gate, r_gate.get_output(0).dtype).get_output(0)
     gated = network.add_elementwise(
@@ -724,10 +781,14 @@ def _add_rwkv_layer(
 
     # The normed output before time-shift becomes present_ff for next step
     present_ff = normed_ffn
+    ff_prev = ff_state_in
+    if sequence_length is None:
+        present_ff = wkv_rows.last_row(network, normed_ffn, hidden_size)
+        ff_prev = wkv_rows.shifted_rows(network, normed_ffn, ff_state_in, hidden_size)
 
     # ===== 2. Time-shift for key and receptance =====
-    xk_ffn = _time_shift_blend(normed_ffn, ff_state_in, f"{prefix}.time_mix_ffn_key")
-    xr_ffn = _time_shift_blend(normed_ffn, ff_state_in, f"{prefix}.time_mix_ffn_receptance")
+    xk_ffn = _time_shift_blend(normed_ffn, ff_prev, f"{prefix}.time_mix_ffn_key")
+    xr_ffn = _time_shift_blend(normed_ffn, ff_prev, f"{prefix}.time_mix_ffn_receptance")
 
     # ===== 3. Key projection + squared ReLU =====
     k_ffn = _project(xk_ffn, hidden_size, intermediate_size, "w_ffn_k", "feed_forward.key")
@@ -752,11 +813,14 @@ def _add_rwkv_layer(
         "hidden": residual_ffn.get_output(0),
         "present_attn": present_attn,
         "present_ff": present_ff,
-        "present_num": present_num.get_output(0),
-        "present_den": present_den.get_output(0),
+        "present_num": present_num,
+        "present_den": present_den,
         "present_max": present_max,
     }
 
+
+# Optimum rows of the prefill engine.
+PREFILL_OPT_TOKENS = 32
 
 _BUNDLE_FILES = (
     "tokenizer.json",
@@ -899,6 +963,20 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         )
         writer.add_bytes("engine.plan", plan)
         layout = "single"
+        if quant_ctx is None:
+            # A second engine prefills the prompt in chunks; decode keeps the one-row engine.
+            writer.add_bytes(
+                "prefill.plan",
+                model.build_engine(
+                    config,
+                    weights,
+                    max_sequence_length,
+                    precision=precision,
+                    verbose=bool(request.verbose),
+                    prefill_rows=wkv_rows.MAX_ROWS,
+                ),
+            )
+            layout = "split"
     writer.add_json(
         "runtime.json",
         _runtime_config(

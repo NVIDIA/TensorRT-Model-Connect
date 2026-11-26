@@ -11,6 +11,7 @@ pairs): each side's units are scored, and a paired bootstrap over independent cl
 from __future__ import annotations
 
 import importlib
+import json
 import math
 import os
 import re
@@ -22,7 +23,7 @@ from . import noninferiority
 
 BOOTSTRAP_SAMPLES = 2000
 # Corpus statistics that cost seconds per evaluation resample less.
-BOOTSTRAP_SAMPLES_BY_METRIC = {"coco_map": 200, "miou": 200}
+BOOTSTRAP_SAMPLES_BY_METRIC = {"coco_map": 200, "miou": 200, "point_miou": 200}
 
 
 def _text(observation: Mapping[str, Any] | None) -> str:
@@ -141,6 +142,22 @@ SETPRIV = ["setpriv", f"--reuid={NOBODY}", f"--regid={NOBODY}", "--clear-groups"
            "--inh-caps=-all", "--bounding-set=-all"]
 
 
+class SandboxUnavailable(RuntimeError):
+    pass
+
+
+def protected_roots(environment: Mapping[str, Any], out: Path) -> list[Any]:
+    return [out, *(environment.get(key) for key in (
+        "bundle_root", "hf_hub_cache", "hf_datasets_cache", "data_root", "reference_env_root", "runtime_root"))]
+
+
+def preflight_code_sandbox(model: Mapping[str, Any], environment: Mapping[str, Any], out: Path) -> None:
+    # Note (Jiaxin Deng): Reject an unavailable grading boundary before spending model preparation or GPU work.
+    if any(item.get("metric") == "code_pass" for item in model.get("absolute", [])):
+        out.mkdir(parents=True, exist_ok=True)
+        _sandbox_verified([str(path) for path in protected_roots(environment, out) if path])
+
+
 def protect(paths: Sequence[Any]) -> None:
     """Directories the generated programs must not be able to write (result, bundle, cache, data roots)."""
     PROTECTED_WRITE.update(str(path) for path in paths if path)
@@ -152,14 +169,19 @@ def _sandbox_verified(protected: Sequence[str]) -> None:
     Raises otherwise (fail closed)."""
     import subprocess
 
+    try:
+        identity = subprocess.run([*SETPRIV, "true"], capture_output=True)
+    except OSError as error:
+        raise SandboxUnavailable(f"code sandbox: setpriv is unavailable: {error}") from error
+    if identity.returncode != 0:
+        raise SandboxUnavailable("code sandbox: cannot switch to the nobody user (setpriv); "
+                                 "the host must provide the required UID/GID and capability boundary")
     for path in protected:
         if Path(path).exists() and subprocess.run([*SETPRIV, "test", "-w", path]).returncode == 0:
-            raise RuntimeError(f"code sandbox: nobody can write {path}")
+            raise SandboxUnavailable(f"code sandbox: nobody can write {path}")
     for path in PROTECTED_READ:
         if Path(path).exists() and subprocess.run([*SETPRIV, "ls", path], capture_output=True).returncode == 0:
-            raise RuntimeError(f"code sandbox: nobody can read {path}")
-    if subprocess.run([*SETPRIV, "true"]).returncode != 0:
-        raise RuntimeError("code sandbox: cannot switch to the nobody user (setpriv)")
+            raise SandboxUnavailable(f"code sandbox: nobody can read {path}")
 
 
 def code_pass(gold: Any, observation: Mapping[str, Any] | None, task: str | None = None) -> tuple[bool, str]:
@@ -239,8 +261,38 @@ def box_iou50(gold: Any, observation: Mapping[str, Any] | None, task: str | None
     return _iou(predicted, target) >= 0.5, match.group(0)
 
 
+def _best(observation: Mapping[str, Any]) -> int | None:
+    if observation.get("top_class") is not None:
+        return int(observation["top_class"])
+    scores = observation.get("scores") or []
+    return max(range(len(scores)), key=lambda index: float(scores[index])) if scores else None
+
+
+def label_hit(gold: Any, observation: Mapping[str, Any] | None, task: str | None = None) -> tuple[bool, str]:
+    """Multi-label audio tagging (AudioSet): the top-scoring class's name (``labels[top_class]``) is one of the
+    clip's gold labels, compared case-insensitively."""
+    observation = observation or {}
+    best, labels = _best(observation), observation.get("labels") or []
+    if best is None or best >= len(labels):
+        return False, ""
+    name = str(labels[best])
+    return name.strip().lower() in {str(label).strip().lower() for label in gold or []}, name
+
+
+def query_hit(gold: Any, observation: Mapping[str, Any] | None, task: str | None = None) -> tuple[bool, str]:
+    """Zero-shot classification by text-image relevance: the best-scoring query (``queries[top_class]``, one
+    prompt per class) names the gold class."""
+    observation = observation or {}
+    best, queries = _best(observation), observation.get("queries") or []
+    if best is None or best >= len(queries):
+        return False, ""
+    query = str(queries[best]).lower()
+    return query.endswith(f" {str(gold).strip().lower()}") or query == str(gold).strip().lower(), query
+
+
 BINARY: dict[str, Callable[..., tuple[bool, str]]] = {"choice": choice, "spoken_choice": spoken_choice, "contains": contains, "code_pass": code_pass,
-                                                      "top1": top1, "box_iou50": box_iou50}
+                                                      "top1": top1, "box_iou50": box_iou50, "label_hit": label_hit,
+                                                      "query_hit": query_hit}
 
 
 # ---------------- conversion parity: (TRTMC observation, native observation, gate) -> (match, reason) -------
@@ -250,8 +302,9 @@ def vector_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
                   gate: Mapping[str, Any]) -> tuple[bool | None, str]:
     """An encoder output vector (``values``) against the native one: equal length, finite values, cosine
     at least ``min_cosine`` and relative L2 error at most ``max_relative_l2`` (magnitude, not only direction)."""
-    mine = [float(value) for value in (candidate or {}).get("values") or []]
-    theirs = [float(value) for value in (native or {}).get("values") or []]
+    field = str(gate.get("field", "values"))  # the output vector (``logits`` for token scores)
+    mine = [float(value) for value in (candidate or {}).get(field) or []]
+    theirs = [float(value) for value in (native or {}).get(field) or []]
     if not mine or not theirs:
         return None, f"no output vector ({len(mine)} vs {len(theirs)} values)"
     if len(mine) != len(theirs):
@@ -263,6 +316,66 @@ def vector_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
     relative = math.sqrt(sum((a - b) ** 2 for a, b in zip(mine, theirs))) / norm
     ok = cosine >= float(gate.get("min_cosine", 0.999)) and relative <= float(gate.get("max_relative_l2", 0.02))
     return ok, f"cosine {cosine:.5f}, relative L2 {relative:.4f}"
+
+
+def depth_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                 gate: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """A relative depth map against the native one at the image's size: Pearson correlation at least
+    ``min_correlation`` and mean absolute error over the native maximum at most ``max_relative_error`` (the
+    family's E2E gate)."""
+    import numpy as np
+
+    sides = []
+    for side in (candidate, native):
+        depth, height, width = (side or {}).get("depth"), int((side or {}).get("height") or 0), int((side or {}).get("width") or 0)
+        values = np.asarray(depth if depth is not None else [], dtype=np.float64)
+        if height <= 0 or width <= 0 or values.size != height * width:
+            return None, "missing depth map or inconsistent dimensions"
+        sides.append((values, (height, width)))
+    (mine, shape), (theirs, expected) = sides
+    if shape != expected:
+        return False, f"depth map {shape} vs {expected}"
+    if not np.isfinite(mine).all():
+        return False, "non-finite depth"
+    correlation = float(np.corrcoef(mine, theirs)[0, 1])
+    scale = float(theirs.max()) if float(theirs.max()) > 0.0 else 1.0
+    relative = float(np.abs(mine - theirs).mean() / scale)
+    ok = correlation >= float(gate.get("min_correlation", 0.998)) and relative <= float(gate.get("max_relative_error", 0.01))
+    return ok, f"correlation {correlation:.5f}, relative error {relative:.5f}"
+
+
+def decision_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                    gate: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """A structured decision (``scores``: per question, its options' probabilities) against the native one:
+    the same questions and options, the same most probable option, and every probability within
+    ``atol`` + ``rtol`` x native (the families' E2E gate, 0.015 and 0.01 by default)."""
+    sides = [(side or {}).get("scores") for side in (candidate, native)]
+    if not all(isinstance(scores, list) for scores in sides):
+        return None, "no decision scores"
+    if sides == [[], []]:  # a schema without questions: both sides decide nothing
+        return True, "no questions on either side"
+    mine = {str(item.get("question_id")): item for item in sides[0]}
+    theirs = {str(item.get("question_id")): item for item in sides[1]}
+    if not mine or not theirs:
+        return None, f"no decision scores ({len(mine)} vs {len(theirs)} questions)"
+    if mine.keys() != theirs.keys():
+        return False, f"questions differ: {sorted(mine)} vs {sorted(theirs)}"
+    atol, rtol = float(gate.get("atol", 0.015)), float(gate.get("rtol", 0.01))
+    worst = 0.0
+    for question, item in theirs.items():
+        own = mine[question]
+        if own.get("option_ids") and item.get("option_ids") and list(own["option_ids"]) != list(item["option_ids"]):
+            return False, f"{question}: options differ"  # compared where both sides name them
+        p, q = [float(v) for v in own.get("probabilities") or []], [float(v) for v in item.get("probabilities") or []]
+        if not p or len(p) != len(q) or not all(math.isfinite(v) for v in p):
+            return False, f"{question}: probabilities missing or malformed"
+        if max(range(len(p)), key=p.__getitem__) != max(range(len(q)), key=q.__getitem__):
+            return False, f"{question}: a different option is most probable"
+        excess = max(abs(a - b) - (atol + rtol * abs(b)) for a, b in zip(p, q))
+        if excess > 0:
+            return False, f"{question}: a probability differs beyond the tolerance by {excess:.4f}"
+        worst = max(worst, max(abs(a - b) for a, b in zip(p, q)))
+    return True, f"{len(theirs)} questions, same choices, max probability difference {worst:.4f}"
 
 
 def mask_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
@@ -318,10 +431,19 @@ def geometry_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, An
     return ok, f"mask IoU {iou:.4f}, median relative depth error {relative:.4f}"
 
 
+def _sign(value: float) -> int:
+    return (value > 0) - (value < 0)
+
+
 def action_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
                   gate: Mapping[str, Any]) -> tuple[bool | None, str]:
     """A robot action chunk (``actions``, row-major [step, component]) against the native one: equal shape,
-    finite values, and the largest absolute error at most ``max_error_of_range`` of the native chunk's range."""
+    finite values, and the largest absolute error at most ``max_error_of_range`` of the native chunk's range, or
+    at most ``max_abs_error`` (robot units) when the gate states that instead.
+
+    With ``gripper_component`` (an index into the native ``action_dim`` components, -1 for the last), that bound
+    covers the other (arm) components, and the gripper is compared by sign, the open or close command the robot
+    executes: at most ``max_gripper_sign_changes`` steps (default 0) may command the other direction."""
     mine = [float(value) for value in (candidate or {}).get("actions") or []]
     theirs = [float(value) for value in (native or {}).get("actions") or []]
     if not mine or not theirs:
@@ -330,9 +452,108 @@ def action_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
         return False, f"shape differs: {len(mine)} vs {len(theirs)} values"
     if not all(math.isfinite(value) for value in mine):
         return False, "non-finite actions"
+    label, changes, note = "max abs error", 0, ""
+    if gate.get("gripper_component") is not None:
+        dim = int((native or {}).get("action_dim") or 0)
+        if dim < 2 or len(theirs) % dim:
+            return None, f"no action_dim to find the gripper in ({dim} for {len(theirs)} values)"
+        column = int(gate["gripper_component"]) % dim
+        changes = sum(_sign(a) != _sign(b) for a, b in zip(mine[column::dim], theirs[column::dim]))
+        mine, theirs = ([value for index, value in enumerate(side) if index % dim != column] for side in (mine, theirs))
+        label, note = "arm max abs error", f", gripper sign changes {changes}"
     span = (max(theirs) - min(theirs)) or 1.0
     error = max(abs(a - b) for a, b in zip(mine, theirs))
-    return error <= float(gate.get("max_error_of_range", 1e-3)) * span, f"max abs error {error:.3g} (range {span:.3g})"
+    limit = (float(gate["max_abs_error"]) if "max_abs_error" in gate
+             else float(gate.get("max_error_of_range", 1e-3)) * span)
+    ok = error <= limit and changes <= int(gate.get("max_gripper_sign_changes", 0))
+    return ok, f"{label} {error:.3g} (limit {limit:.3g}, range {span:.3g}){note}"
+
+
+def pose_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                gate: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """Refined pose hypotheses and their scores (``refined_poses`` row-major [N, 4, 4], ``scores``) against the
+    native ones from the same crops: the largest pose and score errors at most ``max_pose_abs_error`` and
+    ``max_score_abs_error``, the same score ranking, and rigid poses (the family's E2E gate)."""
+    import numpy as np
+
+    sides = [(np.asarray((side or {}).get("refined_poses") or [], dtype=np.float64),
+              np.asarray((side or {}).get("scores") or [], dtype=np.float64)) for side in (candidate, native)]
+    (poses, scores), (native_poses, native_scores) = sides
+    if not poses.size or not native_poses.size or not scores.size or not native_scores.size:
+        return None, f"no refined poses ({poses.size} vs {native_poses.size} values)"
+    if poses.shape != native_poses.shape or scores.shape != native_scores.shape:
+        return False, f"{scores.size} hypotheses vs {native_scores.size}"
+    if not (np.isfinite(poses).all() and np.isfinite(scores).all()):
+        return False, "non-finite poses or scores"
+    pose_error = float(np.max(np.abs(poses - native_poses)))
+    score_error = float(np.max(np.abs(scores - native_scores)))
+    ranked = bool(np.array_equal(np.argsort(-scores, kind="stable"), np.argsort(-native_scores, kind="stable")))
+    rotations = poses.reshape(-1, 4, 4)[:, :3, :3]
+    rigid = bool(np.all(np.abs(rotations @ rotations.transpose(0, 2, 1) - np.eye(3)) <= 2e-3)
+                 and np.all(np.abs(np.linalg.det(rotations) - 1.0) <= 6e-3))
+    ok = (pose_error <= float(gate.get("max_pose_abs_error", 0.005))
+          and score_error <= float(gate.get("max_score_abs_error", 0.05)) and ranked and rigid)
+    return ok, (f"pose max abs error {pose_error:.2g}, score max abs error {score_error:.2g}"
+                f"{'' if ranked else ', ranking differs'}{'' if rigid else ', non-rigid pose'}")
+
+
+def _mmcif_atoms(path: str) -> list[list[float]]:
+    """Atom coordinates of an mmCIF ``ATOM`` loop in file order (Cartn_x/y/z: the 8th to 10th of the 13 columns the
+    Boltz-2 runtime writes)."""
+    rows = [line.split() for line in Path(path).read_text(encoding="utf-8").splitlines() if line.startswith("ATOM ")]
+    return [[float(value) for value in row[7:10]] for row in rows]
+
+
+def _structure(side: Mapping[str, Any]) -> tuple[Any, Any, float]:
+    """A predicted structure's atom coordinates [N, 3], per-token pLDDT and confidence score: inline (``coords``,
+    ``confidence``), or the ``structure_artifact`` mmCIF and ``metadata_artifact`` a TRTMC worker writes."""
+    import numpy as np
+
+    if "structure_artifact" in side:
+        coords = _mmcif_atoms(side["structure_artifact"])
+        confidence = json.loads(Path(side["metadata_artifact"]).read_text(encoding="utf-8"))
+    else:
+        coords, confidence = side["coords"], side["confidence"]
+    return (np.asarray(coords, dtype=np.float64).reshape(-1, 3), np.asarray(confidence["plddt"], dtype=np.float64),
+            float(confidence["confidence_score"]))
+
+
+def structure_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                     gate: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """A predicted structure against the native one from the same noise (each side inline or as the files the
+    TRTMC worker writes, ``_structure``): the same atoms, lDDT at least ``min_lddt``, aligned RMSD at most
+    ``max_rmsd``, and mean pLDDT and confidence-score differences at most ``max_plddt_mean_abs`` and
+    ``max_confidence_abs`` (the family's E2E gate)."""
+    import numpy as np
+
+    try:
+        (mine, plddt, confidence), (theirs, native_plddt, native_confidence) = (
+            _structure(side or {}) for side in (candidate, native))
+    except (KeyError, OSError, TypeError, ValueError) as error:
+        return None, f"no structure: {error}"
+    if not len(mine) or not len(theirs):
+        return None, f"no structure ({len(mine)} vs {len(theirs)} atoms)"
+    if mine.shape != theirs.shape:
+        return False, f"{len(mine)} atoms vs {len(theirs)}"
+    if not (np.isfinite(mine).all() and np.isfinite(plddt).all() and math.isfinite(confidence)):
+        return False, "non-finite structure"
+    distances = [np.linalg.norm(side[:, None] - side[None, :], axis=-1) for side in (theirs, mine)]
+    pairs = (distances[0] < 15.0) & (distances[0] > 0.0)
+    delta = np.abs(distances[1][pairs] - distances[0][pairs])
+    lddt = float(np.mean([(delta < threshold).mean() for threshold in (0.5, 1.0, 2.0, 4.0)]))
+    centered = [side - side.mean(axis=0) for side in (theirs, mine)]
+    left, _, right = np.linalg.svd(centered[1].T @ centered[0])
+    correction = np.diag([1.0, 1.0, np.sign(np.linalg.det(left @ right))])
+    rmsd = float(np.sqrt(np.mean(np.sum((centered[1] @ (left @ correction @ right) - centered[0]) ** 2, axis=1))))
+    if plddt.shape != native_plddt.shape or not plddt.size:
+        return False, f"pLDDT of {plddt.size} tokens vs {native_plddt.size}"
+    plddt_error = float(np.mean(np.abs(plddt - native_plddt)))
+    confidence_error = abs(confidence - native_confidence)
+    ok = (lddt >= float(gate.get("min_lddt", 0.55)) and rmsd <= float(gate.get("max_rmsd", 9.0))
+          and plddt_error <= float(gate.get("max_plddt_mean_abs", 0.10))
+          and confidence_error <= float(gate.get("max_confidence_abs", 0.10)))
+    return ok, (f"lDDT {lddt:.3f}, RMSD {rmsd:.2f} A, pLDDT mean abs {plddt_error:.3f}, "
+                f"confidence abs {confidence_error:.3f}")
 
 
 def disparity_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
@@ -389,12 +610,15 @@ def family_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
 
 
 PARITY: dict[str, Callable[..., tuple[bool | None, str]]] = {"family_parity": family_parity,
+                                                      "decision_parity": decision_parity,
+                                                      "depth_parity": depth_parity,
                                                       "vector_parity": vector_parity, "mask_parity": mask_parity,
                                                       "geometry_parity": geometry_parity,
                                                       "action_parity": action_parity, "disparity_parity": disparity_parity,
-                                                      "audio_parity": audio_parity}
+                                                      "audio_parity": audio_parity, "structure_parity": structure_parity,
+                                                      "pose_parity": pose_parity}
 # Parity metrics that read the output files the servers write (their artifacts are kept).
-ARTIFACT_METRICS = {"geometry_parity", "disparity_parity"}
+ARTIFACT_METRICS = {"geometry_parity", "disparity_parity", "structure_parity"}
 
 
 # ---------------- corpus metrics ----------------
@@ -420,6 +644,24 @@ def wer_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, 
     for index, problem in enumerate(problems):
         reference = _words(str(problem["gold"]))
         units.append((float(_edit_distance(reference, _words(_text(observations.get(index))))), float(len(reference))))
+    return units
+
+
+def _characters(text: str) -> list[str]:
+    """NFKC characters without whitespace or punctuation: the units of a language written without spaces."""
+    import unicodedata
+
+    return [character for character in unicodedata.normalize("NFKC", text).lower()
+            if not character.isspace() and not unicodedata.category(character).startswith("P")]
+
+
+def cer_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, Any]) -> list[tuple[float, float]]:
+    """Per utterance: (character errors, reference characters)."""
+    units = []
+    for index, problem in enumerate(problems):
+        reference = _characters(str(problem["gold"]))
+        units.append((float(_edit_distance(reference, _characters(_text(observations.get(index))))),
+                      float(len(reference))))
     return units
 
 
@@ -532,11 +774,18 @@ def mean_percent(units: Sequence[float]) -> float:
 
 def point_forecast(observation: Mapping[str, Any] | None, length: int) -> list[float]:
     """The point forecast of an output with ``length`` values: the values themselves, or the median
-    row of a quantile forecast ([1, quantiles, horizon], e.g. Chronos-Bolt's nine)."""
+    quantile of a quantile forecast: the ``series_to_quantile_forecast`` Task's [quantile, horizon, channel]
+    (the 0.5 level, else the middle one), or a pipeline's [1, quantiles, horizon] (e.g. Chronos-Bolt's nine)."""
     values = [float(value) for value in (observation or {}).get("values") or []]
     if len(values) == length:
         return values
     shape = (observation or {}).get("shape") or []
+    if list((observation or {}).get("axes") or []) == ["quantile", "horizon", "channel"]:
+        if len(shape) != 3 or shape[1] * shape[2] != length or len(values) != shape[0] * length:
+            return []
+        levels = [float(level) for level in (observation or {}).get("quantile_levels") or []]
+        middle = levels.index(0.5) if 0.5 in levels else shape[0] // 2
+        return values[middle * length:(middle + 1) * length]
     if len(shape) == 3 and len(values) == shape[1] * shape[2] and shape[2] == length:
         middle = shape[1] // 2
         return values[middle * length:(middle + 1) * length]
@@ -661,11 +910,57 @@ def miou(units: Sequence[tuple[Any, Any]]) -> float:
     return float(100.0 * np.mean(intersection[present] / union[present])) if present.any() else 0.0
 
 
+def point_miou_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, Any]) -> list[tuple[Any, Any]]:
+    """Per point cloud: (intersection, union) per class of the predicted per-point classes (``labels``) against
+    the gold ones (``labels``, ``num_classes``), scored by ``miou`` over the corpus (S3DIS: 13 classes)."""
+    import numpy as np
+
+    units = []
+    for index, problem in enumerate(problems):
+        gold = np.asarray(problem["gold"]["labels"], dtype=np.int64)
+        classes = int(problem["gold"]["num_classes"])
+        predicted = np.asarray((observations.get(index) or {}).get("labels") or [], dtype=np.int64)
+        if predicted.shape != gold.shape:
+            predicted = np.full(gold.shape, -1, dtype=np.int64)
+        known = (predicted >= 0) & (predicted < classes)
+        intersection = np.bincount(gold[predicted == gold], minlength=classes)[:classes]
+        area_gold = np.bincount(gold, minlength=classes)[:classes]
+        area_predicted = np.bincount(predicted[known], minlength=classes)[:classes]
+        units.append((intersection, area_gold + area_predicted - intersection))
+    return units
+
+
 # COCO category ids of the 80 contiguous class indices.
 COCO_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 31, 32,
             33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59,
             60, 61, 62, 63, 64, 65, 67, 70, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 84, 85, 86, 87, 88, 89, 90]
-LABEL_FIELDS = {"coco-contiguous-80": "category_index", "coco-category-id": "category_id"}
+LABEL_FIELDS = {"coco-contiguous-80": "category_index", "coco-category-id": "category_id",
+                "coco-names-80": "category_index"}
+# The 80 COCO categories in contiguous order: the phrases an open-vocabulary detector is prompted with, and how
+# its text labels map back to categories (``coco-names-80``).
+COCO_NAMES = ["person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
+              "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+              "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+              "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
+              "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+              "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+              "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard",
+              "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
+              "scissors", "teddy bear", "hair drier", "toothbrush"]
+
+
+def _named_detections(output: Mapping[str, Any]) -> dict[str, Any]:
+    """An open-vocabulary detector's output with its text labels as contiguous COCO classes: a label that names
+    no category (a merged or partial phrase) drops its box, as it answers no category."""
+    index = {name: position for position, name in enumerate(COCO_NAMES)}
+    boxes = output.get("boxes") or []
+    if boxes and not isinstance(boxes[0], (list, tuple)):
+        boxes = [boxes[position:position + 4] for position in range(0, len(boxes), 4)]
+    kept = [(box, score, index[" ".join(str(label).lower().replace(".", " ").split())])
+            for box, score, label in zip(boxes, output.get("scores") or [], output.get("labels") or [])
+            if " ".join(str(label).lower().replace(".", " ").split()) in index and score is not None]
+    return {**output, "boxes": [box for box, _, _ in kept], "scores": [score for _, score, _ in kept],
+            "class_ids": [label for _, _, label in kept]}
 
 
 def coco_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, Any],
@@ -681,6 +976,8 @@ def coco_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int,
                         "category_id": COCO_IDS[int(category)], **({"area": float(area)} if area is not None else {})}
                        for box, category, area in zip(objects["bbox"], objects["category"], areas)]
         output = observations.get(index) or {"boxes": [], "scores": [], "class_ids": []}
+        if params.get("label_space") == "coco-names-80":
+            output = _named_detections(output)
         units.append(({"sample_id": problem.get("sample_id", str(index)), "annotations": annotations}, output, field))
     return units
 
@@ -787,6 +1084,11 @@ def _label_map_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]
     return planes is not None and planes[0].size == planes[1]
 
 
+def _point_labels_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) -> bool:
+    labels = observation.get("labels")  # one class per gold point
+    return isinstance(labels, list) and len(labels) == len(problem["gold"]["labels"])
+
+
 def _value_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) -> bool:
     return _finite([observation.get("value")])
 
@@ -794,8 +1096,8 @@ def _value_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) ->
 # Per corpus metric: whether an output answers its problem (the field the metric reads, well formed). An
 # output that does not is a missing answer (an error), never scored as zeros or an empty prediction.
 ANSWERS: dict[str, Callable[[Mapping[str, Any], Mapping[str, Any]], bool]] = {
-    "chrf": _text_answer, "wer": _text_answer, "coco_map": _detections_answer, "forecast_mse": _forecast_answer,
-    "miou": _label_map_answer, "mask_iou": _masks_answer, "precomputed_mean": _value_answer,
+    "chrf": _text_answer, "wer": _text_answer, "cer": _text_answer, "coco_map": _detections_answer, "forecast_mse": _forecast_answer,
+    "miou": _label_map_answer, "point_miou": _point_labels_answer, "mask_iou": _masks_answer, "precomputed_mean": _value_answer,
     "sts_spearman": _vector_answer, "rerank_ndcg": _scores_answer, "retrieval_ndcg": _vector_answer,
     "retrieval_ndcg10": _vector_answer}
 
@@ -812,9 +1114,11 @@ CORPUS: dict[str, tuple[Callable, Callable, bool]] = {"chrf": (translation_units
                                                       "coco_map": (coco_units, coco_map, True),
                                                       "forecast_mse": (forecast_units, mse, False),
                                                       "miou": (miou_units, miou, True),
+                                                      "point_miou": (point_miou_units, miou, True),
                                                       "mask_iou": (mask_iou_units, mean_percent, True),
                                                       "precomputed_mean": (precomputed_units, mean, True),
                                                       "wer": (wer_units, wer, False),
+                                                      "cer": (cer_units, wer, False),  # the same error rate
                                                       "sts_spearman": (sts_units, spearman, True),
                                                       "rerank_ndcg": (rerank_units, mean_percent, True),
                                                       "retrieval_ndcg": (retrieval_units, mean_percent, True),

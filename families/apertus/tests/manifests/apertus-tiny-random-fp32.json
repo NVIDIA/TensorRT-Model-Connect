@@ -1,0 +1,50 @@
+{
+  "name": "apertus-tiny-random-fp32",
+  "bundle": "apertus-tiny-random-fp32.bundle",
+  "generated_checkpoint": {
+    "seed": 256,
+    "config": {
+      "vocab_size": 260,
+      "hidden_size": 256,
+      "intermediate_size": 512,
+      "num_hidden_layers": 3,
+      "num_attention_heads": 4,
+      "num_key_value_heads": 2,
+      "max_position_embeddings": 512,
+      "rms_norm_eps": 1e-05,
+      "initializer_range": 0.25,
+      "bos_token_id": 1,
+      "eos_token_id": 2,
+      "pad_token_id": 3,
+      "tie_word_embeddings": false,
+      "rope_parameters": {
+        "rope_type": "llama3",
+        "rope_theta": 12000000.0,
+        "factor": 8.0,
+        "original_max_position_embeddings": 64,
+        "low_freq_factor": 1.0,
+        "high_freq_factor": 4.0
+      }
+    }
+  },
+  "family": "apertus",
+  "task": "text_continuation",
+  "precision": "fp32",
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "apertus-tiny-random-fp32",
+      "premerge": true,
+      "input": "random_token_ids",
+      "oracle": "token_exact",
+      "random_tokens": {
+        "seed": 7,
+        "vocab_size": 260,
+        "count": 150
+      },
+      "max_new_tokens": 48,
+      "determinism_reruns": 1
+    }
+  ]
+}

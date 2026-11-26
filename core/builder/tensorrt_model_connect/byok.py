@@ -26,7 +26,12 @@ def add_kernel(
     workspace_bytes: int = 0,
     extra_args: list[dict[str, Any]] | None = None,
 ) -> list[Any]:
-    """Add one TVM-FFI TensorRT plugin layer to the network."""
+    """Add one TVM-FFI TensorRT plugin layer to the network.
+
+    Each output's ``dims`` is ``same_as_input_N`` or a list of positive
+    dimensions and ``{"input": N, "axis": A}`` references. Axis references
+    preserve dynamic dimensions when a kernel changes only part of a shape.
+    """
 
     path = Path(plugin_library).resolve()
     if not path.is_file():

@@ -48,6 +48,8 @@ struct RuntimeConfig {
     bool has_mtp;
     std::int32_t mtp_num_draft_tokens;
     std::int32_t tensor_parallel_size;
+    // A second engine prefills prompt chunks; decoding stays on engine.plan.
+    bool split;
 };
 
 template <typename T>
@@ -90,8 +92,9 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
                            (json.contains("has_mtp") ? 2 : 0) +
                            static_cast<std::size_t>(json.contains("tensor_parallel_size")))
         throw std::runtime_error("qwen3_5_moe runtime.json has an unexpected field set");
-    if (require_value<std::string>(json, "decoder_engine_layout") != "single")
-        throw std::runtime_error("qwen3_5_moe requires decoder_engine_layout='single'");
+    const auto layout = require_value<std::string>(json, "decoder_engine_layout");
+    if (layout != "single" && layout != "split")
+        throw std::runtime_error("qwen3_5_moe requires decoder_engine_layout 'single' or 'split'");
 
     RuntimeConfig config{
         require_value<std::int32_t>(json, "hidden_size"),
@@ -120,7 +123,10 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         json.contains("tensor_parallel_size")
             ? require_value<std::int32_t>(json, "tensor_parallel_size")
             : 1,
+        layout == "split",
     };
+    if (config.split && (config.tensor_parallel_size != 1 || config.has_mtp))
+        throw std::runtime_error("qwen3_5_moe split bundles are single-GPU without MTP");
     const auto layer_types = require_value<std::vector<std::string>>(json, "layer_types");
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_attention_heads <= 0 ||
         config.num_key_value_heads <= 0 || config.head_dim <= 0 || config.vocab_size <= 0 ||
@@ -165,6 +171,18 @@ ITask* create_native(const FamilyContext& context, const RuntimeConfig& config) 
     if (!decoder || !decoder->ok())
         throw std::runtime_error("Qwen3.5-MoE native decoder failed to load");
     decoder->set_timing_label("qwen3_5_moe decoder");
+    std::unique_ptr<ITrtModule> prefill;
+    if (config.split) {
+        // The prefill engine shares the decoder's stream so state copies stay ordered.
+        ModuleCreateOptions prefill_options;
+        prefill_options.stream = decoder->stream();
+        const auto prefill_plan = require_section(context.reader, "prefill.plan");
+        prefill = context.backend.create_module(prefill_plan.data(), prefill_plan.size(),
+                                                prefill_options);
+        if (!prefill || !prefill->ok())
+            throw std::runtime_error("Qwen3.5-MoE native prefill engine failed to load");
+        prefill->set_timing_label("qwen3_5_moe prefill");
+    }
     const cudaStream_t stream = decoder->stream();
     const std::int32_t kv_dim =
         config.num_key_value_heads / config.tensor_parallel_size * config.head_dim;
@@ -226,7 +244,8 @@ ITask* create_native(const FamilyContext& context, const RuntimeConfig& config) 
     auto tokenizer = create_tokenizer(context.reader);
     auto pipeline = std::make_unique<RecurrentPipeline>(
         std::move(decoder), std::move(state), std::move(generation), stream, "Qwen3.5-MoE",
-        tokenizer, std::string{}, std::move(mtp_scheduler), std::move(paired_draft));
+        tokenizer, std::string{}, std::move(mtp_scheduler), std::move(paired_draft),
+        std::move(prefill));
     if (context.reader.find_section("native_visual.json")) {
         auto visual =
             load_engine(context.backend, require_section(context.reader, "native_visual.plan"),

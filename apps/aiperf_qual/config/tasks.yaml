@@ -68,17 +68,24 @@ benchmarks:
              gate: {margin: 2.0}, quantized_gate: {margin: 3.0}, sampled_gate: {margin: 3.0}}
   librispeech: {suite: librispeech-test-clean, suite_definition: librispeech-test-clean-500, metric: wer,
                 gate: {margin: 0.3, relative_margin: 0.05}}
+  # Japanese has no word boundaries: the character error rate of FLEURS ja (models that state it).
+  fleurs_ja: {suite: fleurs-ja-test, suite_definition: fleurs-ja-test-650, metric: cer,
+              gate: {margin: 0.5, relative_margin: 0.05}}
   # Streaming TRTMC vs the native transcription: a wider margin.
   librispeech_streaming: {suite: librispeech-test-clean, suite_definition: librispeech-test-clean-500,
                           metric: wer, gate: {margin: 0.5, relative_margin: 0.10}}
   sts: {suite: stsb, suite_definition: stsbenchmark-pairs-1379, metric: sts_spearman, gate: {margin: 0.5}}
   # Raw encoders (BERT, RoBERTa, ...: STS-B is not their task): conversion parity of the encode output (the
-  # first-token hidden state) on 400 STS-B test sentences, every sentence within the tolerance.
+  # first-token hidden state) on 400 STS-B test sentences, every sentence within the tolerance (a profile's family
+  # file may allow rare outliers: see the README).
   encoder_parity: {suite: encoder-parity, suite_definition: stsbenchmark-sentences-400, metric: vector_parity,
                    gate: {min_cosine: 0.999, max_relative_l2: 0.02},
                    # A native model that cannot run the candidate's precision (fp16) runs at fp32: TRTMC's half-
                    # precision error is then not shared by the reference, so the tolerance doubles.
-                   mismatched_precision_gate: {min_cosine: 0.998, max_relative_l2: 0.04}}
+                   mismatched_precision_gate: {min_cosine: 0.998, max_relative_l2: 0.04},
+                   # An FP8 candidate carries its quantization error: the families' FP8 E2E cosine (0.99), and the
+                   # relative L2 that cosine allows at equal norms (sqrt(2 * 0.01) ~ 0.14).
+                   quantized_gate: {min_cosine: 0.99, max_relative_l2: 0.15}}
   # SciFact reranking of fixed BM25 top-20 candidates (nDCG@10). Each document keeps its head so that the pair, as
   # the bundle's reranker forms it (`pair_format`, the eagle_vlm runtime's), fits the bundle; both sides get it.
   rerank: {suite: scifact-rerank, suite_definition: scifact-rerank-bm25-300, metric: rerank_ndcg, gate: {margin: 1.0},
@@ -93,6 +100,56 @@ benchmarks:
   # (coco-contiguous-80 or coco-category-id).
   coco: {suite: coco-map, suite_definition: coco-val2017-500, metric: coco_map,
          metric_params: {label_space: coco-contiguous-80}, gate: {margin: 1.0}}
+  # The same images for an open-vocabulary detector (an image_text_to_boxes Task): one prompt naming the 80
+  # categories, its text labels mapped back to them (unmatched phrases drop their box). Each family states its
+  # thresholds as its own request fields.
+  coco_prompted:
+    suite: coco-map-prompted
+    suite_definition: coco-val2017-500
+    metric: coco_map
+    metric_params: {label_space: coco-names-80}
+    request:
+      score_threshold: null
+      prompt: >-
+        person. bicycle. car. motorcycle. airplane. bus. train. truck. boat. traffic light. fire hydrant.
+        stop sign. parking meter. bench. bird. cat. dog. horse. sheep. cow. elephant. bear. zebra. giraffe.
+        backpack. umbrella. handbag. tie. suitcase. frisbee. skis. snowboard. sports ball. kite. baseball
+        bat. baseball glove. skateboard. surfboard. tennis racket. bottle. wine glass. cup. fork. knife.
+        spoon. bowl. banana. apple. sandwich. orange. broccoli. carrot. hot dog. pizza. donut. cake. chair.
+        couch. potted plant. bed. dining table. toilet. tv. laptop. mouse. remote. keyboard. cell phone.
+        microwave. oven. toaster. sink. refrigerator. book. clock. vase. scissors. teddy bear. hair drier.
+        toothbrush.
+    gate: {margin: 1.0}
+  # Zero-shot classification by text-image relevance (CLIP, SigLIP): each Imagenette image against its 10 class
+  # prompts; right when the best-scoring prompt names the gold class.
+  imagenette_zero_shot: {suite: imagenette-zero-shot, suite_definition: imagenette-zero-shot-500, metric: query_hit,
+                         gate: {margin: 1.0}, quantized_gate: {margin: 2.0}}
+  # Audio tagging (AST): right when the top class is one of the AudioSet clip's labels.
+  audioset: {suite: audioset-eval, suite_definition: audioset-eval-500, metric: label_hit,
+             gate: {margin: 1.0}, quantized_gate: {margin: 2.0}}
+  # Masked-LM token scores (ESM-2) have no gold set here: every logit of UniRef50 test sequences cut to the
+  # bundle's window, against the native model's (cosine and relative L2, as the encoders).
+  token_score_parity: {suite: token-score-parity, suite_definition: uniref50-test-200, metric: vector_parity,
+                       truncate_tokens: 254, gate: {field: logits, min_cosine: 0.999, max_relative_l2: 0.02}}
+  # Relative monocular depth (Depth Anything) against the native map on 50 COCO images: the family's E2E gate.
+  # A quantized (NVFP4) candidate carries its weight error on every image: about twice the worst one measured on
+  # this suite (correlation 0.9946, relative error 0.0174), as the robot-model gates are derived.
+  depth_parity: {suite: depth-parity, suite_definition: coco-val2017-depth-50, metric: depth_parity,
+                 gate: {min_correlation: 0.998, max_relative_error: 0.01},
+                 quantized_gate: {min_correlation: 0.989, max_relative_error: 0.035}}
+  # Point-cloud semantic segmentation (PointNet): S3DIS Area 5 blocks, class mIoU of the per-point classes over the
+  # corpus against the S3DIS annotation.
+  s3dis_area5: {suite: s3dis-area5-miou, suite_definition: s3dis-area5-blocks-300, metric: point_miou,
+                gate: {margin: 1.0}}
+  # A structured decision (per-option probabilities of a schema's questions) has no public gold set: every
+  # catalog testcase of the profile (its family's fixtures), the same choices and the families' E2E probability
+  # tolerance against the release implementation.
+  decision_parity:
+    suite: decision-parity
+    metric: decision_parity
+    suite_definition: {suite: decision-parity, version: 1, source: {kind: catalog_testcase, all_testcases: true},
+                       selection: {method: first, count: 16}}
+    gate: {atol: 0.015, rtol: 0.01}
   # ETTh1 rolling forecasts (the model's columns / context / horizon in config/models `window`): MSE against
   # the observed future, within 1% of the native MSE.
   etth1: {suite: etth1-mse, suite_definition: etth1-test-rolling, metric: forecast_mse,
@@ -122,6 +179,16 @@ benchmarks:
   # ACT on 50 recorded observations of its training dataset (conversion parity, every observation).
   action_parity: {suite: action-parity, suite_definition: lerobot-act-observations-50, metric: action_parity,
                   gate: {max_error_of_range: 0.001}}
+  # LeRobot action chunks (GR00T, pi0.5) on recorded LIBERO observations with the family's fixed flow noise on
+  # both sides (each profile states its suite and its precision's gate: config/models), every observation.
+  action_chunk_parity: {suite: action-chunk-parity, metric: action_parity, gate: {max_error_of_range: 0.001}}
+  # Structure prediction from the same noise as the native model (the family's suite): lDDT, aligned RMSD, pLDDT
+  # and confidence against the native structure, the family's E2E gate.
+  structure_parity: {suite: structure-parity, metric: structure_parity,
+                     gate: {min_lddt: 0.55, max_rmsd: 9.0, max_plddt_mean_abs: 0.10, max_confidence_abs: 0.10}}
+  # Pose hypothesis refinement on the same crops as the native networks (the family's suite): pose and score
+  # errors, score ranking and rigidity, the family's E2E gate.
+  pose_parity: {suite: pose-parity, metric: pose_parity, gate: {max_pose_abs_error: 0.005, max_score_abs_error: 0.05}}
   # Fast-FoundationStereo on the 15 Middlebury v3 trainingQ scenes of its 700x700 profile (conversion parity).
   disparity_parity: {suite: disparity-parity, suite_definition: middlebury-q-700-15, metric: disparity_parity,
                      gate: {max_mean_epe: 0.1}}
@@ -135,14 +202,26 @@ benchmarks:
          min_new_tokens: 64, gate: {margin: 2.0}}
 
 tasks:
-  text_generation:
+  text_generation: &generate_text
     absolute: [mmlu]
     performance: {output_grader: parity_token_exact, output_grader_params: {min_prefix: 8, accept_equal_text: true}}
+  conditional_text_generation: *generate_text
+  text_continuation: *generate_text  # the Task SDK name of the migrated decoder LMs (qwen3, #1558)
 
   vision_language_generation:
     # OCRBench alone (the owner's choice, October 2026): it caught both VLM conversion defects MMStar caught
     # (qwen3-vl-2b -26 vs -11 points, phi4-multimodal -19 vs -32) and TRTMC answers MMStar slowly (phi4-multimodal:
     # 29 min against 1 min for OCRBench). MMStar stays for profiles that state it.
+    absolute: [ocrbench]
+    performance: {output_grader: parity_edit_distance, output_grader_params: {max_distance: 0.15}}
+  # The Task SDK name of the image-text models (gemma-3n, smolvlm): OCRBench as above, but their runtimes declare no
+  # enable_thinking config (a null removes the suite's field).
+  images_text_to_text:
+    absolute: [{name: ocrbench, request: {enable_thinking: null}}]
+    performance: {output_grader: parity_edit_distance, output_grader_params: {max_distance: 0.15}}
+  # Image, video and text to text (Cosmos3-Edge): OCRBench through the same bundle's image-text Task (the
+  # image-video Task requires a video in every request); the video input is not scored.
+  image_video_text_to_text:
     absolute: [ocrbench]
     performance: {output_grader: parity_edit_distance, output_grader_params: {max_distance: 0.15}}
 
@@ -167,8 +246,10 @@ tasks:
   # otherwise or needs a query/document role state `exclude`.
   text_to_embedding: *embed
 
-  image_features:
+  # Features have no gold answer: each profile states its conversion-parity benchmark (config/models).
+  image_features: &image_features
     performance: {output_grader: parity_numeric, output_grader_params: {min_cosine: 0.99}}
+  image_to_token_and_pooled_features: *image_features
 
   object_detection:
     absolute: [coco]
@@ -177,6 +258,10 @@ tasks:
   # default it, and declare no score_threshold config: the suite's field is not sent.
   image_to_boxes:
     absolute: [{name: coco, request: {score_threshold: null}}]
+    performance: {output_grader: parity_boxes}
+  # Open-vocabulary detection: the profile states coco_prompted with its thresholds (config/models).
+  image_text_to_boxes:
+    absolute: [coco_prompted]
     performance: {output_grader: parity_boxes}
 
   segmentation:
@@ -195,6 +280,7 @@ tasks:
   transcription_streaming:
     <<: *transcribe
     absolute: [librispeech_streaming]
+  speech_transcription: *transcribe  # a non-English model states its own test set (config/models)
 
   # Generative media are slow per request: fewer requests per run, still three runs for the CI.
   audio_generation: &generate_audio
@@ -214,20 +300,21 @@ tasks:
   # content diverges across precisions. Acc is the gold-referenced checks below (GenEval, VBench CLIP-T);
   # the pixel parity under latent replay is reported only (`informational`): generated media drift
   # between TRTMC and the native model at any precision.
-  image_generation:
+  image_generation: &generate_image
     reference: {precision: bf16}
     # Families whose TRTMC runtime takes caller initial latents render with the same initial noise on
     # both sides (latent replay), which makes them comparable pixel by pixel: how much further TRTMC is
     # from the native fp32 render of the first 10 prompts than the native half-precision run.
     supplementary: [{check: replay_parity, suite: partiprompts-30, informational: true, video_samples: 3,
-                     latent_replay_families: [flux, pixart, qwen_image, z_image, wan_t2v],
+                     latent_replay_families: [flux, pixart, qwen_image, qwen_image2_1, z_image, chroma, wan_t2v],
                      parity_floor_samples: 10, max_psnr_gap_db: 3.0, max_ssim_gap: 0.05,
                      quantized_gap: {max_psnr_gap_db: 6.0, max_ssim_gap: 0.1},
                      fallback_min: {psnr_db: 19.0, ssim: 0.8}, min_pass_rate: 0.9},
                     # Text-to-image with caller latents when supported: GenEval-style (all 553 prompts over its six
                     # tags, OWLv2 detections and CLIP colors, exact counts), paired right/wrong per prompt, margin 5 points.
-                    {check: geneval, suite: geneval-full, only_families: [flux, pixart, qwen_image, z_image, stable_diffusion],
-                     latent_replay_families: [flux, pixart, qwen_image, z_image, stable_diffusion],
+                    {check: geneval, suite: geneval-full,
+                     only_families: [flux, pixart, qwen_image, z_image, stable_diffusion, chroma, qwen_image2_1],
+                     latent_replay_families: [flux, pixart, qwen_image, qwen_image2_1, z_image, stable_diffusion, chroma],
                      detector: google/owlv2-base-patch16-ensemble,
                      detector_revision: cfd3195ba4ea9592eec887ded089f4c08eff231d,
                      clip_model: openai/clip-vit-large-patch14, clip_revision: 32bd64288804d66eefd0ccbe215aa642df71cc41,
@@ -243,6 +330,7 @@ tasks:
                      detector_threshold: 0.2, gate: {margin: 1.0}}]
     performance: &media_policy {output_grader: parity_image, output_grader_params: {min_psnr: 0, min_ssim: -1},
                      measurement: {settle_s: 0, warmup: 1, requests: 3, runs: 3}}
+  text_to_image: *generate_image  # image_generation under its Task SDK name
   image_edit:  # edit inputs are model-specific: the catalog testcase
     reference: {precision: bf16}
     # Edits of ten Imagenette images with the same initial noise on both sides (latent replay),
@@ -266,11 +354,39 @@ tasks:
     # validity and coarse agreement (PSNR >= 5 dB, SSIM >= 0.1); action-conditional fidelity is not covered.
     supplementary: [{check: world_model_parity, suite: coco-world-model-10, min_psnr_db: 5.0, min_ssim: 0.1}]
     performance: *media_policy
+  initial_image_text_to_video:  # the family states its native pipeline (reference.adapter)
+    reference: {precision: bf16}
+    # 10 COCO images fitted to the profile's video size, with the catalog's prompt and seed on both sides: video
+    # validity (frame count, motion) and coarse agreement (PSNR >= 5 dB, SSIM >= 0.1); the two sides draw their
+    # noise differently, so pixel fidelity and prompt following are not covered.
+    supplementary: [{check: world_model_parity, suite: coco-initial-image-video-10, min_psnr_db: 5.0, min_ssim: 0.1}]
+    performance: {<<: *media_policy, suite: coco-initial-image-video-1}
 
-  time_series_forecast:
+  time_series_forecast: &forecast
     absolute: [etth1]
     # The catalog testcases are a few values, not the models' context: Perf times the first ETTh1 window.
     performance: {suite: {from_benchmark: etth1-mse}, output_grader: parity_numeric}
+  series_to_point_forecast: *forecast
+  series_to_quantile_forecast: *forecast  # Chronos-Bolt: scored on its median quantile
+  # Tasks whose native reference is the family's own Transformers model (config/models: reference.adapter).
+  audio_to_class_scores:
+    absolute: [audioset]
+    performance: {output_grader: parity_top1}
+  text_image_to_relevance:
+    absolute: [imagenette_zero_shot]
+    performance: {output_grader: parity_numeric}
+  masked_text_to_token_scores:
+    absolute: [token_score_parity]
+    performance: {output_grader: parity_numeric}
+  monocular_depth:
+    absolute: [depth_parity]
+    performance: {output_grader: parity_numeric}
+  points_to_semantic_segmentation:  # the family's reference prepares the checkpoint (reference.prepare)
+    absolute: [s3dis_area5]
+    performance: {output_grader: parity_labels}
+  structured_decision:  # the family states its release implementation (reference.adapter)
+    absolute: [decision_parity]
+    performance: {output_grader: parity_numeric}
   reranking: &rerank_documents
     absolute: [rerank]
     performance: {output_grader: parity_scores}
@@ -282,6 +398,17 @@ tasks:
     # precisions (for example valid pixels), which is the Acc checks' concern.
     performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}
   image_state_to_action_chunk: *control
+  images_state_text_to_action_chunk:
+    absolute: [action_chunk_parity]
+    performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}
+  pose_hypothesis_refinement:  # the family prepares its model and crops (reference.prepare, family_inputs)
+    absolute: [pose_parity]
+    performance: {output_grader: parity_numeric,
+                  output_grader_params: {fields: [refined_hypotheses, refined_poses], min_cosine: 0.999}}
+  structure_prediction:  # the family prepares its package and requests (reference.prepare, family_inputs)
+    absolute: [structure_parity]
+    performance: {output_grader: parity_numeric,
+                  output_grader_params: {fields: [structures, confidence.confidence_score], rtol: 0.2}}
   stereo_disparity:
     absolute: [disparity_parity]
     performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}

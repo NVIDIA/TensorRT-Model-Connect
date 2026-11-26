@@ -38,12 +38,15 @@ RecurrentPipeline::RecurrentPipeline(std::unique_ptr<ITrtModule> decoder,
       name_(name), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
       sampler_(std::move(sampler)), mtp_scheduler_(std::move(mtp_scheduler)),
       prefill_runner_(std::move(prefill_runner)), external_draft_(std::move(external_draft)) {
-    if (!decoder_ || !decoder_->ok())
+    // Without a decoder module the prefill engine also decodes, one row per call; speculative
+    // decoding needs the decoder's single-token outputs.
+    if (decoder_ ? !decoder_->ok() : (!prefill_runner_ || mtp_scheduler_ || external_draft_))
         throw std::runtime_error(std::string(name_) + ": invalid decoder module");
     // Inspect declared inputs rather than optional Edge metadata. Older text
     // bundles remain loadable and never receive media-only bindings.
     int media_bindings = 0;
-    for (const auto& input : decoder_->input_info()) {
+    const auto decoder_inputs = decoder_ ? decoder_->input_info() : std::vector<TensorInfo>{};
+    for (const auto& input : decoder_inputs) {
         if (input.name == "visual_embedding") {
             if (input.shape.size() != 2 || input.shape[0] != 1 || input.shape[1] <= 0 ||
                 input.shape[1] > INT32_MAX ||
@@ -203,7 +206,8 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
         return generate_from_ids_speculative(input_ids, max_new_tokens, params, *active_sampler);
 
     state_->reset();
-    state_->bind_to(*decoder_);
+    if (decoder_)
+        state_->bind_to(*decoder_);
 
     prof_prepare_ms_ = prof_forward_ms_ = prof_logits_copy_ms_ = prof_advance_ms_ = 0;
     prof_steps_ = 0;
@@ -214,8 +218,14 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
     auto t_prefill_start = SteadyClock::now();
     // Multi-token engine first; whatever it could not take (prompt longer than
     // the KV cache) goes through the single-token decoder, which shifts the
-    // cache as it fills.
+    // cache as it fills. The prefill engine cannot shift the cache.
     std::size_t consumed = prefill_chunks(input_ids, logits, nullptr);
+    if (!decoder_ && consumed < input_ids.size())
+        throw std::invalid_argument(std::string(name_) + ": the prompt (" +
+                                    std::to_string(input_ids.size()) +
+                                    " tokens) exceeds the KV cache of a bundle without a "
+                                    "decode engine (" +
+                                    std::to_string(state_->max_length()) + " tokens)");
     for (; consumed < input_ids.size(); ++consumed)
         run_step(input_ids[consumed], logits);
     auto t_prefill_end = SteadyClock::now();
@@ -231,6 +241,9 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
         Qwen38SampleResult result = active_sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
         if (result.is_eos || step + 1 == max_new_tokens)
+            break;
+        // Without a decoder the cache cannot shift: generation ends at its length.
+        if (!decoder_ && !prefill_runner_->fits(1))
             break;
         run_step(result.token_id, logits);
         ++decode_steps;
@@ -511,6 +524,13 @@ RecurrentPipeline::generate_external_draft(const std::vector<int32_t>& input_ids
 
 void RecurrentPipeline::run_step(int32_t token_id, std::vector<float>& logits,
                                  std::vector<float>* hidden_state_out) {
+    if (!decoder_) {
+        // Only plain decoding runs without a decoder (the constructor rejects speculative modes).
+        if (hidden_state_out != nullptr)
+            throw std::logic_error(std::string(name_) + ": no decoder hidden state to return");
+        prefill_runner_->run_chunk(&token_id, 1, logits);
+        return;
+    }
     auto t0 = SteadyClock::now();
 
     TensorMap inputs;

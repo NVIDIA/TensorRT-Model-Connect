@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import tempfile
 import traceback
+from ..draft_policy import block_policy
 from . import builder as edge_llm, precision
 
 _LOG = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ def validate_request(request) -> None:
 
 
 def validate_execution(request, raw: dict) -> Path | None:
-    """Admit documented DFlash pairs or embedded NVFP4 MTP; never fetch a draft."""
+    """Admit documented paired drafts or embedded NVFP4 MTP; never fetch a draft."""
     execution = getattr(request, "execution", None)
     if execution is None:
         return None
@@ -65,17 +66,21 @@ def validate_execution(request, raw: dict) -> Path | None:
     if execution.variant == "mtp":
         if execution.checkpoints:
             raise ValueError("Qwen3.6-MoE MTP uses embedded weights, not a companion")
-        if precision.source_policy(request, raw)["weights"] != "nvfp4":
+        if precision.source_policy(request, raw)["llm"] != "mixed_nvfp4_experts_shared_head_fp8_attention_gdn":
             raise ValueError("The documented MoE MTP recipe requires NVFP4")
         if raw["text_config"].get("mtp_num_hidden_layers") != 1:
             raise ValueError("Qwen3.6-MoE MTP requires one embedded prediction layer")
         if (request.max_sequence_length or 4096) <= 4:
             raise ValueError("Qwen3.6-MoE MTP context must exceed the verify size")
         return None
-    if execution.variant not in {"dflash", "dflash_ddtree"} or tuple(
+    if execution.variant not in {"dflash", "dflash_ddtree", "jetspec"} or tuple(
         checkpoint.role for checkpoint in execution.checkpoints
     ) != ("draft",):
         raise ValueError("Qwen3.5-MoE DFlash requires exactly one explicit draft checkpoint")
+    if execution.variant == "jetspec":
+        policy = precision.source_policy(request, raw)
+        if policy["weights"] != "none" and policy["llm"] != "mixed_nvfp4_experts_shared_head_fp8_attention_gdn":
+            raise ValueError("Qwen3.5-MoE JetSpec requires an original or Qwen3.6 mixed NVFP4 target")
     draft_dir = execution.checkpoints[0].model_dir
     draft = precision.object_file(draft_dir / "config.json")
     base = raw["text_config"]
@@ -86,9 +91,7 @@ def validate_execution(request, raw: dict) -> Path | None:
             raise ValueError(f"Qwen3.5-MoE DFlash base/draft mismatch: {name}")
     if draft.get("num_target_layers") != base["num_hidden_layers"]:
         raise ValueError("Qwen3.5-MoE DFlash target layer count differs")
-    config = draft.get("dflash_config")
-    if not isinstance(config, dict) or config.get("block_size") != 16:
-        raise ValueError("Qwen3.5-MoE DFlash requires the documented block16 profile")
+    config = block_policy(draft, execution.variant)
     layers = config.get("target_layer_ids")
     if (not isinstance(layers, list) or not layers or len(set(layers)) != len(layers)
         or any(type(layer) is not int or not 0 <= layer < base["num_hidden_layers"] for layer in layers)):
@@ -123,8 +126,36 @@ def build(request, writer, native_build) -> None:
         and request.max_sequence_length > raw["text_config"]["max_position_embeddings"]
     ):
         raise ValueError("Requested context exceeds source capacity")
+    original = policy["weights"] == "none"
+    routed_only = policy["llm"] == "nvfp4_routed_experts_original_shared_head_attention"
+    options = {}
+    if original or routed_only:
+        from .checkpoint import validate_checkpoint
+
+        # An absent quantizer in config.json alone cannot prove unquantized weights.
+        # Verify before native fallback as well, and reuse this result during offload.
+        options["verified_layout"] = validate_checkpoint(Path(request.model_dir), policy["weights"], allow_snapshot_blobs=True)
     target = edge_llm.local_target()
-    adapter = EDGE_DISPATCH.get((target["os"], target["arch"], target["sm"], policy["weights"]))
+    key = (target["os"], target["arch"], target["sm"], policy["weights"])
+    adapter = EDGE_DISPATCH.get(key)
+    if routed_only:
+        adapter = None
+        if edge_llm.selected_release() == "0.12.0" and (
+                key in EDGE_DISPATCH or key == ("linux", "aarch64", 103, "nvfp4")):
+            adapter = edge_llm.prepare
+    # New original-weight profiles must not opt into the legacy SDK.
+    original_target = original and (
+        key[:3] + ("int4",) in EDGE_DISPATCH or key[:3] == ("linux", "aarch64", 103)
+    )
+    if (adapter is None and (original_target or key in {("linux", "aarch64", 103, "int4"),
+                                                      ("linux", "aarch64", 103, "nvfp4")})
+            and edge_llm.selected_release() == "0.12.0"):
+        # These routes need the 0.12 SDK; prepare verifies the installed
+        # architectures and exact native CUDA/TensorRT tuple before using it.
+        adapter = edge_llm.prepare
+    execution = getattr(request, "execution", None)
+    if execution is not None and execution.variant == "jetspec" and edge_llm.selected_release() != "0.12.0":
+        adapter = None  # JetSpec is a 0.12 Edge ABI; keep the requested native draft.
     if adapter is None:
         native_build(request, writer)
         return
@@ -138,7 +169,7 @@ def build(request, writer, native_build) -> None:
         prefix=f".{request.output_path.name}.edge-stage-", dir=request.output_path.parent
     ) as directory:
         try:
-            files, marker = adapter(request, raw, target, Path(directory), log)
+            files, marker = adapter(request, raw, target, Path(directory), log, **options)
         except Exception as error:
             with log.open("a", encoding="utf-8") as output:
                 traceback.print_exception(error, file=output)

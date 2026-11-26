@@ -2,5 +2,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
 Pillow
-peft
+peft==0.22.0
 transformers==4.57.6

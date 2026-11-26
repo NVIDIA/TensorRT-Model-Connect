@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstring>
 #include <cuda_runtime_api.h>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -33,24 +34,42 @@ void normalize_eos_ids(Lfm2TextGenConfig& config) {
 
 } // namespace
 
-Lfm2TextGenerationPipeline::Lfm2TextGenerationPipeline(std::unique_ptr<ITrtModule> decoder,
-                                                       std::unique_ptr<Lfm2InferenceState> state,
-                                                       Lfm2TextGenConfig config,
-                                                       cudaStream_t stream,
-                                                       std::shared_ptr<ITokenizer> tokenizer,
-                                                       std::string model_id)
-    : decoder_(std::move(decoder)), state_(std::move(state)), config_(std::move(config)),
-      stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id)) {
+Lfm2TextGenerationPipeline::Lfm2TextGenerationPipeline(
+    std::unique_ptr<ITrtModule> decoder, std::unique_ptr<Lfm2InferenceState> state,
+    Lfm2TextGenConfig config, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
+    std::string model_id, std::unique_ptr<ITrtModule> prefill)
+    : decoder_(std::move(decoder)), prefill_(std::move(prefill)), state_(std::move(state)),
+      config_(std::move(config)), stream_(stream), tokenizer_(std::move(tokenizer)),
+      model_id_(std::move(model_id)) {
     normalize_eos_ids(config_);
     if (!decoder_ || !decoder_->ok())
         throw std::runtime_error("Lfm2TextGenerationPipeline: invalid decoder module");
+    if (prefill_) {
+        if (!prefill_->ok() || prefill_->stream() != stream)
+            throw std::runtime_error("Lfm2TextGenerationPipeline: invalid prefill module");
+        const auto max_shape = prefill_->input_profile_shape(
+            config_.token_id_name, prefill_->profile_idx(), ProfileShapeSelector::kMax);
+        if (max_shape.size() != 1 || max_shape[0] < 1 ||
+            max_shape[0] > std::numeric_limits<int32_t>::max()) {
+            throw std::runtime_error("Lfm2TextGenerationPipeline: invalid prefill token profile");
+        }
+        prefill_chunk_tokens_ = static_cast<int32_t>(max_shape[0]);
+    }
     if (!state_ || !state_->ok())
         throw std::runtime_error("Lfm2TextGenerationPipeline: invalid inference state");
     if (config_.vocab_size <= 0)
         throw std::invalid_argument("Lfm2TextGenerationPipeline: invalid vocabulary size");
     if (stream_ == nullptr || decoder_->stream() != stream_)
         throw std::invalid_argument("Lfm2TextGenerationPipeline: stream mismatch");
+    bind_state();
+}
+
+void Lfm2TextGenerationPipeline::bind_state() {
+    // Both contexts alias the same KV and convolution buffers, so the decoder
+    // continues from the state each prefill chunk committed.
     state_->bind_to(*decoder_);
+    if (prefill_)
+        state_->bind_to(*prefill_);
 }
 
 std::vector<int32_t>
@@ -119,17 +138,16 @@ Lfm2TextGenerationPipeline::generate_from_ids(const std::vector<int32_t>& input_
     const auto setup_start = Clock::now();
     state_->reset();
     decoder_->reset_execution_context();
-    state_->bind_to(*decoder_);
+    if (prefill_)
+        prefill_->reset_execution_context();
+    bind_state();
     logits_device_ptr_ = nullptr;
+    prefill_logits_device_ptr_ = nullptr;
     const auto setup_end = Clock::now();
 
     std::vector<float> logits;
     const auto prefill_start = Clock::now();
-    // Safe v1 path: every prompt token commits native KV and rolling
-    // convolution state together. A KV-only batched-prefill shortcut would
-    // leave the convolution history stale.
-    for (int32_t token : input_ids)
-        run_step(token, logits);
+    run_prefill(input_ids, logits);
     const auto prefill_end = Clock::now();
 
     std::vector<int32_t> output = input_ids;
@@ -149,40 +167,64 @@ Lfm2TextGenerationPipeline::generate_from_ids(const std::vector<int32_t>& input_
                                  milliseconds(decode_start, decode_end)};
 }
 
+void Lfm2TextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
+                                             std::vector<float>& logits) {
+    // Every launch commits native KV and the rolling convolution state
+    // together, so a chunk leaves both exactly as the token loop would.
+    if (!prefill_) {
+        for (int32_t token : input_ids)
+            run_step(token, logits);
+        return;
+    }
+    const auto total = static_cast<int32_t>(input_ids.size());
+    for (int32_t start = 0; start < total;) {
+        const int32_t count = std::min(prefill_chunk_tokens_, total - start);
+        run_tokens(*prefill_, prefill_logits_device_ptr_, input_ids.data() + start, count, logits);
+        start += count;
+    }
+}
+
 void Lfm2TextGenerationPipeline::run_step(int32_t token_id, std::vector<float>& logits) {
+    run_tokens(*decoder_, logits_device_ptr_, &token_id, 1, logits);
+}
+
+void Lfm2TextGenerationPipeline::run_tokens(ITrtModule& module, const float*& logits_device_ptr,
+                                            const int32_t* token_ids, int32_t count,
+                                            std::vector<float>& logits) {
     TensorMap inputs;
-    inputs[config_.token_id_name] = Tensor{&token_id, {1}, DType::kInt32};
-    state_->prepare_step(inputs);
+    inputs[config_.token_id_name] =
+        Tensor{const_cast<int32_t*>(token_ids), {static_cast<int64_t>(count)}, DType::kInt32};
+    state_->prepare_step(inputs, count);
 
     // Every persistent state output is device-sized. Never call forward(),
     // which materializes non-external outputs on the host; execute asynchronously
     // and transfer only the one-vocabulary logits row required for sampling.
-    decoder_->forward_async(inputs);
-    decoder_->sync();
-    if (logits_device_ptr_ == nullptr) {
-        if (!decoder_->has_output(config_.logits_output_name) ||
-            decoder_->tensor_dtype(config_.logits_output_name) != DType::kFloat32) {
+    module.forward_async(inputs);
+    module.sync();
+    if (logits_device_ptr == nullptr) {
+        if (!module.has_output(config_.logits_output_name) ||
+            module.tensor_dtype(config_.logits_output_name) != DType::kFloat32) {
             throw std::runtime_error("Lfm2TextGenerationPipeline: FP32 logits output is missing");
         }
-        const auto shape = decoder_->tensor_shape(config_.logits_output_name);
+        const auto shape = module.tensor_shape(config_.logits_output_name);
         const std::vector<int64_t> vector_shape{config_.vocab_size};
         const std::vector<int64_t> row_shape{1, config_.vocab_size};
         if (shape != vector_shape && shape != row_shape) {
             throw std::runtime_error(
                 "Lfm2TextGenerationPipeline: logits shape must be [vocab] or [1,vocab]");
         }
-        logits_device_ptr_ =
-            static_cast<const float*>(decoder_->device_ptr(config_.logits_output_name));
-        if (logits_device_ptr_ == nullptr)
+        logits_device_ptr =
+            static_cast<const float*>(module.device_ptr(config_.logits_output_name));
+        if (logits_device_ptr == nullptr)
             throw std::runtime_error("Lfm2TextGenerationPipeline: logits device buffer is missing");
     }
     logits.resize(static_cast<std::size_t>(config_.vocab_size));
-    if (cudaMemcpy(logits.data(), logits_device_ptr_, logits.size() * sizeof(float),
+    if (cudaMemcpy(logits.data(), logits_device_ptr, logits.size() * sizeof(float),
                    cudaMemcpyDeviceToHost) != cudaSuccess) {
         throw std::runtime_error("Lfm2TextGenerationPipeline: logits D2H copy failed");
     }
 
-    state_->advance();
+    state_->advance(count);
 }
 
 } // namespace trtmc

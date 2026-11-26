@@ -1,0 +1,20 @@
+{
+  "name": "w2v-bert-2.0",
+  "hf_id": "facebook/w2v-bert-2.0",
+  "hf_revision": "da985ba0987f70aaeb84a80f2851cfac8c697a7b",
+  "family": "wav2vec2_bert",
+  "bundle": "w2v-bert-2.0.bundle",
+  "task": "spectrogram_to_frame_features",
+  "precision": "fp32",
+  "max_sequence_length": 99,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "w2v-bert-2.0-spectral-encoder",
+      "premerge": true,
+      "audio": "librispeech-test-clean-6930-75918-0003.wav",
+      "max_abs_error": 0.0001,
+      "min_cosine": 0.99999
+    }
+  ]
+}
