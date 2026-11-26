@@ -106,6 +106,7 @@ const TASKS = {
   audio_language_identification: ['Audio language identification', 'Audio', 'audio-classification', null],
   audio_to_class_scores: ['Audio to class scores', 'Audio', 'audio-classification', 'classify'],
   audio_to_timed_labels: ['Audio to timed labels', 'Audio', 'voice-activity-detection', null],
+  spectrogram_to_audio: ['Spectrogram to audio', 'Audio', null, null],
   spectrogram_to_frame_features: ['Spectrogram frame features', 'Audio', null, null],
   speech_to_speech_response: ['Speech-to-speech response', 'Audio', 'audio-to-audio', 'speak'],
   batch_speech_transcription: ['Batch speech transcription', 'Audio', 'automatic-speech-recognition', 'transcribe-batch'],
