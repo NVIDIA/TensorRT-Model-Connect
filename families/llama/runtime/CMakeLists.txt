@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+find_package(ICU REQUIRED COMPONENTS uc i18n)
+
 add_library(trtmc_model_llama SHARED
   bpe_tokenizer.cpp
   chat_templates.cpp
@@ -25,6 +27,8 @@ target_include_directories(trtmc_model_llama SYSTEM PRIVATE
 target_link_libraries(trtmc_model_llama PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
+    ICU::uc
+    ICU::i18n
   ${TRTMC_CUDART_LIBRARY}
 )
 target_compile_options(trtmc_model_llama PRIVATE
@@ -39,6 +43,8 @@ set_target_properties(trtmc_model_llama PROPERTIES
 install(TARGETS trtmc_model_llama
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../UNICODE_LICENSE.txt
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/trtmc/families/llama)
 
 if(TRTMC_BUILD_TESTS)
   add_executable(llama_speculative_validation
