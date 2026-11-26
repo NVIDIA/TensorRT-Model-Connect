@@ -7,3 +7,6 @@ absolute: [{name: caption_parity, request: {prompt: ""}}]
 
 reference:
   adapter: families/blip/reference/adapter.py  # the processor has no chat template
+# Perf times the first COCO image: the catalog testcases (an empty prompt, mirrored inputs) are not a request the
+# catalog payload can build.
+performance: {suite: {from_benchmark: caption-parity}}
