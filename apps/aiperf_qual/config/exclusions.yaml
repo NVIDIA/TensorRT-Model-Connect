@@ -13,14 +13,14 @@ exclude:
     reason: the generic embed reference mean-pools and L2-normalizes; GTE pools the CLS token without normalizing, and its catalog testcase has no prompt
   - profile: nomic-embed-text-v1_5*
     reason: the generic embed reference sends unprefixed text; nomic-embed needs a query or document role, and its catalog testcase has no prompt
-  - profile: blip-image-captioning-base
-    reason: a captioner with no question input; its scheme is caption output parity against the native model on COCO images, not yet configured
-  - profile: paligemma-3b-pt-224-*
-    reason: a pretrained model that follows only task prefixes such as "caption en"; its scheme is caption output parity against the native model on COCO images, not yet configured
   - profile: paddleocr-vl-1.6
     reason: the TRTMC bundle rejects every OCRBench text-recognition crop (the resized image does not fit the built image profile); its OCRBench scheme is configured
   - profile: lightonocr-2-1b-fp32
     reason: one OCRBench text-recognition crop is smaller than a merged vision patch, which neither the TRTMC bundle nor the native model can encode; its OCRBench scheme is configured
+  - profile: blip-image-captioning-base
+    reason: a captioner with no question input; its scheme is caption output parity against the native model on COCO images, not yet configured
+  - profile: paligemma-3b-pt-224-*
+    reason: a pretrained model that follows only task prefixes such as "caption en"; its scheme is caption output parity against the native model on COCO images, not yet configured
   - profile: minicpm-v-4.7-35b-a3b
     reason: the native reference needs Transformers 5.22 for MiniCPM-V 4.7 (the family pins it) while the qualification's reference environment has an older one; it needs its own adapter and environment
   - profile: hunyuanocr-*
