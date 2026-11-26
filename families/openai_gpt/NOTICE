@@ -1,0 +1,24 @@
+OpenAI GPT family: third-party notices
+
+The decoder graph in graph.py (post-norm blocks, fused query/key/value projection, scaled
+causal attention, the gelu_new activation and the tied LM head) follows OpenAIGPTLMHeadModel
+of Hugging Face Transformers 5.2.0, src/transformers/models/openai/modeling_openai.py:
+https://github.com/huggingface/transformers/tree/v5.2.0
+Copyright 2018 The OpenAI Team Authors and The HuggingFace Inc. team.
+Licensed under the Apache License 2.0.
+
+The BPE merge procedure (lowest merge rank first, the leftmost pair among equal ranks, a
+queued pair dropped once either side has merged) and the BPEDecoder of Hugging Face
+Tokenizers 0.22.2 are reimplemented in runtime/tokenizer.cpp:
+https://github.com/huggingface/tokenizers/tree/v0.22.2
+Copyright the HuggingFace Inc. team.
+Licensed under the Apache License 2.0.
+
+runtime/unicode_tables.h is read from the BertNormalizer and BertPreTokenizer of the same
+library, which follow the Unicode Character Database; the Unicode License v3 is in
+UNICODE_LICENSE.txt.
+
+The validated checkpoint is not contained in this directory:
+https://huggingface.co/openai-community/openai-gpt
+Revision 1e0d4f3028acbffb47fe933cea64619c5ec1a002
+Licensed under the MIT License.
