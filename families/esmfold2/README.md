@@ -99,26 +99,30 @@ two diffusion samples.
 ## Performance
 
 1x NVIDIA B300 (143 GiB), CUDA 13.x, TensorRT 11.4. Controls of the model cards' example: 3 trunk loops, 50 configured
-sampling steps (34 run), 32 diffusion samples, seed 0. Inputs: random single-chain sequences, uniform over the 20
-standard residues. Native: `trtmc-bench` (`public_task_call_wall`; bundle load, 9 to 11 s, and engine build, about
-7 min, excluded), one bf16 bundle per row with `--max-sequence-length` equal to the length. Eager and `torch.compile`:
-the reference `EsmFold2Model.fold` in bf16 (PyTorch 2.15, transformers 5.24.1); `torch.compile` compiles the trunk,
-the diffusion module and the confidence head (default mode, compilation excluded). Median of 5 calls after 2 warmups;
-peak memory: `nvidia-smi` device memory, sampled every 100 ms.
+sampling steps (34 run), 32 diffusion samples. Inputs: random single-chain sequences, uniform over the 20 standard
+residues (`tests/benchmark_reference.py` defines them and writes them as FASTA). Every timed call is one complete
+request, from the sequence to the ranked structure text of all 32 samples: featurization, trunk, diffusion sampler,
+confidence head, ranking and structure text. Native: `trtmc-bench` (`public_task_call_wall` of `predict_structure`,
+mmCIF text), one bf16 bundle per row with `--max-sequence-length` equal to the length; bundle load (9 to 11 s) and
+engine build (about 7 min) excluded. Eager and `torch.compile`: `tests/benchmark_reference.py`, the reference
+`EsmFold2Model` in bf16 (PyTorch 2.15, transformers 5.24.1) through `prepare_protein_features`, `fold` and
+`output_to_pdb` (PDB text; the reference has no mmCIF writer), between CUDA synchronizations; `torch.compile` compiles
+the trunk, the diffusion module and the confidence head (default mode) in its first, excluded calls. Median of 5 calls
+after 2 warmups; peak memory: `nvidia-smi` device memory, sampled every 100 ms.
 
 | Residues | Native | Eager PyTorch | `torch.compile` | Native peak | Eager peak | `torch.compile` peak |
 |---|---|---|---|---|---|---|
-| 128 | 0.67 s | 1.23 s | 0.55 s | 14.3 GiB | 19.9 GiB | 19.3 GiB |
-| 256 | 1.66 s | 3.08 s | 1.47 s | 17.8 GiB | 31.7 GiB | 32.3 GiB |
-| 512 | 4.94 s | 12.6 s | 6.51 s | 30.5 GiB | 87.2 GiB | 88.0 GiB |
+| 128 | 0.67 s | 1.42 s | 0.76 s | 14.3 GiB | 19.9 GiB | 19.2 GiB |
+| 256 | 1.66 s | 3.51 s | 1.89 s | 17.8 GiB | 31.7 GiB | 32.3 GiB |
+| 512 | 4.94 s | 13.1 s | 7.36 s | 30.5 GiB | 87.2 GiB | 88.0 GiB |
 | 1024 | 18.0 s | out of memory | not run | 79.5 GiB | > 143 GiB | - |
 
-The native runtime is 1.8x to 2.5x faster than eager PyTorch and needs 1.4x to 2.9x less memory, and it folds 1024
-residues where eager PyTorch runs out of memory. `torch.compile` (382 to 696 s of compilation per length) is 1.21x and
-1.12x faster than the native runtime at 128 and 256 residues, and 1.3x slower at 512, where it needs 2.9x the memory.
-One request folds one sequence; the 32 samples run as one batch, so throughput is one structure (32 samples) per
-latency (0.67 s at 128 residues: 48 samples/s). Every fold of the validation and the benchmarks finished with finite
-coordinates and confidences (46 folds, 1,472 samples; the runtime rejects a non-finite output).
+The native runtime is 2.1x to 2.7x faster than eager PyTorch and 1.1x to 1.5x faster than `torch.compile` (which first
+compiles for 326 to 652 s per length), needs 1.3x to 2.9x less memory than either, and folds 1024 residues where eager
+PyTorch runs out of memory. One request folds one sequence; the 32 samples run as one batch, so throughput is one
+structure (32 samples) per latency (0.67 s at 128 residues: 48 samples/s). Every fold of the validation and the
+benchmarks finished with finite coordinates and confidences (46 folds, 1,472 samples; the runtime rejects a non-finite
+output).
 
 ### Limits
 
