@@ -8,6 +8,7 @@
 #include "families/nemotron_labs_diffusion/runtime/chat_templates.h"
 #include "families/nemotron_labs_diffusion/runtime/kv_cache.h"
 #include "families/nemotron_labs_diffusion/runtime/tensor_names.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <cctype>
@@ -372,7 +373,7 @@ NemotronLabsDiffusionTextGenerationPipeline::require_block_prefill(int32_t sq,
     if (sq <= 0)
         throw std::runtime_error("NemotronLabsDiffusionTextGenerationPipeline: empty block");
     if (config_.prefill_max_length > 0 && sq > config_.prefill_max_length) {
-        throw std::runtime_error(
+        throw internal::ConfigError(
             "NemotronLabsDiffusionTextGenerationPipeline: block length exceeds prefill profile");
     }
     return *prefill;

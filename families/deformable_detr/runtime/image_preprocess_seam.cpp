@@ -5,6 +5,8 @@
 
 #include "families/deformable_detr/runtime/image_preprocess_seam.h"
 
+#include "trtmc/internal/config.h"
+
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -63,7 +65,7 @@ std::array<std::int32_t, 2> deformable_detr_resize_shape(std::int32_t height, st
     if (result[0] <= 0 || result[1] <= 0)
         throw std::invalid_argument("deformable_detr resize collapses an image dimension");
     if (result[0] > longest_edge || result[1] > longest_edge)
-        throw std::invalid_argument("deformable_detr resized image exceeds the engine bounds");
+        throw internal::ConfigError("deformable_detr resized image exceeds the engine bounds");
     return result;
 }
 

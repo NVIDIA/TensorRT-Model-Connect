@@ -5,6 +5,7 @@
 
 #include "families/deformable_detr/runtime/box_decode.h"
 #include "families/deformable_detr/runtime/image_preprocess_seam.h"
+#include "trtmc/internal/config.h"
 
 #include <cmath>
 #include <cstdio>
@@ -56,6 +57,14 @@ void test_resize_preserves_aspect_ratio_and_the_checkpoint_bounds() {
         threw = true;
     }
     check(threw, "resize rejects a result outside the dynamic engine bounds");
+    // The server keeps a worker only for a request rejected with ConfigError.
+    threw = false;
+    try {
+        (void)trtmc::deformable_detr_resize_shape(1, 2000, 800, 1333);
+    } catch (const trtmc::internal::ConfigError&) {
+        threw = true;
+    }
+    check(threw, "an image outside the engine bounds is a request error");
 }
 
 void test_preprocess_normalises_with_the_configured_statistics() {
