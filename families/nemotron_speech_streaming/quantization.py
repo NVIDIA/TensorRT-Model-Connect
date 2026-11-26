@@ -18,12 +18,14 @@ the other input.
 Quantized projections (weight-dict names, ``N`` is the layer index), in the offline
 encoder and in every streaming encoder plan:
 
-  encoder  ``el.N.w_{q,k,v,o}`` and the four feed-forward matrices ``el.N.ff{1,2}.w{1,2}``
+  encoder  the four feed-forward matrices ``el.N.ff{1,2}.w{1,2}``
 
-The relative-position attention is decomposed, so its output projection is quantized as
-well. The subsampling convolutions, the conformer convolution modules, the positional
-projection, the RNNT prediction network, the joint network, the prompt kernel and the layer
-norms stay unquantized. Weights are stored ``[in_features, out_features]``, so the matmul
+The attention projections ``el.N.w_{q,k,v,o}`` stay unquantized: with FP8 query, key,
+value and output projections the LibriSpeech test-clean WER rises by about one point over
+the native model, and with them in fp16 it stays within 0.1 point. The subsampling
+convolutions, the conformer convolution modules, the positional projection, the RNNT
+prediction network, the joint network, the prompt kernel and the layer norms stay
+unquantized as well. Weights are stored ``[in_features, out_features]``, so the matmul
 uses the FP8 constant as is.
 """
 
@@ -42,8 +44,9 @@ FP8_E4M3_MAX = 448.0
 ACTIVATION_SCALES_FILENAME = "fp8_activation_scales.json"
 
 _SUPPORTED = ("fp8",)
-# Weight-dict stems of the quantizable projections of one encoder layer.
-_ENCODER_STEMS = ("w_q", "w_k", "w_v", "w_o", "ff1.w1", "ff1.w2", "ff2.w1", "ff2.w2")
+# Weight-dict stems of the quantized projections of one encoder layer. The attention
+# projections (w_q, w_k, w_v, w_o) stay fp16: in FP8 they cost about one WER point.
+_ENCODER_STEMS = ("ff1.w1", "ff1.w2", "ff2.w1", "ff2.w2")
 _DUAL_GEMM_KNOB = "peep:match_dual_gemm"
 
 

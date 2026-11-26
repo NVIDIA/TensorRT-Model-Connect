@@ -151,12 +151,15 @@ def ensure_bundle(environment: Environment, model: Mapping[str, Any], out: Path,
         return {"status": "failed", "exit": None, "reason": str(error), "log": str(log)}
     (work / "command.json").write_text(json.dumps(command))
     env = build_env(environment)
+    # trtmc-bench stops a build after its own limit (1 h by default): the qualification's limit applies instead,
+    # unless the environment's build_env states one.
+    env.setdefault("TRTMC_BENCH_BUILD_TIMEOUT_S", str(BUILD_TIMEOUT_S))
     if cached(environment, model):  # the build reads the cache; gated repositories refuse anonymous checks
         env["HF_HUB_OFFLINE"] = "1"
     with gpu_exclusive(environment), open(log, "w") as handle:
-        try:
+        try:  # the margin covers checkpoint staging before trtmc-bench starts its build clock
             code = subprocess.run(command, stdout=handle, stderr=subprocess.STDOUT, env=env,
-                                  cwd=environment.path("repo"), timeout=BUILD_TIMEOUT_S).returncode
+                                  cwd=environment.path("repo"), timeout=BUILD_TIMEOUT_S + 600).returncode
         except subprocess.TimeoutExpired:
             code = None
     seconds = round(time.time() - started)

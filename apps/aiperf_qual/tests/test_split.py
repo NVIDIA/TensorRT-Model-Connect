@@ -69,11 +69,40 @@ def test_a_rerun_sets_every_previous_result_aside_before_its_plan(tmp_path):
 
 def test_both_interpreters_count_among_the_campaign_inputs(monkeypatch):
     monkeypatch.setattr(split, "harness_digest", lambda: "h")
-    monkeypatch.setattr(split, "code_digests", lambda environment, model: {"serving": "s", "family": ""})
+    monkeypatch.setattr(split, "code_digests",
+                        lambda environment, model: {"serving": "s", "family": "", "runtime": "built"})
     monkeypatch.setattr(split, "dependencies_digest", lambda python: f"deps of {python}")
+    monkeypatch.setattr(split, "pinned_versions", lambda python: {"tensorrt": "11.4.0.106", "python": python})
     inputs = split.campaign_inputs(Environment({"serve_python": __file__}))
-    assert inputs["dependencies"] == {"harness": f"deps of {split.sys.executable}", "serving": f"deps of {__file__}"}
+    assert inputs["versions"] == {"harness": {"tensorrt": "11.4.0.106", "python": split.sys.executable},
+                                  "serving": {"tensorrt": "11.4.0.106", "python": __file__}}
     assert inputs["code"] == {"serving": "s"}
+    assert inputs["informational"] == {"runtime": "built", "dependencies": {
+        "harness": f"deps of {split.sys.executable}", "serving": f"deps of {__file__}"}}
+
+
+def test_pinned_versions_reads_tensorrt_torch_and_transformers(monkeypatch):
+    frozen = "numpy==2.5.4\ntensorrt==11.4.0.106\ntensorrt_cu13==11.4.0.106\ntorch==2.12.0+cu130\n" \
+             "Transformers==5.2.0\naiperf @ file:///tmp/x\n"
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: type("Done", (), {"stdout": frozen})())
+    assert split.pinned_versions("python3") == {"tensorrt": "11.4.0.106", "torch": "2.12.0+cu130",
+                                                 "transformers": "5.2.0"}
+
+
+def test_hosts_whose_only_differences_are_informational_still_merge(tmp_path):
+    assignment = split.assign(MODELS, LEDGER, ["h1", "h2"])
+    required = {"harness": "x", "code": {"core": "c"}, "versions": {"harness": {"tensorrt": "11.4.0.106"}}}
+    one = root(tmp_path, "one", assignment, "h1", {"a": "formal", "e": "formal"},
+               inputs={**required, "informational": {"runtime": "r1", "dependencies": {"harness": "d1"}}})
+    two = root(tmp_path, "two", assignment, "h2", {"b": "formal", "c": "formal", "d": "formal"},
+               inputs={**required, "informational": {"runtime": "r2", "dependencies": {"harness": "d1"}}})
+    assert split.merge_check(assignment, [one, two]) == []
+    assert split.informational_differences([one, two]) == [
+        "the hosts' runtime differ (informational: TensorRT, torch, transformers and the sources match)"]
+
+    newer = {**required, "versions": {"harness": {"tensorrt": "11.5.0.1"}}, "informational": {}}
+    three = root(tmp_path, "three", assignment, "h2", {"b": "formal", "c": "formal", "d": "formal"}, inputs=newer)
+    assert any("different campaign inputs" in problem for problem in split.merge_check(assignment, [one, three]))
 
 
 def root(tmp_path, name, assignment, host, results, inputs=None):
@@ -101,7 +130,8 @@ def test_the_roots_merge_only_when_disjoint_complete_formal_and_alike(tmp_path):
     other = root(tmp_path, "other", assignment, "h2", {"b": "formal", "c": "formal", "d": "smoke", "a": "formal"},
                  inputs={"harness": "y"})
     problems = split.merge_check(assignment, [one, other])
-    assert "the roots ran with different campaign inputs (harness, code, runtime, or dependencies)" in problems
+    assert ("the roots ran with different campaign inputs (harness, code, or the TensorRT, torch or transformers "
+            "version)") in problems
     assert any("a is assigned to another host" in problem for problem in problems)
     assert any("d is a smoke result" in problem for problem in problems)
     assert "d: no formal result" in problems
@@ -245,6 +275,12 @@ def test_a_local_install_path_does_not_split_the_dependency_digest(monkeypatch):
     assert first == second != third
 
 
+def _named_as_given(monkeypatch):
+    """A run of the named profiles as given (selection is tested on its own): these environments have no catalog."""
+    monkeypatch.setattr("trtmc_aiperf_qual.selection.machine_run_list",
+                        lambda environment, names=None, ignore_exclusions=False: (list(names or []), []))
+
+
 def test_a_machines_environment_names_no_run_ledger_and_run_all_takes_one(tmp_path, monkeypatch, capsys):
     from trtmc_aiperf_qual import cli
 
@@ -259,9 +295,149 @@ def test_a_machines_environment_names_no_run_ledger_and_run_all_takes_one(tmp_pa
         return []
 
     (tmp_path / "env.yaml").write_text(f"repo: {tmp_path}\n")
+    _named_as_given(monkeypatch)
     monkeypatch.setattr("trtmc_aiperf_qual.models.resolve_model", lambda name, environment: {"model": name})
     monkeypatch.setattr("trtmc_aiperf_qual.campaign.run_all", run_all)
     monkeypatch.setattr("trtmc_aiperf_qual.campaign.write_plan", lambda *args, **kwargs: None)
     cli.main(["run-all", "--environment", str(tmp_path / "env.yaml"), "--out-root", str(tmp_path / "out"),
               "--profile", "x", "--ledger", str(tmp_path / "ledger.json")])
     assert seen["ledger"] == str((tmp_path / "ledger.json").resolve())
+
+
+def fragment_root(tmp_path, name, fragment, given, results, *, campaign="c1", host="h1", inputs=None,
+                  config_errors=(), excluded=()):
+    """One fragment's root: its plan (the profiles it was given), its exclusions and results of each kind."""
+    path = tmp_path / name
+    path.mkdir()
+    (path / "plan.json").write_text(json.dumps({
+        "selected": list(given), "config_errors": [{"profile": item, "reason": "broken"} for item in config_errors],
+        "campaign": campaign, "fragment": fragment, "host": host, "inputs": inputs or {"harness": "x"}}))
+    if excluded:
+        (path / "excluded.json").write_text(json.dumps([{"profile": item, "task": "t", "reason": "128 GB",
+                                                         "source": "config/platforms/small.yaml"} for item in excluded]))
+    for profile, kind in results.items():
+        (path / profile).mkdir()
+        if kind == "build-failed":
+            (path / profile / "build.json").write_text(json.dumps({"status": "failed"}))
+        elif kind == "error":
+            (path / profile / "error.json").write_text(json.dumps({"category": "error"}))
+        else:
+            (path / profile / "report.json").write_text(json.dumps({"mode": kind}))
+    return path
+
+
+def test_a_fragment_resumes_only_as_the_same_campaign_fragment_host_and_inputs(tmp_path, monkeypatch):
+    plan = {"campaign": "c1", "fragment": "g-a-1", "host": "h1", "inputs": {"harness": "x"}}
+    old = fragment_root(tmp_path, "old", "g-a-1", ["a"], {"a": "formal"})
+    split.check_resume(old, plan)
+    for change in ({"fragment": "g-a-2"}, {"campaign": "c2"}, {"host": "h2"}, {"inputs": {"harness": "y"}}):
+        with pytest.raises(ConfigError, match="use a fresh --out-root"):
+            split.check_resume(old, {**plan, **change})
+    held = root(tmp_path, "held", split.assign(MODELS, LEDGER, ["h1", "h2"]), "h1", {"a": "formal"})
+    with pytest.raises(ConfigError):  # an assignment's root is no fragment's
+        split.check_resume(held, plan)
+
+    monkeypatch.setattr(split, "campaign_inputs", lambda environment: {"harness": "x"})
+    assert split.fragment_plan("c1", "g-a-1", "h1", Environment({})) == plan
+    for campaign, fragment, host in (("c1", "../g", "h1"), ("", "g", "h1"), ("c1", "g", "h 1")):
+        with pytest.raises(ConfigError, match="letters, digits"):
+            split.fragment_plan(campaign, fragment, host, Environment({}))
+
+
+def test_fragments_merge_when_every_profile_has_one_accepted_result(tmp_path):
+    manifest = {"campaign": "c1", "expected": ["a", "b", "c", "d"], "accepted": ["g-a-1", "g-bc-2", "g-d-1"]}
+    first = fragment_root(tmp_path, "first", "g-a-1", ["a"], {"a": "formal", "a.1791000000": "smoke"})
+    lost = fragment_root(tmp_path, "lost", "g-bc-1", ["b", "c"], {"b": "formal"}, host="h2")  # superseded
+    retry = fragment_root(tmp_path, "retry", "g-bc-2", ["c", "b"], {"b": "formal", "c": "build-failed"})
+    broken = fragment_root(tmp_path, "broken", "g-d-1", [], {}, host="h2", config_errors=["d"])
+    roots = [first, lost, retry, broken]
+
+    assert split.fragment_merge_check(manifest, roots) == []
+    assert split.accepted_roots(manifest, roots) == [first, retry, broken]
+    # A named profile an exclusion left out has no result to give; a foreign exclusion claims nothing.
+    left_out = fragment_root(tmp_path, "left-out", "g-e-1", [], {}, excluded=["e", "z"])
+    assert split.fragment_merge_check({**manifest, "expected": [*manifest["expected"], "e"],
+                                       "accepted": [*manifest["accepted"], "g-e-1"]}, [*roots, left_out]) == []
+
+
+def test_fragments_do_not_merge_when_a_result_is_missing_doubled_foreign_or_unlike(tmp_path):
+    manifest = {"campaign": "c1", "expected": ["a", "b", "c"], "accepted": ["g-a-1", "g-b-1", "g-c-1"]}
+    one = fragment_root(tmp_path, "one", "g-a-1", ["a"], {"a": "formal", "b": "formal"})
+    two = fragment_root(tmp_path, "two", "g-b-1", ["b", "z"], {"b": "formal", "z": "formal"}, inputs={"harness": "y"})
+    smoke = fragment_root(tmp_path, "smoke", "g-c-1", ["c"], {"c": "smoke"})
+    elsewhere = fragment_root(tmp_path, "elsewhere", "g-c-1", ["c"], {"c": "formal"}, campaign="c0")
+
+    problems = split.fragment_merge_check(manifest, [one, two, smoke, elsewhere])
+
+    assert f"{one}: b is not one of fragment g-a-1's profiles" in problems
+    assert f"{two}: z is not in the campaign" in problems
+    assert f"{smoke}: c is a smoke result" in problems and "c: no formal result" in problems
+    assert any(problem.startswith(f"{elsewhere}: not run in campaign c1") for problem in problems)
+    assert any("different campaign inputs" in problem for problem in problems)
+    assert split.fragment_merge_check(manifest, [smoke], "smoke")[:2] == ["fragment g-a-1: 0 result roots",
+                                                                          "fragment g-b-1: 0 result roots"]
+    twice = {**manifest, "accepted": ["g-a-1", "g-a-2", "g-c-1"]}
+    again = fragment_root(tmp_path, "again", "g-a-2", ["a"], {"a": "formal"})
+    copy = fragment_root(tmp_path, "copy", "g-c-1", ["c"], {"c": "formal"})
+    problems = split.fragment_merge_check(twice, [one, again, smoke, copy])
+    assert any(problem.startswith("a: results in") for problem in problems)
+    assert "fragment g-c-1: 2 result roots" in problems
+    assert split.fragment_merge_check({"campaign": "../c", "expected": ["a", "a"], "accepted": "g"}, []) == [
+        "the manifest's campaign is not an identifier: '../c'", "the manifest's expected lists a name twice",
+        "the manifest's accepted is not a list of names"]
+
+
+def test_run_all_runs_a_fragment_in_its_given_order_and_records_it(tmp_path, monkeypatch, capsys):
+    from trtmc_aiperf_qual import cli
+
+    (tmp_path / "env.yaml").write_text(f"repo: {tmp_path}\n")
+    seen = {}
+
+    def run_all(environment, models, out_root, **kwargs):
+        seen.update(models=[item["model"] for item in models], keep_order=kwargs["keep_order"])
+        return []
+
+    _named_as_given(monkeypatch)
+    monkeypatch.setattr("trtmc_aiperf_qual.models.resolve_model", lambda name, environment: {"model": name})
+    monkeypatch.setattr("trtmc_aiperf_qual.campaign.run_all", run_all)
+    monkeypatch.setattr(split, "campaign_inputs", lambda environment: {"harness": "x"})
+    base = ["run-all", "--environment", str(tmp_path / "env.yaml"), "--out-root", str(tmp_path / "out")]
+    fragment = ["--campaign", "c1", "--fragment", "g-bc-2", "--host", "h1", "--profile", "c", "--profile", "b"]
+
+    assert cli.main([*base, *fragment]) == 0
+    assert seen == {"models": ["c", "b"], "keep_order": True}
+    plan = json.loads((tmp_path / "out" / "plan.json").read_text())
+    assert {key: plan[key] for key in ("campaign", "fragment", "host", "selected", "inputs")} == {
+        "campaign": "c1", "fragment": "g-bc-2", "host": "h1", "selected": ["c", "b"], "inputs": {"harness": "x"}}
+    (tmp_path / "out" / "c").mkdir()
+    (tmp_path / "out" / "c" / "report.json").write_text(json.dumps({"mode": "formal"}))
+    for wrong in (fragment[:4] + fragment[6:], [*fragment, "--shard", "0/2"],
+                  ["--campaign", "c1", "--fragment", "g-bc-3", "--host", "h1", "--profile", "b"],
+                  ["--campaign", "c1", "--fragment", "../x", "--host", "h1", "--profile", "b"]):
+        seen.clear()
+        assert cli.main([*base, *wrong]) == 2, wrong
+        assert seen == {}
+        capsys.readouterr()
+
+
+def test_summary_merges_only_the_manifests_accepted_fragments(tmp_path, monkeypatch, capsys):
+    from trtmc_aiperf_qual import cli
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"campaign": "c1", "expected": ["a", "b"], "accepted": ["g-a-1", "g-b-2"]}))
+    first = fragment_root(tmp_path, "a1", "g-a-1", ["a"], {"a": "formal"})
+    late = fragment_root(tmp_path, "b1", "g-b-1", ["b"], {"b": "formal"}, host="h2")
+    retry = fragment_root(tmp_path, "b2", "g-b-2", ["b"], {"b": "formal"})
+    merged = {}
+
+    def summary(roots, baseline):
+        merged["roots"] = [path.name for path in roots]
+        return "# merged\n", {}
+
+    monkeypatch.setattr("trtmc_aiperf_qual.campaign.summary", summary)
+    assert cli.main(["merge-check", "--manifest", str(manifest), str(first), str(late), str(retry)]) == 0
+    assert cli.main(["summary", "--manifest", str(manifest), str(first), str(late), str(retry)]) == 0
+    assert merged["roots"] == ["a1", "b2"]
+    capsys.readouterr()
+    assert cli.main(["summary", "--manifest", str(manifest), str(first), str(late)]) == 1
+    assert "fragment g-b-2: 0 result roots" in capsys.readouterr().err

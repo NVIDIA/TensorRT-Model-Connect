@@ -20,6 +20,14 @@ namespace trtmc {
 
 namespace {
 
+// The next decode step would store one more K/V row. A full cache ends the
+// generation, as max_new_tokens does, instead of dropping the prompt's rows.
+// A state without a length limit (max_length() < 0) never fills.
+bool kv_cache_full(const LocateanythingInferenceState& state) {
+    const int32_t max_length = state.max_length();
+    return max_length >= 0 && state.position() >= max_length;
+}
+
 bool is_coordinate_token(std::string_view token) {
     if (token.size() < 3 || token.front() != '<' || token.back() != '>')
         return false;
@@ -517,6 +525,8 @@ LocateAnythingPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
         output.push_back(result.token_id);
         if (result.is_eos)
             break;
+        if (kv_cache_full(*state_))
+            break;
         run_text_step(result.token_id, logits);
     }
 
@@ -614,6 +624,8 @@ void LocateAnythingPipeline::run_vl_decode_loop(LocateAnythingISampler* sampler,
         LocateAnythingSampleResult result = sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
         if (result.is_eos)
+            break;
+        if (kv_cache_full(*state_))
             break;
         run_text_step(result.token_id, logits);
     }

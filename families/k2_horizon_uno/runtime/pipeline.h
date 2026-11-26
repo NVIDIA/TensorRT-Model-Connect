@@ -58,6 +58,8 @@ class K2HorizonUnoTextGenerationPipeline final : public ITextGeneration {
 
     void reset_generation_context();
     void run_prefill(const std::vector<int32_t>& input_ids, std::vector<float>& logits);
+    // Run prompt rows on the base context without reading their logits.
+    void run_prompt_rows(const int32_t* token_ids, int32_t rows);
     void run_block(const std::vector<int32_t>& token_ids, const std::vector<float>& lora_mask,
                    std::vector<float>& logits);
     std::vector<int32_t> effective_eos_ids(const TextGenerationConfig& cfg) const;
@@ -65,6 +67,8 @@ class K2HorizonUnoTextGenerationPipeline final : public ITextGeneration {
 
     std::unique_ptr<ITrtModule> lora_decoder_;
     std::unique_ptr<ITrtModule> base_decoder_;
+    // Prompt rows per base-context call: the base profile maximum.
+    int32_t prompt_rows_{1};
     std::unique_ptr<K2HorizonUnoKvCache> cache_;
     std::shared_ptr<ITokenizer> tokenizer_;
     double last_setup_ms_{0.0};

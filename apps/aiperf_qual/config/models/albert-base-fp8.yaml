@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# ALBERT shares one set of layer weights across all layers, so its FP8 error compounds: the family's FP8 E2E cosine
+# (tests/thresholds/albert-base-fp8.json, 0.9) and the relative L2 it allows at equal norms (sqrt(2 * 0.1) ~ 0.45).
+absolute: [{name: encoder_parity, quantized_gate: {min_cosine: 0.9, max_relative_l2: 0.45}}]

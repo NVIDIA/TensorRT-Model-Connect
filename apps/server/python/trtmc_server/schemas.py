@@ -8,11 +8,22 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class StrictRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("*")
+    @classmethod
+    def require_utf8_text(cls, value: Any) -> Any:
+        for item in value if isinstance(value, list) else [value]:
+            if isinstance(item, str):
+                try:
+                    item.encode("utf-8")
+                except UnicodeEncodeError as error:
+                    raise ValueError("text must contain valid Unicode scalar values") from error
+        return value
 
 
 class TextContentPart(StrictRequest):
@@ -41,7 +52,7 @@ class StreamOptions(StrictRequest):
 class GenerationRequest(StrictRequest):
     model: str
     max_tokens: int | None = Field(default=None, ge=1)
-    temperature: float | None = Field(default=None, ge=0)
+    temperature: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     top_p: float | None = Field(default=None, ge=0, le=1)
     min_p: float | None = Field(default=None, ge=0, le=1)
     top_k: int | None = Field(default=None, ge=0)

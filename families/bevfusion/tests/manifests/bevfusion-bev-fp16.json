@@ -1,0 +1,58 @@
+{
+  "name": "bevfusion-bev-fp16",
+  "bundle": "bevfusion-bev-fp16.bundle",
+  "family": "bevfusion",
+  "task": "spatial_features_to_class_scores",
+  "precision": "fp16",
+  "source_revision": "326653dc06e0938edf1aae7d01efcd158ba83de5",
+  "external_files": [
+    {
+      "path": "bevfusion-seg.pth",
+      "url": "https://www.dropbox.com/scl/fi/8lgd1hkod2a15mwry0fvd/bevfusion-seg.pth?rlkey=2tmgw7mcrlwy9qoqeui63tay9&dl=1"
+    },
+    {
+      "path": "reference/mmdet3d/models/fusers/conv.py",
+      "url": "https://raw.githubusercontent.com/mit-han-lab/bevfusion/326653dc06e0938edf1aae7d01efcd158ba83de5/mmdet3d/models/fusers/conv.py"
+    },
+    {
+      "path": "reference/mmdet3d/models/backbones/second.py",
+      "url": "https://raw.githubusercontent.com/mit-han-lab/bevfusion/326653dc06e0938edf1aae7d01efcd158ba83de5/mmdet3d/models/backbones/second.py"
+    },
+    {
+      "path": "reference/mmdet3d/models/necks/second.py",
+      "url": "https://raw.githubusercontent.com/mit-han-lab/bevfusion/326653dc06e0938edf1aae7d01efcd158ba83de5/mmdet3d/models/necks/second.py"
+    },
+    {
+      "path": "reference/mmdet3d/models/heads/segm/vanilla.py",
+      "url": "https://raw.githubusercontent.com/mit-han-lab/bevfusion/326653dc06e0938edf1aae7d01efcd158ba83de5/mmdet3d/models/heads/segm/vanilla.py"
+    }
+  ],
+  "testcases": [
+    {
+      "name": "bevfusion-bev-fp16",
+      "premerge": true,
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "feature_maps": [
+        {
+          "name": "camera_bev",
+          "channels": 80,
+          "height": 128,
+          "width": 128,
+          "values_path": "data/camera.f32"
+        },
+        {
+          "name": "lidar_bev",
+          "channels": 256,
+          "height": 128,
+          "width": 128,
+          "values_path": "data/lidar.f32"
+        }
+      ]
+    }
+  ],
+  "tensor_parallel_size": 1
+}

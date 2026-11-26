@@ -58,10 +58,14 @@ def add_sparse_moe(network, hidden, weights: MoEWeights):
         original = all(isinstance(matrix, np.ndarray) for matrix in matrices)
         packed = all(
             isinstance(matrix, PackedLinear)
-            and matrix.format in {"gptq", "nvfp4_a16"}
+            and matrix.format in {"gptq", "nvfp4_a16", "nvfp4_a4"}
             and matrix.format == matrices[0].format
             for matrix in matrices
         )
+        if packed and matrices[0].format == "nvfp4_a4":
+            # A single Q/DQ across routed rows is equivalent only for the same scale.
+            # Otherwise each expert must retain its own calibrated input scale.
+            packed = all(matrix.input_scale == matrices[0].input_scale for matrix in matrices)
         if not (original or packed):
             return _add_sparse_moe_individual(network, hidden, weights)
     return _add_sparse_moe_selected(network, hidden, weights)
@@ -146,12 +150,14 @@ def _add_sparse_moe_selected(network, hidden, weights: MoEWeights):
             rhs = network.add_gather(rhs, selected, 0).get_output(0)
         else:
             fmt = matrices[0].format
-            if fmt not in ("gptq", "nvfp4_a16") or any(
+            if fmt not in ("gptq", "nvfp4_a16", "nvfp4_a4") or any(
                 m.format != fmt or m.shape != (k, n) for m in matrices
             ):
                 raise ValueError(
                     "Selected experts require matching packed precision and geometry"
                 )
+            if fmt == "nvfp4_a4":
+                value = matrices[0].round_nvfp4_input(network, value)
             # Integer words retain the exact compact bytes without claiming an
             # INT8 quantized floating-point tensor (which TRT restricts to DQ).
             packed = np.stack([m.packed for m in matrices]).view("<i4")
@@ -397,3 +403,115 @@ def _add_sparse_moe_individual(network, hidden, weights: MoEWeights):
         binary(shared, gate, trt.ElementWiseOperation.PROD),
         trt.ElementWiseOperation.SUM,
     )
+
+
+def dense_rows_supported(weights: MoEWeights) -> bool:
+    """Whether :func:`add_dense_moe_rows` can run these experts: every routed projection is GPTQ."""
+    return all(
+        isinstance(getattr(item, name), PackedLinear) and getattr(item, name).format == "gptq"
+        for item in weights.experts
+        for name in ("gate", "up", "down")
+    )
+
+
+@dataclass(frozen=True)
+class _StackedExperts:
+    """All routed experts as three GPTQ projections: gate and up over every expert's outputs, down over every
+    expert's inputs. Group-128 blocks stay inside one expert, so the INT4 codes and FP16 scales are unchanged."""
+
+    gate: PackedLinear
+    up: PackedLinear
+    down: PackedLinear
+
+
+def _stack_experts(weights: MoEWeights) -> _StackedExperts:
+    def outputs(matrices):
+        return PackedLinear("gptq", np.ascontiguousarray(np.concatenate([m.packed for m in matrices], 0)),
+                            np.ascontiguousarray(np.concatenate([m.scales for m in matrices], 0)))
+
+    def inputs(matrices):
+        return PackedLinear("gptq", np.ascontiguousarray(np.concatenate([m.packed for m in matrices], 1)),
+                            np.ascontiguousarray(np.concatenate([m.scales for m in matrices], 1)))
+
+    return _StackedExperts(outputs([e.gate for e in weights.experts]), outputs([e.up for e in weights.experts]),
+                           inputs([e.down for e in weights.experts]))
+
+
+def add_dense_moe_rows(network, hidden, weights: MoEWeights, keep: list):
+    """MoE over ``S`` token rows (prefill) with every expert in three W4A16 GEMMs.
+
+    The routing is that of :func:`_add_sparse_moe_selected` (FP32 softmax over the router logits, top-k,
+    renormalized). Each row then runs every expert, so the experts' INT4 weights are read once per launch
+    instead of once per token: unselected experts are zeroed with a select (their FP16 intermediate may
+    overflow) before the routing weights scale the down-projection inputs, and the down GEMM sums the
+    selected experts. ``keep`` holds the stacked projections until the engine is built.
+    """
+    dtype = hidden.dtype
+    hidden_size, count = weights.router.shape
+    topk = weights.top_k
+    stacked = _stack_experts(weights)
+    keep.append(stacked)
+    width = stacked.gate.shape[1] // count
+
+    def cast(x, d):
+        return x if x.dtype == d else network.add_cast(x, d).get_output(0)
+
+    def const(x):
+        x = np.array(x, copy=True, order="C")
+        keep.append(x)
+        return network.add_constant(x.shape, x).get_output(0)
+
+    def binary(a, b, op):
+        return network.add_elementwise(a, b, op).get_output(0)
+
+    def reshape(x, shape):
+        op = network.add_shuffle(x)
+        op.reshape_dims = shape
+        return op.get_output(0)
+
+    def linear(x, w):
+        if isinstance(w, PackedLinear):
+            return w.matmul(network, x, *w.shape)
+        return network.add_matrix_multiply(
+            x, trt.MatrixOperation.NONE, cast(const(w), dtype), trt.MatrixOperation.NONE
+        ).get_output(0)
+
+    def activated(x):
+        x = cast(x, trt.float32)
+        return cast(binary(x, network.add_activation(x, trt.ActivationType.SIGMOID).get_output(0),
+                           trt.ElementWiseOperation.PROD), dtype)
+
+    router = network.add_matrix_multiply(
+        cast(hidden, trt.float32), trt.MatrixOperation.NONE,
+        cast(cast(const(weights.router), dtype), trt.float32), trt.MatrixOperation.NONE,
+    ).get_output(0)
+    sm = network.add_softmax(cast(cast(router, dtype), trt.float32))
+    sm.axes = 1 << 1
+    top = network.add_topk(sm.get_output(0), trt.TopKOperation.MAX, topk, 1 << 1)
+    probs, indices = top.get_output(0), top.get_output(1)
+    denom = network.add_reduce(probs, trt.ReduceOperation.SUM, 1 << 1, True).get_output(0)
+    probs = cast(binary(probs, denom, trt.ElementWiseOperation.DIV), dtype)
+    # Routing weight of every expert per row, [S, E, 1]; zero for the unselected ones.
+    chosen = binary(reshape(indices, (-1, topk, 1)), const(np.arange(count, dtype=np.int32).reshape(1, 1, count)),
+                    trt.ElementWiseOperation.EQUAL)
+    weighted = network.add_select(chosen, reshape(probs, (-1, topk, 1)),
+                                  cast(const(np.zeros((1, 1, 1), np.float32)), dtype)).get_output(0)
+    scores = reshape(network.add_reduce(weighted, trt.ReduceOperation.SUM, 1 << 1, False).get_output(0),
+                     (-1, count, 1))
+    selected = network.add_reduce(cast(chosen, trt.int32), trt.ReduceOperation.MAX, 1 << 1, False).get_output(0)
+    selected = cast(reshape(selected, (-1, count, 1)), trt.bool)
+
+    gate = reshape(linear(hidden, stacked.gate), (-1, count, width))
+    up = reshape(linear(hidden, stacked.up), (-1, count, width))
+    expert_inputs = binary(activated(gate), up, trt.ElementWiseOperation.PROD)
+    expert_inputs = network.add_select(selected, expert_inputs,
+                                       cast(const(np.zeros((1, 1, 1), np.float32)), dtype)).get_output(0)
+    expert_inputs = binary(expert_inputs, scores, trt.ElementWiseOperation.PROD)
+    routed = linear(reshape(expert_inputs, (-1, count * width)), stacked.down)
+
+    gate = linear(hidden, weights.shared.gate)
+    up = linear(hidden, weights.shared.up)
+    shared = linear(binary(activated(gate), up, trt.ElementWiseOperation.PROD), weights.shared.down)
+    shared_gate = cast(network.add_activation(cast(linear(hidden, weights.shared_gate), trt.float32),
+                                              trt.ActivationType.SIGMOID).get_output(0), dtype)
+    return binary(routed, binary(shared, shared_gate, trt.ElementWiseOperation.PROD), trt.ElementWiseOperation.SUM)

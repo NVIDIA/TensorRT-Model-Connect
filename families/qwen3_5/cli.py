@@ -41,6 +41,7 @@ def build(
     max_sequence_length: int | None = None, tensor_parallel_size: int = 1,
     verbose: bool = False, quantization: str | None = None,
     fp32_layers: list[int] | tuple[int, ...] = (),
+    edge_builder_python: Path | None = None,
     execution_variant: str | None = None, companion: list[str] | tuple[str, ...] = (),
 ) -> int:
     """Run the declared owner command; help never imports this handler."""
@@ -56,7 +57,7 @@ def build(
         verbose=verbose, quantization=quantization,
         fp32_layers=tuple(fp32_layers),
     )
-    if execution is not None:
-        request = with_execution(request, execution)
+    if execution is not None or edge_builder_python is not None:
+        request = with_execution(request, execution, edge_builder_python=edge_builder_python)
     build_bundle(request, output)
     return 0

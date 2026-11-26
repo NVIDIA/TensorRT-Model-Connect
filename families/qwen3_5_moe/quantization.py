@@ -21,8 +21,8 @@ def _positive_scalar(value, name: str) -> float:
 class PackedLinear:
     """Output-major original codes and scales, retained for the full TRT build.
 
-    GPTQ packing changes bits/layout only. NVFP4 experts are W4A16: their
-    input_scale metadata must not accidentally enable W4A4 activation rounding.
+    GPTQ packing changes bits/layout only. The mixed 35B recipe uses W4A16;
+    only the ordinary NVFP4 recipe rounds activations to E2M1.
     FP8 attention projections do retain their calibrated activation quantizer.
     """
 
@@ -45,32 +45,177 @@ class PackedLinear:
                        scales=(self.scales if self.format == "fp8" else
                                np.ascontiguousarray(self.scales[indices])), keep_alive=[])
 
+    def _lookup_packed_weights(self, network, bits: int, table: np.ndarray):
+        """Decode original checkpoint codes, low bits first, using standard TRT ops."""
+        import tensorrt as trt
+
+        k, n = self.shape
+        lanes = 32 // bits
+        # INT8/FP8 constants would be interpreted as quantized weights; carry
+        # the unchanged source bytes in INT32 words instead. Padding is per row.
+        extra = (-self.packed.shape[1]) % 4
+        data = np.pad(self.packed, ((0, 0), (0, extra))) if extra else self.packed
+        words = np.ascontiguousarray(data).view("<i4").reshape(n, -1, 1)
+        divisors = (1 << (bits * np.arange(lanes, dtype=np.int32))).reshape(1, 1, lanes)
+        radix = np.full((1, 1, 1), 1 << bits, np.int32)
+        self.keep_alive.extend((words, divisors, radix, table))
+
+        def constant(array):
+            return network.add_constant(array.shape, array).get_output(0)
+
+        def binary(left, right, op):
+            return network.add_elementwise(left, right, op).get_output(0)
+
+        op = trt.ElementWiseOperation
+        shifted = binary(constant(words), constant(divisors), op.FLOOR_DIV)
+        base = constant(radix)
+        # Euclidean modulo also extracts the high code of negative signed words.
+        indices = binary(shifted, binary(binary(shifted, base, op.FLOOR_DIV), base, op.PROD), op.SUB)
+        values = network.add_gather(constant(table), indices, 0).get_output(0)
+        view = network.add_shuffle(values)
+        view.reshape_dims = (n, words.shape[1] * lanes)
+        weight = view.get_output(0)
+        return network.add_slice(weight, (0, 0), (n, k), (1, 1)).get_output(0) if extra else weight
+
     def weight_tensor(self, network, dtype):
         """Reconstruct source weights in graph; TensorRT owns lowering/storage."""
         import tensorrt as trt
 
         k, n = self.shape
-        kind = {"gptq": trt.DataType.INT4, "nvfp4_a16": trt.DataType.FP4,
-                "fp8": trt.DataType.FP8}[self.format]
-        raw = trt.Weights(kind, self.packed.ctypes.data, n * k)
+        if self.format == "fp8":
+            import ml_dtypes
+
+            values = np.arange(256, dtype=np.uint8).view(ml_dtypes.float8_e4m3fn)
+            table = values.astype(np.float32) * self.scales[0]
+            return network.add_cast(self._lookup_packed_weights(network, 8, table), dtype).get_output(0)
+        if self.format in {"nvfp4_a16", "nvfp4_a4"}:
+            import ml_dtypes
+
+            positive = np.array([0, 0.5, 1, 1.5, 2, 3, 4, 6], np.float32)
+            values = self._lookup_packed_weights(network, 4, np.concatenate((positive, -positive)))
+            blocks = network.add_shuffle(values)
+            blocks.reshape_dims = (n, k // 16, 16)
+            # The serialized FP8 scale is shared by sixteen E2M1 weights.
+            # Combine it with the per-projection scale before any FP16 cast.
+            scales = self.scales.view(ml_dtypes.float8_e4m3fn).astype(np.float32)
+            scales = (scales * np.float32(self.global_scale)).reshape(n, k // 16, 1)
+            self.keep_alive.append(scales)
+            scale = network.add_constant(scales.shape, scales).get_output(0)
+            weight = network.add_elementwise(blocks.get_output(0), scale, trt.ElementWiseOperation.PROD)
+            view = network.add_shuffle(weight.get_output(0))
+            view.reshape_dims = (n, k)
+            return network.add_cast(view.get_output(0), dtype).get_output(0)
+        if self.format != "gptq":
+            raise ValueError(f"Unknown packed projection format: {self.format}")
+        raw = trt.Weights(trt.DataType.INT4, self.packed.ctypes.data, n * k)
         weight = network.add_constant((n, k), raw).get_output(0)
         self.keep_alive.extend((self.packed, self.scales, raw))
-        if self.format == "nvfp4_a16":
-            raw_scales = trt.Weights(trt.DataType.FP8, self.scales.ctypes.data, self.scales.size)
-            blocks = network.add_constant(self.scales.shape, raw_scales).get_output(0)
-            global_array = np.asarray([self.global_scale], dtype=np.float32)
-            global_scale = network.add_constant((1,), global_array).get_output(0)
-            self.keep_alive.extend((raw_scales, global_array))
-            scales = network.add_dequantize(blocks, global_scale, trt.float32).get_output(0)
-            decoded = network.add_dequantize(weight, scales, trt.float32)
-            decoded.axis = 1
-            # Do not round the intermediate FP8-block/global product to FP16.
-            return network.add_cast(decoded.get_output(0), dtype).get_output(0)
         scales = network.add_constant(self.scales.shape, self.scales).get_output(0)
         decoded = network.add_dequantize(weight, scales, dtype)
-        if self.format == "gptq":
-            decoded.axis = 1
+        decoded.axis = 1
         return decoded.get_output(0)
+
+    def _round_e4m3_magnitude(self, network, magnitude, scale):
+        """Nearest-even finite E4M3 code; compare calibrated midpoints before division."""
+        import tensorrt as trt
+
+        rank = len(magnitude.shape)
+        e, u = trt.ElementWiseOperation, trt.UnaryOperation
+
+        def constant(value):
+            array = np.full((1,) * rank, value, np.float32)
+            self.keep_alive.append(array)
+            return network.add_constant(array.shape, array).get_output(0)
+
+        def binary(left, right, op):
+            return network.add_elementwise(left, right, op).get_output(0)
+
+        def unary(value, op):
+            return network.add_unary(value, op).get_output(0)
+
+        raw = binary(magnitude, scale, e.DIV)
+        raw = binary(raw, constant(448), e.MIN)
+        normal = binary(raw, constant(2 ** -6), e.MAX)
+        exponent = unary(binary(unary(normal, u.LOG), constant(np.log(2)), e.DIV), u.FLOOR)
+        step = binary(binary(constant(2), exponent, e.POW), constant(0.125), e.PROD)
+        lower = unary(binary(raw, step, e.DIV), u.FLOOR)
+        midpoint = binary(binary(binary(lower, constant(0.5), e.SUM), step, e.PROD), scale, e.PROD)
+        half = binary(lower, constant(0.5), e.PROD)
+        odd = binary(half, unary(half, u.FLOOR), e.GREATER)
+        up = binary(binary(magnitude, midpoint, e.GREATER),
+                    binary(odd, binary(magnitude, midpoint, e.EQUAL), e.AND), e.OR)
+        code = binary(lower, network.add_cast(up, trt.float32).get_output(0), e.SUM)
+        return binary(binary(code, step, e.PROD), constant(448), e.MIN)
+
+    def round_nvfp4_input(self, network, activation):
+        """Apply this projection's original per-16 E2M1 / E4M3 activation scales."""
+        import tensorrt as trt
+
+        if self.format != "nvfp4_a4" or self.input_scale is None:
+            raise ValueError("NVFP4 activation quantization requires the source W4A4 scale")
+        shape = network.add_shape(activation).get_output(0)
+        width = self.shape[0]
+        blocks = network.add_shuffle(activation)
+        rank = len(activation.shape)
+        # Preserve the independent token and routed-expert axes; only split K.
+        blocks.reshape_dims = (0,) * (rank - 1) + (width // 16, 16)
+        work = network.add_cast(blocks.get_output(0), trt.float32).get_output(0)
+        e, u = trt.ElementWiseOperation, trt.UnaryOperation
+
+        def constant(value):
+            array = np.full((1,) * (rank + 1), value, np.float32)
+            self.keep_alive.append(array)
+            return network.add_constant(array.shape, array).get_output(0)
+
+        def binary(left, right, op):
+            return network.add_elementwise(left, right, op).get_output(0)
+
+        def unary(value, op):
+            return network.add_unary(value, op).get_output(0)
+
+        # Reconstruct the ModelOpt block scale in FP32. E4M3FN has three
+        # mantissa bits, minimum normal exponent -6 and maximum finite 448.
+        # Floating point graph math keeps this route valid without FP8 hardware.
+        magnitude = unary(work, u.ABS)
+        maximum = network.add_reduce(magnitude, trt.ReduceOperation.MAX, 1 << rank, True).get_output(0)
+        global_scale = constant(self.input_scale)
+        six_global = constant(np.float32(6) * np.float32(self.input_scale))
+        block_scale = self._round_e4m3_magnitude(network, maximum, six_global)
+        effective = binary(block_scale, global_scale, e.PROD)
+        # Compare in the original scale domain. Division can be lowered to an
+        # approximate reciprocal, moving exactly representable FP4 ties by one ulp.
+        levels = constant(0)
+        for midpoint, upper, upper_even in ((0.25, 0.5, False), (0.75, 1, True),
+                                             (1.25, 1.5, False), (1.75, 2, True),
+                                             (2.5, 3, False), (3.5, 4, True), (5, 6, False)):
+            threshold = binary(effective, constant(midpoint), e.PROD)
+            select_upper = (unary(binary(magnitude, threshold, e.LESS), u.NOT) if upper_even
+                            else binary(magnitude, threshold, e.GREATER))
+            levels = network.add_select(select_upper, constant(upper), levels).get_output(0)
+        levels = binary(levels, unary(work, u.SIGN), e.PROD)
+        # Match the effective-scale DQ of the requested compute type.
+        scale = network.add_cast(effective, activation.dtype).get_output(0)
+        result = binary(network.add_cast(levels, activation.dtype).get_output(0), scale, e.PROD)
+        restored = network.add_shuffle(result)
+        restored.set_input(1, shape)
+        return restored.get_output(0)
+
+    def round_fp8_input(self, network, activation):
+        """Quantize and dequantize using the checkpoint's per-tensor E4M3 input scale."""
+        import tensorrt as trt
+
+        if self.format != "fp8" or self.input_scale is None:
+            raise ValueError("FP8 activation quantization requires its calibrated input scale")
+        scale_array = np.full((1,) * len(activation.shape), self.input_scale, np.float32)
+        self.keep_alive.append(scale_array)
+        scale = network.add_constant(scale_array.shape, scale_array).get_output(0)
+        value = network.add_cast(activation, trt.float32).get_output(0)
+        mag = network.add_unary(value, trt.UnaryOperation.ABS).get_output(0)
+        code = self._round_e4m3_magnitude(network, mag, scale)
+        sign = network.add_unary(value, trt.UnaryOperation.SIGN).get_output(0)
+        v = network.add_elementwise(code, sign, trt.ElementWiseOperation.PROD).get_output(0)
+        v = network.add_elementwise(v, scale, trt.ElementWiseOperation.PROD).get_output(0)
+        return network.add_cast(v, activation.dtype).get_output(0)
 
     def matmul(self, network, activation, input_width: int, output_width: int,
                *, fp32_accumulation: bool = False):
@@ -79,12 +224,10 @@ class PackedLinear:
 
         if self.shape != (input_width, output_width):
             raise ValueError("Packed projection dimensions disagree with the model graph")
+        if self.format == "nvfp4_a4":
+            activation = self.round_nvfp4_input(network, activation)
         if self.format == "fp8":
-            scale_array = np.asarray([self.input_scale], dtype=np.float32)
-            self.keep_alive.append(scale_array)
-            scale = network.add_constant((1,), scale_array).get_output(0)
-            quantized = network.add_quantize(activation, scale, trt.DataType.FP8).get_output(0)
-            activation = network.add_dequantize(quantized, scale, activation.dtype).get_output(0)
+            activation = self.round_fp8_input(network, activation)
         weight = self.weight_tensor(network, activation.dtype)
         dtype = activation.dtype
         if fp32_accumulation:
@@ -125,8 +268,8 @@ def gptq_projection(qweight, qzeros, scales, group_index) -> PackedLinear:
     return PackedLinear("gptq", packed, np.ascontiguousarray(scales.T))
 
 
-def nvfp4_projection(packed, block_scales, global_scale) -> PackedLinear:
-    """Retain E2M1 bytes and original E4M3 block/global scales for W4A16."""
+def nvfp4_projection(packed, block_scales, global_scale, *, input_scale=None) -> PackedLinear:
+    """Retain packed E2M1 weights; only an explicit W4A4 recipe supplies input_scale."""
     packed, block_scales = np.asarray(packed), np.asarray(block_scales)
     if packed.dtype != np.uint8 or packed.ndim != 2:
         raise ValueError("NVFP4 requires rank-two packed UINT8")
@@ -138,9 +281,10 @@ def nvfp4_projection(packed, block_scales, global_scale) -> PackedLinear:
     values = block_scales.astype(np.float32)
     if not np.isfinite(values).all() or np.any(values < 0):
         raise ValueError("NVFP4 block scales must be finite and nonnegative")
-    return PackedLinear("nvfp4_a16", np.ascontiguousarray(packed),
+    return PackedLinear("nvfp4_a16" if input_scale is None else "nvfp4_a4", np.ascontiguousarray(packed),
                         np.ascontiguousarray(block_scales.view(np.uint8)),
-                        _positive_scalar(global_scale, "NVFP4 global"))
+                        _positive_scalar(global_scale, "NVFP4 global"),
+                        None if input_scale is None else _positive_scalar(input_scale, "NVFP4 activation"))
 
 
 def fp8_projection(packed, weight_scale, input_scale) -> PackedLinear:
@@ -174,7 +318,7 @@ def prepared_format(model_dir, raw: dict, requested: str | None, *,
     return source_policy(SimpleNamespace(model_dir=root, quantization=requested), raw)["weights"]
 
 
-def load_projection(readers, prefix: str):
+def load_projection(readers, prefix: str, *, quantize_nvfp4_input: bool = False):
     """Read source codes/scales, or transpose an original excluded projection."""
     def raw(suffix):
         key = prefix + suffix
@@ -189,7 +333,8 @@ def load_projection(readers, prefix: str):
     if value.ndim != 2:
         raise ValueError(f"{prefix}: projection weight must be rank two")
     if value.dtype == np.uint8:
-        return nvfp4_projection(value, raw(".weight_scale"), raw(".weight_scale_2"))
+        return nvfp4_projection(value, raw(".weight_scale"), raw(".weight_scale_2"),
+                                input_scale=raw(".input_scale") if quantize_nvfp4_input else None)
     if str(value.dtype) == "float8_e4m3fn":
         return fp8_projection(value, raw(".weight_scale"), raw(".input_scale"))
     if value.dtype not in (np.dtype("float16"), np.dtype("float32")) and str(value.dtype) != "bfloat16":

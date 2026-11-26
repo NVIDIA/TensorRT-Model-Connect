@@ -62,7 +62,8 @@ def test_ordinary_qwen3_build_reserves_its_448_square_image_tokens(tmp_path):
     config.raw["_family_build_options"] = {"qwen_vl_vision": {"dynamic_resolution": False}}
     assert not _dynamic_vision_profile(str(tmp_path), config)[0]
     assert not _QwenVLModel().get_vl_config(config)["dynamic_image_resolution"]
-    assert _default_sequence_length(str(tmp_path), config) == 256
+    # The fixed 448-square profile reserves its 196 image tokens too.
+    assert _default_sequence_length(str(tmp_path), config) == 452
 
 
 @pytest.mark.gpu

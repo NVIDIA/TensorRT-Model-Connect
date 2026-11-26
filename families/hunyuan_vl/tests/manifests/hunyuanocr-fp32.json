@@ -1,0 +1,19 @@
+{
+  "name": "hunyuanocr-fp32",
+  "hf_id": "tencent/HunyuanOCR",
+  "hf_revision": "47644ecc4fc854efa4f505155158831f36773ee4",
+  "bundle": "hunyuanocr-fp32.bundle",
+  "family": "hunyuan_vl",
+  "task": "images_text_to_text",
+  "precision": "fp32",
+  "max_sequence_length": 8192,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "hunyuanocr-fp32",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "reference_backend": "hf_transformers"
+    }
+  ]
+}

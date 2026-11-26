@@ -1,4 +1,50 @@
-# Phi4 Multimodal with Edge-LLM 0.11
+# Phi4 Multimodal with Edge-LLM
+
+When the installed Model Connect wheel includes a native runner and Edge SDK,
+the family uses that SDK. A different SDK on `CMAKE_PREFIX_PATH` cannot
+override the wheel's native runner. To select another release, install a
+Model Connect wheel built for it, or use a matching standalone Model Connect
+builder and runner in an environment without the wheel. For standalone
+installations, `CMAKE_PREFIX_PATH` selects the SDK as usual.
+
+## Opt-in Edge 0.12: original checkpoint
+
+Use an MC installation built with `TRTMC_ENABLE_EDGELLM=ON` and
+`TRTMC_EDGELLM_RELEASE=0.12.0`. The repository default remains 0.11.
+The native C++ SDK must match the worker's GPU architecture, CUDA and TensorRT.
+The Python builder can come from the official wheel or a source installation.
+When it lives outside MC's environment, pass its interpreter explicitly:
+
+```bash
+trtmc phi4_multimodal build "$MODEL_DIR" -o phi4.bundle --precision fp16 \
+  --max-sequence-length 10368 --edge-builder-python "$EDGE_PYTHON"
+trtmc run phi4.bundle --image "$IMAGE" --prompt "Describe this image." \
+  --max-new-tokens 30 --temperature 1 --top-k 1
+```
+
+For the original Microsoft checkpoint the family builds the LLM and visual
+components together. It preserves the vision LoRA and external weight bindings.
+The owner image case at batch one, TP1, context 10368 passed on SM80: the
+existing finite/nonzero feature check passed and the generated answer had
+normalized edit distance 0.1241 against the independent FP32 reference
+(limit 0.15). The warned native fallback passed the same feature check and
+matched all 30 FP32 reference tokens (NED 0). This does not qualify the old 768-token profile on 0.12.
+
+Text-only inference on the same vision-language bundle also executed. In a
+separate eight-token raw completion, both Edge and HF FP32 began with the
+correct city, but the continuations differed (NED 0.6757, above 0.15). That
+request remains executable; the image result does not qualify standalone text.
+Native also missed the language-only reference (NED 0.6486). Forcing the
+vision LoRA in HF reproduced all eight native tokens but did not reproduce
+Edge's continuation. Neither comparison changes the image gate.
+
+The release catalog also lists audio, but the 0.12 direct builder rejects
+`--components audio` for this checkpoint: only `llm` and `visual` are
+available. Phi4 does not implement an MC audio-text task or a native audio
+encoder. Neither audio inference nor audio quality is claimed. The prepared
+checkpoints below describe the legacy route, not new 0.12 qualifications.
+
+## Edge 0.11: historical profiles
 
 This family owns Edge selection, builder arguments, engine assets, runtime
 orchestration, and validation. Shared model-selection code is unchanged.

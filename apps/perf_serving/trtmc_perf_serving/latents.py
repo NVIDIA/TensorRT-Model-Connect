@@ -7,8 +7,9 @@ A ``generate_image`` request with ``latent_seed`` gets standard-normal noise dra
 the pipeline's own (unpacked) latent shape, computed from the checkpoint's model_index.json,
 transformer/config.json, and vae/config.json. The noise is written as a raw float32 file and passed
 as ``initial_latents_path``: the TRTMC families read that layout directly (CHW / CTHW), and the
-Diffusers adapter packs it where the pipeline expects packed latents. Both sides then denoise the
-same starting point, so their outputs differ only by numerics.
+Diffusers adapter packs it where the pipeline expects packed latents. Chroma's TRTMC family reads packed
+latents, so its noise is drawn packed and both sides take it as is. Both sides then denoise the same
+starting point, so their outputs differ only by numerics.
 """
 
 from __future__ import annotations
@@ -44,6 +45,13 @@ def _flux2(transformer: Mapping[str, Any], vae: Mapping[str, Any], height: int, 
     return (1, channels * 4, rows // 2, columns // 2)
 
 
+def _chroma(transformer: Mapping[str, Any], vae: Mapping[str, Any], height: int, width: int,
+            _frames: int) -> tuple[int, ...]:
+    # Packed [(H / 16) * (W / 16), 64]: what ChromaPipeline takes as supplied latents and TRTMC's Chroma reads.
+    scale = 2 ** (len(vae["block_out_channels"]) - 1)
+    return (1, (height // (scale * 2)) * (width // (scale * 2)), transformer["in_channels"])
+
+
 def _pixart(transformer: Mapping[str, Any], vae: Mapping[str, Any], height: int, width: int,
             _frames: int) -> tuple[int, ...]:
     scale = 2 ** (len(vae["block_out_channels"]) - 1)
@@ -54,6 +62,12 @@ def _qwen_image(transformer: Mapping[str, Any], vae: Mapping[str, Any], height: 
                 _frames: int) -> tuple[int, ...]:
     scale = 2 ** len(vae["temperal_downsample"])
     return (1, 1, transformer["in_channels"] // 4, 2 * (height // (scale * 2)), 2 * (width // (scale * 2)))
+
+
+def _qwen_image21(transformer: Mapping[str, Any], _vae: Mapping[str, Any], height: int, width: int,
+                  _frames: int) -> tuple[int, ...]:
+    # QwenImage21Pipeline: a fixed 16x VAE scale, and latents it packs unpatched (a plain spatial flatten).
+    return (1, 1, transformer["in_channels"], 2 * (height // 32), 2 * (width // 32))
 
 
 def _z_image(transformer: Mapping[str, Any], vae: Mapping[str, Any], height: int, width: int,
@@ -68,10 +82,13 @@ def _wan(transformer: Mapping[str, Any], vae: Mapping[str, Any], height: int, wi
     return (1, transformer["in_channels"], (frames - 1) // temporal + 1, height // spatial, width // spatial)
 
 
+# FLUX.2-klein draws and packs its latents exactly as FLUX.2 does.
 LAYOUTS = {"FluxPipeline": Layout(_flux_like, pack=True), "Flux2Pipeline": Layout(_flux2),
+           "Flux2KleinPipeline": Layout(_flux2), "ChromaPipeline": Layout(_chroma),
            "PixArtSigmaPipeline": Layout(_pixart, cast_to_pipeline_dtype=True),
            "QwenImagePipeline": Layout(_qwen_image, pack=True), "QwenImageEditPipeline": Layout(_qwen_image, pack=True),
-           "QwenImageEditPlusPipeline": Layout(_qwen_image, pack=True), "ZImagePipeline": Layout(_z_image),
+           "QwenImageEditPlusPipeline": Layout(_qwen_image, pack=True),
+           "QwenImage21Pipeline": Layout(_qwen_image21, pack=True), "ZImagePipeline": Layout(_z_image),
            "WanPipeline": Layout(_wan)}
 
 

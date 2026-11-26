@@ -1,12 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""LeRobot Pi 0.5 build -> bundle -> native Task API, against the pinned LeRobot reference.
+"""Compare recorded robot actions to the selected independent LeRobot or openpi FP32 policy.
 
-Every case builds the pinned ``lerobot/pi05_libero_base`` checkpoint straight from its
-directory, runs a recorded LIBERO observation through the bundle with the reference's
-flow noise, and compares all 50 x 7 action values with the LeRobot float32 oracle (and, for
-a bfloat16 bundle, with LeRobot's own bfloat16 policy).
+The two LIBERO profiles use the same weights but different preprocessing and horizons.
 """
 
 from __future__ import annotations
@@ -15,6 +12,7 @@ from tools.e2e_evidence import evidence_stage, record_evidence
 
 import json
 import os
+import re
 import subprocess
 from functools import cache
 from pathlib import Path
@@ -78,7 +76,10 @@ def pytest_generate_tests(metafunc) -> None:
     names = sorted(
         name
         for name, (manifest, _) in CASES.items()
-        if not selected or {FAMILY, manifest["name"], name}.intersection(selected)
+        if (not selected or {FAMILY, manifest["name"], name}.intersection(selected))
+        # The LeRobot processor stress vectors include state even for LIBERO. They are
+        # deliberately not the tokenizer contract of the separately selected openpi policy.
+        and not (manifest.get("pi05_policy_config") and metafunc.function.__name__ == "test_native_tokenizer_matches_lerobot")
     )
     parameters = (
         names
@@ -117,9 +118,8 @@ def _checkpoint_dir(manifest: dict) -> Path:
     )
 
 
-def _ci_tokenizer(manifest: dict) -> Path | None:
-    (asset,) = manifest["external_files"]
-    assert asset["path"] == TOKENIZER_FILE
+def _ci_asset(manifest: dict, name: str) -> Path | None:
+    asset = next(item for item in manifest["external_files"] if item["path"] == name)
     for root in (os.environ.get(EXTERNAL_FILES_ENV), CI_ASSET_DIR):
         if root and (Path(root) / asset["path"]).is_file():
             return Path(root) / asset["path"]
@@ -135,12 +135,23 @@ def model_dirs(tmp_path_factory):
         name = manifest["name"]
         if name not in resolved:
             directory = _checkpoint_dir(manifest)
-            ci_tokenizer = _ci_tokenizer(manifest)
-            if ci_tokenizer is not None and not (directory / TOKENIZER_FILE).is_file():
-                overlay = tmp_path_factory.mktemp(f"{name}-with-tokenizer")
+            # Checkpoint snapshots stay immutable. The CI-staged tokenizer and openpi
+            # statistics can live outside the snapshot and must resolve without network.
+            required = {TOKENIZER_FILE: TOKENIZER_FILE}
+            if policy := manifest.get("pi05_policy_config"):
+                required["assets/norm_stats.json"] = f"{policy}_norm_stats.json"
+            missing = {key: _ci_asset(manifest, filename) for key, filename in required.items()
+                       if not (directory / key).is_file()}
+            if any(path is not None for path in missing.values()):
+                overlay = tmp_path_factory.mktemp(f"{name}-with-assets")
                 for path in directory.iterdir():
-                    (overlay / path.name).symlink_to(path)
-                (overlay / TOKENIZER_FILE).symlink_to(ci_tokenizer)
+                    if path.name != "assets" or "assets/norm_stats.json" not in missing:
+                        (overlay / path.name).symlink_to(path.resolve())
+                for key, path in missing.items():
+                    if path is not None:
+                        dest = overlay / key
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.symlink_to(path.resolve())
                 directory = overlay
             resolved[name] = directory
         return resolved[name]
@@ -168,8 +179,9 @@ def test_pinned_assets_are_staged(case_name: str, model_dirs) -> None:
         directory = model_dirs(manifest)
     except Exception as error:  # noqa: BLE001 - surface why the staged snapshot is unusable
         pytest.fail(f"{manifest['hf_id']}@{manifest['hf_revision']} is not staged locally: {error}")
-    missing = [name for name in MODEL_FILES if not (directory / name).is_file()]
-    missing += [name for name in _staged_state_files(directory) if not (directory / name).is_file()]
+    required = (("config.json", "model.safetensors", "assets/norm_stats.json")
+                if manifest.get("pi05_policy_config") else (*MODEL_FILES, *_staged_state_files(directory)))
+    missing = [name for name in required if not (directory / name).is_file()]
     assert not missing, f"staged checkpoint is missing {missing}"
     if (directory / "tokenizer.model").is_file():
         return
@@ -193,16 +205,22 @@ def bundles(tmp_path_factory, model_dirs):
         if manifest["name"] not in built:
             output = tmp_path_factory.mktemp(manifest["name"]) / manifest["bundle"]
             with evidence_stage("build"):
-                build(
-                    BuildRequest(
-                        model_dir=model_dirs(manifest),
-                        output_path=output,
-                        family=FAMILY,
-                        task=manifest["task"],
-                        precision=manifest["precision"],
-                        quantization=manifest.get("quantization"),
+                if policy := manifest.get("pi05_policy_config"):
+                    from ..edge_llm.cli import build as build_openpi
+
+                    build_openpi(model=str(model_dirs(manifest)), output=output, pi05_policy_config=policy,
+                                 precision=manifest["precision"])
+                else:
+                    build(
+                        BuildRequest(
+                            model_dir=model_dirs(manifest),
+                            output_path=output,
+                            family=FAMILY,
+                            task=manifest["task"],
+                            precision=manifest["precision"],
+                            quantization=manifest.get("quantization"),
+                        )
                     )
-                )
             assert output.is_file()
             built[manifest["name"]] = output
         return built[manifest["name"]]
@@ -216,7 +234,7 @@ def _qualification_binary() -> tuple[Path, Path]:
     subprocess.run(
         ["cmake", "--build", str(build_dir), "--parallel", "8", "--target",
          "trtmc_lerobot_pi05_qualification", "trtmc_lerobot_pi05_tokenizer_check",
-         "trtmc_backend_trt", "trtmc_model_lerobot_pi05"],
+         "trtmc_backend_trt", "trtmc_model_lerobot_pi05", "trtmc"],
         check=True,
         timeout=900,
     )
@@ -233,7 +251,7 @@ def _asset(case: dict, name: str) -> Path:
 
 
 def _reference(case: dict, name: str) -> np.ndarray:
-    return np.fromfile(_asset(case, name), dtype="<f4").reshape(CHUNK, ACTION_DIM)
+    return np.fromfile(_asset(case, name), dtype="<f4").reshape(case["inputs"].get("action_shape", [CHUNK, ACTION_DIM]))
 
 
 def _metrics(got: np.ndarray, want: np.ndarray) -> dict[str, float]:
@@ -242,17 +260,83 @@ def _metrics(got: np.ndarray, want: np.ndarray) -> dict[str, float]:
     return {"max_abs": float(diff.max()), "mean_abs": float(diff.mean()), "cosine": cosine}
 
 
-def _run_native(binary: Path, root: Path, bundle: Path, case: dict, tmp_path: Path) -> tuple[np.ndarray, dict]:
+def _recorded_rgb(frame) -> np.ndarray:
+    """Reconstruct the recorded RGB bytes from the pinned limited-range BT.601 clips."""
+    if frame.format.name != "yuv420p" or frame.color_range != 1 or frame.colorspace not in (2, 5, 6):
+        raise ValueError("Expected an 8-bit limited-range BT.601 recorded observation")
+    y, u, v = (
+        np.frombuffer(plane, dtype=np.uint8).reshape(plane.height, plane.line_size)[:, :plane.width].astype(np.int32)
+        for plane in frame.planes
+    )
+    # The reference conversion truncates each Q13 BT.601 matrix term before adding
+    # it. FFmpeg's default RGB rounding varies by CPU. Keep both the pixels and the
+    # action references fixed instead of comparing actions on slightly different images.
+    def chroma(plane):
+        return (plane - 128).repeat(2, axis=0).repeat(2, axis=1)[:y.shape[0], :y.shape[1]]
+
+    u, v = chroma(u), chroma(v)
+    luma = (y - 16) * 9539 // 8192
+    red = luma + v * 13075 // 8192
+    green = luma + u * -3209 // 8192 + v * -6660 // 8192
+    blue = luma + u * 16525 // 8192
+    return np.stack((red, green, blue), axis=-1).clip(0, 255).astype(np.uint8)
+
+
+def _camera_inputs(manifest: dict, case: dict, frame: Path, tmp_path: Path) -> dict[str, Path]:
+    cameras = case["inputs"]["cameras"]
+    if "video_frame" not in case["inputs"]:
+        return {name: frame / file for name, file in cameras.items()}
+
+    import av
+    from PIL import Image
+
+    assert case["inputs"]["video_frame"] == 0
+    result = {}
+    for i, (name, file) in enumerate(cameras.items()):
+        clip = _ci_asset(manifest, file)
+        assert clip is not None, f"Missing staged camera clip: {file}"
+        with av.open(str(clip)) as container:
+            stream = container.streams.video[0]
+            if stream.codec_context.name == "av1":
+                codec = av.CodecContext.create("libdav1d", "r")
+                codec.extradata = stream.codec_context.extradata
+                first = next(frame for packet in container.demux(stream) for frame in codec.decode(packet))
+            else:
+                first = next(container.decode(stream))
+            image = tmp_path / f"camera-{i}.png"
+            Image.fromarray(_recorded_rgb(first)).save(image)
+            result[name] = image
+    return result
+
+
+def _run_native(binary: Path, root: Path, bundle: Path, manifest: dict, case: dict, tmp_path: Path) -> tuple[np.ndarray, dict]:
     frame = _asset(case, "frame")
     observation = json.loads((frame / "observation.json").read_text(encoding="utf-8"))
     state = tmp_path / "state.f32"
     np.asarray(observation["state"], dtype="<f4").tofile(state)
     output = tmp_path / "actions.f32"
+    shape = case["inputs"].get("action_shape", [CHUNK, ACTION_DIM])
+    cameras = _camera_inputs(manifest, case, frame, tmp_path)
+    if "noise_seed" in case["inputs"]:
+        noise = tmp_path / "noise.f32"
+        rng = np.random.default_rng(case["inputs"]["noise_seed"])
+        rng.standard_normal((shape[0], 32), dtype=np.float32).astype("<f4").tofile(noise)
+    else:
+        noise = _asset(case, "noise")
+    if "noise_prefix_rows" in case["inputs"]:
+        # The LIBERO openpi oracle uses the first ten rows of the committed 50x32 draw.
+        rows = case["inputs"]["noise_prefix_rows"]
+        assert rows == shape[0] and 0 < rows < CHUNK
+        draw = np.fromfile(noise, dtype="<f4").reshape(CHUNK, 32)
+        noise = tmp_path / "noise.f32"
+        draw[:rows].tofile(noise)
+    assert noise.stat().st_size == shape[0] * 32 * 4
+    if "action_shape" not in case["inputs"]:
+        assert tuple(cameras) == CAMERAS
     command = [
         str(binary), "--bundle", str(bundle), "--runtime-root", str(root),
-        "--camera", f"{CAMERAS[0]}={frame / 'image.png'}",
-        "--camera", f"{CAMERAS[1]}={frame / 'wrist_image.png'}",
-        "--state", str(state), "--noise", str(_asset(case, "noise")),
+        *(arg for key, file in cameras.items() for arg in ("--camera", f"{key}={file}")),
+        "--state", str(state), "--noise", str(noise),
         "--text", observation["task"], "--repeat", "20", "--check-rejections",
         "--output", str(output),
     ]
@@ -268,8 +352,14 @@ def _run_native(binary: Path, root: Path, bundle: Path, case: dict, tmp_path: Pa
         "native_process",
         {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
     )
-    summary = json.loads(completed.stdout)
-    return np.fromfile(output, dtype="<f4").reshape(CHUNK, ACTION_DIM), summary
+    lines = completed.stdout.splitlines()
+    if "action_shape" in case["inputs"]:
+        # The released Edge SDK writes timestamped diagnostic records to stdout. Never
+        # accept multiple result records or swallow errors from the consumer.
+        log = re.compile(r"^\[\d\d:\d\d:\d\d\.\d+\] \[(?:INFO|WARNING|DEBUG|TRACE)\] ")
+        lines = [line for line in lines if not log.match(line)]
+    assert len(lines) == 1, lines
+    return np.fromfile(output, dtype="<f4").reshape(shape), json.loads(lines[0])
 
 
 # Messages are part of the contract: a caller has to learn which input was wrong.
@@ -291,12 +381,15 @@ def test_pi05_bundle_matches_the_lerobot_reference_e2e(case_name: str, bundles, 
     with evidence_stage("native_build"):
         binary, root = _qualification_binary()
     with evidence_stage("native"):
-        actions, summary = _run_native(binary, root, bundle, case, tmp_path)
+        actions, summary = _run_native(binary, root, bundle, manifest, case, tmp_path)
 
-    assert summary["rows"] == CHUNK and summary["columns"] == ACTION_DIM
+    shape = case["inputs"].get("action_shape", [CHUNK, ACTION_DIM])
+    assert [summary["rows"], summary["columns"]] == shape
+    assert len(summary["wall_ms"]) == 20
     assert np.isfinite(actions).all()
     vs_fp32 = _metrics(actions, _reference(case, "reference_fp32"))
-    vs_bf16 = _metrics(actions, _reference(case, "reference_bf16"))
+    vs_bf16 = (_metrics(actions, _reference(case, "reference_bf16"))
+               if "reference_bf16" in case["inputs"] else None)
     p95 = float(np.percentile(summary["wall_ms"], 95))
     record_evidence(
         "metrics",
@@ -314,6 +407,18 @@ def test_pi05_bundle_matches_the_lerobot_reference_e2e(case_name: str, bundles, 
 
     rejections = {item["case"]: item for item in summary["rejections"]}
     assert set(rejections) == set(EXPECTED_REJECTIONS)
+    if manifest.get("pi05_policy_config"):
+        # Unlike the LeRobot processor, openpi accepts smaller RGB frames and resizes
+        # them. The four malformed requests must still return invalid argument (2).
+        assert rejections["wrong_image_size"]["code"] == "ok"
+        for name in EXPECTED_REJECTIONS.keys() - {"wrong_image_size"}:
+            assert rejections[name]["code"] == "2" and rejections[name]["message"], rejections[name]
+        sections = json.loads(subprocess.check_output([str(root / "trtmc"), "inspect", str(bundle)], text=True))["sections"]
+        route = "edge" if "edge_llm.json" in sections else "native"
+        if route == "native":
+            assert {"prefix.plan", "denoise.plan"} <= set(sections)
+        record_evidence("policy_route", {"policy": manifest["pi05_policy_config"], "backend": route})
+        return
     for name, needle in EXPECTED_REJECTIONS.items():
         assert rejections[name]["code"] != "ok", f"{name} was accepted"
         assert needle in rejections[name]["message"], rejections[name]

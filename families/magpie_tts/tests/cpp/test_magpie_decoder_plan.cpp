@@ -9,7 +9,8 @@
 // Trace ID:       UT-AUD-CPP-06
 // Architecture:   ARCH-FAC-001
 // Unit Design:    UD-AUD-01
-// Intent:         Magpie decoder plan: CFG enablement and GPU greedy fallback estimation
+// Intent:         Magpie decoder plan: CFG enablement, GPU greedy fallback estimation and
+//                 decoder bundle section selection
 // Preconditions:  MagpieConfig with valid decoder parameters
 // Postconditions: CFG flag set correctly, fallback estimate used without cross attention
 // =============================================================================
@@ -18,6 +19,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <string>
 
 namespace {
 
@@ -79,11 +81,23 @@ void test_magpie_decoder_plan_uses_fallback_estimate_without_cross_attention() {
           "magpie gpu greedy helper requires greedy mode");
 }
 
+void test_magpie_decoder_section_follows_cross_kv_plan() {
+    check(trtmc::magpie_decoder_section(1, 0, false) == "decoder.plan",
+          "magpie decoder section keeps decoder.plan without cross_kv.plan");
+    check(trtmc::magpie_decoder_section(1, 0, true) == "decoder.cross_kv.plan",
+          "magpie decoder section selects the projected cross K/V decoder");
+    check(trtmc::magpie_decoder_section(4, 2, false) == "decoder.rank2.plan",
+          "magpie decoder section selects the tensor-parallel rank plan");
+    check(trtmc::magpie_decoder_section(4, 2, true) == "decoder.rank2.plan",
+          "magpie decoder section ignores cross_kv.plan for tensor-parallel plans");
+}
+
 } // namespace
 
 int main() {
     test_magpie_decoder_plan_enables_cfg_and_gpu_greedy();
     test_magpie_decoder_plan_uses_fallback_estimate_without_cross_attention();
+    test_magpie_decoder_section_follows_cross_kv_plan();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " magpie decoder plan test(s) failed\n";

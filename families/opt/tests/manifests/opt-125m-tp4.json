@@ -4,7 +4,7 @@
   "hf_revision": "27dcfa74d334bc871f3234de431e71c6eeba5dd6",
   "bundle": "opt-125m-tp4.bundle",
   "family": "opt",
-  "task": "text_generation",
+  "task": "text_continuation",
   "trust_remote_code": false,
   "testcases": [
     {

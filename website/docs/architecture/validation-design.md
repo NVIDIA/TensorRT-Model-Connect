@@ -31,6 +31,10 @@ family's owner-selected cases; nightly runs the complete declared inventory.
   checkpoint evidence without importing unrelated families.
 - Package validation finds every family dependency file and DSO while avoiding
   unselected family imports.
+- A change confined to `apps/aiperf_qual` selects no family E2E, because no
+  family, core code, or other application depends on it.
+  `tools/test_impact.py --validate` rejects any file under `families/`, `core/`,
+  or another application that names it.
 
 ## Local checks
 

@@ -87,6 +87,9 @@ class NemotronHKvCache : public NemotronHInferenceState {
     // copies them via write_prefill_kv().
     void bind_cache_inputs(ITrtModule& module);
 
+    // Append the first `seq_len` present K/V rows a prefill context produced.
+    void append_prefill_from(const ITrtModule& module, int32_t seq_len);
+
   private:
     void write_position_input(TensorMap& inputs, int32_t seq_len);
     void write_batched_mask(TensorMap& inputs, int32_t seq_len);

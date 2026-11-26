@@ -403,6 +403,23 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             quant_ctx=quant_ctx, verbose=request.verbose,
         ),
     )
+    # A second engine prefills the prompt (tokens and audio frames) in one
+    # launch; decoding stays on the one-token engine above. TensorRT 11.4
+    # fails shape inference of the FP8 graph over a runtime row count, so FP8
+    # bundles keep the token loop.
+    split = not quantized and not request.fp32_layers and parallel.tp_size == 1
+    if split:
+        config.raw["_decoder_engine_role"] = "prefill"
+        try:
+            writer.add_bytes(
+                "prefill.plan",
+                plugin.build_engine(
+                    config, weights, max_length, precision=request.precision,
+                    quant_ctx=quant_ctx, verbose=request.verbose,
+                ),
+            )
+        finally:
+            config.raw.pop("_decoder_engine_role", None)
     encoder = plugin.build_vision_engine(
         str(model_dir), config, weights, precision=request.precision,
         quant_ctx=quant_ctx, verbose=request.verbose,
@@ -411,6 +428,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise RuntimeError("glmasr audio encoder build returned no engine")
     writer.add_bytes("encoder.plan", encoder)
     runtime = {
+        "decoder_engine_layout": "split" if split else "single",
         "tensor_parallel_size": parallel.tp_size,
         "hidden_size": config.hidden_size,
         "max_cache_length": max_length,

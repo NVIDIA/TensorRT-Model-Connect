@@ -254,44 +254,43 @@ void NemotronHKvCache::set_position(int32_t position) {
     position_ = std::max(0, std::min(position, max_length_));
 }
 
+void NemotronHKvCache::append_prefill_from(const ITrtModule& module, int32_t seq_len) {
+    std::vector<const void*> keys(static_cast<std::size_t>(num_layers_));
+    std::vector<const void*> values(static_cast<std::size_t>(num_layers_));
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        const auto layer = static_cast<std::size_t>(i);
+        keys[layer] = module.device_ptr(names_.present_k[layer]);
+        values[layer] = module.device_ptr(names_.present_v[layer]);
+        if (keys[layer] == nullptr || values[layer] == nullptr)
+            throw std::runtime_error("nemotron_h prefill context has no present K/V output");
+    }
+    append_prefill_kv(keys, values, seq_len);
+}
+
 void NemotronHKvCache::advance(int32_t n_tokens) {
     // For now, only single-token advance is supported.
     // n_tokens > 1 reserved for future batched prefill (TASK-10).
     assert(n_tokens == 1 && "NemotronHKvCache::advance: only n_tokens==1 supported");
     (void)n_tokens;
 
+    // Generation stops when the cache is full (the pipeline checks before each
+    // step), so a row that does not fit is a caller error. Dropping the oldest
+    // rows instead would silently discard the prompt.
+    if (position_ >= max_length_)
+        throw std::runtime_error("NemotronHKvCache::advance: the KV cache is full");
+
     // Copy present K/V (single row) into cache at current position.
     // present_k_[layer] is [1, kv_dim] → copy to cache_k_[layer][position_, :]
-    auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
-
-    if (position_ < max_length_) {
-        // Normal append: write to position_ slot
-        auto offset = static_cast<std::size_t>(position_) * row_bytes;
-        for (int32_t i = 0; i < num_layers_; ++i) {
-            auto li = static_cast<std::size_t>(i);
-            cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset,
-                            present_k_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset,
-                            present_v_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
-        }
-        ++position_;
-    } else {
-        // Cache full: shift [1..max) → [0..max-1), then write at tail
-        auto shift_bytes = static_cast<std::size_t>(max_length_ - 1) * row_bytes;
-        auto tail_offset = shift_bytes;
-        for (int32_t i = 0; i < num_layers_; ++i) {
-            auto li = static_cast<std::size_t>(i);
-            auto* ck = static_cast<uint8_t*>(cache_k_[li].data());
-            auto* cv = static_cast<uint8_t*>(cache_v_[li].data());
-            cudaMemcpyAsync(ck, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(ck + tail_offset, present_k_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv + tail_offset, present_v_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-        }
-        // position_ stays at max_length_ (cache is full, all slots visible)
+    const auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
+    const auto offset = static_cast<std::size_t>(position_) * row_bytes;
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        auto li = static_cast<std::size_t>(i);
+        cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset, present_k_[li].data(),
+                        row_bytes, cudaMemcpyDeviceToDevice, stream_);
+        cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset, present_v_[li].data(),
+                        row_bytes, cudaMemcpyDeviceToDevice, stream_);
     }
+    ++position_;
 }
 
 void NemotronHKvCache::reset() {

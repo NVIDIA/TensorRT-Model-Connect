@@ -8,6 +8,7 @@
 #include "families/nemotron_h/runtime/chat_templates.h"
 #include "families/nemotron_h/runtime/paired.h"
 #include "families/nemotron_h/runtime/recurrent_generation_plan.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <chrono>
@@ -27,17 +28,40 @@ inline double elapsed_ms(TimePoint start, TimePoint end) {
 
 namespace trtmc {
 
+namespace {
+
+// The next decode step would store one more K/V row. A full cache ends the
+// generation, as max_new_tokens does, instead of dropping the prompt's rows.
+// A state without a length limit (max_length() < 0) never fills.
+bool kv_cache_full(const NemotronHInferenceState& state) {
+    const int32_t max_length = state.max_length();
+    return max_length >= 0 && state.position() >= max_length;
+}
+
+} // namespace
+
 RecurrentPipeline::RecurrentPipeline(std::unique_ptr<ITrtModule> decoder,
                                      std::unique_ptr<NemotronHInferenceState> state,
                                      RecurrentGenConfig config, cudaStream_t stream,
                                      const char* name, std::shared_ptr<ITokenizer> tokenizer,
                                      std::string model_id_str,
-                                     std::unique_ptr<NemotronHPairedDraft> paired)
+                                     std::unique_ptr<NemotronHPairedDraft> paired,
+                                     std::unique_ptr<ITrtModule> prefill)
     : decoder_(std::move(decoder)), state_(std::move(state)), config_(config), stream_(stream),
       name_(name), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
-      paired_(std::move(paired)) {
+      paired_(std::move(paired)), prefill_(std::move(prefill)) {
     if (!decoder_ || !decoder_->ok())
         throw std::runtime_error(std::string(name_) + ": invalid decoder module");
+    if (prefill_) {
+        if (!prefill_->ok() || paired_)
+            throw std::runtime_error(std::string(name_) +
+                                     ": batched prefill needs a plain text decoder");
+        const auto rows = prefill_->input_profile_shape("token_id", prefill_->profile_idx(),
+                                                        ProfileShapeSelector::kMax);
+        if (rows.size() != 1 || rows[0] < 1)
+            throw std::runtime_error(std::string(name_) + ": invalid prefill token profile");
+        prefill_rows_ = static_cast<int32_t>(std::min<int64_t>(rows[0], state_->max_length()));
+    }
 }
 
 RecurrentPipeline::~RecurrentPipeline() = default;
@@ -93,6 +117,16 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
 
+    // The KV cache never drops rows: a prompt it cannot hold is rejected before
+    // prefill, and generation stops once the cache is full.
+    if (const int32_t capacity = state_->max_length();
+        capacity >= 0 && input_ids.size() > static_cast<std::size_t>(capacity)) {
+        throw internal::ConfigError("nemotron_h prompt has " + std::to_string(input_ids.size()) +
+                                    " tokens but the KV cache holds " + std::to_string(capacity) +
+                                    "; rebuild the bundle with a larger --max-sequence-length or "
+                                    "shorten the prompt");
+    }
+
     auto local_sampler = create_nemotron_h_sampler(params);
     auto* active_sampler = local_sampler.get();
     active_sampler->reset();
@@ -111,9 +145,15 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
 
     // ── Prefill phase ──
     auto t_prefill_start = SteadyClock::now();
-    for (std::size_t i = 0; i < input_ids.size(); ++i)
-        run_step(input_ids[i], logits,
-                 nemotron_h_recurrent::prefill_step_needs_logits(i, input_ids.size()));
+    // Longer prompts were rejected above. A state without a length limit
+    // (max_length() < 0) keeps the token loop.
+    if (prefill_ && static_cast<int64_t>(input_ids.size()) <= state_->max_length()) {
+        run_prefill_chunks(input_ids, logits);
+    } else {
+        for (std::size_t i = 0; i < input_ids.size(); ++i)
+            run_step(input_ids[i], logits,
+                     nemotron_h_recurrent::prefill_step_needs_logits(i, input_ids.size()));
+    }
     auto t_prefill_end = SteadyClock::now();
 
     // ── Decode phase ──
@@ -130,6 +170,8 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
                 active_sampler->sample(logits.data(), vocab_size, params);
             output.push_back(result.token_id);
             if (result.is_eos)
+                break;
+            if (kv_cache_full(*state_))
                 break;
             run_step(result.token_id, logits, true);
             ++decode_steps;
@@ -154,7 +196,10 @@ std::vector<int32_t> RecurrentPipeline::generate_paired(const std::vector<int32_
     };
     const auto append = [&](int32_t token) {
         output.push_back(token);
+        // A full KV cache ends generation like max_new_tokens: the last token is
+        // returned without being fed back.
         return output.size() - input_ids.size() >= static_cast<std::size_t>(max_new_tokens) ||
+               kv_cache_full(*state_) ||
                std::find(sampling.eos_token_ids.begin(), sampling.eos_token_ids.end(), token) !=
                    sampling.eos_token_ids.end();
     };
@@ -276,6 +321,31 @@ void RecurrentPipeline::report_timing(SteadyClock::time_point t_prefill_start,
                   << host_outputs.tensor_count << " tensor/copy, " << prof_logits_copies_
                   << " copies)\n";
     }
+}
+
+void RecurrentPipeline::run_prefill_chunks(const std::vector<int32_t>& input_ids,
+                                           std::vector<float>& logits) {
+    const auto total = static_cast<int32_t>(input_ids.size());
+    state_->bind_prefill(*prefill_);
+    for (int32_t start = 0; start < total; start += prefill_rows_) {
+        const int32_t rows = std::min(prefill_rows_, total - start);
+        TensorMap inputs;
+        inputs["token_id"] =
+            Tensor{const_cast<int32_t*>(input_ids.data() + start), {rows}, DType::kInt32};
+        state_->prepare_step(inputs, rows);
+        prefill_->forward_async(inputs);
+        state_->commit_prefill(*prefill_, rows);
+    }
+    prefill_->sync();
+    const auto* device_logits = prefill_->device_ptr("logits");
+    if (device_logits == nullptr)
+        throw std::runtime_error(std::string(name_) + ": prefill context has no logits output");
+    logits.resize(static_cast<std::size_t>(config_.vocab_size));
+    const cudaError_t copied = cudaMemcpy(logits.data(), device_logits,
+                                          logits.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    if (copied != cudaSuccess)
+        throw std::runtime_error(std::string(name_) +
+                                 ": failed to copy prefill logits: " + cudaGetErrorString(copied));
 }
 
 void RecurrentPipeline::run_step(int32_t token_id, std::vector<float>& logits, bool copy_logits) {

@@ -89,6 +89,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import BinaryIO
 
 import numpy as np
 import tensorrt as trt
@@ -177,6 +178,34 @@ def _load_fp8_kv_scales(readers, layer_types: list[str]) -> dict:
             scales.append(float(value.item()))
         result[f"{name}.kv_scales"] = tuple(scales)
     return result
+
+
+class _PlanWriter(trt.IStreamWriter):
+    """Forward the serialized plan to a binary stream as TensorRT produces it."""
+
+    def __init__(self, stream: BinaryIO) -> None:
+        trt.IStreamWriter.__init__(self)
+        self.stream = stream
+
+    def write(self, data) -> int:
+        return self.stream.write(data)
+
+
+def _serialize(builder, network, trt_config, what: str,
+               plan_stream: BinaryIO | None = None) -> memoryview | None:
+    """Build the engine. With ``plan_stream`` the plan is written into it and None is returned.
+
+    Streaming keeps a 27B FP16 plan (about 54 GB) out of host memory. On a GPU that shares its memory with
+    the CPU, that buffer and the builder's device copy of the weights do not fit together.
+    """
+    if plan_stream is not None:
+        if not builder.build_serialized_network_to_stream(network, trt_config, _PlanWriter(plan_stream)):
+            raise RuntimeError(f"TensorRT {what} build failed")
+        return None
+    plan = builder.build_serialized_network(network, trt_config)
+    if plan is None:
+        raise RuntimeError(f"TensorRT {what} build failed")
+    return memoryview(plan)
 
 
 def _owned(quant_ctx, name: str) -> bool:
@@ -540,8 +569,12 @@ class Qwen38Model:
         debug_layer_outputs: bool = False,
         target_feature_layers: tuple[int, ...] = (),
         media_inputs: bool = False,
-    ) -> bytes:
-        """Build hybrid TRT engine with DeltaNet + attention layers."""
+        plan_stream: BinaryIO | None = None,
+    ) -> memoryview | None:
+        """Build hybrid TRT engine with DeltaNet + attention layers.
+
+        With ``plan_stream`` the plan is written into it (see ``_serialize``) and None is returned.
+        """
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
@@ -887,17 +920,13 @@ class Qwen38Model:
                   f"cache={max_cache_length}) ...",
                   file=sys.stderr)
 
-        plan = builder.build_serialized_network(network, trt_config)
-        if plan is None:
-            raise RuntimeError("TensorRT engine build failed")
-
-        return bytes(plan)
+        return _serialize(builder, network, trt_config, "engine", plan_stream)
 
     def build_mtp_engine(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False, media_inputs: bool = False,
-    ) -> bytes:
+    ) -> memoryview:
         """Build the MTP (multi-token-prediction) draft-head TRT engine.
 
         Mirrors vLLM's Qwen3-Next MTP forward pass (`qwen3_next_mtp.py`):
@@ -1139,13 +1168,13 @@ class Qwen38Model:
         if plan is None:
             raise RuntimeError("TensorRT MTP engine build failed")
 
-        return bytes(plan)
+        return memoryview(plan)
 
     def build_mtp_draft_chain_engine(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, num_draft_tokens: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
-    ) -> bytes:
+    ) -> memoryview:
         """Build an MTP engine that drafts `num_draft_tokens` tokens in one
         call, by repeating the single trained mtp.layers.0 block
         `num_draft_tokens` times against the SAME weights -- no extra
@@ -1428,13 +1457,13 @@ class Qwen38Model:
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
             raise RuntimeError("TensorRT MTP draft-chain engine build failed")
-        return bytes(plan)
+        return memoryview(plan)
 
     def build_engine_multi_token(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, seq_len: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False, media_inputs: bool = False,
-    ) -> bytes:
+    ) -> memoryview:
         """Build a TRT engine that processes `seq_len` NEW tokens in one call,
         emitting `seq_len` rows of logits -- one prediction per position.
 
@@ -1826,14 +1855,16 @@ class Qwen38Model:
         if plan is None:
             raise RuntimeError("TensorRT multi-token engine build failed")
 
-        return bytes(plan)
+        return memoryview(plan)
 
     def build_engine_prefill(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, chunk_len: int, *, precision: str = "fp32",
-        quant_ctx=None, verbose: bool = False,
-    ) -> bytes:
+        quant_ctx=None, verbose: bool = False, plan_stream: BinaryIO | None = None,
+    ) -> memoryview | None:
         """Build the multi-token prefill engine: `chunk_len` prompt tokens per call.
+
+        With ``plan_stream`` the plan is written into it (see ``_serialize``) and None is returned.
 
         Unlike `build_engine_multi_token` (which chains `chunk_len` single-token
         sub-steps and so still streams every weight `chunk_len` times), every
@@ -2135,16 +2166,13 @@ class Qwen38Model:
             print(f"[trtmc build] Building Qwen3.8 prefill ({chunk_len}-token) TRT engine "
                   f"(hidden={hidden}, cache={max_cache_length}) ...", file=sys.stderr)
 
-        plan = builder.build_serialized_network(network, trt_config)
-        if plan is None:
-            raise RuntimeError("TensorRT prefill engine build failed")
-        return bytes(plan)
+        return _serialize(builder, network, trt_config, "prefill engine", plan_stream)
 
     def build_mtp_prefill_engine(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, chunk_len: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
-    ) -> bytes:
+    ) -> memoryview:
         """Build the engine that warms MTP's KV cache for `chunk_len` prompt tokens at once.
 
         Prefill must leave MTP's own cache holding one K/V row per prompt
@@ -2270,7 +2298,7 @@ class Qwen38Model:
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
             raise RuntimeError("TensorRT MTP prefill engine build failed")
-        return bytes(plan)
+        return memoryview(plan)
 
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
         """Inject hybrid-specific config fields into the bundle."""

@@ -78,3 +78,70 @@ def test_receipt_rejects_missing_decode_step() -> None:
     payload["decode_ms"] = 0.0
     with pytest.raises(AssertionError):
         assert_native_kv_receipt(payload, _case(), 65)
+
+
+@pytest.mark.parametrize("launches, max_chunk", [(1, 16), (2, 8)])
+def test_prefill_count_includes_bos_without_requiring_a_kv_only_case(launches, max_chunk):
+    from families.llama.tests.runtime_receipt import assert_prefill_token_count
+
+    stderr = f"[trtmc.prefill] tokens=16 launches={launches} max_chunk={max_chunk}"
+    assert_prefill_token_count(stderr, 16)
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "",
+        "[trtmc.prefill] tokens=18 launches=1 max_chunk=18",
+        "[trtmc.prefill] tokens=8 launches=1 max_chunk=8\n"
+        "[trtmc.prefill] tokens=8 launches=1 max_chunk=8",
+    ],
+)
+def test_prefill_count_rejects_missing_wrong_or_repeated_receipts(stderr):
+    from families.llama.tests.runtime_receipt import assert_prefill_token_count
+
+    with pytest.raises(AssertionError):
+        assert_prefill_token_count(stderr, 16)
+
+@pytest.mark.parametrize("ids", [[0], [0, 7, 8]])
+def test_prefill_prompt_ids_match_exactly(ids):
+    from families.llama.tests.runtime_receipt import assert_prefill_token_ids
+
+    receipt = "[trtmc.prefill_ids]" + "".join(f" {value}" for value in ids)
+    assert_prefill_token_ids(receipt, ids)
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        "[trtmc.prefill] tokens=3 launches=1 max_chunk=3",
+        "[trtmc.prefill_ids] 0 2 1",
+        "[trtmc.prefill_ids] 0 1",
+        "[trtmc.prefill_ids] 0 1 2 3",
+        "[trtmc.prefill_ids] 0 1 2\n[trtmc.prefill_ids] 0 1 2",
+        "[trtmc.prefill_ids] 0 invalid 2",
+    ],
+)
+def test_prefill_prompt_ids_reject_wrong_missing_or_repeated_receipts(receipt):
+    from families.llama.tests.runtime_receipt import assert_prefill_token_ids
+
+    with pytest.raises(AssertionError):
+        assert_prefill_token_ids(receipt, [0, 1, 2])
+
+@pytest.mark.parametrize("with_expected_ids", [False, True])
+def test_native_prompt_id_trace_is_requested_only_for_id_checks(monkeypatch, tmp_path, with_expected_ids):
+    from types import SimpleNamespace
+    from families.llama.tests import test_e2e
+
+    observed = {}
+
+    def run(command, **options):
+        observed.update(options["env"])
+        return SimpleNamespace(stdout='{"token_ids": [7], "text": "x"}', stderr="")
+
+    monkeypatch.setenv("TRTMC_LLAMA_TRACE_PREFILL_IDS", "1")
+    monkeypatch.setattr(test_e2e.subprocess, "run", run)
+    case = {"expected_prompt_token_ids": [0]} if with_expected_ids else {}
+    monkeypatch.setattr(test_e2e, "_native_arguments", lambda *args: [])
+    test_e2e._run_native(Path("trtmc"), tmp_path, tmp_path / "test.bundle", "", case, 1, tmp_path)
+    assert observed.get("TRTMC_LLAMA_TRACE_PREFILL_IDS") == ("1" if with_expected_ids else None)

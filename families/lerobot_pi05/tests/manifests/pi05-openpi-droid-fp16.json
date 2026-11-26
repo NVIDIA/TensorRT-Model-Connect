@@ -1,0 +1,49 @@
+{
+  "name": "pi05-openpi-droid-fp16",
+  "hf_id": "lerobot/pi05_droid",
+  "hf_revision": "72824c0a93f00ce5bb8bedb7feb58953ba1da364",
+  "external_files": [
+    {
+      "path": "tokenizer.model",
+      "url": "https://storage.googleapis.com/big_vision/paligemma_tokenizer.model?generation=1711547605575873"
+    },
+    {
+      "path": "pi05_droid_norm_stats.json",
+      "url": "https://storage.googleapis.com/openpi-assets/checkpoints/pi05_droid/assets/droid/norm_stats.json?generation=1757354377575323"
+    },
+    {
+      "path": "pi05_droid_exterior.mp4",
+      "url": "https://huggingface.co/datasets/aractingi/droid_100_test/resolve/ae1ae6519703520d5e78b11cadb00cc028499d7f/videos/chunk-000/observation.image.exterior_image_1_left/episode_000000.mp4"
+    },
+    {
+      "path": "pi05_droid_wrist.mp4",
+      "url": "https://huggingface.co/datasets/aractingi/droid_100_test/resolve/ae1ae6519703520d5e78b11cadb00cc028499d7f/videos/chunk-000/observation.image.wrist_image_left/episode_000000.mp4"
+    }
+  ],
+  "bundle": "pi05-openpi-droid-fp16.bundle",
+  "family": "lerobot_pi05",
+  "task": "images_state_text_to_action_chunk",
+  "precision": "fp16",
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "pi05-openpi-droid-fp16-ep0000-f000",
+      "premerge": true,
+      "inputs": {
+        "frame": "data/recorded_observation/droid_ep0000_f000",
+        "cameras": {
+          "observation/exterior_image_1_left": "pi05_droid_exterior.mp4",
+          "observation/wrist_image_left": "pi05_droid_wrist.mp4"
+        },
+        "video_frame": 0,
+        "noise_seed": 20261006,
+        "reference_fp32": "data/reference/droid_ep0000_f000.openpi.fp32.f32",
+        "action_shape": [
+          15,
+          8
+        ]
+      }
+    }
+  ],
+  "pi05_policy_config": "pi05_droid"
+}

@@ -16,6 +16,7 @@ import tensorrt as trt
 
 from . import graph_ops
 from .checkpoint_mapper import _has_tensor, _load_tensor, _open_safetensors
+from .config import dflash_policy
 from .prepared_quantization import PreparedLinear, load_projection
 
 
@@ -39,7 +40,7 @@ class DraftConfig:
     def from_dict(cls, raw, target, variant):
         if variant not in {"dflash", "dflash_ddtree"}:
             raise ValueError("Unsupported native Qwen3.5 DFlash variant")
-        policy = raw.get("dflash_config") or {}
+        policy = dflash_policy(raw)
         feature_layers = tuple(policy.get("target_layer_ids", ()))
         hidden, vocab = int(raw["hidden_size"]), int(raw["vocab_size"])
         if (
@@ -51,7 +52,6 @@ class DraftConfig:
             or len(set(feature_layers)) != len(feature_layers)
             or any(type(i) is not int or not 0 <= i < target["num_hidden_layers"]
                    for i in feature_layers)
-            or policy.get("block_size") != 16
         ):
             raise ValueError("Qwen3.5 DFlash companion metadata does not match its target")
         if (raw.get("attention_bias", False)

@@ -1,0 +1,17 @@
+{
+  "name": "mask2former-swin-large-ade-semantic",
+  "hf_id": "facebook/mask2former-swin-large-ade-semantic",
+  "hf_revision": "aa25c92404a40599614215e76514c79b427c7527",
+  "bundle": "mask2former-swin-large-ade-semantic.bundle",
+  "family": "mask2former",
+  "task": "image_to_semantic_segmentation",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "mask2former-swin-large-ade-semantic",
+      "premerge": true,
+      "test_image": "data/test_img.png"
+    }
+  ],
+  "tensor_parallel_size": 1
+}

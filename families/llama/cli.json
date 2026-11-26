@@ -121,9 +121,10 @@
           "choices": [
             "none",
             "fp8",
-            "nvfp4"
+            "nvfp4",
+            "int4_awq"
           ],
-          "help": "Build from an already quantized ModelOpt checkpoint (fp8: nvidia/Llama-3.1-8B-Instruct-FP8, nvfp4: nvidia/Llama-3.1-8B-Instruct-NVFP4); its packed weights and scales are used as-is"
+          "help": "fp8 and nvfp4 build from an already quantized ModelOpt checkpoint (nvidia/Llama-3.1-8B-Instruct-FP8, nvidia/Llama-3.1-8B-Instruct-NVFP4) and use its packed weights and scales as-is; int4_awq quantizes the original 16-bit checkpoint with the family's calibrated AWQ scales"
         },
         {
           "name": "execution_variant",
@@ -145,6 +146,14 @@
           "action": "append",
           "default": [],
           "help": "Local companion checkpoint as ROLE=LOCAL_DIR"
+        },
+        {
+          "name": "edge_builder_python",
+          "flags": [
+            "--edge-builder-python"
+          ],
+          "type": "path",
+          "help": "Absolute Python interpreter for the optional Edge builder"
         }
       ]
     },

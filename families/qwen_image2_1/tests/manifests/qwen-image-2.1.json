@@ -1,0 +1,22 @@
+{
+  "name": "qwen-image-2.1",
+  "hf_id": "unsloth/Qwen-Image-2.1",
+  "hf_revision": "20f5a734a394f0fce241bf2f9dc1b3d97ac18b2a",
+  "bundle": "qwen-image-2.1.bundle",
+  "family": "qwen_image2_1",
+  "task": "text_to_image",
+  "precision": "bf16",
+  "image_height": 1024,
+  "image_width": 1024,
+  "max_sequence_length": 512,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "qwen-image-2.1",
+      "prompt": "A capybara wearing a wizard hat, reading a book by candlelight, oil painting",
+      "num_inference_steps": 40,
+      "seed": 42,
+      "reference_precision": "bf16"
+    }
+  ]
+}

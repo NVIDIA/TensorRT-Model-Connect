@@ -576,6 +576,33 @@ def test_mount_order_is_not_configuration_drift(tmp_path: Path) -> None:
     assert _mutation_commands(runner) == []
 
 
+def test_a_mount_reached_through_a_symlink_is_not_configuration_drift(tmp_path: Path) -> None:
+    checkout = _checkout(tmp_path)
+    share = tmp_path / "share" / "datasets"
+    share.mkdir(parents=True)
+    linked = tmp_path / "data"
+    linked.symlink_to(share)
+    mount = DockerMount(linked, PurePosixPath("/mnt/data"), read_only=True)
+    runner = DockerLifecycleRunner()
+    toolkit = DevToolkit.from_checkout(checkout, runner=runner)
+    toolkit.prepare_docker(gpu="none", mounts=[mount])
+    assert runner.container is not None
+    for item in runner.container["Mounts"]:  # type: ignore[union-attr]
+        if item["Destination"] == "/mnt/data":
+            item["Source"] = str(linked)  # Docker recorded the path it was given, not the resolved one
+    runner.calls.clear()
+
+    result = toolkit.prepare_docker(gpu="none", mounts=[mount], policy=DockerTargetPolicy.ENSURE)
+
+    assert result.container_id == "container-123"  # adopted, not replaced
+    assert not any(command[:2] in (["docker", "create"], ["docker", "rm"]) for command in runner.commands)
+    for item in runner.container["Mounts"]:  # type: ignore[union-attr]
+        if item["Destination"] == "/mnt/data":
+            item["Source"] = str(tmp_path / "elsewhere")
+    with pytest.raises(DevToolkitError, match="mount:/mnt/data"):
+        toolkit.prepare_docker(gpu="none", mounts=[mount], policy=DockerTargetPolicy.ENSURE)
+
+
 @pytest.mark.parametrize("volume_target", ("/image-cache", "checkout"))
 def test_image_declared_volume_is_allowed_or_overridden(
     tmp_path: Path,

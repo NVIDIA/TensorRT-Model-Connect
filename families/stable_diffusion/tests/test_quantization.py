@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""stable_diffusion FP8 self-quantization: weight scales, the scale table, the tool, the build."""
+"""stable_diffusion FP8 and NVFP4 self-quantization: weight scales, the scale table, the tool, the build."""
 
 from __future__ import annotations
 
@@ -20,8 +20,11 @@ from ..quantization import (
     ACTIVATION_SCALES_FILENAME,
     UNetQuantContext,
     configure_build,
+    is_nvfp4,
     is_quantized,
+    nvfp4_names,
     quantize_fp8_weight,
+    quantize_nvfp4_weight,
     quantized_names,
     scale_key,
     unet_quant_context,
@@ -274,9 +277,9 @@ def test_non_positive_scale_is_rejected(monkeypatch, tiny_scales) -> None:
 
 
 def test_unsupported_format_is_rejected(tiny_scales) -> None:
-    """Only fp8 is implemented."""
-    with pytest.raises(NotImplementedError, match="nvfp4"):
-        unet_quant_context(_tiny_weights(), {}, quantization="nvfp4")
+    """Only fp8 and nvfp4 are implemented."""
+    with pytest.raises(NotImplementedError, match="'fp8', 'nvfp4'"):
+        unet_quant_context(_tiny_weights(), {}, quantization="int4_awq")
 
 
 def test_scale_key_names_model_and_size() -> None:
@@ -454,38 +457,45 @@ def _request(model_dir: Path, **overrides):
     return SimpleNamespace(**values)
 
 
-def test_build_rejects_unknown_quantization(tmp_path: Path) -> None:
-    """Quantization formats other than fp8 are refused."""
-    with pytest.raises(NotImplementedError, match="nvfp4"):
-        model.build(_request(tmp_path, quantization="nvfp4"), Mock())
+@pytest.mark.parametrize("quantization", ["int4_awq", "mxfp8", "w4a8"])
+def test_build_rejects_unknown_quantization(tmp_path: Path, quantization: str) -> None:
+    """Quantization formats other than fp8 and nvfp4 are refused."""
+    with pytest.raises(NotImplementedError, match="none, fp8 or nvfp4"):
+        model.build(_request(tmp_path, quantization=quantization), Mock())
 
 
-def test_build_rejects_fp8_outside_fp16(tmp_path: Path) -> None:
-    """FP8 needs fp16 precision."""
-    with pytest.raises(NotImplementedError, match="fp16"):
-        model.build(_request(tmp_path, precision="fp32"), Mock())
+@pytest.mark.parametrize("quantization", ["fp8", "nvfp4"])
+def test_build_rejects_quantization_outside_fp16(tmp_path: Path, quantization: str) -> None:
+    """FP8 and NVFP4 need fp16 precision."""
+    with pytest.raises(NotImplementedError, match=f"{quantization} quantization requires .*fp16"):
+        model.build(_request(tmp_path, precision="fp32", quantization=quantization), Mock())
 
 
-def test_build_refuses_sd15_before_reading_weights(tmp_path: Path) -> None:
+@pytest.mark.parametrize("quantization", ["fp8", "nvfp4"])
+def test_build_refuses_sd15_before_reading_weights(tmp_path: Path, quantization: str) -> None:
     """SD 1.5 has no calibrated scales: the error names the supported model, and no weight is read."""
     root = _write_components(tmp_path, xl=False, scheduler={"_class_name": "PNDMScheduler"})
     with pytest.raises(NotImplementedError, match="SDXL-Turbo UNet only"):
-        model.build(_request(root), Mock())
+        model.build(_request(root, quantization=quantization), Mock())
 
 
-def test_build_refuses_sdxl_base_before_reading_weights(tmp_path: Path) -> None:
+@pytest.mark.parametrize("quantization", ["fp8", "nvfp4"])
+def test_build_refuses_sdxl_base_before_reading_weights(tmp_path: Path, quantization: str) -> None:
     """SDXL base has the Turbo UNet config, with other weights and another scheduler."""
     base = {"_class_name": "EulerDiscreteScheduler", "timestep_spacing": "leading"}
     root = _write_components(tmp_path, xl=True, scheduler=base)
     with pytest.raises(NotImplementedError, match="SDXL base and Lightning"):
-        model.build(_request(root), Mock())
+        model.build(_request(root, quantization=quantization), Mock())
 
 
-def test_build_refuses_an_uncalibrated_image_size(tmp_path: Path) -> None:
+@pytest.mark.parametrize("quantization", ["fp8", "nvfp4"])
+def test_build_refuses_an_uncalibrated_image_size(tmp_path: Path, quantization: str) -> None:
     """SDXL-Turbo at a size with no committed scales points at the calibration tool."""
     root = _write_components(tmp_path, xl=True, scheduler=TURBO_SCHEDULER)
     with pytest.raises(NotImplementedError, match="calibrate_fp8_scales"):
-        model.build(_request(root, image_height=768, image_width=768), Mock())
+        model.build(
+            _request(root, quantization=quantization, image_height=768, image_width=768), Mock()
+        )
 
 
 def test_unet_builder_rejects_fp8_with_fp32_precision() -> None:
@@ -607,3 +617,221 @@ def _network_layers(quant) -> list[tuple[str, str]]:
 def test_quantization_selecting_nothing_leaves_the_network_unchanged() -> None:
     """A context that selects no layer builds the same network as no context at all."""
     assert _network_layers(UNetQuantContext({})) == _network_layers(None)
+
+
+# ---------------------------------------------------------------------------
+# NVFP4: the GEGLU projections are NVFP4, everything else keeps the FP8 recipe
+# ---------------------------------------------------------------------------
+
+_E2M1_VALUES = np.array([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=np.float32)
+
+
+def _decode_nvfp4(packed: np.ndarray, block_scale: np.ndarray, weight_scale_2: float) -> np.ndarray:
+    """The float32 weight the NVFP4 bytes stand for, written out independently of the module."""
+    codes = np.stack([packed & 0xF, packed >> 4], axis=-1).reshape(packed.shape[0], -1)
+    values = _E2M1_VALUES[codes & 7] * np.where(codes >= 8, -1.0, 1.0)
+    scale = block_scale.view(ml_dtypes.float8_e4m3fn).astype(np.float32)
+    return values * np.repeat(scale, 16, axis=-1) * weight_scale_2
+
+
+def _geglu_names(weights) -> set[str]:
+    return {key[: -len(".weight")] for key in weights if key.endswith(".ff.net.0.proj.weight")}
+
+
+def test_nvfp4_weight_scales_and_bytes() -> None:
+    """weight_scale_2 = amax / (6 * 448); block scales e4m3; the bytes decode to the weight."""
+    weight = np.random.default_rng(4).normal(0.0, 0.2, (32, 64)).astype(np.float32)
+    weight[3, :16] = 0.0  # an all-zero block gets block scale 1
+    packed, block_scale, weight_scale_2 = quantize_nvfp4_weight(weight)
+    assert packed.dtype == np.uint8 and packed.shape == (32, 32)
+    assert block_scale.dtype == np.uint8 and block_scale.shape == (32, 4)
+    amax = float(np.abs(weight).max())
+    assert weight_scale_2 == pytest.approx(amax / (6.0 * 448.0), rel=1e-6)
+    assert block_scale.view(ml_dtypes.float8_e4m3fn).astype(np.float32)[3, 0] == 1.0
+    decoded = _decode_nvfp4(packed, block_scale, weight_scale_2)
+    assert np.all(decoded[3, :16] == 0.0)
+    # E2M1 keeps about one mantissa bit: the error is at most half a step of the block's scale.
+    blocks = np.abs(weight).reshape(32, 4, 16).max(-1)
+    assert np.all(np.abs(decoded - weight) <= np.repeat(blocks, 16, axis=-1) / 6.0 * 1.1 + 1e-6)
+    assert np.corrcoef(decoded.ravel(), weight.ravel())[0, 1] > 0.98
+
+
+def test_nvfp4_rounds_ties_to_even_codes() -> None:
+    """A value on a midpoint goes to the neighbour with an even code, the sign is kept."""
+    row = np.array([6.0, 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0] * 2, dtype=np.float32)
+    row[8:] *= -1
+    packed, block_scale, weight_scale_2 = quantize_nvfp4_weight(row[None, :])
+    decoded = _decode_nvfp4(packed, block_scale, weight_scale_2)[0]
+    unit = decoded / (
+        block_scale.view(ml_dtypes.float8_e4m3fn).astype(np.float32)[0, 0] * weight_scale_2
+    )
+    expected = np.array([6.0, 0.0, 1.0, 1.0, 2.0, 2.0, 4.0, 4.0], dtype=np.float32)
+    np.testing.assert_allclose(unit, np.concatenate([expected, -expected]), rtol=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("weight", "match"),
+    [
+        (np.ones((4, 24), np.float32), "multiple of 16"),
+        (np.zeros((4, 16), np.float32), "amax"),
+        (np.ones((4, 4, 16), np.float32), r"\[out, in\]"),
+    ],
+)
+def test_nvfp4_weight_rejects_bad_input(weight: np.ndarray, match: str) -> None:
+    """Widths that do not fill 16-value blocks, zero weights and non-matrix weights are refused."""
+    with pytest.raises(ValueError, match=match):
+        quantize_nvfp4_weight(weight)
+
+
+@pytest.mark.parametrize(
+    ("name", "rank", "expected"),
+    [
+        ("mid_block.attentions.0.transformer_blocks.0.ff.net.0.proj", 2, True),
+        ("up_blocks.0.attentions.2.transformer_blocks.9.ff.net.0.proj", 2, True),
+        ("mid_block.attentions.0.transformer_blocks.0.ff.net.2", 2, False),
+        ("mid_block.attentions.0.transformer_blocks.0.attn1.to_q", 2, False),
+        ("mid_block.attentions.0.transformer_blocks.0.attn2.to_out.0", 2, False),
+        ("mid_block.attentions.0.proj_in", 2, False),
+        ("down_blocks.1.resnets.0.conv1", 4, False),
+        ("mid_block.attentions.0.transformer_blocks.0.ff.net.0.proj", 4, False),
+        ("ff.net.0.proj", 2, False),
+    ],
+)
+def test_nvfp4_layer_selection(name: str, rank: int, expected: bool) -> None:
+    """Only the GEGLU projection (a Linear) of a transformer block is NVFP4."""
+    assert is_nvfp4(name, rank) is expected
+
+
+def test_nvfp4_context_selects_the_geglu_projections_and_keeps_fp8_for_the_rest(
+    tiny_scales,
+) -> None:
+    """quantization="nvfp4" keeps every FP8 layer and its scale; the GEGLU projections are NVFP4."""
+    weights = _tiny_weights()
+    fp8 = unet_quant_context(weights, {}, quantization="fp8")
+    nvfp4 = unet_quant_context(weights, {}, quantization="nvfp4")
+    assert fp8.nvfp4 == frozenset()
+    assert nvfp4.scales == fp8.scales == tiny_scales
+    assert nvfp4.nvfp4 == _geglu_names(weights) == set(nvfp4_names(weights))
+    assert len(nvfp4.nvfp4) == 4
+    assert not any(name.endswith("ff.net.2") for name in nvfp4.nvfp4)
+
+
+def test_nvfp4_context_refuses_a_layer_without_scale() -> None:
+    """An NVFP4 layer needs the FP8 activation scale its global scale is derived from."""
+    with pytest.raises(ValueError, match="without an activation scale"):
+        UNetQuantContext({"a.to_q": 0.1}, nvfp4=frozenset({"b.ff.net.0.proj"}))
+
+
+def test_nvfp4_context_refuses_a_checkpoint_without_geglu_projections(monkeypatch) -> None:
+    """A UNet with no transformer block has nothing to put in NVFP4."""
+    weights = {
+        key: value for key, value in _tiny_weights().items() if ".transformer_blocks." not in key
+    }
+    scales = _all_scales(weights)
+    monkeypatch.setattr(quantization_module, "scale_key", lambda cfg: "tiny")
+    monkeypatch.setattr(quantization_module, "load_activation_scales", lambda key: scales)
+    with pytest.raises(ValueError, match="no GEGLU projection"):
+        unet_quant_context(weights, {}, quantization="nvfp4")
+
+
+def test_nvfp4_linear_is_dynamic_fp4_quantize_matmul_bias(monkeypatch) -> None:
+    """An NVFP4 linear adds no static Quantize: a dynamic FP4 quantize of the input, four
+    Dequantize (two block-scale levels each for input and weight), one matmul and the bias. The
+    input global scale is the FP8 activation scale / 6."""
+    seen_scales = []
+    real_scale_const = quantization_module._scale_const
+
+    def spy(network, value, scale_type=None):
+        seen_scales.append(float(value))
+        return real_scale_const(network, value, *(() if scale_type is None else (scale_type,)))
+
+    monkeypatch.setattr(quantization_module, "_scale_const", spy)
+    name = "blk.transformer_blocks.0.ff.net.0.proj"
+    ctx = UNetQuantContext({name: 0.6}, nvfp4=frozenset({name}))
+    network = _RecordingNetwork()
+    weight = np.random.default_rng(5).normal(0.0, 0.1, (64, 32)).astype(np.float16)
+    x = SimpleNamespace(dtype="half", shape=(1, 8, 32))
+    ctx.linear(network, x, weight, np.zeros(64, np.float16), name)
+    assert network.calls.count("add_dynamic_quantize") == 1
+    assert network.calls.count("add_quantize") == 0
+    assert network.calls.count("add_dequantize") == 4
+    assert network.calls.count("add_matrix_multiply") == 1
+    assert network.calls.count("add_shuffle") == 2
+    assert network.calls[-1] == "add_elementwise"
+    assert seen_scales.count(pytest.approx(0.6 / 6.0)) == 2
+    packed, block_scale = ctx.keep_alive[:2]
+    assert packed.shape == (64, 16) and block_scale.shape == (64, 2)
+
+
+def test_nvfp4_context_leaves_fp8_layers_on_the_fp8_path() -> None:
+    """A layer outside the NVFP4 set of an NVFP4 context builds exactly the FP8 layers."""
+    fp8_net, nvfp4_net = _RecordingNetwork(), _RecordingNetwork()
+    weight = np.random.default_rng(6).normal(0.0, 0.1, (16, 32)).astype(np.float16)
+    x = SimpleNamespace(dtype="half", shape=(1, 8, 32))
+    UNetQuantContext({"attn.to_q": 0.05}).linear(fp8_net, x, weight, None, "attn.to_q")
+    UNetQuantContext(
+        {"attn.to_q": 0.05, "b.ff.net.0.proj": 0.1}, nvfp4=frozenset({"b.ff.net.0.proj"})
+    ).linear(nvfp4_net, x, weight, None, "attn.to_q")
+    assert nvfp4_net.calls == fp8_net.calls
+
+
+def test_committed_scales_cover_the_70_geglu_projections() -> None:
+    """The NVFP4 global scales come from the committed FP8 table: one per GEGLU projection."""
+    table = json.loads(
+        (Path(quantization_module.__file__).parent / ACTIVATION_SCALES_FILENAME).read_text()
+    )
+    for key, scales in table.items():
+        selected = [name for name in scales if is_nvfp4(name, 2)]
+        assert len(selected) == EXPECTED_SDXL_TURBO_NVFP4_LAYERS, key
+        assert all(name.endswith(".ff.net.0.proj") for name in selected), key
+
+
+# Counted from the SDXL-Turbo UNet checkpoint: one GEGLU projection per transformer block.
+EXPECTED_SDXL_TURBO_NVFP4_LAYERS = 70
+
+
+def _nvfp4_capable() -> bool:
+    import torch
+
+    return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 10
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_nvfp4_engine_builds_with_fp4_geglu_projections(tiny_scales) -> None:
+    """The tiny NVFP4 UNet builds on Blackwell; the plan has FP4 tensors and the same I/O."""
+    import tensorrt as trt
+
+    if not _nvfp4_capable():
+        pytest.skip("NVFP4 needs a Blackwell GPU")
+    weights = _tiny_weights()
+    ctx = _SpyContext(_all_scales(weights))
+    ctx.nvfp4 = frozenset(_geglu_names(weights))
+    plan = model.build_unet_engine(weights, CFG, precision="fp16", quant=ctx)
+    assert set(ctx.seen) == set(ctx.scales)
+    engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
+    info = json.dumps(
+        json.loads(
+            engine.create_engine_inspector().get_engine_information(trt.LayerInformationFormat.JSON)
+        )
+    )
+    assert "FP4" in info and "FP8" in info, "the plan lacks FP4 or FP8 tensors"
+    assert [engine.get_tensor_name(i) for i in range(engine.num_io_tensors)].count(
+        "out_sample"
+    ) == 1
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_nvfp4_context_changes_only_the_geglu_projections() -> None:
+    """Against the FP8 network, the NVFP4 network differs only where a GEGLU projection is built."""
+    weights = _tiny_weights()
+    scales = _all_scales(weights)
+    fp8 = _network_layers(UNetQuantContext(scales))
+    nvfp4 = _network_layers(UNetQuantContext(scales, nvfp4=frozenset(_geglu_names(weights))))
+    assert len(nvfp4) > len(fp8)
+    fp8_types = [layer_type for _, layer_type in fp8]
+    nvfp4_types = [layer_type for _, layer_type in nvfp4]
+    assert "LayerType.QUANTIZE" in fp8_types
+    assert nvfp4_types.count("LayerType.DYNAMIC_QUANTIZE") == 4
+    assert fp8_types.count("LayerType.QUANTIZE") - nvfp4_types.count("LayerType.QUANTIZE") == 4

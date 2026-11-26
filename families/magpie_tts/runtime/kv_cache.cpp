@@ -5,6 +5,7 @@
 
 #include "families/magpie_tts/runtime/kv_cache.h"
 
+#include "families/magpie_tts/runtime/magpie_decode_policy.h"
 #include "trtmc/runtime/trt_module.h"
 
 #include <algorithm>
@@ -54,7 +55,7 @@ MagpieKvCache::MagpieKvCache(int32_t num_layers, int32_t max_length, int32_t kv_
 }
 
 // Masked score constant is model-local.
-static constexpr float kMaskedScore = -1.0e4F;
+static constexpr float kMaskedScore = kMagpieMaskedScore;
 
 void MagpieKvCache::write_position_input(TensorMap& inputs, int32_t seq_len) {
     if (!has_position_input_)
@@ -123,14 +124,11 @@ void MagpieKvCache::write_decode_mask(TensorMap& inputs) {
     if (mask_rank != 2 && mask_rank != 3)
         throw std::runtime_error("magpie_tts decoder has an invalid attention-mask rank");
 
-    const int32_t valid = std::max(0, std::min(position_, max_length_));
     const int32_t mask_width = max_length_ + 1;
     if (mask_buf_.size() != static_cast<std::size_t>(mask_width))
         mask_buf_.resize(static_cast<std::size_t>(mask_width));
-    std::fill(mask_buf_.begin(), mask_buf_.end(), kMaskedScore);
-    for (int32_t i = 0; i < valid; ++i)
-        mask_buf_[static_cast<std::size_t>(i)] = 0.0F;
-    mask_buf_.back() = 0.0F;
+    for (int32_t i = 0; i < mask_width; ++i)
+        mask_buf_[static_cast<std::size_t>(i)] = magpie_decode_mask_value(i, position_, mask_width);
 
     Tensor mask_t;
     mask_t.data = mask_buf_.data();
@@ -247,38 +245,24 @@ void MagpieKvCache::advance(int32_t n_tokens) {
     assert(n_tokens == 1 && "MagpieKvCache::advance: only n_tokens==1 supported");
     (void)n_tokens;
 
+    // Generation stops when the cache is full (the pipeline checks before each
+    // step), so a row that does not fit is a caller error. Dropping the oldest
+    // rows instead would silently discard the prompt.
+    if (position_ >= max_length_)
+        throw std::runtime_error("MagpieKvCache::advance: the KV cache is full");
+
     // Copy present K/V (single row) into cache at current position.
     // present_k_[layer] is [1, kv_dim] → copy to cache_k_[layer][position_, :]
-    auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
-
-    if (position_ < max_length_) {
-        // Normal append: write to position_ slot
-        auto offset = static_cast<std::size_t>(position_) * row_bytes;
-        for (int32_t i = 0; i < num_layers_; ++i) {
-            auto li = static_cast<std::size_t>(i);
-            cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset,
-                            present_k_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset,
-                            present_v_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
-        }
-        ++position_;
-    } else {
-        // Cache full: shift [1..max) → [0..max-1), then write at tail
-        auto shift_bytes = static_cast<std::size_t>(max_length_ - 1) * row_bytes;
-        auto tail_offset = shift_bytes;
-        for (int32_t i = 0; i < num_layers_; ++i) {
-            auto li = static_cast<std::size_t>(i);
-            auto* ck = static_cast<uint8_t*>(cache_k_[li].data());
-            auto* cv = static_cast<uint8_t*>(cache_v_[li].data());
-            cudaMemcpyAsync(ck, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(ck + tail_offset, present_k_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv + tail_offset, present_v_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-        }
-        // position_ stays at max_length_ (cache is full, all slots visible)
+    const auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
+    const auto offset = static_cast<std::size_t>(position_) * row_bytes;
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        auto li = static_cast<std::size_t>(i);
+        cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset, present_k_[li].data(),
+                        row_bytes, cudaMemcpyDeviceToDevice, stream_);
+        cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset, present_v_[li].data(),
+                        row_bytes, cudaMemcpyDeviceToDevice, stream_);
     }
+    ++position_;
 }
 
 void MagpieKvCache::reset() {

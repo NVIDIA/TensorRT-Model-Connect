@@ -11,11 +11,12 @@ from typing import TYPE_CHECKING
 
 from .checkpoint_mapper import WeightDict, load_standard_weights
 from .config import ModelConfig
+from .gptq import is_prepared_w8a16
 from .default_decoder import build_standard_decoder_engine
 
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
+    from .edge_llm.cli import MistralBuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
@@ -88,7 +89,7 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
     return runtime
 
 
-def build(request: "BuildRequest", writer: "BundleWriter") -> None:
+def build(request: "MistralBuildRequest", writer: "BundleWriter") -> None:
     """Build one Mistral bundle through family-owned code only."""
     if request.dynamic_kv_cache:
         raise NotImplementedError("mistral does not support dynamic_kv_cache")
@@ -126,7 +127,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError("Mistral max_sequence_length exceeds checkpoint context capacity")
     if request.tensor_parallel_size != 1:
         raise NotImplementedError("Mistral does not expose a tensor-parallel builder")
-    if request.quantization not in {None, "none", "fp8"}:
+    prepared = is_prepared_w8a16(config.raw)
+    if prepared and (precision != "fp16" or request.quantization not in {None, "none", "w8a16"}):
+        raise ValueError("Prepared Mistral GPTQ W8A16 requires FP16 without requantization")
+    if not prepared and request.quantization not in {None, "none", "fp8"}:
         raise NotImplementedError(f"Mistral does not support quantization={request.quantization!r}")
     quantized = request.quantization == "fp8"
     if quantized and precision not in {"fp16", "bf16"}:
@@ -135,6 +139,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("Mistral does not expose mixed-precision layer selection")
     if request.mtp_seq_len is not None:
         raise NotImplementedError("Mistral does not support MTP speculative decoding")
+
+    if prepared:
+        from .edge_llm.builder import try_build
+
+        if try_build(request, writer, model_dir, max_sequence_length):
+            return
 
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_resolved_build_precision"] = precision
@@ -176,6 +186,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             precision=precision,
             max_cache_length=max_sequence_length,
             decoder_engine_layout="split",
+            **({"weight_format": "gptq_w8a16"} if prepared else {}),
         ),
     )
     for filename in _BUNDLE_FILES:

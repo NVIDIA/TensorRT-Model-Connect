@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# GB300 (288 GB per GPU): defaults of every environment with `platform: gb300`.
+# Every ready catalog model fits, so the platform leaves none out.
+models:
+  exclude: []

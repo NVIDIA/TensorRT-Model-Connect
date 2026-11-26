@@ -4,8 +4,8 @@ This family builds BART encoder-decoder checkpoints (`model_type` `bart` and
 `mbart`) for `text_generation` as two TensorRT engines: the encoder and a
 one-token decoder step with a static KV cache. Precision is fp32 or fp16, batch
 size is 1, and `max_sequence_length` defaults to 256 (at most the checkpoint's
-`max_position_embeddings`). The manifest builds `facebook/bart-base` in fp16
-with `max_sequence_length` 256.
+`max_position_embeddings`). The manifests build `facebook/bart-base` in fp16
+with `max_sequence_length` 256 and 1024.
 
 ## FP8 quantization study (not shipped)
 
@@ -119,8 +119,8 @@ TensorRT 11.4, batch 1, times in ms, ratio = fp16 time / FP8 time.
 | `bart-base`, 256 | B200 | 0.240 / 0.230 (1.04x) | 0.416 / 0.426 (0.98x) | 80.8 / 86.8 (0.93x) |
 | `bart-base`, 256 | B300 | 0.224 / 0.207 (1.08x) | 0.411 / 0.410 (1.00x) | 76.0 / 80.4 (0.94x) |
 
-The fp16 output at 1024 is wrong on main (section 8); its timings are still
-valid for the same graph.
+The fp16 output at 1024 was wrong in the graph measured by this study
+(section 8). The timings above describe that earlier graph.
 
 The FP8 plans have more layers than fp16 (`bart-large-cnn` decoder 403 vs 355
 at 256, 283 vs 259 at 1024; encoder 112 vs 100) because of the activation
@@ -198,13 +198,13 @@ already drifts on `bart-large-cnn`.
 | H100, TensorRT 11.1 speed | Not measured. |
 | Native runtime with an FP8 bundle | Not run; the Python harness called the engines. |
 
-### 8. Found on the way (main, independent of FP8; not fixed here)
+### 8. Findings from the study (independent of FP8)
 
-1. The fp16 engine at `max_sequence_length` 1024 gives wrong logits. The
-   encoder output matches Transformers (cosine at least 0.9998), the decoder
-   output does not. 256 is correct (section 5). The unquantized `bart-base`
-   plans built from main and from the study branch have the same size at 256
-   and at 1024.
+1. At the time of the study, the fp16 engine at `max_sequence_length` 1024
+   gave wrong logits. The encoder output matched Transformers (cosine at
+   least 0.9998), but the decoder output did not. 256 was correct (section
+   5). The unquantized `bart-base` plans built from main and from the study
+   branch had the same size at 256 and at 1024.
 
    | Model, 1024, fp16 | Articles | KL | Top-1 | Greedy equal | ROUGE-1 (Transformers fp32) |
    |---|---|---|---|---|---|
@@ -213,8 +213,10 @@ already drifts on `bart-large-cnn`.
    | `bart-large-cnn`, no forced BOS in the engine, B200 | 20 | 4.33 | 27.8% | 5.0% | - |
    | `bart-base`, B200 | 20 | 3.02 | 42.3% | 0% | - |
 
-   512 and an fp32 build at 1024 were not measured. The manifest uses 256, so
-   CI does not cover it.
+   The study did not measure 512 or an fp32 build at 1024. The decoder now
+   expresses masked self-attention and cross-attention as scaled scores,
+   softmax and value multiplication, avoiding the long-KV error observed with
+   native attention. The table records the earlier behavior.
 2. The BART runtime does not apply `forced_bos_token_id`. `bart-large-cnn` sets
    it to 0 in its generation config; the bundle runtime config takes only
    `eos_token_id` from the generation config. The study forced the token in

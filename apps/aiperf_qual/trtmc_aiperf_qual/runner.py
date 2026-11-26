@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping, Sequence
 from . import absolute, aiperf_metrics, compat, edits, execution, geneval, intelligibility, judge, replay_parity, sweep, world_model
 from .aiperf_runner import AiperfRun, run_aiperf
 from .config import Environment
+from .gold_metrics import SandboxUnavailable
 from .report import write_report
 from .artifacts import recorded_path
 from .services import gpu_exclusive, gpu_identity, platform_fingerprint, platform_id, reference_python, serving
@@ -132,11 +133,15 @@ def near_capacity_request(environment: Environment, model: Mapping[str, Any], re
     return long, rendered_tokens(tokenizer, long)
 
 
+# The text generation Task under its legacy name and its Task SDK name (the migrated decoder LMs).
+TEXT_GENERATION_TASKS = frozenset({"text_generation", "text_continuation", "conditional_text_generation"})
+
+
 def near_capacity_applies(model: Mapping[str, Any], request: Mapping[str, Any]) -> bool:
     """The text generation Task's text-only requests (not vision-language models, whose image tokens share the
     bundle length) on a bundle long enough for a passage."""
     length = int(model["candidate"].get("max_sequence_length") or 0)
-    return (model.get("task") == "text_generation" and not any(key.startswith("image") for key in request)
+    return (model.get("task") in TEXT_GENERATION_TASKS and not any(key.startswith("image") for key in request)
             and length > 2 * NEAR_CAPACITY_NEW_TOKENS)
 
 
@@ -228,7 +233,7 @@ def _collect_outputs(environment: Environment, service: Mapping[str, Any], model
                   suite: Suite, out: Path) -> dict[str, Any]:
     """One observation per suite sample from a server (sequential, one request each)."""
     for sample in suite.samples:
-        if missing := unstated_defaults(sample["request"], model["operation"]):
+        if missing := unstated_defaults(sample["request"], model["operation"], model.get("catalog_request")):
             raise ValueError(f"{suite.name}: state {', '.join(missing)} explicitly before benchmarking")
     run = run_aiperf(environment, out, [*TASK_ENDPOINT, *_task_url(service, model["operation"]), "--concurrency", "1",
                                         "--input-file", str(suite.write_inputs(out.parent / f"{out.name}.inputs.jsonl")),
@@ -527,6 +532,9 @@ class _Phases:
             evidence_start = execution.checkpoint()
             try:
                 return call()
+            except SandboxUnavailable:
+                execution.supersede(evidence_start)
+                raise
             except Exception as error:  # noqa: BLE001 - reported per phase
                 execution.supersede(evidence_start)
                 self.errors[name] = f"{type(error).__name__}: {error}"[:1500]
@@ -535,6 +543,19 @@ class _Phases:
                 if reset is not None:
                     reset()
         return None
+
+
+def reported_reference(reference: Mapping[str, Any], performance: Sequence[Mapping[str, Any]],
+                       accuracy: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The report's native-reference summary. ``precision`` is the precision the native model ran at (as timed,
+    else as it answered the benchmarks, else the first it would be timed at); the configured fallback precision
+    is ``fallback_precision``, so a reader does not take the fallback for the precision that ran."""
+    ran = next((precision for precision in [*((item.get("reference") or {}).get("precision") for item in performance),
+                                            *((item.get("native") or {}).get("precision") for item in accuracy)]
+                if precision), None)
+    return {"backend": reference.get("backend"), "precision": ran or timing_precisions(reference)[0],
+            "fallback_precision": reference.get("precision"), "perf_precision": reference.get("perf_precision"),
+            "timing_precision": reference.get("timing_precision")}
 
 
 def timing_precisions(reference: Mapping[str, Any]) -> list[str]:
@@ -810,7 +831,8 @@ def execution_session(model: Mapping[str, Any], environment: Environment, out: P
         lambda mine, theirs: judge.work_check({"work": [mine] if mine is not None else []},
                                              {"work": [theirs] if theirs is not None else []}) is None,
         smoke=bool(environment.values.get("smoke")),
-        request_problems=lambda payload: unstated_defaults(payload.get("request") or {}, model["operation"]), **kwargs)
+        request_problems=lambda payload: unstated_defaults(payload.get("request") or {}, model["operation"],
+                                                         model.get("catalog_request")), **kwargs)
 
 
 def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[str, Any]:
@@ -819,6 +841,9 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
     environment = Environment({**environment.values, "native_replicas": 1, "candidate_replicas": 1,
                                "acc_mps": False, "acc_overlap": False})
     out.mkdir(parents=True, exist_ok=True)
+    from . import gold_metrics
+
+    gold_metrics.preflight_code_sandbox(model, environment.values, out)
     (out / "execution.jsonl").write_text("")
     evidence = execution_session(model, environment, out)
     with execution.session(evidence):
@@ -878,11 +903,11 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
     fingerprint = platform_fingerprint(environment, python)["fingerprint"]
     from . import gold_metrics
 
-    gold_metrics.protect([out.parent, *(environment.values.get(key) for key in (
-        "bundle_root", "hf_hub_cache", "hf_datasets_cache", "data_root", "reference_env_root", "runtime_root"))])
+    gold_metrics.protect(gold_metrics.protected_roots(environment.values, root))
     accuracy: list[dict[str, Any]] = []
     performance: list[dict[str, Any]] = []
-    unstated = unstated_defaults(perf_suite.samples[0]["request"], model["operation"]) if perf_suite else []
+    unstated = (unstated_defaults(perf_suite.samples[0]["request"], model["operation"], model.get("catalog_request"))
+                if perf_suite else [])
     if unstated:  # each side would apply its own default: different work
         phases.errors["perf_request"] = (f"the timed request leaves {', '.join(unstated)} to each side's default; "
                                          "state them in config/models performance")
@@ -958,8 +983,7 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
               "performance_source": "quality" if dataset_only else "fixed",
               **({"accuracy_note": model["accuracy_note"]} if model.get("accuracy_note") else {}),
               **({"coverage": model["coverage"]} if model.get("coverage") else {}),
-              "reference": {key: reference.get(key) for key in ("backend", "precision", "perf_precision",
-                                                                 "timing_precision")},
+              "reference": reported_reference(reference, performance, accuracy),
               "reference_python": python, "duration_s": time.time() - started, "accuracy": accuracy,
               "performance": performance, "service_metrics": service_metrics,
               "errors": phases.errors,

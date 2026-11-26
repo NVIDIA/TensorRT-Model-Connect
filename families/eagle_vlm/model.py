@@ -98,10 +98,13 @@ class _EagleModel:
         quant_ctx=None,
         verbose: bool = False,
         parallel_config=None,
+        single_forward: bool = False,
     ) -> bytes:
         is_rerank = _is_reranker(config)
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
+            if single_forward:
+                raise ValueError("Eagle single forward pass requires one GPU")
             parallel.validate()
             from .tp_builder import build_eagle_vlm_tp_engine
 
@@ -122,6 +125,7 @@ class _EagleModel:
             precision=precision,
             quant_ctx=quant_ctx,
             verbose=verbose,
+            single_forward=single_forward,
         )
 
     def build_vision_engine(
@@ -132,18 +136,28 @@ class _EagleModel:
         *,
         precision: str = "fp32",
         verbose: bool = False,
+        single_forward: bool = False,
     ) -> bytes | None:
         # The reranking runtime accepts only query/document tokens and the
         # text engine exposes no image inputs. Do not build or package an
         # unreachable vision engine for this mode.
-        if _is_reranker(config):
+        if _is_reranker(config) and not single_forward:
             return None
+        if single_forward and (
+            config.raw.get("select_layer", -1) != -1
+            or config.raw.get("downsample_ratio", 0.5) != 0.5
+        ):
+            raise ValueError("Eagle single forward pass requires final vision features and 2x2 merging")
         vision_config = config.raw.get("vision_config")
         if vision_config is None:
             return None
         vision_weights = _load_vision_weights(model_dir, config)
         return _build_siglip_vision_engine(
-            vision_config, vision_weights, precision=precision, verbose=verbose
+            vision_config,
+            vision_weights,
+            precision=precision,
+            verbose=verbose,
+            single_forward=single_forward,
         )
 
     def get_vl_config(self, config: ModelConfig) -> dict | None:
@@ -325,19 +339,19 @@ def _load_vision_weights(model_dir: str, config: ModelConfig) -> WeightDict:
     for reader in readers:
         for key in reader.keys():
             if key.startswith("vision_model.") or key.startswith("visual."):
-                weights[key] = _load_tensor([reader], key)
+                weights[key] = _load_tensor(readers, key)
             elif key.startswith("model.vision_model."):
                 # Rerank model uses model.vision_model.* prefix — strip model.
                 canon = key[len("model.") :]
-                weights[canon] = _load_tensor([reader], key)
+                weights[canon] = _load_tensor(readers, key)
             elif key.startswith("vision_tower."):
                 canon = key.replace("vision_tower.", "vision_model.")
-                weights[canon] = _load_tensor([reader], key)
+                weights[canon] = _load_tensor(readers, key)
             elif key.startswith("multi_modal_projector."):
-                weights[key] = _load_tensor([reader], key)
+                weights[key] = _load_tensor(readers, key)
             elif key.startswith("mlp1.") or key.startswith("model.mlp1."):
                 canon = key.replace("model.", "", 1) if key.startswith("model.mlp1.") else key
-                weights[canon] = _load_tensor([reader], key)
+                weights[canon] = _load_tensor(readers, key)
 
     return weights
 
@@ -356,6 +370,7 @@ def _build_eagle_engine(
     precision: str = "fp32",
     quant_ctx=None,
     verbose: bool = False,
+    single_forward: bool = False,
 ) -> bytes:
     """Build Eagle text backbone engine for embedding or reranking.
 
@@ -378,6 +393,9 @@ def _build_eagle_engine(
     else:
         raise ValueError(f"Unsupported Eagle VLM precision {precision!r}; expected fp32 or fp16")
 
+    if single_forward and config.raw.get("pooling", "avg") != "avg":
+        raise ValueError("Eagle single forward pass requires average pooling")
+
     attention_size: int = weights.get("_attention_size", config.attention_size)
     mlp_size: int = weights.get("_mlp_size", config.intermediate_size)
     hidden = config.hidden_size
@@ -398,6 +416,8 @@ def _build_eagle_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
+    if single_forward and precision == "fp32":
+        trt_config.clear_flag(trt.BuilderFlag.TF32)
     configure_fp8_build(trt_config, quant_ctx)
 
     # --- Inputs ---
@@ -421,7 +441,6 @@ def _build_eagle_engine(
             (_RERANKER_MAX_BATCH_SIZE, opt_seq),
             (_RERANKER_MAX_BATCH_SIZE, seq_length),
         )
-        trt_config.add_optimization_profile(profile)
         input_shape = network.add_shape(input_ids).get_output(0)
         sequence_slice = network.add_slice(input_shape, start=(1,), shape=(1,), stride=(1,))
         sequence_shape = sequence_slice.get_output(0)
@@ -438,6 +457,25 @@ def _build_eagle_engine(
             use_input_embed = network.add_cast(use_input_embed, work_trt_dtype).get_output(0)
         runtime_sequence_length = seq_length
 
+    if is_reranker and single_forward:
+        input_embed = network.add_input("input_embed", trt.float32, (-1, -1, hidden))
+        use_input_embed = network.add_input("use_input_embed", trt.float32, (-1, -1))
+        profile.set_shape(
+            "input_embed", (1, 1, hidden),
+            (_RERANKER_MAX_BATCH_SIZE, opt_seq, hidden),
+            (_RERANKER_MAX_BATCH_SIZE, seq_length, hidden),
+        )
+        profile.set_shape(
+            "use_input_embed", (1, 1),
+            (_RERANKER_MAX_BATCH_SIZE, opt_seq),
+            (_RERANKER_MAX_BATCH_SIZE, seq_length),
+        )
+        if work_trt_dtype != trt.float32:
+            input_embed = network.add_cast(input_embed, work_trt_dtype).get_output(0)
+            use_input_embed = network.add_cast(use_input_embed, work_trt_dtype).get_output(0)
+    if is_reranker:
+        trt_config.add_optimization_profile(profile)
+
     # --- Embedding with input_embed bypass ---
     embedding_table = graph_ops.add_constant(
         network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype
@@ -446,14 +484,15 @@ def _build_eagle_engine(
     gather = network.add_gather(embedding_table, input_ids, 0)
     token_embed = gather.get_output(0)
 
-    if is_reranker:
+    if is_reranker and not single_forward:
         hidden_state = token_embed
     else:
         # Select image features only at positions marked by use_input_embed.
         use_reshape = network.add_shuffle(use_input_embed)
-        use_reshape.reshape_dims = (seq_length, 1)
+        use_reshape.reshape_dims = (0, 0, 1) if is_reranker else (seq_length, 1)
         ones_bcast = graph_ops.add_constant(
-            network, (1, 1), np.array([1.0], dtype=work_np_dtype), dtype=work_np_dtype
+            network, (1,) * (3 if is_reranker else 2),
+            np.array([1.0], dtype=work_np_dtype), dtype=work_np_dtype,
         )
         inv_use = network.add_elementwise(
             ones_bcast, use_reshape.get_output(0), trt.ElementWiseOperation.SUB
@@ -811,6 +850,14 @@ def _build_eagle_engine(
             )
         if score.dtype != trt.float32:
             score = network.add_cast(score, trt.float32).get_output(0)
+        if single_forward:
+            temperature = float(config.raw.get("temperature", 1.0))
+            divisor = graph_ops.add_constant(
+                network, (1, 1, 1), np.array([temperature], dtype=np.float32)
+            )
+            score = network.add_elementwise(
+                score, divisor, trt.ElementWiseOperation.DIV
+            ).get_output(0)
         score.name = "score"
         network.mark_output(score)
     else:
@@ -819,6 +866,24 @@ def _build_eagle_engine(
         output = hidden_state
         if output.dtype != trt.float32:
             output = network.add_cast(output, trt.float32).get_output(0)
+        if single_forward:
+            mask = network.add_cast(attention_mask_input, trt.float32).get_output(0)
+            mask_col = network.add_shuffle(mask)
+            mask_col.reshape_dims = (seq_length, 1)
+            masked = network.add_elementwise(
+                output, mask_col.get_output(0), trt.ElementWiseOperation.PROD
+            ).get_output(0)
+            total = network.add_reduce(masked, trt.ReduceOperation.SUM, 1, True).get_output(0)
+            count = network.add_reduce(
+                mask_col.get_output(0), trt.ReduceOperation.SUM, 1, True
+            ).get_output(0)
+            pooled = network.add_elementwise(total, count, trt.ElementWiseOperation.DIV).get_output(0)
+            square = network.add_elementwise(pooled, pooled, trt.ElementWiseOperation.PROD).get_output(0)
+            norm_squared = network.add_reduce(square, trt.ReduceOperation.SUM, 2, True).get_output(0)
+            norm = network.add_unary(norm_squared, trt.UnaryOperation.SQRT).get_output(0)
+            epsilon = graph_ops.add_constant(network, (1, 1), np.array([1e-12], dtype=np.float32))
+            norm = network.add_elementwise(norm, epsilon, trt.ElementWiseOperation.MAX).get_output(0)
+            output = network.add_elementwise(pooled, norm, trt.ElementWiseOperation.DIV).get_output(0)
         output.name = "hidden_states"
         network.mark_output(output)
 
@@ -846,6 +911,7 @@ def _build_siglip_vision_engine(
     *,
     precision: str = "fp32",
     verbose: bool = False,
+    single_forward: bool = False,
 ) -> bytes:
     """Build SigLIP-2 vision encoder TRT engine.
 
@@ -854,6 +920,11 @@ def _build_siglip_vision_engine(
     """
     import tensorrt as trt
     from . import graph_ops
+
+    if single_forward:
+        for key in ("mlp1.0.weight", "mlp1.1.weight", "mlp1.3.weight"):
+            if key not in weights:
+                raise ValueError(f"Missing Eagle vision projector weight: {key}")
 
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
@@ -879,6 +950,8 @@ def _build_siglip_vision_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
+    if single_forward and precision == "fp32":
+        trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     # Input: pixel_values [3, image_size, image_size]
     pixel_values = network.add_input("pixel_values", trt.float32, (3, image_size, image_size))
@@ -982,7 +1055,7 @@ def _build_siglip_vision_engine(
                 break
 
         if lp is None:
-            continue  # skip missing layers
+            raise ValueError(f"Missing SigLIP vision layer {layer_idx}")
 
         # Layer norm 1
         ln1_w_key = f"{lp}.layer_norm1.weight"
@@ -1084,6 +1157,20 @@ def _build_siglip_vision_engine(
                 dtype=work_np_dtype,
             )
 
+        # SigLIP attention projections have learned biases.
+        if qkv_key in weights:
+            bias = weights.get(qkv_key.replace("weight", "bias"))
+            biases = [None] * 3 if bias is None else np.split(bias, 3)
+        else:
+            biases = [weights.get(key.replace("weight", "bias")) for key in (q_key, k_key, v_key)]
+        projections = [q_out, k_out, v_out]
+        for index, bias in enumerate(biases):
+            if bias is not None:
+                projections[index] = graph_ops.add_bias_sum(
+                    network, projections[index], vision_hidden,
+                    bias.astype(work_np_dtype), dtype=work_np_dtype,
+                )
+        q_out, k_out, v_out = projections
         concat = graph_ops.add_attention_from_rows(
             network,
             q_out,
@@ -1114,6 +1201,11 @@ def _build_siglip_vision_engine(
             )
         else:
             proj = concat
+        out_bias = weights.get(out_key.replace("weight", "bias"))
+        if out_bias is not None:
+            proj = graph_ops.add_bias_sum(
+                network, proj, vision_hidden, out_bias.astype(work_np_dtype), dtype=work_np_dtype
+            )
 
         # Residual
         res1 = network.add_elementwise(hidden_state, proj, trt.ElementWiseOperation.SUM)
@@ -1176,8 +1268,12 @@ def _build_siglip_vision_engine(
                     dtype=work_np_dtype,
                 )
 
-            # Approximate GELU via TRT
-            gelu_layer = network.add_activation(fc1_out, trt.ActivationType.GELU_ERF)
+            activation = (
+                trt.ActivationType.GELU_TANH
+                if vision_config.get("hidden_act", "gelu_pytorch_tanh") == "gelu_pytorch_tanh"
+                else trt.ActivationType.GELU_ERF
+            )
+            gelu_layer = network.add_activation(fc1_out, activation)
 
             fc2_out = graph_ops.add_matmul_rhs_constant(
                 network,
@@ -1203,6 +1299,17 @@ def _build_siglip_vision_engine(
         # Residual
         res2 = network.add_elementwise(res1.get_output(0), fc2_out, trt.ElementWiseOperation.SUM)
         hidden_state = res2.get_output(0)
+
+    # SigLIP's last_hidden_state includes the final post-layer normalization.
+    for prefix in ("vision_model.vision_model", "vision_model"):
+        if f"{prefix}.post_layernorm.weight" in weights:
+            hidden_state = _add_layer_norm_vision(
+                network, hidden_state, vision_hidden,
+                weights[f"{prefix}.post_layernorm.weight"].astype(np.float32),
+                weights[f"{prefix}.post_layernorm.bias"].astype(np.float32),
+                eps_const, dtype=work_np_dtype,
+            )
+            break
 
     # --- Pixel shuffle (2x2 merge) + MLP projector (mlp1) ---
     # Eagle VLM merges 2x2 adjacent patches before the MLP projector:
@@ -1268,7 +1375,7 @@ def _build_siglip_vision_engine(
 
         # LayerNorm over mlp1_in_dim
         ln_eps = graph_ops.add_constant(
-            network, (1, 1), np.array([layer_norm_eps], dtype=np.float32)
+            network, (1, 1), np.array([1e-5], dtype=np.float32)
         )
         hidden_state = _add_layer_norm_vision(
             network,

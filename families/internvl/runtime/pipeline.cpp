@@ -19,6 +19,14 @@ namespace trtmc {
 
 namespace {
 
+// The next decode step would store one more K/V row. A full cache ends the
+// generation, as max_new_tokens does, instead of dropping the prompt's rows.
+// A state without a length limit (max_length() < 0) never fills.
+bool kv_cache_full(const InternvlInferenceState& state) {
+    const int32_t max_length = state.max_length();
+    return max_length >= 0 && state.position() >= max_length;
+}
+
 void validate_pipeline_components(const ITrtModule* text_decoder,
                                   const InternvlInferenceState* state, const ITrtModule* prefill) {
     if (text_decoder == nullptr || !text_decoder->ok())
@@ -389,9 +397,16 @@ TextResult InternVlPipeline::generate(const std::string& prompt, const float* im
         // features in tile order, as the reference model does.
         const std::size_t tile_values =
             preprocessed.pixel_values.size() / static_cast<std::size_t>(preprocessed.num_tiles);
+        // Copy the metadata once and only the current tile's pixels per tile:
+        // copying the whole multi-tile buffer per tile costs O(tiles^2).
+        InternVlPreprocessedImage tile_image;
+        tile_image.image_grid_hws = preprocessed.image_grid_hws;
+        tile_image.channels = preprocessed.channels;
+        tile_image.height = preprocessed.height;
+        tile_image.width = preprocessed.width;
+        tile_image.num_tiles = 1;
+        tile_image.ok = preprocessed.ok;
         for (int32_t tile = 0; tile < preprocessed.num_tiles; ++tile) {
-            InternVlPreprocessedImage tile_image = preprocessed;
-            tile_image.num_tiles = 1;
             const auto first =
                 preprocessed.pixel_values.begin() + static_cast<std::ptrdiff_t>(tile * tile_values);
             tile_image.pixel_values.assign(first, first + static_cast<std::ptrdiff_t>(tile_values));
@@ -480,6 +495,8 @@ std::vector<int32_t> InternVlPipeline::generate_from_ids(const std::vector<int32
         output.push_back(result.token_id);
         if (result.is_eos)
             break;
+        if (kv_cache_full(*state_))
+            break;
         run_text_step(result.token_id, logits);
     }
 
@@ -527,6 +544,9 @@ bool InternVlPipeline::run_vl_prefill_batched(
         return false;
 
     kv_cache->bind_cache_inputs(*prefill_);
+    // Valid-prefix decoders write the prompt's K/V straight into the cache
+    // (no device copies, and no host download of the present outputs).
+    const bool kv_in_place = kv_cache->bind_present_to_cache_rows(*prefill_, sq);
     auto embedding_inputs =
         build_vl_sequence_embedding_inputs(input_ids, config_.image_token_id, image_features,
                                            deepstack_features, num_features, feature_dim);
@@ -539,6 +559,10 @@ bool InternVlPipeline::run_vl_prefill_batched(
     auto outputs = prefill_->forward(inputs);
     if (!copy_last_prefill_logits(outputs, config_.vocab_size, logits))
         return false;
+    if (kv_in_place) {
+        kv_cache->commit_cache_rows(sq);
+        return true;
+    }
 
     std::vector<const void*> present_k;
     std::vector<const void*> present_v;
@@ -576,6 +600,8 @@ void InternVlPipeline::run_vl_decode_loop(InternVlISampler* sampler,
         InternVlSampleResult result = sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
         if (result.is_eos)
+            break;
+        if (kv_cache_full(*state_))
             break;
         run_text_step(result.token_id, logits);
     }

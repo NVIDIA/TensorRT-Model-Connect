@@ -9,6 +9,7 @@
 #include "trtmc/runtime/family_factory.h"
 
 #include <cstdint>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -33,6 +34,9 @@ struct RuntimeConfig {
     std::vector<std::int32_t> eos_token_ids;
     std::int32_t max_cache_length;
     std::string precision;
+    // "single": one single-token profile (prompt fed one token per launch).
+    // "dual_profile": profile 0 prefills a chunk of tokens, profile 1 decodes one.
+    bool dual_profile;
 };
 
 template <typename T>
@@ -96,6 +100,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_eos_ids(json),
         require_value<std::int32_t>(json, "max_cache_length"),
         require_value<std::string>(json, "precision"),
+        layout == "dual_profile",
     };
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_attention_heads <= 0 ||
         config.num_key_value_heads <= 0 || config.head_dim <= 0 ||
@@ -106,18 +111,66 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         throw std::runtime_error("lfm2 runtime.json contains invalid geometry");
     }
     if (intermediate_size <= 0 || norm_eps <= 0.0F || rope_theta <= 0.0F ||
-        layer_types.size() != static_cast<std::size_t>(config.num_layers) || layout != "single" ||
+        layer_types.size() != static_cast<std::size_t>(config.num_layers) ||
+        (layout != "single" && layout != "dual_profile") ||
         (config.precision != "fp16" && config.precision != "bf16")) {
         throw std::runtime_error("lfm2 runtime.json contains invalid model contract");
     }
     return config;
 }
 
+// A dual-profile context accepts token inputs of [1..max_tokens].
+void require_token_profile(const ITrtModule& module, const std::string& name,
+                           std::int64_t max_tokens) {
+    const auto profile = module.profile_idx();
+    if (!module.has_input(name) || module.tensor_dtype(name) != DType::kInt32 ||
+        module.input_profile_shape(name, profile, ProfileShapeSelector::kMin) !=
+            std::vector<std::int64_t>{1} ||
+        module.input_profile_shape(name, profile, ProfileShapeSelector::kMax) !=
+            std::vector<std::int64_t>{max_tokens}) {
+        throw std::runtime_error("lfm2 engine input profile mismatch for '" + name + "'");
+    }
+}
+
+struct DecoderModules {
+    std::unique_ptr<ITrtModule> decode;
+    std::unique_ptr<ITrtModule> prefill;
+};
+
+DecoderModules load_decoder(const FamilyContext& context, const RuntimeConfig& config) {
+    const auto plan = require_section(context.reader, "engine.plan");
+    if (!config.dual_profile) {
+        auto decoder = load_module(context.backend, plan);
+        if (decoder->optimization_profile_count() != 1)
+            throw std::runtime_error("lfm2 single-layout engine needs exactly one profile");
+        return {std::move(decoder), nullptr};
+    }
+    auto modules = context.backend.create_dual_profile_modules(plan.data(), plan.size(), {});
+    if (modules.prefill == nullptr || !modules.prefill->ok() || modules.decode == nullptr ||
+        !modules.decode->ok()) {
+        throw std::runtime_error("lfm2 dual-profile engine did not create both contexts");
+    }
+    if (modules.decode->optimization_profile_count() != 2)
+        throw std::runtime_error("lfm2 dual-profile engine needs two profiles");
+    const auto chunk = modules.prefill->input_profile_shape(
+        "token_id", modules.prefill->profile_idx(), ProfileShapeSelector::kMax);
+    if (chunk.size() != 1 || chunk[0] < 1 || chunk[0] > config.max_cache_length)
+        throw std::runtime_error("lfm2 prefill profile has an invalid token range");
+    for (const char* name : {"token_id", "position_id"}) {
+        require_token_profile(*modules.prefill, name, chunk[0]);
+        require_token_profile(*modules.decode, name, 1);
+    }
+    modules.prefill->set_timing_label("lfm2 prefill engine");
+    modules.decode->set_timing_label("lfm2 engine");
+    return {std::move(modules.decode), std::move(modules.prefill)};
+}
+
 } // namespace
 
 ITask* create(const FamilyContext& context) {
     const RuntimeConfig config = parse_runtime_config(context.reader);
-    auto decoder = load_module(context.backend, require_section(context.reader, "engine.plan"));
+    auto modules = load_decoder(context, config);
+    auto& decoder = modules.decode;
     const cudaStream_t stream = decoder->stream();
     const DType dtype = state_dtype(config.precision);
 
@@ -137,9 +190,9 @@ ITask* create(const FamilyContext& context) {
     generation.id_eos_ids = config.eos_token_ids;
     apply_chat_template(context.reader, generation);
 
-    return new Lfm2TextGenerationPipeline(std::move(decoder), std::move(state),
-                                          std::move(generation), stream,
-                                          create_tokenizer(context.reader), std::string{});
+    return new Lfm2TextGenerationPipeline(
+        std::move(decoder), std::move(state), std::move(generation), stream,
+        create_tokenizer(context.reader), std::string{}, std::move(modules.prefill));
 }
 
 } // namespace trtmc::lfm2

@@ -1,0 +1,89 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "help": "Build a LeRobot Pi0.5 or a documented openpi action policy",
+      "executor": "python",
+      "handler": "edge_llm.cli:build",
+      "arguments": [
+        {
+          "name": "model",
+          "type": "string",
+          "help": "Hugging Face model ID or local snapshot"
+        },
+        {
+          "name": "output",
+          "flags": [
+            "-o",
+            "--output"
+          ],
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "flags": [
+            "--revision"
+          ],
+          "type": "string"
+        },
+        {
+          "name": "precision",
+          "flags": [
+            "--precision"
+          ],
+          "type": "string",
+          "choices": [
+            "fp32",
+            "bf16",
+            "fp16"
+          ],
+          "help": "TensorRT compute precision; defaults to BF16 for LeRobot or FP16 for openpi"
+        },
+        {
+          "name": "quantization",
+          "flags": [
+            "--quantization"
+          ],
+          "type": "string",
+          "choices": [
+            "none",
+            "fp8"
+          ],
+          "help": "Use FP8 weights and activations for the native BF16 LeRobot policy."
+        },
+        {
+          "name": "verbose",
+          "flags": [
+            "--verbose"
+          ],
+          "type": "bool",
+          "action": "store_true",
+          "default": false
+        },
+        {
+          "name": "pi05_policy_config",
+          "flags": [
+            "--pi05-policy-config"
+          ],
+          "type": "string",
+          "choices": [
+            "pi05_libero",
+            "pi05_droid",
+            "pi05_aloha"
+          ],
+          "help": "Select openpi semantics explicitly; omit to retain the native LeRobot action contract."
+        },
+        {
+          "name": "edge_builder_python",
+          "flags": [
+            "--edge-builder-python"
+          ],
+          "type": "path",
+          "help": "Use this isolated Edge 0.12.0 Python builder when the installed runtime supports the requested openpi policy."
+        }
+      ]
+    }
+  ]
+}

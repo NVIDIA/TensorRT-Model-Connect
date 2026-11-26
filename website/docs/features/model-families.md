@@ -167,6 +167,14 @@ are 0, a power of two below 64, or a multiple of 64. Each extra engine carries
 its own copy of the weights, so it adds to the bundle size and build time.
 Bundles built before this engine existed still load and prefill token by token.
 
+When the decode and prefill engines' weights do not both fit in 80% of the GPU
+memory (a 27B FP16 checkpoint on a 128 GB unified-memory GPU), a bundle without
+MTP ships only `prefill_engine.plan` (`decoder_engine_layout: "chunked"`). It
+also decodes, one row per call. A prompt must fit the KV cache
+(`--max-sequence-length`), and generation stops when the cache is full; a
+bundle with the decode engine instead shifts the cache. Older runtimes reject
+these bundles.
+
 ### Nemotron-H Edge-LLM execution
 
 Use `trtmc nemotron_h build MODEL -o model.bundle` with the owning
@@ -248,6 +256,26 @@ family's options. `trtmc qwen3_5 build --help` works offline without
 a checkpoint or GPU imports. This uses the existing
 [family CLI protocol](../extend/family-cli.md), not an extension to the shared parser.
 
+The default Edge SDK remains 0.11.0. To opt in to 0.12.0, configure
+`-DTRTMC_EDGELLM_RELEASE=0.12.0`, build with `--precision fp16`, and, if
+needed, supply `--edge-builder-python /absolute/path/to/python` to select
+a matching wheel or source installation. This does not replace the native SDK.
+The 2B, 4B and 9B ordinary FP16 text profiles, including their Base
+checkpoints, passed the short reference and the greedy/sampled release checks.
+The 4B embedded MTP profile passed the short, long greedy and input-limit
+checks. The original 4B, 9B and 27B DFlash pairs passed the measured short
+and long greedy checks with both linear and top-k-four tree decoding. Some other
+ordinary text profiles remain runnable but miss sampled quality; see the
+family recipe below for the per-checkpoint results and tested scope.
+The prepared 4B NVFP4 target and its matching NVFP4 DFlash draft use the
+0.12 ONNX exporter (install the Edge Python `onnx` extra and configure
+`-DTRTMC_EDGELLM_ONNX=ON`). The native fallback preserves paired decoding
+without ONNX.
+For the 27B TP2 image case, the recipe also identifies a tested A100 pair
+where both Edge runners failed in prefill and MC selects native TensorRT.
+Use `--task images_text_to_text` for ordered images; the legacy single-image
+task is `vision_language_generation`.
+
 The Qwen3.5 family maps the recorded original-source dense 0.8B/2B/4B/9B
 configurations (Instruct and Base), embedded MTP, and explicit 4B/9B DFlash
 pairs to the pinned Edge-LLM 0.11.0 SDK on native x86 SM80/SM120, FP16 compute,
@@ -279,20 +307,40 @@ results from unexecuted combinations and known quality limitations.
 
 ### Optional Qwen3.5/3.6 MoE Edge execution
 
+On Edge 0.12, original-weight requests use the ONNX exporter and native SDK
+compilers (`TRTMC_EDGELLM_ONNX=ON`) because the direct builder expects
+individual experts rather than fused weights. The documented original Qwen3.6
+35B DFlash and JetSpec pairs use separate base and draft engine roles. Packed
+checkpoints keep the direct path. If Edge preparation fails, Model Connect
+warns and builds the requested configuration through the family’s native path.
+
 `trtmc qwen3_5_moe build MODEL -o model.bundle` owns the GPTQ Qwen3.5 35B-A3B
 and NVFP4 Qwen3.6 35B-A3B routes. Its family-local options select explicit
 DFlash companions, greedy DDTree, or the documented embedded NVFP4 MTP recipe.
 Visual bundles map the existing image and video Task interfaces directly to
 Edge preprocessing and runtime APIs. Shared model selection remains unchanged.
 
-The native SDK is pinned to official Edge-LLM 0.11.0. Compatible PyPI Python
-tools are discovered automatically; a source-built installation also works,
-and matching native headers, libraries and plugins remain required.
-Builds preserve each source checkpoint's weight quantization recipe, with FP16
-compute and single-device execution. The published NVFP4 checkpoint lacks
-exported K/V scales and therefore uses FP16 KV storage; prepared sources with
-actual exported scales retain FP8 KV. Larger/original checkpoints outside the
-measured memory admission are not advertised as qualified configurations.
+Edge-LLM 0.11.0 is the default. To use 0.12.0, build with
+`-DTRTMC_EDGELLM_RELEASE=0.12.0` on the target and install matching Python
+tools from PyPI or source. With 0.12.0, a documented JetSpec pair uses
+`--execution-variant jetspec --companion draft=PATH`; a DFlash draft is not
+interchangeable with a JetSpec draft.
+
+The native fallback preserves the checkpoint recipe. For example, the mixed
+Qwen3.6 35B NVFP4 source uses FP8 projections and W4A16 experts with FP16 KV.
+The prepared Qwen3.5 122B source uses W4A4 routed experts. Its metadata
+advertises FP8 KV, but the checkpoint lacks the text K scales that Edge 0.12
+requires for FP8 KV, so the adapter selects FP16 KV. This source check is not
+a full-model validation result. In ordinary decoding with
+Qwen3.5 35B GPTQ-Int4, both 0.12 Edge execution and native TensorRT matched
+the independent packed-checkpoint reference on the tested text and image
+requests. The original Qwen3.5 35B checkpoint also matched the independent reference
+on raw text, chat and image through both the 0.12 ONNX and native routes.
+For the original Qwen3.6 35B checkpoint, use the 0.12 ONNX flow:
+its ordinary vision bundle matched the independent reference token IDs on the
+tested raw-text, chat and image requests. With the documented JetSpec draft,
+Edge ONNX also matched the original target and reference on raw text and chat.
+These measurements do not qualify other checkpoints, pairs or modalities.
 
 Runtime availability is not an accuracy claim: speculative decoding and NVFP4
 repeatability have recorded quality failures. Those routes remain executable
@@ -305,6 +353,10 @@ owns native TensorRT Python graph construction and Model Connect C++ execution,
 including prepared routed experts and media inputs. Publication errors,
 cancellation and runtime errors do not trigger this fallback. Native execution
 needs neither Edge nor ONNX.
+A native single-GPU GPTQ bundle without MTP or a draft also ships `prefill.plan`
+when two copies of the checkpoint weights fit in 80% of the GPU memory. The
+runtime then prefills text and media prompts up to 64 rows per call and decodes
+with `engine.plan`; other bundles prefill one token at a time, as before.
 The existing validation checks seed rejection on Edge and seeded request-local
 repeatability on native, retaining capacity recovery, the independent checkpoint
 reference and the unchanged accuracy gate. Native speculative mappings and

@@ -54,3 +54,20 @@ if(TRTMC_BUILD_TESTS)
   endforeach()
   set_tests_properties(test_internlm_pipeline PROPERTIES SKIP_RETURN_CODE 77)
 endif()
+
+if(TRTMC_BUILD_TESTS)
+  # CPU-backed KV-cache test: CUDA calls are served from host memory, and an
+  # overlapping copy fails the test.
+  add_executable(test_internlm_kv_cache
+    ${PROJECT_SOURCE_DIR}/families/internlm/tests/cpp/test_kv_cache.cpp
+    kv_cache.cpp
+    ${PROJECT_SOURCE_DIR}/core/runtime/primitives/device_tensor.cpp
+  )
+  target_include_directories(test_internlm_kv_cache PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_internlm_kv_cache SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_internlm_kv_cache PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME internlm_kv_cache COMMAND test_internlm_kv_cache)
+endif()
