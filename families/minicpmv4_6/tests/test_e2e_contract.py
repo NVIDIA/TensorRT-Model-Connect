@@ -9,7 +9,6 @@ import json
 import math
 import sys
 import types
-from pathlib import Path
 
 import pytest
 
@@ -340,25 +339,35 @@ def _stop():
 
 
 @pytest.mark.parametrize("case_name", sorted(e2e._CASES))
-def test_the_evidence_of_a_case_attaches_only_its_own_images(tmp_path, monkeypatch, case_name):
-    # The report shows a case's first recorded image as its input. The E2E records its inputs before it starts the
-    # runtime, where this check stops it, and resolves fixture paths from the repository root.
+def test_the_evidence_of_a_case_attaches_only_the_images_it_feeds(tmp_path, tmp_path_factory, monkeypatch,
+                                                                    case_name):
+    # The report shows a case's first recorded image as its input, so the media are the files the case feeds, and no
+    # fixture or other case's image named in a recorded value. The E2E runs from the repository root, where fixture
+    # paths resolve; this check stops it where the runtime would start.
+    pytest.importorskip("PIL")
     recorder = e2e_evidence.Evidence(
         tmp_path / "evidence", family=e2e._FAMILY, case="contract-check",
-        source_revision="a" * 40, roots=(e2e._REPO,),
+        source_revision="a" * 40, roots=(e2e._REPO, tmp_path),
     )
     monkeypatch.chdir(e2e._REPO)
-    monkeypatch.setattr(e2e, "_environment", _stop)
+    monkeypatch.setattr(e2e, "_environment", lambda: (None, None, None))
+    monkeypatch.setattr(e2e, "_checkpoint", lambda manifest: tmp_path)
+    monkeypatch.setattr(e2e, "_bundle", lambda *args: tmp_path / "bundle")
+    monkeypatch.setattr(e2e, "_run_cli", lambda *args: _stop())
+    work = tmp_path / "case"
+    work.mkdir()
     token = e2e_evidence._ACTIVE.set(recorder)
     try:
         with pytest.raises(_Stop):
-            e2e.test_e2e(case_name, tmp_path, None, None)
+            e2e.test_e2e(case_name, work, tmp_path_factory, None)
     finally:
         e2e_evidence._ACTIVE.reset(token)
     _, case = e2e._CASES[case_name]
-    assert [artifact["label"] for artifact in recorder.data["artifacts"]] == [
-        Path(source).name for source in case.get("images", [])
-    ]
+    fed = [work / f"input-{index}.png" for index in range(len(case.get("images", [])))]
+    artifacts = recorder.data["artifacts"]
+    assert [artifact["label"] for artifact in artifacts] == [path.name for path in fed]
+    for artifact, path in zip(artifacts, fed):
+        assert (recorder.directory / artifact["path"]).read_bytes() == path.read_bytes()
 
 
 _MANIFEST = {"hf_id": "openbmb/MiniCPM-V-4.6", "hf_revision": "97328f3c2d70c4645b6a35594807eb6932068635"}

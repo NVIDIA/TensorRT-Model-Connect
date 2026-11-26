@@ -446,10 +446,12 @@ def test_e2e(case_name: str, tmp_path: Path, tmp_path_factory, request) -> None:
     if case_name == _SELECTION_CHECK:
         _foreign_testcases(request)
     manifest, case = _CASES[case_name]
-    # The evidence attaches every file a recorded value names to this case as media, so the manifest is recorded
-    # without the test cases that name other cases' images.
+    # The evidence attaches every file a recorded value names to this case as media and shows the first as its input,
+    # so neither the manifest's test cases nor the case's fixture paths are recorded: the media are the images the
+    # case feeds, recorded once they are written.
     shared = {key: value for key, value in manifest.items() if key != "testcases"}
-    record_evidence("inputs", {"manifest": shared, "case": case, "prompt": case["prompt"]})
+    settings = {key: value for key, value in case.items() if key != "images"}
+    record_evidence("inputs", {"manifest": shared, "case": settings, "prompt": case["prompt"]})
     binary, runtime_root, torch = _environment()
     model_dir = _checkpoint(manifest)
     record_evidence("checkpoint", {"hf_id": manifest["hf_id"], "hf_revision": manifest["hf_revision"]})
