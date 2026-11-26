@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Validation only; the builder needs just the base environment (TensorRT, NumPy, safetensors, tokenizers).
+# Official reference for the E2E and parity tests: GraniteSpeech5ForCTC first ships in Transformers
+# 5.16.0. The Hub and tokenizer pins keep its resolution on top of the CI image deterministic.
+transformers==5.22.2
+tokenizers==0.23.3
+huggingface-hub==1.33.0
+# The official GraniteSpeech5FeatureExtractor requires torch and torchaudio. Keep the torchaudio build
+# that matches the environment's torch: the repository's CI image ships torchaudio 2.11.0+cu130 with
+# torch 2.12.0+cu130.
+torchaudio
+# Float32 WAV input for the E2E cases (the wheel bundles libsndfile, LGPL-2.1, loaded dynamically and
+# not redistributed).
+soundfile==0.14.0
