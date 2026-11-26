@@ -1,0 +1,5 @@
+# The reference image processor warps the person crop with scipy.ndimage and smooths the heatmaps with its
+# Gaussian filter.
+scipy==1.18.1
+# scipy alone resolves numpy past the range the CI image installs.
+numpy>=1.24,<2.5

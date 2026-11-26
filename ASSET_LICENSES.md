@@ -124,6 +124,11 @@ distributed under the Apache License 2.0 with the rest of the project:
   `printed_tall.png` — printed text lines written by the checked-in
   `families/trocr/tests/data/generate.py` with Pillow's built-in default font,
   Aileron Regular (https://dotcolon.net/fonts/aileron, CC0 1.0 Universal)
+- `families/vitpose/tests/data/person.png` — a 480 x 640 photograph-style image
+  of a person in a yoga pose, generated for the ViTPose E2E with
+  `black-forest-labs/FLUX.2-klein-4B` (Apache-2.0) at revision
+  `e7b7dc27f91deacad38e78976d1f2b499d76a294` (seed 0, 4 steps); it depicts no
+  real person
 - `families/minicpm_ocr/tests/data/minicpm_ocr_page.png` — the decoded pixels of
   `families/deepseek_ocr/tests/data/orc_test_img.jpeg` saved losslessly as PNG, so
   the native loader and the reference processor read identical pixels

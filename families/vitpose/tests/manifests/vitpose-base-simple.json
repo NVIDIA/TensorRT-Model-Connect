@@ -1,0 +1,27 @@
+{
+  "name": "vitpose-base-simple",
+  "hf_id": "usyd-community/vitpose-base-simple",
+  "hf_revision": "a93ac0c67e0b7e2c55287d21d4c460c8f3c54d45",
+  "bundle": "vitpose-base-simple.bundle",
+  "family": "vitpose",
+  "task": "image_text_to_points",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "vitpose-base-simple",
+      "premerge": true,
+      "test_image": "data/person.png",
+      "scene": "standing_facing_camera",
+      "requests": [
+        {
+          "label": "whole image"
+        },
+        {
+          "label": "person box",
+          "person_box": [96.0, 86.5, 404.25, 590.75]
+        }
+      ]
+    }
+  ],
+  "tensor_parallel_size": 1
+}
