@@ -10,12 +10,15 @@ import numpy as np
 import pytest
 
 from families.qwen3_next.tests.checkpoint import assert_bundle_checkpoint, assert_pinned_checkpoint
+from families.qwen3_next.tests.native import native_test_binary
 
 
-def test_qwen3_next_bf16_logits(request, tmp_path):
+@pytest.mark.parametrize("case_name", ["qwen3-next-bf16-logits"])
+def test_official_checkpoint_e2e(case_name, request, tmp_path):
     directory = Path(__file__).parent
     manifest = json.loads((directory / "manifests/qwen3-next-bf16.json").read_text())
     case = manifest["testcases"][0]
+    assert case["name"] == case_name
     values = (request.config.getoption("--e2e-model", default=[]) or []) + (
         request.config.getoption("--e2e-testcase", default=[]) or []
     )
@@ -84,8 +87,7 @@ def test_qwen3_next_bf16_logits(request, tmp_path):
     assert info["provenance"]["build"]["tensor_parallel_size"] == manifest["tensor_parallel_size"]
     if supplied:
         assert_bundle_checkpoint(info, manifest)
-    trace_binary = runtime / "qwen3_next_logits_trace"
-    assert trace_binary.is_file()
+    trace_binary = native_test_binary("qwen3_next_logits_trace")
     prefix = tmp_path / "native"
     subprocess.run(
         [

@@ -9,6 +9,7 @@ import subprocess
 
 import pytest
 
+from families.qwen3_next.tests.native import native_test_binary
 from families.qwen3_next.tests.tokenizer_contract import tokenizer_document
 
 TEXTS = ['def add(a, b):\n    return a + b\n', "// UTF-8: café, 中文, 🙂\n\tprint('hello')\n", '<|im_start|>user\nExplain this code.\n<|im_end|>\n<|im_start|>assistant\n', "café = 'decomposed NFC'\n", '# العربية ١٢٣, हिन्दी, Ελληνικά\n', "foo'bar I'Spoon WE'RE I'll I'VE couldn't\n", "\t'quote'\n\t== 42\n", 'x = 1234567890\n\n    # whitespace  \n', 'foo\n    \n    bar', 'a\n  \n  b', 'x\n\t\n\ny', '\t \n  \r\n    end', 'a\n \n b']
@@ -27,11 +28,7 @@ def tokenizer_path(tmp_path_factory):
 
 
 def native(path, text):
-    runtime = os.environ.get("TRTMC_RUNTIME_ROOT")
-    if not runtime:
-        pytest.skip("requires the native Qwen3-Next tokenizer probe")
-    probe = Path(runtime) / "qwen3_next_tokenizer_probe"
-    assert probe.is_file()
+    probe = native_test_binary("qwen3_next_tokenizer_probe")
     return subprocess.run([str(probe), str(path), text], text=True,
                           capture_output=True, timeout=30)
 

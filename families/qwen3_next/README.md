@@ -50,6 +50,14 @@ Configure the source build with `TRTMC_BUILD_TESTS=ON` and build `trtmc`,
 `qwen3_next_pipeline_probe`, and `test_qwen3_next_sampler`. The tokenizer requires
 ICU uc and i18n.
 
+CTest runs the native sampler test. Run the pipeline retry, tokenizer, and
+routing checks through the family pytest suite below. Set
+`TRTMC_NATIVE_BUILD_DIR` to a source build configured with `TRTMC_BUILD_TESTS=ON`
+to build each test executable on demand. This also works when
+`TRTMC_RUNTIME_ROOT` points to an installed wheel, which contains production
+libraries but no test executables. Without `TRTMC_NATIVE_BUILD_DIR`, pytest
+uses the prebuilt test executables in `TRTMC_RUNTIME_ROOT`.
+
 The family tests use the official Transformers 5.2.0 implementation as the
 independent BF16 oracle. The layer tests compare actual checkpoint DeltaNet and
 attention/MoE layers; the end-to-end test compares full-vocabulary logits under
@@ -67,6 +75,7 @@ does not establish native parity or change the blocking acceptance criteria.
 export TRTMC_QWEN3_NEXT_CHECKPOINT=/path/to/pinned/checkpoint
 export TRTMC_RUNTIME_ROOT=$PWD/build
 export TRTMC_BINARY=$TRTMC_RUNTIME_ROOT/trtmc
+export TRTMC_NATIVE_BUILD_DIR=$PWD/build
 # Optional: reuse an existing public-build bundle; provenance is checked.
 export TRTMC_QWEN3_NEXT_BUNDLE=/path/to/qwen3-coder-next-bf16.bundle
 PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \

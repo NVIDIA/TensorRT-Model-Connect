@@ -3,12 +3,12 @@
 """Preserve official CPU expert selection, including equal routing scores."""
 
 import json
-import os
-from pathlib import Path
 import subprocess
 
 import numpy as np
 import pytest
+
+from families.qwen3_next.tests.native import native_test_binary
 
 
 @pytest.mark.parametrize(
@@ -26,9 +26,7 @@ import pytest
     ],
 )
 def test_native_expert_selection(kind, experts, top_k, tmp_path):
-    runtime = os.environ.get("TRTMC_RUNTIME_ROOT")
-    if not runtime:
-        pytest.skip("requires the native Qwen3-Next routing diagnostic")
+    probe = native_test_binary("qwen3_next_routing_probe")
     import torch
 
     random = np.random.default_rng(20261112)
@@ -47,7 +45,7 @@ def test_native_expert_selection(kind, experts, top_k, tmp_path):
     filename = tmp_path / "probabilities.f32"
     probabilities.numpy().tofile(filename)
     result = subprocess.run(
-        [str(Path(runtime) / "qwen3_next_routing_probe"), str(filename), str(top_k)],
+        [str(probe), str(filename), str(top_k)],
         check=True,
         capture_output=True,
         text=True,

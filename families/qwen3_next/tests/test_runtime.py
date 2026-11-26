@@ -3,23 +3,18 @@
 """Exercise real Pipeline routing retries and cache commits with a mock backend."""
 
 import json
-import os
-from pathlib import Path
 import subprocess
 
 import pytest
 
 from tensorrt_model_connect.bundle_writer import BundleWriter
+from families.qwen3_next.tests.native import native_test_binary
 from families.qwen3_next.tests.tokenizer_contract import tokenizer_document
 
 
 @pytest.mark.parametrize("mode", [0, 1, 2])
 def test_pipeline_routing_retry(mode, tmp_path):
-    runtime = os.environ.get("TRTMC_RUNTIME_ROOT")
-    if not runtime:
-        pytest.skip("requires the family-owned pipeline probe")
-    probe = Path(runtime) / "qwen3_next_pipeline_probe"
-    assert probe.is_file()
+    probe = native_test_binary("qwen3_next_pipeline_probe")
     path = tmp_path / "routing.bundle"
     writer = BundleWriter(path)
     writer.set_header(family="qwen3_next", task="text_generation", backend="mock")
