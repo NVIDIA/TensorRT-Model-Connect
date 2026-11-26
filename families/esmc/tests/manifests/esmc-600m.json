@@ -1,0 +1,17 @@
+{
+  "name": "esmc-600m",
+  "hf_id": "biohub/ESMC-600M",
+  "hf_revision": "5e366569e675ad5ae3512f66bf0b53ffe80ee83e",
+  "bundle": "esmc-600m.bundle",
+  "family": "esmc",
+  "task": "masked_text_to_token_scores",
+  "precision": "fp32",
+  "max_sequence_length": 256,
+  "testcases": [
+    {
+      "name": "esmc-600m",
+      "prompt": "MQIFVKTLTGKTITLEVEPSDTIENVKAK<mask>QDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG"
+    }
+  ],
+  "tensor_parallel_size": 1
+}

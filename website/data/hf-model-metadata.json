@@ -1689,6 +1689,28 @@
         "SmolVLMForConditionalGeneration"
       ],
       "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "biohub/ESMC-300M",
+      "revision": "96a2d8d61654ac0c08881be44da6c867686449b9",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "esmc",
+      "architectures": [
+        "EsmcForMaskedLM"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "biohub/ESMC-600M",
+      "revision": "5e366569e675ad5ae3512f66bf0b53ffe80ee83e",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "esmc",
+      "architectures": [
+        "EsmcForMaskedLM"
+      ],
+      "architecture_source": "config.architectures"
     }
   ]
 }
