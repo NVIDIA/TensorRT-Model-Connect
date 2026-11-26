@@ -120,9 +120,10 @@ class TextGeneration:
         # Vision-capable checkpoints (a vision_config) still take text-only requests as plain text:
         # the chat template applies only with an image or when the request asks for it.
         if self.processor is not None and image_path:
-            content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-            if image_path:
-                content.insert(0, {"type": "image", "image": load_image(image_path)})
+            # An empty prompt is the image alone (OCR models that read a page without an instruction).
+            content: list[dict[str, Any]] = [{"type": "image", "image": load_image(image_path)}]
+            if prompt:
+                content.append({"type": "text", "text": prompt})
             messages = [{"role": "user", "content": content}]
             return self.processor.apply_chat_template(
                 messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt")

@@ -13,18 +13,10 @@ exclude:
     reason: the generic embed reference mean-pools and L2-normalizes; GTE pools the CLS token without normalizing, and its catalog testcase has no prompt
   - profile: nomic-embed-text-v1_5*
     reason: the generic embed reference sends unprefixed text; nomic-embed needs a query or document role, and its catalog testcase has no prompt
-  # images_text_to_text profiles that cannot answer OCRBench's free questions: until each has its own scheme (the
-  # OCR models on OCRBench's text-recognition questions with their fixed prompt, the captioners on output parity).
-  - profile: glm-ocr-*
-    reason: an OCR model prompted only with "Text Recognition:"; its scheme is OCRBench's text-recognition questions with that prompt, not yet configured
-  - profile: minicpm-ocr-1.0*
-    reason: an OCR model prompted only with "Text Recognition:"; its scheme is OCRBench's text-recognition questions with that prompt, not yet configured
   - profile: paddleocr-vl-1.6
-    reason: an OCR model prompted only with "OCR:"; its scheme is OCRBench's text-recognition questions with that prompt, not yet configured
+    reason: the TRTMC bundle rejects every OCRBench text-recognition crop (the resized image does not fit the built image profile); its OCRBench scheme is configured
   - profile: lightonocr-2-1b-fp32
-    reason: a page OCR model with no question input; its scheme is OCRBench's text-recognition questions without a prompt, not yet configured
-  - profile: trocr-base-printed
-    reason: a single-line printed-text OCR model with no prompt input; its scheme is OCRBench's text-recognition questions without a prompt, not yet configured
+    reason: one OCRBench text-recognition crop is smaller than a merged vision patch, which neither the TRTMC bundle nor the native model can encode; its OCRBench scheme is configured
   - profile: blip-image-captioning-base
     reason: the family build loads its FP32 kernels from the installed tensorrt-model-connect distribution (families/blip/native_kernels.py), which the qualification's source-tree build does not install; its caption parity is configured
   - profile: minicpm-v-4.7-35b-a3b
