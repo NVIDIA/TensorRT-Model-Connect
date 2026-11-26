@@ -38,5 +38,20 @@ The native family library requires the host ICU shared libraries (`uc`, `i18n`,
 and their `data` dependency), including for wheel installations. Install the
 runtime package matching the wheel's ICU ABI; an Ubuntu 24.04 build uses
 `libicu74`. Building from source additionally requires `libicu-dev`.
-See the [host-library check](../../website/docs/getting-started/quick-start.md#host-runtime-libraries)
-before loading the family.
+
+Check this family's shared library before loading a bundle. Replace the path
+below with the library in the installed wheel's `bin` directory or your native
+build directory:
+
+```bash
+python - /path/to/runtime/libtrtmc_model_bailing_hybrid.so <<'PYTHON'
+import ctypes
+import os
+import sys
+
+ctypes.CDLL(sys.argv[1], mode=os.RTLD_NOW | os.RTLD_LOCAL)
+PYTHON
+```
+
+A missing or incompatible dependency raises `OSError` with the dynamic linker's
+diagnostic. Install the matching host library before retrying the Bailing runtime.
