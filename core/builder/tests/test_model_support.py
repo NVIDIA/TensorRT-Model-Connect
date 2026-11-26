@@ -14,6 +14,7 @@ from tensorrt_model_connect.model_support import (
     FamilyResolutionError,
     FamilySupport,
     ModelMetadata,
+    Variant,
     family_support,
     load_model_metadata,
     resolve_family,
@@ -78,6 +79,39 @@ def test_load_model_metadata_keeps_exact_snapshot_files_without_root_json(
     assert metadata.config == {}
     assert metadata.model_index == {}
     assert metadata.files == ("checkpoint/manifest.ocdbt",)
+
+
+def test_load_model_metadata_discovers_a_modular_pipeline(tmp_path: Path) -> None:
+    (tmp_path / "modular_model_index.json").write_text(
+        '{"_class_name":"ExampleModularPipeline"}', encoding="utf-8"
+    )
+
+    metadata = load_model_metadata(tmp_path)
+
+    assert metadata.pipeline_class == "ExampleModularPipeline"
+    assert metadata.files == ("modular_model_index.json",)
+
+
+def test_standard_pipeline_index_takes_precedence_over_modular_index(tmp_path: Path) -> None:
+    (tmp_path / "model_index.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "modular_model_index.json").write_text(
+        '{"_class_name":"ExampleModularPipeline"}', encoding="utf-8"
+    )
+
+    assert load_model_metadata(tmp_path).model_index == {}
+
+
+@pytest.mark.parametrize("content", ["{", "[]"])
+def test_modular_index_does_not_mask_an_invalid_standard_index(
+    tmp_path: Path, content: str
+) -> None:
+    (tmp_path / "model_index.json").write_text(content, encoding="utf-8")
+    (tmp_path / "modular_model_index.json").write_text(
+        '{"_class_name":"ExampleModularPipeline"}', encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="model metadata"):
+        load_model_metadata(tmp_path)
 
 
 def test_resolve_family_requires_exactly_one_match(monkeypatch) -> None:
@@ -294,3 +328,39 @@ def test_family_owned_exact_metadata_shapes_resolve_without_priority(
 ) -> None:
     family, _ = resolve_family(metadata)
     assert family == expected_family
+
+
+def test_family_support_carries_declared_variants() -> None:
+    variants = (Variant("bf16"), Variant("bf16", "fp8", status="experimental"))
+    describe = family_support(
+        model_types=("example",),
+        tasks=("generation",),
+        default_task="generation",
+        default_precision="bf16",
+        variants=variants,
+    )
+
+    support = describe(ModelMetadata({"model_type": "example"}, {}))
+    assert support is not None
+    assert support.variants == variants
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"precision": "BF16"},
+        {"precision": "bf16", "quantization": "none"},
+        {"precision": "bf16", "quantization": "FP8"},
+        {"precision": "bf16", "status": "qualified"},
+        {"precision": "bf16", "manifests": ("a", "a")},
+        {"precision": "bf16", "manifests": ("",)},
+    ],
+)
+def test_variant_rejects_invalid_declarations(arguments: dict) -> None:
+    with pytest.raises(ValueError):
+        Variant(**arguments)
+
+
+def test_family_support_rejects_duplicate_variants() -> None:
+    with pytest.raises(ValueError, match="unique"):
+        FamilySupport(("generation",), "generation", variants=(Variant("fp16"), Variant("fp16")))

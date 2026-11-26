@@ -31,7 +31,7 @@ def validate_request(request):
     contract = detect_qwen3_embedding_contract(config)
     if contract is None:
         raise ValueError(
-            "Qwen embedding requires the Qwen3-Embedding-0.6B sentence-transformers last-token pooling contract"
+            "Qwen embedding requires a supported Qwen3-Embedding sentence-transformers last-token pooling contract"
         )
     length = request.max_sequence_length or config.max_position_embeddings
     if length < 1 or length > config.max_position_embeddings:

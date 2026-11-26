@@ -1,0 +1,20 @@
+{
+  "name": "bart-base-1024",
+  "hf_id": "facebook/bart-base",
+  "hf_revision": "aadd2ab0ae0c8268c7c9693540e9904811f36177",
+  "bundle": "bart-base-1024.bundle",
+  "family": "bart",
+  "task": "conditional_text_generation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "bart-base-1024",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "The city council voted to improve public transportation after residents requested more frequent buses. Construction is expected to begin next spring, and officials said the project will connect schools, hospitals, and residential neighborhoods.",
+      "max_new_tokens": 20
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1024
+}

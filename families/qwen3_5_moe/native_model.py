@@ -29,9 +29,16 @@ from .checkpoint_mapper import (
 )
 from . import graph_ops
 from . import graph_blocks
+from . import deltanet_rows
 from .quantization import (
     PackedLinear, load_attention_kv_scales, load_fp8_kv_scales, load_projection, prepared_format, prepare_fp8_cache,
 )
+
+
+# Prefill engine rows; the chunked delta rule pads its solve to this size.
+PREFILL_MAX_TOKENS = deltanet_rows.SOLVE_ROWS
+PREFILL_OPT_TOKENS = 32
+PREFILL_OPTIMIZATION_LEVEL = 2
 
 
 def _projection_matmul(network, dtype):
@@ -153,6 +160,7 @@ class _Qwen35MoeModel:
 
         weights = WeightDict()
         weights["_moe_config"] = text_cfg
+        weights["_nvfp4_routed_activations"] = (config.raw.get("quantization_config") or {}).get("quant_algo") == "NVFP4"
         weights.update(load_fp8_kv_scales(readers, layer_types))
 
         # Embedding
@@ -379,8 +387,9 @@ class _Qwen35MoeModel:
 
         text = weights["_moe_config"]
         mlp = f"{hf_prefix}.mlp"
-        def expert(name):
-            return ExpertWeights(*(load_projection(readers, f"{name}.{projection}")
+        def expert(name, *, routed=False):
+            quantize_input = routed and weights.get("_nvfp4_routed_activations", False)
+            return ExpertWeights(*(load_projection(readers, f"{name}.{projection}", quantize_nvfp4_input=quantize_input)
                                    for projection in ("gate_proj", "up_proj", "down_proj")))
         count, width = text["num_experts"], text["moe_intermediate_size"]
         fused_key = f"{mlp}.experts.gate_up_proj"
@@ -403,7 +412,7 @@ class _Qwen35MoeModel:
                 np.ascontiguousarray(down[i].T, dtype=dtype),
             ) for i in range(count))
         else:
-            experts = tuple(expert(f"{mlp}.experts.{i}") for i in range(count))
+            experts = tuple(expert(f"{mlp}.experts.{i}", routed=True) for i in range(count))
         weights[f"{prefix}.moe"] = MoEWeights(
             router=load_projection(readers, f"{mlp}.gate"),
             experts=experts,
@@ -424,8 +433,21 @@ class _Qwen35MoeModel:
         media_inputs: bool = False,
         export_hidden_state: bool = False,
         feature_layers: tuple[int, ...] = (),
-    ) -> bytes:
-        """Build hybrid TRT engine with DeltaNet + attention layers."""
+        prefill_rows: int | None = None,
+    ) -> memoryview:
+        """Build hybrid TRT engine with DeltaNet + attention layers.
+
+        ``prefill_rows`` builds the prefill engine of a split bundle instead: ``S`` prompt rows with one profile
+        ``1..prefill_rows``, DeltaNet as one chunked delta rule, attention over the cache plus the chunk and
+        GPTQ experts as dense W4A16 GEMMs. Media rows take per-row visual embeddings and MRoPE offsets. Its
+        logits come from the last row; present K/V cover all rows and the recurrent outputs hold the state
+        after the last row. Decoding stays on the one-token engine.
+        """
+        if prefill_rows is not None and (export_hidden_state or feature_layers or debug_layer_outputs):
+            raise NotImplementedError("Qwen3.5-MoE prefill engines have no hidden-state, draft or debug outputs")
+        if prefill_rows is not None and not 1 <= prefill_rows <= PREFILL_MAX_TOKENS:
+            raise ValueError(f"Qwen3.5-MoE prefill_rows must be in 1..{PREFILL_MAX_TOKENS}")
+        sequence_length = None if prefill_rows else 1
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
@@ -476,12 +498,30 @@ class _Qwen35MoeModel:
         builder.max_threads = min(8, os.cpu_count() or 1)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
-        trt_config.builder_optimization_level = 1
+        # Level 1 skips the INT4 dequantize-GEMM fusion, so the prefill engine's stacked GPTQ experts would be
+        # expanded to FP16 in memory on every launch (about 4x slower); level 2 keeps them as W4A16 GEMMs.
+        trt_config.builder_optimization_level = PREFILL_OPTIMIZATION_LEVEL if prefill_rows else 1
 
         # --- Inputs ---
-        token_id = network.add_input("token_id", trt.int32, (1,))
-        position_id = network.add_input("position_id", trt.int32, (1,))
-        attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
+        row_dim = -1 if prefill_rows else 1
+        token_id = network.add_input("token_id", trt.int32, (row_dim,))
+        position_id = network.add_input("position_id", trt.int32, (row_dim,))
+        attention_mask = network.add_input(
+            "attention_mask", trt.float32, (row_dim, -1 if prefill_rows else attention_window)
+        )
+        profile = None
+        if prefill_rows:
+            max_rows = min(prefill_rows, max_cache_length)
+            opt_rows = min(PREFILL_OPT_TOKENS, max_rows)
+            profile = builder.create_optimization_profile()
+            for name in ("token_id", "position_id"):
+                profile.set_shape(name, (1,), (opt_rows,), (max_rows,))
+            profile.set_shape(
+                "attention_mask",
+                (1, max_cache_length + 1),
+                (opt_rows, max_cache_length + opt_rows),
+                (max_rows, max_cache_length + max_rows),
+            )
 
         # DeltaNet state inputs (conv + ssm per DeltaNet layer)
         conv_state_inputs = []
@@ -571,7 +611,26 @@ class _Qwen35MoeModel:
         )
 
         rotary_position = position_id
-        if media_inputs:
+        if media_inputs and prefill_rows:
+            from .vision import add_mrope_prompt_rows
+            offsets = network.add_input("rotary_position_offsets", trt.int32, (-1, 3))
+            for name, size in (("rotary_position_offsets", 3),):
+                profile.set_shape(name, (1, size), (opt_rows, size), (max_rows, size))
+            column = network.add_shuffle(position_id)
+            column.reshape_dims = (-1, 1)
+            coordinates = network.add_elementwise(
+                column.get_output(0), offsets, trt.ElementWiseOperation.SUM).get_output(0)
+            text = config.raw.get("text_config", config.raw)
+            rope = text.get("rope_parameters") or text.get("rope_scaling") or {}
+            cos_half_tensor, sin_half_tensor = add_mrope_prompt_rows(
+                network, cos_half_tensor, sin_half_tensor, coordinates,
+                rope, rotary_embedding_dim // 2, work_np_dtype,
+            )
+            # Row i of the per-row tables belongs to row i: positions relative to the first row.
+            first = network.add_slice(position_id, (0,), (1,), (1,)).get_output(0)
+            rotary_position = network.add_elementwise(
+                position_id, first, trt.ElementWiseOperation.SUB).get_output(0)
+        elif media_inputs:
             from .vision import add_mrope_rows
             offsets = network.add_input("rotary_position_offsets", trt.int32, (3,))
             coordinates = network.add_elementwise(position_id, offsets, trt.ElementWiseOperation.SUM).get_output(0)
@@ -587,10 +646,15 @@ class _Qwen35MoeModel:
         gather = network.add_gather(embedding_table, token_id, 0)
         hidden_state = gather.get_output(0)
         if media_inputs:
-            visual = network.add_input("visual_embedding", work_trt_dtype, (1, hidden))
-            selector = network.add_input("use_visual_embedding", trt.int32, (1, 1))
+            visual = network.add_input("visual_embedding", work_trt_dtype, (row_dim, hidden))
+            selector = network.add_input("use_visual_embedding", trt.int32, (row_dim, 1))
+            if prefill_rows:
+                profile.set_shape("visual_embedding", (1, hidden), (opt_rows, hidden), (max_rows, hidden))
+                profile.set_shape("use_visual_embedding", (1, 1), (opt_rows, 1), (max_rows, 1))
             use_visual = network.add_cast(selector, trt.bool).get_output(0)
             hidden_state = network.add_select(use_visual, visual, hidden_state).get_output(0)
+        if profile is not None:
+            trt_config.add_optimization_profile(profile)
 
         if debug_layer_outputs:
             _mark_debug_output(network, hidden_state, "debug_embed")
@@ -635,6 +699,7 @@ class _Qwen35MoeModel:
                     head_dim=deltanet_head_dim,
                     mlp_size=mlp_size,
                     dtype=layer_np_dtype,
+                    sequence_length=sequence_length,
                 )
                 hidden_state = result["hidden"]
                 present_conv_outputs.append(result["present_conv"])
@@ -666,6 +731,7 @@ class _Qwen35MoeModel:
                     max_cache_length=max_cache_length,
                     mlp_size=mlp_size,
                     dtype=layer_np_dtype,
+                    sequence_length=sequence_length,
                 )
                 hidden_state = result["hidden"]
                 present_k_outputs.append(result["present_k"])
@@ -688,6 +754,15 @@ class _Qwen35MoeModel:
             target_features = combined.get_output(0)
             target_features.name = "target_hidden"
             network.mark_output(target_features)
+
+        if prefill_rows:
+            # Only the last row can affect the next token.
+            last = network.add_elementwise(
+                deltanet_rows.row_count(network, hidden_state),
+                graph_ops.add_constant(network, (1,), np.array([1], dtype=np.int64), dtype=np.int64),
+                trt.ElementWiseOperation.SUB,
+            ).get_output(0)
+            hidden_state = deltanet_rows.dynamic_slice(network, hidden_state, (last, 0), (1, hidden))
 
         # --- Final norm ---
         if hidden_state.dtype != work_trt_dtype:
@@ -754,11 +829,15 @@ class _Qwen35MoeModel:
                 file=sys.stderr,
             )
 
-        plan = builder.build_serialized_network(network, trt_config)
+        try:
+            plan = builder.build_serialized_network(network, trt_config)
+        finally:
+            # The prefill graph's stacked expert copies are needed only while TensorRT builds.
+            weights.pop("_prefill_keep", None)
         if plan is None:
             raise RuntimeError("TensorRT engine build failed")
 
-        return bytes(plan)
+        return memoryview(plan)
 
     def _load_mtp_weights(self, readers, weights, config):
         """Load the actual embedded head without unpacking prepared projections."""
@@ -788,7 +867,7 @@ class _Qwen35MoeModel:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
         verbose: bool = False, media_inputs: bool = False,
-    ) -> bytes:
+    ) -> memoryview:
         """Build the MTP (multi-token-prediction) draft-head TRT engine.
 
         Follows the pinned Qwen3.5-MoE embedded-draft forward pass:
@@ -1006,14 +1085,14 @@ class _Qwen35MoeModel:
         if plan is None:
             raise RuntimeError("TensorRT MTP engine build failed")
 
-        return bytes(plan)
+        return memoryview(plan)
 
 
     def build_engine_multi_token(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, seq_len: int, *, precision: str = "fp32",
         verbose: bool = False, media_inputs: bool = False,
-    ) -> bytes:
+    ) -> memoryview:
         """Build a TRT engine that processes `seq_len` NEW tokens in one call,
         emitting `seq_len` rows of logits -- one prediction per position.
 
@@ -1389,7 +1468,7 @@ class _Qwen35MoeModel:
         if plan is None:
             raise RuntimeError("TensorRT multi-token engine build failed")
 
-        return bytes(plan)
+        return memoryview(plan)
 
 
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
@@ -1464,8 +1543,9 @@ def _add_deltanet_layer(
     head_dim: int,
     mlp_size: int,
     dtype: np.dtype = np.float32,
+    sequence_length: int | None = 1,
 ) -> dict[str, trt.ITensor]:
-    """Add one Gated DeltaNet layer (single-step decode).
+    """Add one Gated DeltaNet layer over one row, or ``S`` rows when ``sequence_length`` is None.
 
     DeltaNet uses delta-rule linear attention with:
       - Conv1d on QKV projection output
@@ -1477,8 +1557,6 @@ def _add_deltanet_layer(
 
     Returns: {hidden, present_conv, present_ssm}
     """
-    qk_dim = num_kv_heads * head_dim  # Q and K dimension before Compact GQA/MQA K/V
-
     # ===== 1. RMSNorm =====
     normed = graph_ops.add_rms_norm(
         network, hidden, hidden_size, weights[f"{prefix}.input_norm"], eps_tensor, dtype=dtype
@@ -1509,6 +1587,149 @@ def _add_deltanet_layer(
     b_raw = graph_ops.add_matmul_rhs_constant(
         network, normed, hidden_size, num_heads, weights[f"{prefix}.deltanet_b_proj"], dtype=dtype
     )
+
+    mixer = _add_deltanet_mixer_rows if sequence_length is None else _add_deltanet_mixer_step
+    mixer_output, present_conv, present_ssm = mixer(
+        network,
+        qkv=qkv,
+        a_raw=a_raw,
+        b_raw=b_raw,
+        conv_state_in=conv_state_in,
+        ssm_state_in=ssm_state_in,
+        weights=weights,
+        prefix=prefix,
+        d_inner=d_inner,
+        d_conv=d_conv,
+        conv_dim=conv_dim,
+        num_heads=num_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+        dtype=dtype,
+    )
+
+    # ===== 10. Gated RMSNorm per-head: weight * norm(output) * silu(z) =====
+    # The reference recurrent kernel returns the attention output in the model
+    # storage dtype before Qwen3_5RMSNormGated casts it back to FP32.
+    recurrent_output = mixer_output
+    rows = 1 if sequence_length is not None else -1
+    head_shape = (num_heads, head_dim) if sequence_length is not None else (-1, num_heads, head_dim)
+    if recurrent_output.dtype != hidden.dtype:
+        recurrent_output = network.add_cast(recurrent_output, hidden.dtype).get_output(0)
+
+    # HF norm operates per head_v_dim: reshape to [num_heads, head_dim], norm, reshape back
+    deltanet_norm_w = weights[f"{prefix}.deltanet_norm"]
+    # Use same eps as HF Qwen3_5RMSNormGated (config.rms_norm_eps = 1e-6)
+    eps_small = graph_ops.add_constant(
+        network, (1, 1), np.array([1e-6], dtype=np.float32), dtype=np.float32
+    )
+
+    # Reshape output and z to [num_heads, head_dim] for per-head norm
+    output_heads = network.add_shuffle(recurrent_output)
+    output_heads.reshape_dims = head_shape
+    norm_input = output_heads.get_output(0)
+    norm_output_dtype = norm_input.dtype
+    if dtype != np.float32:
+        norm_input = network.add_cast(norm_input, trt.float32).get_output(0)
+
+    # Per-head RMSNorm: norm each head independently
+    sq = network.add_elementwise(norm_input, norm_input, trt.ElementWiseOperation.PROD)
+    head_axis = len(head_shape) - 1
+    mean = network.add_reduce(
+        sq.get_output(0), trt.ReduceOperation.AVG, 1 << head_axis, keep_dims=True
+    )
+    if head_axis == 2:
+        eps_small = network.add_shuffle(eps_small)
+        eps_small.reshape_dims = (1, 1, 1)
+        eps_small = eps_small.get_output(0)
+    denom_in = network.add_elementwise(mean.get_output(0), eps_small, trt.ElementWiseOperation.SUM)
+    sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
+    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
+    normalized = network.add_elementwise(
+        norm_input, recip.get_output(0), trt.ElementWiseOperation.PROD
+    )
+
+    # Reshape back and apply weight
+    norm_flat = network.add_shuffle(normalized.get_output(0))
+    norm_flat.reshape_dims = (rows, d_inner)
+    gamma_t = graph_ops.add_constant(network, (1, d_inner), deltanet_norm_w, dtype=np.float32)
+    normed_output = network.add_elementwise(
+        norm_flat.get_output(0), gamma_t, trt.ElementWiseOperation.PROD
+    )
+    normed_output_tensor = normed_output.get_output(0)
+    if normed_output_tensor.dtype != norm_output_dtype:
+        normed_output_tensor = network.add_cast(normed_output_tensor, norm_output_dtype).get_output(
+            0
+        )
+
+    # Gate: multiply by silu(z)
+    z_activated = graph_ops.add_activation(network, z, "silu", dtype=dtype)
+    gated = network.add_elementwise(
+        normed_output_tensor, z_activated, trt.ElementWiseOperation.PROD
+    )
+
+    # ===== 11. Output projection + residual =====
+    out = graph_ops.add_matmul_rhs_constant(
+        network,
+        gated.get_output(0),
+        d_inner,
+        hidden_size,
+        weights[f"{prefix}.deltanet_out_proj"],
+        dtype=dtype,
+    )
+
+    residual = network.add_elementwise(hidden, out, trt.ElementWiseOperation.SUM)
+    hidden_after_attn = residual.get_output(0)
+
+    # ===== 12. Post-attention norm + SwiGLU MLP + residual =====
+    post_normed = graph_ops.add_rms_norm(
+        network,
+        hidden_after_attn,
+        hidden_size,
+        weights[f"{prefix}.post_attn_norm"],
+        eps_tensor,
+        dtype=dtype,
+    )
+
+    mlp_out = graph_blocks.add_sparse_mlp(
+        network,
+        post_normed,
+        weights=weights,
+        prefix=prefix,
+        hidden_size=hidden_size,
+        mlp_size=mlp_size,
+        dtype=dtype,
+        rows=sequence_length is None,
+    )
+
+    mlp_residual = network.add_elementwise(hidden_after_attn, mlp_out, trt.ElementWiseOperation.SUM)
+
+    return {
+        "hidden": mlp_residual.get_output(0),
+        "present_conv": present_conv,
+        "present_ssm": present_ssm,
+    }
+
+
+def _add_deltanet_mixer_step(
+    network: trt.INetworkDefinition,
+    *,
+    qkv: trt.ITensor,
+    a_raw: trt.ITensor,
+    b_raw: trt.ITensor,
+    conv_state_in: trt.ITensor,
+    ssm_state_in: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    d_inner: int,
+    d_conv: int,
+    conv_dim: int,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    dtype: np.dtype,
+) -> tuple[trt.ITensor, trt.ITensor, trt.ITensor]:
+    """Conv step and delta-rule update for one token: ``(output [1, d_inner], conv, ssm)``."""
+    qk_dim = num_kv_heads * head_dim  # Q and K dimension before Compact GQA/MQA K/V
 
     # ===== 3. Conv1d step on QKV =====
     # conv_state_in: [conv_dim, d_conv]
@@ -1720,97 +1941,132 @@ def _add_deltanet_layer(
     output_flat = network.add_shuffle(output_3d.get_output(0))
     output_flat.reshape_dims = (1, d_inner)
 
-    # ===== 10. Gated RMSNorm per-head: weight * norm(output) * silu(z) =====
-    # The reference recurrent kernel returns the attention output in the model
-    # storage dtype before Qwen3_5RMSNormGated casts it back to FP32.
-    recurrent_output = output_flat.get_output(0)
-    if recurrent_output.dtype != hidden.dtype:
-        recurrent_output = network.add_cast(recurrent_output, hidden.dtype).get_output(0)
+    return output_flat.get_output(0), present_conv, present_ssm
 
-    # HF norm operates per head_v_dim: reshape to [num_heads, head_dim], norm, reshape back
-    deltanet_norm_w = weights[f"{prefix}.deltanet_norm"]
-    # Use same eps as HF Qwen3_5RMSNormGated (config.rms_norm_eps = 1e-6)
-    eps_small = graph_ops.add_constant(
-        network, (1, 1), np.array([1e-6], dtype=np.float32), dtype=np.float32
+
+def _add_deltanet_mixer_rows(
+    network: trt.INetworkDefinition,
+    *,
+    qkv: trt.ITensor,
+    a_raw: trt.ITensor,
+    b_raw: trt.ITensor,
+    conv_state_in: trt.ITensor,
+    ssm_state_in: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    d_inner: int,
+    d_conv: int,
+    conv_dim: int,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    dtype: np.dtype,
+) -> tuple[trt.ITensor, trt.ITensor, trt.ITensor]:
+    """Conv and delta rule over ``S`` rows in one launch: ``(output [S, d_inner], conv, ssm)``.
+
+    Same arithmetic as :func:`_add_deltanet_mixer_step` applied token by token;
+    the recurrence runs as one chunk (see :mod:`.deltanet_rows`).
+    """
+    qk_dim = num_kv_heads * head_dim
+
+    def shuffle(tensor, reshape=None, transpose=None):
+        layer = network.add_shuffle(tensor)
+        if transpose is not None:
+            layer.first_transpose = transpose
+        if reshape is not None:
+            layer.reshape_dims = reshape
+        return layer.get_output(0)
+
+    def fp32(tensor):
+        return tensor if tensor.dtype == trt.float32 else network.add_cast(tensor, trt.float32).get_output(0)
+
+    conv_w = graph_ops.add_constant(
+        network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"], dtype=dtype
     )
-
-    # Reshape output and z to [num_heads, head_dim] for per-head norm
-    output_heads = network.add_shuffle(recurrent_output)
-    output_heads.reshape_dims = (num_heads, head_dim)
-    norm_input = output_heads.get_output(0)
-    norm_output_dtype = norm_input.dtype
-    if dtype != np.float32:
-        norm_input = network.add_cast(norm_input, trt.float32).get_output(0)
-
-    # Per-head RMSNorm: norm each head independently
-    sq = network.add_elementwise(norm_input, norm_input, trt.ElementWiseOperation.PROD)
-    mean = network.add_reduce(sq.get_output(0), trt.ReduceOperation.AVG, 1 << 1, keep_dims=True)
-    denom_in = network.add_elementwise(mean.get_output(0), eps_small, trt.ElementWiseOperation.SUM)
-    sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
-    recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
-    normalized = network.add_elementwise(
-        norm_input, recip.get_output(0), trt.ElementWiseOperation.PROD
+    conv_columns, present_conv = deltanet_rows.add_short_conv_rows(
+        network,
+        columns=shuffle(qkv, transpose=(1, 0)),
+        conv_state=conv_state_in,
+        weight=conv_w,
+        channels=conv_dim,
+        kernel=d_conv,
     )
-
-    # Reshape back and apply weight
-    norm_flat = network.add_shuffle(normalized.get_output(0))
-    norm_flat.reshape_dims = (1, d_inner)
-    gamma_t = graph_ops.add_constant(network, (1, d_inner), deltanet_norm_w, dtype=np.float32)
-    normed_output = network.add_elementwise(
-        norm_flat.get_output(0), gamma_t, trt.ElementWiseOperation.PROD
+    conv_out = graph_ops.add_bias_sum(
+        network, shuffle(conv_columns, transpose=(1, 0)), conv_dim,
+        weights[f"{prefix}.conv1d_bias"], dtype=dtype,
     )
-    normed_output_tensor = normed_output.get_output(0)
-    if normed_output_tensor.dtype != norm_output_dtype:
-        normed_output_tensor = network.add_cast(normed_output_tensor, norm_output_dtype).get_output(
-            0
+    activated = graph_ops.add_activation(network, conv_out, "silu", dtype=dtype)
+    rows = deltanet_rows.row_count(network, activated)
+
+    def columns(offset, width):
+        return deltanet_rows.dynamic_slice(network, activated, (0, offset), (rows, width))
+
+    q_normed = graph_ops.add_l2_norm(
+        network, shuffle(columns(0, qk_dim), reshape=(-1, num_kv_heads, head_dim)), 2,
+        eps=1e-6, dtype=dtype,
+    )
+    k_normed = graph_ops.add_l2_norm(
+        network, shuffle(columns(qk_dim, qk_dim), reshape=(-1, num_kv_heads, head_dim)), 2,
+        eps=1e-6, dtype=dtype,
+    )
+    heads_per_group = num_heads // num_kv_heads
+
+    def expand_heads(tensor):
+        # [S, kv_heads, D] -> [S, heads, D], head = kv_head * heads_per_group + g.
+        if heads_per_group == 1:
+            return tensor
+        tile = graph_ops.add_constant(
+            network, (1, 1, heads_per_group, 1),
+            np.ones((1, 1, heads_per_group, 1), dtype=dtype), dtype=dtype,
         )
+        tiled = network.add_elementwise(
+            shuffle(tensor, reshape=(-1, num_kv_heads, 1, head_dim)), tile,
+            trt.ElementWiseOperation.PROD,
+        ).get_output(0)
+        return shuffle(tiled, reshape=(-1, num_heads, head_dim))
 
-    # Gate: multiply by silu(z)
-    z_activated = graph_ops.add_activation(network, z, "silu", dtype=dtype)
-    gated = network.add_elementwise(
-        normed_output_tensor, z_activated, trt.ElementWiseOperation.PROD
+    def head_major(tensor):
+        return shuffle(fp32(tensor), transpose=(1, 0, 2))  # [H, S, D]
+
+    q_scale = graph_ops.add_constant(
+        network, (1, 1, 1), np.array([[[1.0 / np.sqrt(head_dim)]]], dtype=np.float32),
+        dtype=np.float32,
     )
+    q_heads = network.add_elementwise(
+        head_major(expand_heads(q_normed)), q_scale, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    k_heads = head_major(expand_heads(k_normed))
+    v_heads = head_major(shuffle(columns(2 * qk_dim, d_inner), reshape=(-1, num_heads, head_dim)))
 
-    # ===== 11. Output projection + residual =====
-    out = graph_ops.add_matmul_rhs_constant(
+    # Decay g = A * softplus(a + dt_bias) and beta = sigmoid(b), FP32, [H, S].
+    a_const = graph_ops.add_constant(network, (1, num_heads), weights[f"{prefix}.A"], dtype=np.float32)
+    dt_bias = graph_ops.add_constant(
+        network, (1, num_heads), weights[f"{prefix}.dt_bias"], dtype=np.float32
+    )
+    biased = network.add_elementwise(fp32(a_raw), dt_bias, trt.ElementWiseOperation.SUM).get_output(0)
+    one = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=np.float32), dtype=np.float32)
+    softplus = network.add_unary(
+        network.add_elementwise(
+            network.add_unary(biased, trt.UnaryOperation.EXP).get_output(0), one,
+            trt.ElementWiseOperation.SUM,
+        ).get_output(0),
+        trt.UnaryOperation.LOG,
+    ).get_output(0)
+    decay = network.add_elementwise(a_const, softplus, trt.ElementWiseOperation.PROD).get_output(0)
+    beta = fp32(network.add_activation(b_raw, trt.ActivationType.SIGMOID).get_output(0))
+
+    outputs, present_ssm = deltanet_rows.add_chunked_delta_rule(
         network,
-        gated.get_output(0),
-        d_inner,
-        hidden_size,
-        weights[f"{prefix}.deltanet_out_proj"],
-        dtype=dtype,
+        q=q_heads,
+        k=k_heads,
+        v=v_heads,
+        g=shuffle(decay, transpose=(1, 0)),
+        beta=shuffle(beta, transpose=(1, 0)),
+        state=fp32(ssm_state_in),
+        num_heads=num_heads,
+        head_dim=head_dim,
     )
-
-    residual = network.add_elementwise(hidden, out, trt.ElementWiseOperation.SUM)
-    hidden_after_attn = residual.get_output(0)
-
-    # ===== 12. Post-attention norm + SwiGLU MLP + residual =====
-    post_normed = graph_ops.add_rms_norm(
-        network,
-        hidden_after_attn,
-        hidden_size,
-        weights[f"{prefix}.post_attn_norm"],
-        eps_tensor,
-        dtype=dtype,
-    )
-
-    mlp_out = graph_blocks.add_sparse_mlp(
-        network,
-        post_normed,
-        weights=weights,
-        prefix=prefix,
-        hidden_size=hidden_size,
-        mlp_size=mlp_size,
-        dtype=dtype,
-    )
-
-    mlp_residual = network.add_elementwise(hidden_after_attn, mlp_out, trt.ElementWiseOperation.SUM)
-
-    return {
-        "hidden": mlp_residual.get_output(0),
-        "present_conv": present_conv,
-        "present_ssm": present_ssm,
-    }
+    return shuffle(outputs, transpose=(1, 0, 2), reshape=(-1, d_inner)), present_conv, present_ssm
 
 
 def _add_grouped_attention(network, q, k, v, mask, num_heads, kv_heads, head_dim, window):
@@ -1851,6 +2107,53 @@ def _add_grouped_attention(network, q, k, v, mask, num_heads, kv_heads, head_dim
     return reshape(cast(context, work_dtype), (1, num_heads * head_dim))
 
 
+def _add_grouped_attention_rows(network, q, k, v, mask, num_heads, kv_heads, head_dim):
+    """Grouped attention of ``S`` query rows over the cache plus their own rows (prefill).
+
+    Same arithmetic as :func:`_add_grouped_attention`: compute-dtype Q pre-scale, FP32 scores and
+    softmax, FP32 context. ``mask`` is ``[S, cache + S]`` and holds the causal prefix of every row.
+    """
+    def reshape(tensor, shape):
+        layer = network.add_shuffle(tensor)
+        layer.reshape_dims = shape
+        return layer.get_output(0)
+
+    def transpose(tensor, order):
+        layer = network.add_shuffle(tensor)
+        layer.first_transpose = order
+        return layer.get_output(0)
+
+    def cast(tensor, dtype):
+        return tensor if tensor.dtype == dtype else network.add_cast(tensor, dtype).get_output(0)
+
+    work_dtype = q.dtype
+    groups = num_heads // kv_heads
+    scale = graph_ops.add_constant(network, (1, 1, 1), np.array([[[head_dim ** -0.5]]], np.float32))
+    queries = network.add_elementwise(reshape(q, (-1, num_heads, head_dim)), cast(scale, work_dtype),
+                                      trt.ElementWiseOperation.PROD).get_output(0)
+    # [S, H, D] -> [kv, g, S, D]; keys/values [W, kv, D] -> [kv, 1, W, D].
+    queries = transpose(reshape(queries, (-1, kv_heads, groups, head_dim)), (1, 2, 0, 3))
+    keys = transpose(reshape(k, (-1, kv_heads, 1, head_dim)), (1, 2, 0, 3))
+    values = transpose(reshape(v, (-1, kv_heads, 1, head_dim)), (1, 2, 0, 3))
+    scores = network.add_matrix_multiply(cast(queries, trt.float32), trt.MatrixOperation.NONE,
+                                         cast(keys, trt.float32), trt.MatrixOperation.TRANSPOSE).get_output(0)
+    # [S, W] -> [1, 1, S, W]: both sizes are runtime dimensions.
+    mask_shape = network.add_concatenation([
+        graph_ops.add_constant(network, (2,), np.ones(2, np.int64), dtype=np.int64),
+        network.add_shape(mask).get_output(0),
+    ]).get_output(0)
+    mask_4d = network.add_shuffle(cast(mask, trt.float32))
+    mask_4d.set_input(1, mask_shape)
+    scores = network.add_elementwise(scores, mask_4d.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)
+    softmax = network.add_softmax(scores)
+    softmax.axes = 1 << 3
+    probabilities = cast(softmax.get_output(0), work_dtype)
+    context = network.add_matrix_multiply(cast(probabilities, trt.float32), trt.MatrixOperation.NONE,
+                                          cast(values, trt.float32), trt.MatrixOperation.NONE).get_output(0)
+    # [kv, g, S, D] -> [S, kv, g, D] -> [S, H * D]
+    return reshape(transpose(cast(context, work_dtype), (2, 0, 1, 3)), (-1, num_heads * head_dim))
+
+
 def _add_full_attention_layer(
     *,
     network: trt.INetworkDefinition,
@@ -1874,6 +2177,7 @@ def _add_full_attention_layer(
     max_cache_length: int,
     mlp_size: int,
     dtype: np.dtype = np.float32,
+    sequence_length: int | None = 1,
 ) -> dict[str, trt.ITensor]:
     """Add one full self-attention layer with output gating.
 
@@ -1883,9 +2187,13 @@ def _add_full_attention_layer(
       - Output gating: context * sigmoid(gate) BEFORE o_proj
       - SwiGLU MLP after attention
 
+    ``sequence_length`` None runs ``S`` runtime rows over the cache plus their own causal prefix
+    (prefill); the attention mask is then ``[S, cache + S]``.
+
     Returns: {hidden, present_k, present_v}
     """
     attention_window = max_cache_length + 1
+    rows = -1 if sequence_length is None else sequence_length
 
     # Pre-attention norm
     normed = graph_blocks.apply_norm(
@@ -1914,12 +2222,14 @@ def _add_full_attention_layer(
     q_norm = weights.get(f"{prefix}.q_norm")
     if q_norm is not None:
         q = graph_ops.add_rms_norm_per_head(
-            network, q, num_heads, head_dim, q_norm, eps_tensor, dtype=dtype
+            network, q, num_heads, head_dim, q_norm, eps_tensor, dtype=dtype,
+            sequence_length=sequence_length,
         )
     k_norm = weights.get(f"{prefix}.k_norm")
     if k_norm is not None:
         k = graph_ops.add_rms_norm_per_head(
-            network, k, num_kv_heads, head_dim, k_norm, eps_tensor, dtype=dtype
+            network, k, num_kv_heads, head_dim, k_norm, eps_tensor, dtype=dtype,
+            sequence_length=sequence_length,
         )
 
     # Native RoPE
@@ -1932,6 +2242,7 @@ def _add_full_attention_layer(
         sin_half_tensor,
         position_id,
         rotary_embedding_dim,
+        sequence_length=sequence_length,
     )
     k = graph_ops.add_apply_rope_native(
         network,
@@ -1942,6 +2253,7 @@ def _add_full_attention_layer(
         sin_half_tensor,
         position_id,
         rotary_embedding_dim,
+        sequence_length=sequence_length,
     )
 
     # Q stays in compute precision for one-token decoding. K/V are stored
@@ -1955,9 +2267,9 @@ def _add_full_attention_layer(
 
     # Reshape K, V for concatenation
     k_reshape = network.add_shuffle(k)
-    k_reshape.reshape_dims = (1, kv_attention_size)
+    k_reshape.reshape_dims = (rows, kv_attention_size)
     v_reshape = network.add_shuffle(v)
-    v_reshape.reshape_dims = (1, kv_attention_size)
+    v_reshape.reshape_dims = (rows, kv_attention_size)
 
     # Concatenate with cache
     all_k = network.add_concatenation([cache_k, k_reshape.get_output(0)])
@@ -1965,11 +2277,17 @@ def _add_full_attention_layer(
     all_v = network.add_concatenation([cache_v, v_reshape.get_output(0)])
     all_v.axis = 0
 
-    mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
-    context_flat = _add_grouped_attention(
-        network, q, all_k.get_output(0), all_v.get_output(0), mask_4d,
-        num_heads, num_kv_heads, head_dim, attention_window,
-    )
+    if sequence_length is None:
+        context_flat = _add_grouped_attention_rows(
+            network, q, all_k.get_output(0), all_v.get_output(0), attention_mask,
+            num_heads, num_kv_heads, head_dim,
+        )
+    else:
+        mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
+        context_flat = _add_grouped_attention(
+            network, q, all_k.get_output(0), all_v.get_output(0), mask_4d,
+            num_heads, num_kv_heads, head_dim, attention_window,
+        )
 
     # Gate: applied BEFORE o_proj (HF order)
     gate_attn_w = weights.get(f"{prefix}.w_gate_attn")
@@ -2010,6 +2328,7 @@ def _add_full_attention_layer(
         hidden_size=hidden_size,
         mlp_size=mlp_size,
         dtype=dtype,
+        rows=sequence_length is None,
     )
 
     mlp_residual = network.add_elementwise(hidden_after_attn, mlp_out, trt.ElementWiseOperation.SUM)
@@ -2057,6 +2376,72 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _Qwen35MoeModel
     return runtime
 
 
+
+
+# Share of GPU memory that the decode and prefill engines' weights may take together.
+_TWO_ENGINE_MEMORY_FRACTION = 0.8
+
+
+def _two_engines_fit(weight_bytes: int, gpu_bytes: int | None) -> bool:
+    """Whether the prefill engine, which carries its own copy of every weight, fits beside the decode engine.
+
+    Without it, prompts run through the decode engine one token at a time (the bundle stays loadable). An
+    unknown GPU capacity keeps that single-engine layout.
+    """
+    if gpu_bytes is None:
+        print("Skipping the prefill engine: the GPU memory could not be queried", file=sys.stderr)
+        return False
+    if 2 * weight_bytes <= gpu_bytes * _TWO_ENGINE_MEMORY_FRACTION:
+        return True
+    print(f"Skipping the prefill engine: the decode and prefill engines need about {2 * weight_bytes / 1024**3:.0f} "
+          f"GiB of weights and the GPU has {gpu_bytes / 1024**3:.0f} GiB; prompts run through the decode engine",
+          file=sys.stderr)
+    return False
+
+
+def _checkpoint_bytes(readers) -> int:
+    """Size of the shards the loader mapped: what each engine carries, packed experts included."""
+    return sum(len(reader.mapping) for reader in readers)
+
+
+def _wants_prefill_engine(weights, readers, *, tensor_parallel_size: int, require_mtp: bool,
+                          has_draft: bool) -> bool:
+    """Whether the bundle adds the chunked prefill engine: single-GPU GPTQ without MTP or a draft, if it fits."""
+    return (not require_mtp and not has_draft and tensor_parallel_size == 1
+            and _dense_prefill_experts(weights)
+            and _two_engines_fit(_checkpoint_bytes(readers), _gpu_memory_bytes()))
+
+
+def _stage_prefill_engine(writer, build) -> bool:
+    """Stage ``prefill.plan`` from ``build()``. The engine is optional: if its build fails, the bundle keeps
+    the single-engine layout and prompts run through the decode engine."""
+    try:
+        plan = build()
+    except (RuntimeError, MemoryError) as error:
+        print(f"Skipping the prefill engine: its build failed ({error}); prompts run through the decode engine",
+              file=sys.stderr)
+        return False
+    writer.add_bytes("prefill.plan", plan)
+    return True
+
+
+def _dense_prefill_experts(weights) -> bool:
+    """Whether every MoE layer's routed experts can run as dense W4A16 GEMMs over prefill rows (GPTQ)."""
+    from .moe import MoEWeights, dense_rows_supported
+
+    layers = [value for value in weights.values() if isinstance(value, MoEWeights)]
+    return bool(layers) and all(dense_rows_supported(layer) for layer in layers)
+
+
+def _gpu_memory_bytes() -> int | None:
+    """Total memory of the current CUDA device, or None when no device can be queried."""
+    try:
+        import torch
+    except ImportError:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    return int(torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory)
 
 
 def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mtp: bool = False,
@@ -2141,6 +2526,9 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
                                  compact_fp16=precision == "fp16")
     if require_mtp:
         model._load_mtp_weights(readers, weights, config)
+    # Single-GPU GPTQ bundles add an engine that prefills the prompt (text and media rows) in chunks.
+    split = _wants_prefill_engine(weights, readers, tensor_parallel_size=int(request.tensor_parallel_size or 1),
+                                  require_mtp=require_mtp, has_draft=draft_config is not None)
     plan = model.build_engine(
         config,
         weights,
@@ -2154,6 +2542,16 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
     )
 
     writer.add_bytes("engine.plan", plan)
+    del plan  # The section is staged; do not retain a full plan during the next build.
+    if split:
+        try:
+            split = _stage_prefill_engine(writer, lambda: model.build_engine(
+                config, weights, max_sequence_length, precision=precision,
+                verbose=bool(request.verbose), media_inputs=visual, prefill_rows=PREFILL_MAX_TOKENS,
+            ))
+        finally:
+            # Also after a failed graph construction: the stacked expert copies must not outlive this build.
+            weights.pop("_prefill_keep", None)
     if require_mtp:
         # Preserve the admitted three draft steps plus one target anchor.
         writer.add_bytes("mtp_engine.plan", model.build_mtp_engine(
@@ -2187,7 +2585,7 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
             "feature_layers": list(draft_config.feature_layers),
             "draft_rows": draft_config.block_size,
             "mask_token_id": draft_config.mask_token,
-            "draft_top_k": 4 if draft_variant == "dflash_ddtree" else 1,
+            "draft_top_k": {"jetspec": 7, "dflash_ddtree": 4, "dflash": 1}[draft_variant],
             "verify_size": 16,
         })
     writer.add_json(
@@ -2198,7 +2596,7 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
             model,
             precision=precision,
             max_cache_length=max_sequence_length,
-            decoder_engine_layout="single",
+            decoder_engine_layout="split" if split else "single",
             **({"has_mtp": True, "mtp_num_draft_tokens": 3} if require_mtp else {}),
             **({"kv_cache_quantization": "fp8"} if weights.get("_fp8_kv_cache", False) else {}),
         ),

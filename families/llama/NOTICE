@@ -1,0 +1,13 @@
+MiniCPM5-1B configuration fixture
+
+families/llama/tests/fixtures/minicpm5-1b-config.json is copied from the
+OpenBMB MiniCPM5-1B checkpoint configuration at revision
+87179e5c1f455ef22e6223592d2d61351b525bfc.
+
+Source:
+https://huggingface.co/openbmb/MiniCPM5-1B/blob/87179e5c1f455ef22e6223592d2d61351b525bfc/config.json
+
+The publisher declares Apache License 2.0 in the model card at the same revision:
+https://huggingface.co/openbmb/MiniCPM5-1B/blob/87179e5c1f455ef22e6223592d2d61351b525bfc/README.md
+
+The Apache License 2.0 text is provided in the repository LICENSE file.

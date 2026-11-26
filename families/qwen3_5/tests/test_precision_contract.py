@@ -208,6 +208,7 @@ def test_edge_cli_failure_preserves_existing_bundle(tmp_path, monkeypatch, failu
 @pytest.mark.parametrize("mtp_shape,quantized,visual", [
     ((1024, 24, 3584, 8, 2), False, False), ((2048, 24, 6144, 8, 2), False, False),
     ((2560, 32, 9216, 16, 4), False, False), ((4096, 32, 12288, 16, 4), False, False),
+    ((5120, 64, 17408, 24, 4), False, False),
     ((2560, 32, 9216, 16, 4), True, False),
     ((2560, 32, 9216, 16, 4), False, True), ((2560, 32, 9216, 16, 4), True, True),
     ((4096, 32, 12288, 16, 4), False, True),
@@ -315,6 +316,18 @@ def test_edge_pair_requires_draft_and_rechecks_local_inputs(
                 variant, (NamedCheckpoint("draft", draft),),
             ))
         assert paired_calls == ["dflash", "dflash_ddtree"]
+        # The release-prepared NVFP4 draft moves only the block width to the root.
+        raw_draft = json.loads((draft / "config.json").read_text())
+        raw_draft["block_size"] = raw_draft["dflash_config"].pop("block_size")
+        (draft / "config.json").write_text(json.dumps(raw_draft))
+        execution = BuildExecutionInputs("dflash_ddtree", (NamedCheckpoint("draft", draft),))
+        build_paired(request, None, execution)
+        assert paired_calls[-3:] == ["dflash", "dflash_ddtree", "dflash_ddtree"]
+        raw_draft["dflash_config"]["block_size"] = 8
+        (draft / "config.json").write_text(json.dumps(raw_draft))
+        with pytest.raises(ValueError, match="block-16"):
+            build_paired(request, None, execution)
+
 
 
 @pytest.mark.parametrize("sm", [80, 120])
@@ -478,6 +491,28 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
         staged = tmp_path / "permission-probe"
         staged.mkdir()
 
+        # ONNX builds the two checkpoint roles separately but verifies the same
+        # 16-token block. The compiler must come from the selected SDK.
+        compiler = prefix / "bin/llm_build"
+        compiler.parent.mkdir(exist_ok=True)
+        compiler.touch()
+        sdk = {"onnx": True, "_prefix": prefix, "onnx_builder": "bin/llm_build"}
+        commands = builder._onnx_dflash_commands(
+            sdk, "python", source, packed, staged / "engine", 1024, 2048, False
+        )
+        base_export, base_build, draft_export, draft_build = commands
+        assert "--dflash-base" in base_export and "--dflash-draft" in draft_export
+        assert all(argv[argv.index("--dflash-draft-dir") + 1] == str(packed)
+                   for argv in (base_export, draft_export))
+        assert base_build[0] == draft_build[0] == str(compiler)
+        assert base_build[-3:] == ["--spec-base", "--max-spec-verify-tokens", "16"]
+        assert draft_build[-3:] == ["--spec-draft", "--max-spec-draft-tokens", "16"]
+        with pytest.raises(ValueError, match="SDK onnx_builder path"):
+            builder._onnx_dflash_commands(
+                {**sdk, "onnx_builder": "../llm_build"}, "python", source, packed,
+                staged / "engine", 1024, 2048, False,
+            )
+
         class StagingChecked(Exception):
             pass
 
@@ -486,6 +521,11 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
         expected_visual = False
         expected_dflash = False
         expected_tree = False
+
+        legacy_sdk = {
+            "version": "0.11.0", "revision": "95515c2f87fba8982db5a519f9022277667b3cc9",
+            "python": "python", "plugin": "plugin",
+        }
 
         def check_staging(argv, **kwargs):
             assert argv[argv.index("--dense") + 1] == expected_dense
@@ -511,7 +551,7 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
             raise StagingChecked
 
         with monkeypatch.context() as patch:
-            patch.setattr(builder, "installed_package", lambda _: {"python": "python", "plugin": "plugin"})
+            patch.setattr(builder, "installed_package", lambda _: legacy_sdk)
             patch.setattr(builder, "builder_python", lambda *_: "python")
             patch.setattr(builder.subprocess, "run", check_staging)
             with pytest.raises(StagingChecked):
@@ -545,7 +585,7 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
                         staged, tmp_path / f"mtp-visual-{quantization}.log", spec_type="mtp",
                     )
         with monkeypatch.context() as patch:
-            patch.setattr(builder, "installed_package", lambda _: {"python": "python", "plugin": "plugin"})
+            patch.setattr(builder, "installed_package", lambda _: legacy_sdk)
             patch.setattr(builder, "builder_python", lambda *_: "python")
             patch.setattr(builder.subprocess, "run", check_staging)
             expected_mtp = expected_visual = False
@@ -697,7 +737,7 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
         # An installed wheel supplies Python tooling, never the native C++ SDK.
         from types import SimpleNamespace
 
-        package = {"python": "/sdk/private/python"}
+        package = {"version": "0.11.0", "python": "/sdk/private/python"}
         platform = {"tensorrt_version": "11.1.0.106"}
         responses = iter([
             '["0.11.0", "11.1.0.106"]',

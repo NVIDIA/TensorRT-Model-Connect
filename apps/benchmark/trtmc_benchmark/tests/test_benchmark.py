@@ -40,6 +40,8 @@ def test_catalog_reads_family_owned_manifests_without_a_registry() -> None:
     distilgpt2 = next(entry for entry in entries if entry.name == "distilgpt2")
     assert distilgpt2.operation == "generate"
     assert distilgpt2.status == "ready"
+    # Every family manifest validates against its family's build declaration.
+    assert [(entry.name, entry.reason) for entry in entries if entry.status == "invalid"] == []
 
 
 def test_case_resolves_current_task_and_manifest_fields(tmp_path: Path) -> None:

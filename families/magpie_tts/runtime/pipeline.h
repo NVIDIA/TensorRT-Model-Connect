@@ -50,6 +50,18 @@ class MagpiePipeline final : public IAudioGeneration, public IStreamingAudioGene
                                      AudioChunkCallback audio_callback,
                                      int32_t chunk_frames) override;
 
+    // Optional second execution context of the decoder plan whose profile
+    // accepts the whole baked speaker context in one call. Without it, or when
+    // the context is longer than the profile allows, the context is prefilled
+    // one frame at a time with the step decoder.
+    void set_context_prefill_decoder(std::unique_ptr<ITrtModule> prefill_decoder);
+
+    // Optional plan that maps the encoder output to the per-layer cross_k /
+    // cross_v rows of a decoder plan built with projected cross K/V inputs.
+    // It runs once per request into the cross_k/cross_v buffers. Without it the
+    // decoder binds the raw encoder output and projects it in every step.
+    void set_cross_kv_projector(std::unique_ptr<ITrtModule> cross_kv_projector);
+
   private:
     struct DecoderLoopState {
         int32_t hidden{0};
@@ -106,6 +118,9 @@ class MagpiePipeline final : public IAudioGeneration, public IStreamingAudioGene
     void bind_cross_kv();
     void compute_cross_kv_uncond();
     void bind_cross_kv_uncond();
+    void bind_cross_inputs(ITrtModule& module, bool unconditional);
+    void project_cross_kv(void* memory, std::vector<MagpieCudaBuffer>& cross_k,
+                          std::vector<MagpieCudaBuffer>& cross_v);
 
     DecoderLoopState init_decoder_state() const;
     int32_t prefill_context(DecoderLoopState& state);
@@ -126,19 +141,11 @@ class MagpiePipeline final : public IAudioGeneration, public IStreamingAudioGene
     std::vector<int32_t> run_gpu_greedy_loop(DecoderLoopState& state, int32_t max_frames);
     bool gpu_greedy_frame_step(DecoderLoopState& state, int32_t frame,
                                MagpieCudaBuffer& d_eos_flag);
-    void gpu_greedy_update_text_consumed(DecoderLoopState& state, int32_t frame);
 
     // GPU sampling loop (top-k temperature sampling on device)
     std::vector<int32_t> run_gpu_sampling_loop(DecoderLoopState& state, int32_t max_frames);
     bool gpu_sampling_frame_step(DecoderLoopState& state, int32_t frame,
                                  MagpieCudaBuffer& d_eos_flag, std::vector<int32_t>& h_codes);
-
-    // Unified GPU stop checking
-    bool gpu_check_stop_conditions(DecoderLoopState& state, int32_t frame,
-                                   MagpieCudaBuffer& d_eos_flag, int32_t& h_eos_flag,
-                                   int32_t& gen_frames_actual);
-    // GPU-side text completion update
-    void gpu_update_text_completion(DecoderLoopState& state, int32_t frame);
 
     // CFG passes
     bool run_cfg_uncond_pass_gpu(DecoderLoopState& state, int32_t frame);
@@ -155,7 +162,9 @@ class MagpiePipeline final : public IAudioGeneration, public IStreamingAudioGene
     void construct_attention_prior(std::vector<float>& prior, int32_t best_pos, int32_t text_len);
     void upload_attention_prior();
 
-    bool prefill_context_sequential(DecoderLoopState& state, int32_t ctx_frames);
+    bool prefill_context_batched(DecoderLoopState& state, int32_t ctx_frames);
+    bool prefill_context_sequential(DecoderLoopState& state, int32_t first_frame,
+                                    int32_t ctx_frames);
 
     // Constructor helpers
     void upload_embeddings_to_gpu();
@@ -177,6 +186,8 @@ class MagpiePipeline final : public IAudioGeneration, public IStreamingAudioGene
     std::unique_ptr<ITrtModule> decoder_;
     std::unique_ptr<MagpieInferenceState> decoder_state_;
     std::unique_ptr<ITrtModule> codec_;
+    std::unique_ptr<ITrtModule> prefill_decoder_;
+    std::unique_ptr<ITrtModule> cross_kv_projector_;
 
     std::unique_ptr<MagpieInferenceState> decoder_state_uncond_;
 

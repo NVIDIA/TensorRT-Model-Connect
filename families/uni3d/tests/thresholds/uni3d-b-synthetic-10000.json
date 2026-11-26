@@ -1,0 +1,5 @@
+{
+  "threshold_overrides": {
+    "min_cosine": 0.9999
+  }
+}

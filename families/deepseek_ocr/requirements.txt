@@ -6,7 +6,7 @@ Pillow==13.0.0
 addict==2.4.0
 easydict==1.13
 einops==0.8.1
-scipy
+scipy==1.18.1
 transformers==4.46.3
 # Imported by the family tests (torch, numpy and TensorRT come from the base image).
 ml_dtypes==0.6.0

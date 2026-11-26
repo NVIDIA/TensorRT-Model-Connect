@@ -47,4 +47,17 @@ class CudaBuffer final {
     cudaError_t mStatus{cudaSuccess};
 };
 
+/// Let stream-ordered allocations (cudaMallocAsync, which TensorRT's default allocator uses) on an
+/// integrated GPU reach the device's whole memory.
+///
+/// A memory pool created with maxSize 0, the default pool included, holds about a third of the
+/// memory on Jetson AGX Thor (40.5 of 122.8 GiB), while cudaMalloc can still use the rest: two
+/// engines of 27 and 29 GiB do not deserialize in one process. On an integrated device whose
+/// current pool is still the default one, this makes a pool with maxSize = the device memory the
+/// current pool; the pool lives until the process exits. Thread-safe and idempotent; a device
+/// that is not integrated, or already has another current pool, is left alone.
+/// @param device CUDA device ordinal.
+/// @return true when the device's current pool was replaced by this call.
+bool use_full_size_mem_pool(int device);
+
 } // namespace trtmc

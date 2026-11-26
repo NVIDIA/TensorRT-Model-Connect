@@ -4,7 +4,7 @@
   "hf_revision": "dc2443792ce5516872b89b37cf1bc058c3bf0c10",
   "bundle": "timesfm-2.0-500m-official.bundle",
   "family": "timesfm",
-  "task": "time_series_forecast",
+  "task": "series_to_point_forecast",
   "precision": "fp32",
   "testcases": [
     {

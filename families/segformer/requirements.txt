@@ -2,4 +2,4 @@
 # SPDX-License-Identifier: Apache-2.0
 
 Pillow
-timm>=1.0
+timm==1.0.31

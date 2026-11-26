@@ -9,12 +9,15 @@ import json
 import logging
 import os
 from pathlib import Path
+import platform
+import sys
 import tempfile
 import traceback
 
+from ..config import normalize_target_layers
 from . import builder as edge_llm
 from .edge_quantization import source_quantization
-from .edge_config import topology_matches
+from .edge_config import layers, topology_matches
 
 _LOG = logging.getLogger(__name__)
 # Native platforms with recorded passing family profiles; admission is not qualification.
@@ -61,6 +64,149 @@ def platform_matches(raw: dict, target: dict) -> bool:
     return target["sm"] >= 80
 
 
+def _adapter_for(raw: dict, target: dict, precision: str):
+    """Keep the legacy map; let the 0.12 native SDK determine operator availability."""
+    if not platform_matches(raw, target):
+        return None
+    key = (target["os"], target["arch"], target["sm"], precision)
+    # The documented compressed FP8 MoE lowering is new in the 0.12 direct builder.
+    if ((raw.get("quantization_config") or {}).get("quant_method") == "compressed-tensors"
+            and edge_llm.selected_release() != "0.12.0"):
+        return None
+    if key in EDGE_DISPATCH:
+        return EDGE_DISPATCH[key]
+    if (target["os"] == "linux" and target["arch"] in {"aarch64", "x86_64"}
+            and edge_llm.selected_release() == "0.12.0"):
+        # Admission is not qualification. prepare checks the exact installed SM,
+        # CUDA and TRT; an unsupported operator retries the unchanged native request.
+        return edge_llm.prepare
+    return None
+
+
+# The serializer failures were observed on two ordered target topologies. A
+# nearby graph is eligible for native execution, even on the same device.
+_NANO_LAYER_ORDER = "MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME"
+_SUPER_LAYER_ORDER = (
+    "MEMEMEM*EMEMEMEM*EMEMEMEM*EMEMEMEMEM*EMEMEMEMEM*"
+    "EMEMEMEMEM*EMEMEMEMEM*EMEMEMEM*EMEMEMEME"
+)
+
+
+def _measured_target_graph(raw: dict, *, large: bool) -> bool:
+    pattern = _SUPER_LAYER_ORDER if large else _NANO_LAYER_ORDER
+    names = {"M": "mamba", "E": "moe", "*": "attention"}
+    if layers(raw) != [names[code] for code in pattern]:
+        return False
+    expected = {
+        "vocab_size": 131072, "hidden_size": 4096 if large else 2688,
+        "num_attention_heads": 32, "num_key_value_heads": 2, "head_dim": 128,
+        "mamba_num_heads": 128 if large else 64, "mamba_head_dim": 64,
+        "n_groups": 8, "ssm_state_size": 128, "conv_kernel": 4,
+        "n_routed_experts": 512 if large else 128, "n_shared_experts": 1,
+        "num_experts_per_tok": 22 if large else 6, "n_group": 1, "topk_group": 1,
+        "moe_intermediate_size": 2688 if large else 1856,
+        "moe_shared_expert_intermediate_size": 5376 if large else 3712,
+        "moe_latent_size": 1024 if large else None,
+        "norm_topk_prob": True, "routed_scaling_factor": 5.0 if large else 2.5,
+    }
+    return all(raw.get(key) == value for key, value in expected.items())
+
+
+def _compiler_profile(raw: dict, precision: str | None, variant: str) -> tuple[str, int] | None:
+    """Identify a measured target graph, not a general restriction on quantized MoE."""
+    raw = normalize_target_layers(raw)
+    policy = raw.get("quantization_config") or {}
+    if raw.get("model_type") != "nemotron_h" or not isinstance(policy, dict):
+        return None
+    if raw.get("num_hidden_layers") == 88:
+        if (variant == "ordinary" and precision == "nvfp4" and policy.get("quant_algo") == "MIXED_PRECISION"
+                and _measured_target_graph(raw, large=True)):
+            return "Super 120B NVFP4", 103
+        return None
+    if raw.get("num_hidden_layers") != 52 or not _measured_target_graph(raw, large=False):
+        return None
+    if (variant == "ordinary" and precision == "nvfp4" and not policy
+            and raw.get("num_nextn_predict_layers") is None):
+        return "Nano 30B NVFP4", 103
+    if raw.get("num_nextn_predict_layers") == 1:
+        if (variant in {"ordinary", "dflash", "dspark", "dspark_tree"} and precision == "nvfp4"
+                and policy.get("quant_algo") == "MIXED_PRECISION"):
+            return "Lightning 30B NVFP4", 103
+        if variant == "ordinary" and precision == "fp8" and policy.get("quant_method") == "compressed-tensors":
+            return "Lightning 30B compressed FP8", 100
+    return None
+
+
+def _measured_native_stack(target: dict, sm: int, arch: str = "aarch64") -> bool:
+    return (
+        (target.get("os"), target.get("arch"), target.get("sm")) == ("linux", arch, sm)
+        and (target.get("cuda_version"), target.get("tensorrt_version")) == ("13.4", "11.4.0.106")
+    )
+
+
+def _native_gpu():
+    from cuda.bindings import runtime
+
+    status, device = runtime.cudaGetDevice()
+    if int(status) != 0:
+        return None
+    status, gpu = runtime.cudaGetDeviceProperties(device)
+    return gpu if int(status) == 0 else None
+
+
+def _check_native_route(request, raw: dict, target: dict | None, variant: str) -> None:
+    # Unrelated native graphs and devices do not require Edge or its toolkit probe.
+    os_name, arch = ((sys.platform, platform.machine()) if target is None
+                     else (target.get("os"), target.get("arch")))
+    if os_name != "linux" or arch not in {"aarch64", "x86_64"}:
+        return
+    if arch == "x86_64" and (variant != "ordinary" or raw.get("hidden_size") != 2688
+                             or raw.get("num_nextn_predict_layers") is not None):
+        return
+    if raw.get("hidden_size") not in (2688, 4096) or raw.get("model_type") != "nemotron_h":
+        return
+    if raw.get("max_position_embeddings") is None or edge_llm.sequence_length(request, raw) != 256:
+        return
+    precision = source_quantization(request, raw)
+    profile = _compiler_profile(raw, precision, variant)
+    if profile is None or not topology_matches(raw, precision):
+        return
+    name, sm = profile
+    device_label = f"ARM64 SM{sm}"
+    if arch == "x86_64":
+        if name != "Nano 30B NVFP4" or (target is not None and not _measured_native_stack(target, 120, arch)):
+            return
+        gpu = _native_gpu()
+        if (gpu is None or gpu.major * 10 + gpu.minor != 120
+                or bytes(gpu.name).split(b"\0", 1)[0] != b"NVIDIA RTX PRO 4500 Blackwell"):
+            return
+        device_label, sm = "x86-64 RTX PRO 4500 Blackwell", 120
+    if target is None:
+        try:
+            target = edge_llm.local_target()
+        except RuntimeError as error:
+            # The native graph does not require nvcc. A failed optional probe is
+            # not evidence that this device and toolkit match the measured crash.
+            _LOG.warning("Cannot identify the measured native compiler stack: %s. "
+                         "Continuing with native TensorRT.", error)
+            return
+    if _measured_native_stack(target, sm, arch):
+        raise ValueError(
+            f"Nemotron {name} ({variant}, capacity 256): native TensorRT serialization crashed "
+            f"on {device_label}, CUDA 13.4 and TensorRT 11.4.0.106. "
+            "Not retrying this native build."
+        )
+
+
+def _no_ordinary_build_route(request, raw: dict, target: dict, precision: str) -> bool:
+    """This one ordinary profile also failed both official Edge 0.12 builders."""
+    return (
+        _compiler_profile(raw, precision, "ordinary") == ("Super 120B NVFP4", 103)
+        and edge_llm.sequence_length(request, raw) == 256 and _measured_native_stack(target, 103)
+        and edge_llm.selected_release() == "0.12.0"
+    )
+
+
 def build(request, writer, native) -> None:
     """Prepare Edge privately or warn and retry unchanged native once.
 
@@ -73,14 +219,13 @@ def build(request, writer, native) -> None:
     raw = json.loads((Path(request.model_dir) / "config.json").read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("checkpoint config.json must contain an object")
-    if not candidate(request, raw):
-        native(request, writer)
-        return
-    if not edge_llm.package_present():
+    if not candidate(request, raw) or not edge_llm.package_present():
+        _check_native_route(request, raw, None, "ordinary")
         native(request, writer)
         return
     if edge_llm.sequence_length(request, raw) > raw["max_position_embeddings"]:
         raise ValueError("Nemotron-H max_sequence_length exceeds checkpoint context capacity")
+    target = None
     failure = None
     descriptor, name = tempfile.mkstemp(prefix=f".{request.output_path.name}.edge-", suffix=".log",
                                         dir=request.output_path.parent)
@@ -91,26 +236,35 @@ def build(request, writer, native) -> None:
     ) as directory:
         try:
             target = edge_llm.local_target()
-            key = (target["os"], target["arch"], target["sm"], source_quantization(request, raw))
-            adapter = EDGE_DISPATCH.get(key) if platform_matches(raw, target) else None
-            if adapter is not None:
+            precision = source_quantization(request, raw)
+            adapter = _adapter_for(raw, target, precision)
+            unavailable = adapter is not None and _no_ordinary_build_route(request, raw, target, precision)
+            if adapter is not None and not unavailable:
                 files, marker = adapter(request, raw, target, Path(directory), log_path)
         except Exception as error:
             failure = error
             with log_path.open("a", encoding="utf-8") as log:
                 traceback.print_exception(error, file=log)
             _LOG.warning("nemotron_h Edge build failed: %s. Diagnostics: %s. "
-                         "Retrying native once with the unchanged request.", error, log_path, exc_info=True)
+                         "Retrying native once with the unchanged request if eligible.", error, log_path, exc_info=True)
         except BaseException:
             log_path.unlink(missing_ok=True)
             raise
         else:
+            if unavailable:
+                log_path.unlink()
+                raise ValueError(
+                    "Nemotron Super 120B NVFP4 at capacity 256 has no usable automatic build route "
+                    "with Edge 0.12.0 on ARM64 SM103, CUDA 13.4 and TensorRT 11.4.0.106: "
+                    "both Edge builds failed in tactic selection and native serialization crashed."
+                )
             if adapter is not None:
                 edge_llm.publish(request, writer, files, marker)
                 log_path.unlink()
                 return
             log_path.unlink()
     try:
+        _check_native_route(request, raw, target, "ordinary")
         native(request, writer)
     except Exception as error:
         if failure is not None:
@@ -122,24 +276,27 @@ def build_speculative(request, writer, draft: Path, variant: str) -> None:
     """Offload the complete pair, or warn and retry the same native pair once."""
     from ..paired import build as native_paired
 
-    raw = json.loads((Path(request.model_dir) / "config.json").read_text(encoding="utf-8"))
+    raw = normalize_target_layers(json.loads(
+        (Path(request.model_dir) / "config.json").read_text(encoding="utf-8")
+    ))
     if not candidate(request, raw) or source_quantization(request, raw) != "nvfp4":
         raise ValueError("Nemotron-H paired execution requires a compatible NVFP4 target and TP1 text request")
     if edge_llm.sequence_length(request, raw) > raw["max_position_embeddings"]:
         raise ValueError("Nemotron-H max_sequence_length exceeds checkpoint context capacity")
     if not edge_llm.package_present():
+        _check_native_route(request, raw, None, variant)
         native_paired(request, writer, draft, variant)
         return
     descriptor, name = tempfile.mkstemp(prefix=f".{request.output_path.name}.edge-onnx-", suffix=".log",
                                         dir=request.output_path.parent)
     os.close(descriptor)
     log_path = Path(name)
+    target = None
     failure = None
     with tempfile.TemporaryDirectory(prefix=f"trtmc-nemotron-h-{variant}-", dir=request.output_path.parent) as directory:
         try:
             target = edge_llm.local_target()
-            key = (target["os"], target["arch"], target["sm"], "nvfp4")
-            use_edge = key in EDGE_DISPATCH and platform_matches(raw, target)
+            use_edge = _adapter_for(raw, target, "nvfp4") is not None
             if use_edge:
                 files, marker = edge_llm.prepare_paired(request, raw, target, Path(directory), log_path, draft, variant)
         except Exception as error:
@@ -147,7 +304,7 @@ def build_speculative(request, writer, draft: Path, variant: str) -> None:
             with log_path.open("a", encoding="utf-8") as log:
                 traceback.print_exception(error, file=log)
             _LOG.warning("Nemotron-H paired Edge ONNX build failed: %s. Diagnostics: %s. "
-                         "Retrying the unchanged native pair once.", error, log_path, exc_info=True)
+                         "Retrying the unchanged native pair once if eligible.", error, log_path, exc_info=True)
         except BaseException:
             log_path.unlink(missing_ok=True)
             raise
@@ -160,6 +317,7 @@ def build_speculative(request, writer, draft: Path, variant: str) -> None:
                 return
             log_path.unlink()
     try:
+        _check_native_route(request, raw, target, variant)
         native_paired(request, writer, draft, variant)
     except Exception as error:
         if failure is not None:

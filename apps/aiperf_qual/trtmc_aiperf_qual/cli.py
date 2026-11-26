@@ -345,11 +345,16 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
     return 0
 
 
+IGNORE_HELP = ("run the named --profile even when an exclusion leaves it out (config/tasks.yaml, "
+               "config/exclusions.yaml, the platform or the machine): diagnostics, not a qualification run")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="trtmc-aiperf-qual", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="build (when missing), qualify quality and performance, apply bundle retention")
     run.add_argument("--profile", required=True, help="catalog profile; its configuration is derived")
+    run.add_argument("--ignore-exclusions", action="store_true", help=IGNORE_HELP)
     run.add_argument("--environment", type=Path, required=True)
     run.add_argument("--out", type=Path, required=True)
     run.add_argument("--smoke", action="store_true", help="one problem per benchmark and one timed request: "
@@ -359,11 +364,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                                                 "or --profile ...) in sequence")
     batch.add_argument("--environment", type=Path, required=True)
     batch.add_argument("--out-root", type=Path, required=True, help="one output directory per profile below it")
-    batch.add_argument("--profile", action="append", help="only these profiles")
+    batch.add_argument("--profile", action="append", help="only these profiles (names or glob patterns), held to "
+                                                          "the same exclusions as the machine's list")
+    batch.add_argument("--ignore-exclusions", action="store_true", help=IGNORE_HELP)
     batch.add_argument("--shard", help="INDEX/COUNT: this host's share (profiles sharing a checkpoint stay together)")
     batch.add_argument("--assignment", type=Path, help="a frozen multi-host assignment (`assign`): run --host's "
                                                       "profiles in its order")
-    batch.add_argument("--host", help="this host's name in --assignment")
+    batch.add_argument("--host", help="this host's name in --assignment or --fragment")
+    batch.add_argument("--campaign", help="a campaign run as fragments (a coordinator hands profiles to hosts as "
+                                          "they free up): its identifier, with --fragment and --host")
+    batch.add_argument("--fragment", help="this fragment of --campaign (one attempt at the given --profile list, "
+                                          "in that order, in an --out-root of its own)")
     batch.add_argument("--rerun", action="store_true", help="rerun profiles that already have a result")
     batch.add_argument("--ledger", type=Path, help="this run's ledger (JSON: profile -> predicted seconds): each AIPerf "
                                                    "run's deadline is three times its profile's time, at least ten "
@@ -388,22 +399,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "reason in the HTML report; the matrix itself stays as run")
     merge.add_argument("--assignment", type=Path, help="a formal multi-host run: refuse to merge unless the roots "
                                                       "pass merge-check against this assignment")
-    merge.add_argument("--smoke", action="store_true", help="with --assignment: the roots hold smoke results")
+    merge.add_argument("--manifest", type=Path, help="a campaign run as fragments: refuse to merge unless the "
+                                                    "roots pass merge-check against this manifest, and merge only "
+                                                    "its accepted fragments")
+    merge.add_argument("--smoke", action="store_true", help="with --assignment or --manifest: the roots hold smoke "
+                                                           "results")
     split = commands.add_parser("assign", help="freeze the formal run's profile -> host assignment from a ledger")
     split.add_argument("--environment", type=Path, required=True)
-    split.add_argument("--profile", action="append", help="only these profiles")
+    split.add_argument("--profile", action="append", help="only these profiles (names or glob patterns)")
+    split.add_argument("--ignore-exclusions", action="store_true", help=IGNORE_HELP)
     split.add_argument("--ledger", type=Path, required=True, help="JSON: profile -> predicted seconds")
     split.add_argument("--host", action="append", required=True, help="host names, in tie order")
     split.add_argument("--output", type=Path, required=True)
     merge_check = commands.add_parser("merge-check", help="verify that hosts' result roots form the assignment's "
-                                                          "matrix: disjoint, complete, formal, same campaign inputs")
-    merge_check.add_argument("--assignment", type=Path, required=True)
+                                                          "matrix (or the manifest's campaign): disjoint, complete, "
+                                                          "formal, same campaign inputs")
+    against = merge_check.add_mutually_exclusive_group(required=True)
+    against.add_argument("--assignment", type=Path)
+    against.add_argument("--manifest", type=Path, help="JSON: {campaign, expected: [profiles], accepted: [fragments]}")
     merge_check.add_argument("--smoke", action="store_true", help="check smoke roots (results of run-all --smoke)")
     merge_check.add_argument("roots", nargs="+", type=Path)
     plan = commands.add_parser("plan", help="print the derived configuration of this machine's models "
                                             "(and its exclusions)")
     plan.add_argument("--environment", type=Path, required=True)
-    plan.add_argument("--profile", action="append", help="only these profiles")
+    plan.add_argument("--profile", action="append", help="only these profiles (names or glob patterns)")
+    plan.add_argument("--ignore-exclusions", action="store_true", help=IGNORE_HELP)
     order = commands.add_parser("order-check", help="time each profile's performance requests in both orders: the order "
                                                     "effect before a formal run")
     order.add_argument("--environment", type=Path, required=True)
@@ -412,7 +432,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     matrix = commands.add_parser("matrix", help="the execution matrix: one CSV row per ready profile with its "
                                                 "native path, environment, workloads, and checks")
     matrix.add_argument("--environment", type=Path, required=True)
-    matrix.add_argument("--profile", action="append", help="only these profiles")
+    matrix.add_argument("--profile", action="append", help="only these profiles (names or glob patterns)")
+    matrix.add_argument("--ignore-exclusions", action="store_true", help=IGNORE_HELP)
     matrix.add_argument("--output", type=Path, help="write the CSV here instead of stdout")
     rejudge = commands.add_parser("rejudge", help="recompute Perf lights and verdicts of existing reports")
     rejudge.add_argument("outs", nargs="+", type=Path, help="qualification output directories")
@@ -505,11 +526,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             return rejudge_reports(arguments.outs, load_environment(arguments.environment)
                                    if arguments.environment else None, selection_cache=arguments.selection_cache)
         if arguments.command == "merge-check":
-            from .split import merge_check
+            from .split import accepted_roots, fragment_merge_check, informational_differences, merge_check
 
-            problems = merge_check(json.loads(arguments.assignment.read_text()), arguments.roots,
-                                   "smoke" if arguments.smoke else "formal")
-            print("\n".join(problems) if problems else "the roots form the assignment's matrix")
+            mode = "smoke" if arguments.smoke else "formal"
+            roots = arguments.roots
+            if arguments.manifest:
+                manifest = json.loads(arguments.manifest.read_text())
+                problems = fragment_merge_check(manifest, roots, mode)
+                roots = accepted_roots(manifest, roots)
+            else:
+                problems = merge_check(json.loads(arguments.assignment.read_text()), roots, mode)
+            print("\n".join(problems) if problems else
+                  "the roots form the " + ("manifest's campaign" if arguments.manifest else "assignment's matrix"))
+            for note in informational_differences(roots):
+                print(f"note: {note}")
             return 1 if problems else 0
         if arguments.command == "summary":
             import tempfile
@@ -519,14 +549,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             with tempfile.TemporaryDirectory(prefix="trtmc-aiperf-summary-") as fetched:
                 store = arguments.html.parent / f"{arguments.html.stem}-evidence" if arguments.html else Path(fetched)
                 roots = fetch_roots(arguments.roots, arguments.ssh, store, evidence=bool(arguments.html))
-                if arguments.assignment:
-                    from .split import merge_check
+                if arguments.assignment and arguments.manifest:
+                    print("trtmc-aiperf-qual: --assignment and --manifest exclude each other", file=sys.stderr)
+                    return 2
+                if arguments.assignment or arguments.manifest:
+                    from .split import accepted_roots, fragment_merge_check, merge_check
 
-                    problems = merge_check(json.loads(arguments.assignment.read_text()), roots,
-                                           "smoke" if arguments.smoke else "formal")
+                    mode = "smoke" if arguments.smoke else "formal"
+                    if arguments.manifest:
+                        manifest = json.loads(arguments.manifest.read_text())
+                        problems = fragment_merge_check(manifest, roots, mode)
+                        roots = accepted_roots(manifest, roots)  # a superseded fragment is left out
+                    else:
+                        problems = merge_check(json.loads(arguments.assignment.read_text()), roots, mode)
                     if problems:
                         print("\n".join(["trtmc-aiperf-qual: the roots do not merge:", *problems]), file=sys.stderr)
                         return 1
+                    from .split import informational_differences
+
+                    for note in informational_differences(roots):
+                        print(f"trtmc-aiperf-qual: note: {note}", file=sys.stderr)
                 baseline = fetch_roots(arguments.baseline, arguments.ssh, Path(fetched) / "baseline")
                 text, counts = summary(roots, baseline)
                 if arguments.html:
@@ -563,13 +605,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .models import resolve_model
 
         def machine_list() -> tuple[list[str], list[dict]]:
-            """--profile as given, else the environment's model list (selected names, exclusions)."""
-            if arguments.profile:
-                return arguments.profile, []
-            from .selection import catalog, select
+            """The profiles to run (--profile, else the environment's model list) and the excluded ones."""
+            from .selection import machine_run_list
 
-            selected, excluded = select(environment.values.get("models") or {}, catalog(environment.path("repo")))
-            return [profile.name for profile in selected], excluded
+            return machine_run_list(environment, arguments.profile, ignore_exclusions=arguments.ignore_exclusions)
 
         if arguments.command == "run-all":
             from . import preflight
@@ -582,6 +621,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     print(f"trtmc-aiperf-qual: serve_python cannot import the serving packages: {missing}; install "
                           "apps/perf_serving/requirements.txt into it (apps/aiperf_qual/setup.sh)", file=sys.stderr)
                     return 2
+            if arguments.campaign or arguments.fragment:
+                if not (arguments.campaign and arguments.fragment and arguments.host and arguments.profile):
+                    raise ConfigError("a fragment needs --campaign, --fragment, --host and its --profile list")
+                if arguments.assignment or arguments.shard:
+                    raise ConfigError("--fragment excludes --assignment and --shard")
             names, excluded = machine_list()
             if arguments.smoke and arguments.out_root.name != "smoke":  # never mixed with formal results
                 arguments.out_root = arguments.out_root / "smoke"
@@ -601,19 +645,24 @@ def main(argv: Sequence[str] | None = None) -> int:
             if arguments.shard:
                 models = shard(models, *parse_shard(arguments.shard))
             extra = None
-            if arguments.assignment:
-                from .split import campaign_inputs, check_resume, digest, host_models, set_aside_results
+            if arguments.assignment or arguments.fragment:
+                from .split import campaign_inputs, check_resume, digest, fragment_plan, host_models, set_aside_results
 
-                assignment = json.loads(arguments.assignment.read_text())
-                models = host_models(assignment, str(arguments.host), models)
-                extra = {"host": arguments.host, "assignment": digest(assignment), "inputs": campaign_inputs(environment)}
+                if arguments.fragment:
+                    extra = fragment_plan(arguments.campaign, arguments.fragment, str(arguments.host), environment)
+                else:
+                    assignment = json.loads(arguments.assignment.read_text())
+                    models = host_models(assignment, str(arguments.host), models)
+                    extra = {"host": arguments.host, "assignment": digest(assignment),
+                             "inputs": campaign_inputs(environment)}
                 if arguments.rerun:
                     set_aside_results(arguments.out_root)
                 else:
                     check_resume(arguments.out_root, extra)
             write_plan(arguments.out_root, [model["model"] for model in models], config_errors, extra)
             records = run_all(environment, models, arguments.out_root, rerun=arguments.rerun,
-                              prefetch_next=not arguments.no_prefetch, keep_order=bool(arguments.assignment))
+                              prefetch_next=not arguments.no_prefetch,
+                              keep_order=bool(arguments.assignment or arguments.fragment))
             return exit_code(records, config_errors, smoke=arguments.smoke)
         if arguments.command == "assign":
             from .split import assign
@@ -660,7 +709,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             names, excluded = machine_list()
             for item in excluded:
-                print(json.dumps({"profile": item["profile"], "task": item["task"], "excluded": item["reason"]}))
+                print(json.dumps({"profile": item["profile"], "task": item["task"], "excluded": item["reason"],
+                                  "source": item["source"]}))
             for name in names:
                 try:
                     model = resolve_model(name, environment)
@@ -680,6 +730,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         from .campaign import run_one
 
+        if not arguments.ignore_exclusions:
+            from .selection import machine_run_list
+
+            _, excluded = machine_run_list(environment, [arguments.profile])
+            if excluded:
+                item = excluded[0]
+                print(f"trtmc-aiperf-qual: {item['profile']} is excluded ({item['source']}): {item['reason']}; "
+                      "--ignore-exclusions runs it anyway", file=sys.stderr)
+                return 2
         if arguments.smoke and arguments.out.parent.name != "smoke":  # as run-all: <dir>/smoke/<profile>
             arguments.out = arguments.out.parent / "smoke" / arguments.out.name
         record = run_one(environment, resolve_model(arguments.profile, environment), arguments.out)

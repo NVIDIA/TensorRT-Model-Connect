@@ -36,6 +36,9 @@ set_target_properties(trtmc_model_bert PROPERTIES
 install(TARGETS trtmc_model_bert
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/UNICODE-LICENSE.txt
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/trtmc/families/bert
+)
 
 # The application adapter can load a model; the model never depends on its loader.
 add_library(trtmc_cli_bert SHARED cli.cpp)
@@ -56,6 +59,19 @@ set_target_properties(trtmc_cli_bert PROPERTIES
 install(TARGETS trtmc_cli_bert LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_bert_task_capabilities
+    ${PROJECT_SOURCE_DIR}/families/bert/tests/cpp/test_task_capabilities.cpp
+  )
+  target_include_directories(test_bert_task_capabilities PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_bert_task_capabilities SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_bert_task_capabilities PRIVATE trtmc_model_bert trtmc_core)
+  target_compile_options(test_bert_task_capabilities PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME bert_task_capabilities COMMAND test_bert_task_capabilities)
+
   add_executable(test_bert_cli
     ${PROJECT_SOURCE_DIR}/families/bert/tests/cpp/test_cli.cpp
     cli.cpp
@@ -84,4 +100,16 @@ if(TRTMC_BUILD_TESTS)
   )
   add_test(NAME test_bert_wordpiece_tokenizer COMMAND test_bert_wordpiece_tokenizer)
   set_tests_properties(test_bert_wordpiece_tokenizer PROPERTIES LABELS cpu)
+
+  add_executable(test_bert_precompiled_normalizer
+    ${PROJECT_SOURCE_DIR}/families/bert/tests/cpp/test_precompiled_normalizer.cpp
+    unigram_tokenizer.cpp
+  )
+  target_include_directories(test_bert_precompiled_normalizer PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_bert_precompiled_normalizer PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_bert_precompiled_normalizer PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME bert_precompiled_normalizer COMMAND test_bert_precompiled_normalizer
+    ${PROJECT_SOURCE_DIR}/families/bert/tests/data/precompiled-unigram.json
+  )
+  set_tests_properties(bert_precompiled_normalizer PROPERTIES LABELS cpu)
 endif()

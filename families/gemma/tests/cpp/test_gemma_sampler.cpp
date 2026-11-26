@@ -78,6 +78,25 @@ int main() {
     config.seed = 17;
     const auto seeded = trtmc::gemma::edge_llm::make_request("hello", config, 128);
     check(seeded.samplingSeed == 17, "Gemma4 forwards an explicit supported seed");
+    auto nucleus = config;
+    nucleus.temperature = 1.0F;
+    nucleus.top_k = 1;
+    nucleus.top_p = 0.9F;
+    const auto full_nucleus = trtmc::gemma::edge_llm::make_request("hello", nucleus, 128, true);
+    check(full_nucleus.topK == 0 && full_nucleus.topP == nucleus.top_p &&
+              full_nucleus.samplingSeed == 17,
+          "Nucleus sampling with the MC default top-k must use the full Edge vocabulary");
+    bool nucleus_rejected = false;
+    try {
+        (void)trtmc::gemma::edge_llm::make_request("hello", nucleus, 128);
+    } catch (const std::invalid_argument&) {
+        nucleus_rejected = true;
+    }
+    check(nucleus_rejected, "A greedy-only speculative variant must not silently sample top-1");
+    nucleus.top_k = 5;
+    const auto capped = trtmc::gemma::edge_llm::make_request("hello", nucleus, 128, true);
+    check(capped.topK == 5 && capped.topP == nucleus.top_p,
+          "An explicit top-k cap still applies before nucleus sampling");
     config.top_k = 50;
     bool rejected = false;
     try {

@@ -20,8 +20,29 @@ def configure_aux_streams(build_config, raw):
         build_config.max_aux_streams = 0
 
 
-def validate_source(source: Path, raw, readers):
-    """Admit prepared experts or dense MLPs with original-precision attention/cache."""
+def prepared_fp8_cache(raw, *, release_012):
+    """The 0.12 grouped NVFP4 loader reads the embedded KV scheme before the sidecar."""
+    quant = raw.get("quantization_config") or {}
+    if not release_012 or quant.get("quant_algo") != "NVFP4" or not quant.get("config_groups"):
+        return False
+    scheme = quant.get("kv_cache_scheme")
+    if not scheme:
+        return False
+    if scheme != {"type": "float", "num_bits": 8, "dynamic": False}:
+        raise NotImplementedError("Gemma4 native requires a static E4M3 target cache scheme")
+    return True
+
+
+def prepared_target_precision(raw, *, variant, release_012):
+    """An explicit JetSpec request has no legacy native precision contract."""
+    calibrated = release_012 or variant == "jetspec"
+    quant = raw.get("quantization_config") or {}
+    experts = bool(calibrated and raw.get("enable_moe_block") and quant.get("quant_algo") == "NVFP4")
+    return experts, prepared_fp8_cache(raw, release_012=calibrated)
+
+
+def validate_source(source: Path, raw, readers, *, calibrated_experts=False):
+    """Admit the mapped prepared projections; never discard calibrated attention scales."""
     quant = raw.get("quantization_config") or {}
     sidecar = source / "hf_quant_config.json"
     if not quant and not sidecar.exists():
@@ -36,11 +57,13 @@ def validate_source(source: Path, raw, readers):
         raise NotImplementedError("Gemma4 native prepared weights require ModelOpt NVFP4 block16")
     dense = not raw.get("enable_moe_block")
     expected = set()
-    if dense:
+    if dense or calibrated_experts:
         layout = {"dynamic": False, "num_bits": 4, "type": "float", "group_size": 16}
         if quant.get("config_groups") != {"group_0": {
                 "weights": layout, "input_activations": layout, "targets": ["Linear"]}}:
-            raise NotImplementedError("Gemma4 dense NVFP4 requires the prepared W4A4 contract")
+            topology = "dense" if dense else "routed"
+            raise NotImplementedError(f"Gemma4 {topology} NVFP4 requires the prepared W4A4 contract")
+    if dense:
         prefix = next((p for p in ("model.language_model", "language_model.model", "model")
                        if p + ".embed_tokens.weight" in readers.tensor_map), None)
         if prefix is None:
@@ -53,6 +76,20 @@ def validate_source(source: Path, raw, readers):
                   if name.endswith((".weight_scale", ".weight_scale_2", ".input_scale"))}
         if actual != expected:
             raise NotImplementedError("Gemma4 dense NVFP4 requires all and only prepared MLP projections")
+    if calibrated_experts:
+        # A fused float expert tensor would take the dense branch of the
+        # native graph, so it cannot coexist with a calibrated packed layout.
+        prefix = next((p for p in ("model.language_model", "language_model.model", "model")
+                       if p + ".embed_tokens.weight" in readers.tensor_map), None)
+        if prefix is None:
+            raise ValueError("Gemma4 routed NVFP4 target embedding is missing")
+        expected = {f"{prefix}.layers.{layer}.experts.{expert}.{projection}.{suffix}"
+                    for layer in range(raw["num_hidden_layers"])
+                    for expert in range(raw["num_experts"])
+                    for projection in ("gate_proj", "up_proj", "down_proj")
+                    for suffix in ("weight", "weight_scale", "weight_scale_2", "input_scale")}
+        if {k for k in readers.tensor_map if ".experts." in k} != expected:
+            raise NotImplementedError("Gemma4 calibrated NVFP4 requires a complete split expert layout")
     # The sidecar's FP8 label alone is not evidence of calibrated KV. The
     # admitted published source carries no cache scales; never discard any.
     for name in readers.tensor_map:
@@ -68,7 +105,7 @@ def expert_tensor(graph, prefix, projection, loop):
 
     Ordinary integer operators interpret the source FP4 bits. Iterating before
     decoding avoids retaining expanded weights for all experts in a layer.
-    No hardware-specific quantized kernel or activation rewrite is required.
+    This weight layout is independent of the expert input quantization.
     """
     experts = graph.raw["num_experts"]
     hidden, width = graph.raw["hidden_size"], graph.raw["moe_intermediate_size"]
@@ -100,8 +137,7 @@ def expert_tensor(graph, prefix, projection, loop):
             block = np.asarray(block, dtype=np.float32)
             if not np.isfinite(block).all() or (block < 0).any():
                 raise ValueError(f"Gemma4 packed expert block scales are invalid: {key}")
-            # Edge's Gemma4 expert path is W4A16: checkpoint input_scale does
-            # not quantize activations. Preserve every source weight scale.
+            # Decode weights independently of the routed activation contract.
             packed[expert, section * rows:(section + 1) * rows] = weight
             combined = block * global_scale[0]
             if not np.isfinite(combined).all():
@@ -129,15 +165,93 @@ def expert_tensor(graph, prefix, projection, loop):
     return graph.cast(graph.reshape(decoded, (count, columns)), graph.dtype)
 
 
+def expert_input_scales(graph, prefix, loop):
+    """Load calibrated FC1 and FC2 scalars in the expert loop's source order."""
+    scales = np.empty((graph.raw["num_experts"], 2), np.float32)
+    for expert in range(len(scales)):
+        inputs = []
+        for proj in ("gate", "up", "down"):
+            key = f"{graph.prefix}.{prefix}.experts.{expert}.{proj}_proj.input_scale"
+            reader = graph.readers.tensor_map.get(key)
+            if reader is None:
+                raise ValueError(f"Missing Gemma4 expert calibration: {key}")
+            value = np.asarray(reader.get_tensor(key))
+            if (value.dtype != np.float32 or value.size != 1
+                    or not np.isfinite(value.item()) or value.item() <= 0):
+                raise ValueError(f"Invalid Gemma4 expert calibration: {key}")
+            inputs.append(value.item())
+        if inputs[0] != inputs[1]:
+            raise ValueError("Gemma4 fused gate/up projections require equal input scales")
+        scales[expert] = inputs[0], inputs[2]
+    return tuple(loop.add_iterator(graph.const(column.copy()), 0, False).get_output(0)
+                 for column in scales.T)
+
+
+def expert_activation(graph, value, calibration):
+    """Round to calibrated E2M1 with E4M3 block scales before expert GEMM.
+
+    Express the rounding on the standard float lattice, including ties to even,
+    so TensorRT can lower the same graph without requiring FP4 instructions.
+    """
+    net = graph.net
+    ew, un = trt.ElementWiseOperation, trt.UnaryOperation
+    width = value.shape[-1]
+    if len(value.shape) != 2 or width <= 0 or width % 16:
+        raise ValueError("Gemma4 expert activations require complete blocks of 16")
+
+    def const(v):
+        return graph.const(np.full((1, 1, 1), v, np.float32))
+
+    def unary(x, op):
+        return net.add_unary(x, op).get_output(0)
+
+    def select(c, a, b):
+        return net.add_select(c, a, b).get_output(0)
+
+    op = graph.op
+    x = graph.reshape(graph.cast(value, trt.float32), (-1, width // 16, 16))
+    g = graph.reshape(calibration, (1, 1, 1))
+    # A reciprocal multiply alone moves some exact E2M1/E4M3 midpoints
+    # across a rounding boundary. Correct its residual before the RNE step.
+    def divide(a, b):
+        q = op(a, b, ew.DIV)
+        residual = op(a, op(q, b, ew.PROD), ew.SUB)
+        return op(q, op(residual, b, ew.DIV), ew.SUM)
+
+    mag = unary(x, un.ABS)
+    maximum = net.add_reduce(mag, trt.ReduceOperation.MAX, 1 << 2, True).get_output(0)
+    raw = divide(maximum, op(g, const(6), ew.PROD))
+    raw = op(raw, const(448), ew.MIN)
+    # E4M3 subnormals have spacing 2**-9. Each successive normal binade
+    # doubles the spacing, up to 32 in the final (256..448) range.
+    spacing = const(2**-9)
+    for exponent in range(-5, 9):
+        spacing = select(op(raw, const(2.**exponent), ew.LESS), spacing,
+                         const(2.**(exponent - 3)))
+    block = op(unary(op(raw, spacing, ew.DIV), un.ROUND), spacing, ew.PROD)
+    unit = op(block, g, ew.PROD)
+    safe = select(op(unit, const(0), ew.EQUAL), const(1), unit)
+    a = op(divide(mag, safe), const(6), ew.MIN)
+    step = select(op(a, const(2), ew.LESS), const(.5),
+                  select(op(a, const(4), ew.LESS), const(1), const(2)))
+    rounded = op(unary(op(a, step, ew.DIV), un.ROUND), step, ew.PROD)
+    result = op(op(unary(x, un.SIGN), rounded, ew.PROD), unit, ew.PROD)
+    return graph.reshape(result, (-1, width))
+
+
 def dense_linear(graph, value, name):
     """Source-packed dense W4A4, expressed only with TensorRT native Q/DQ.
 
-    This is not the routed-expert W4A16 path. In particular, input_scale is
+    For these dense projections, input_scale is
     the calibrated global activation scale, not a reason to bypass quantization.
     TensorRT owns lowering or reporting unsupported hardware; no SM selection
     or hardware-specific kernel is part of the mathematical graph.
     """
-    stem = f"{graph.prefix}.{name}"
+    return packed_w4a4_linear(graph, value, f"{graph.prefix}.{name}")
+
+
+def packed_w4a4_linear(graph, value, stem):
+    """Apply one source-calibrated block16 projection, including its input Q/DQ."""
 
     def read(suffix):
         key = stem + suffix

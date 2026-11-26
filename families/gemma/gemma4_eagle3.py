@@ -21,7 +21,7 @@ class EagleDraftGraph(DenseTextGraph):
     recomputation needs no speculative mutable cache and no rejected history.
     """
 
-    def __init__(self, network, raw, readers, precision, capacity):
+    def __init__(self, network, raw, readers, precision, capacity, *, branch_tree=False):
         if (raw.get("architectures") != ["Gemma4Eagle3Model"]
                 or raw.get("num_hidden_layers") != 1 or raw.get("draft_num_hidden_layers") != 1
                 or raw.get("ttt_length") != 7 or raw.get("layer_types") != ["full_attention"]
@@ -29,6 +29,7 @@ class EagleDraftGraph(DenseTextGraph):
                 or raw.get("attention_bias") or raw.get("num_kv_shared_layers", 0)):
             raise NotImplementedError("Native Gemma EAGLE3 requires the dense single-layer TTT7 head")
         self.net, self.raw, self.readers = network, raw, readers
+        self.branch_tree = branch_tree
         self.capacity, self.buffers, self.weights = capacity, [], {}
         self.dtype = {"fp16": trt.float16, "bf16": trt.bfloat16, "fp32": trt.float32}[precision]
         self.storage = np.float16 if precision == "fp16" else np.float32
@@ -92,12 +93,28 @@ class EagleDraftGraph(DenseTextGraph):
         zero_mask = self.const(np.zeros((1, 1, 1, 1), np.float32))
         token = n.add_gather(tokens, last, 0).get_output(0)
         rows, states, proposals = [], [], []
-        for row in range(raw["ttt_length"]):
+        if self.branch_tree:
+            # Score one particular ancestry. Only its causal prefix up to
+            # branch_depth is used; siblings never share a speculative state.
+            branch_tokens = n.add_input("branch_tokens", trt.int32, (5,))
+            depth = n.add_input("branch_depth", trt.int32, (1,))
+
+        def project(state):
+            logits = self.linear(self.norm(state, "norm"), "lm_head")
+            if raw.get("final_logit_softcapping"):
+                logits = graph_ops.add_tanh_softcap(n, logits, float(raw["final_logit_softcapping"]),
+                                                   scalar_shape=(1, 1))
+            return logits
+
+        for row in range(6 if self.branch_tree else raw["ttt_length"]):
             # Tail rows past capacity are discarded, but all gathers remain valid.
             pos = self.op(last, self.const(np.array([row], np.int32)), trt.ElementWiseOperation.SUM)
             pos = self.op(pos, self.const(np.array([self.capacity - 1], np.int32)),
                           trt.ElementWiseOperation.MIN)
             if row:
+                if self.branch_tree:
+                    index = self.const(np.array([row - 1], np.int32))
+                    token = n.add_gather(branch_tokens, index, 0).get_output(0)
                 embed = self.scale(n.add_gather(embedding, token, 0).get_output(0), hidden**0.5)
                 query_source = joined([self.norm(embed, prefix + ".input_layernorm"),
                     self.cast(self.norm(state, prefix + ".hidden_norm"), self.dtype)], 1)
@@ -121,14 +138,31 @@ class EagleDraftGraph(DenseTextGraph):
             state = self.op(state,
                 self.reshape(self.weight(prefix + ".layer_scalar", dtype=trt.float32), (1, 1)),
                 trt.ElementWiseOperation.PROD)
-            logits = self.linear(self.norm(state, "norm"), "lm_head")
-            if raw.get("final_logit_softcapping"):
-                logits = graph_ops.add_tanh_softcap(n, logits, float(raw["final_logit_softcapping"]),
-                                                   scalar_shape=(1, 1))
+            states.append(state)
+            if self.branch_tree:
+                continue
+            logits = project(state)
             token = self.reshape(n.add_topk(logits, trt.TopKOperation.MAX, 1, 2).get_output(1), (1,))
             rows.append(logits)
-            states.append(state)
             proposals.append(token)
+
+        if self.branch_tree:
+            # One vocabulary projection per visited parent. Normalize over
+            # the whole vocabulary, not just the ten retained children.
+            logits = self.cast(project(n.add_gather(joined(states), depth, 0).get_output(0)),
+                               trt.float32)
+            best = n.add_topk(logits, trt.TopKOperation.MAX, 10, 2)
+            maximum = n.add_reduce(logits, trt.ReduceOperation.MAX, 2, True).get_output(0)
+            centered = self.op(logits, maximum, trt.ElementWiseOperation.SUB)
+            exp = n.add_unary(centered, trt.UnaryOperation.EXP).get_output(0)
+            total = n.add_reduce(exp, trt.ReduceOperation.SUM, 2, True).get_output(0)
+            log_total = n.add_unary(total, trt.UnaryOperation.LOG).get_output(0)
+            scores = self.op(self.op(best.get_output(0), maximum, trt.ElementWiseOperation.SUB),
+                             log_total, trt.ElementWiseOperation.SUB)
+            for name, tensor in (("branch_ids", best.get_output(1)), ("branch_log_probs", scores)):
+                tensor.name = name
+                n.mark_output(tensor)
+            return
 
         # Public module buffers are provisioned at the maximum input shape.
         # A shrinking output would underallocate at shorter contexts. Keep

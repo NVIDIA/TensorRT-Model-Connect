@@ -150,6 +150,60 @@ def test_validation_allows_isolated_family_cpp_tests(tmp_path: Path) -> None:
         test_impact.validate(repo)
 
 
+def test_validation_rejects_aiperf_settings_in_a_family(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    # Family code whose name starts with aiperf is not AIPerf settings.
+    (repo / "families/alpha/tests/aiperf_requests.py").write_text("PACKAGE = None\n")
+    test_impact.validate(repo)
+    settings = repo / "families/alpha/tests/aiperf/alpha.yaml"
+    settings.parent.mkdir()
+    settings.write_text("reference: {mode: eager}\n")
+    with pytest.raises(ValueError, match="alpha: obsolete tests/aiperf"):
+        test_impact.validate(repo)
+
+
+def test_isolated_application_selects_no_family(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    impact = test_impact.classify(
+        repo,
+        ["apps/aiperf_qual/config/models/alpha.yaml", "apps/aiperf_qual/trtmc_aiperf_qual/models.py"],
+    )
+    assert impact.scope == "none"
+    assert impact.families == ()
+    assert impact.run_core_tests is True
+
+    with_family = test_impact.classify(repo, ["apps/aiperf_qual/README.md", "families/alpha/model.py"])
+    assert with_family.scope == "families"
+    assert with_family.families == ("alpha",)
+    # A sibling application stays shared: family references and examples may import it.
+    assert test_impact.classify(repo, ["apps/aiperf_qual/README.md", "apps/benchmark/x.py"]).scope == "all"
+
+
+@pytest.mark.parametrize(
+    "path, source",
+    [
+        ("families/alpha/tests/test_alpha.py", "from trtmc_aiperf_qual.models import resolve_model\n"),
+        ("families/alpha/reference/inputs.py", "CONFIG = 'apps/aiperf_qual/config/models/alpha.yaml'\n"),
+        ("core/builder/helper.py", "import trtmc_aiperf_qual\n"),
+        ("apps/benchmark/runner.py", "import trtmc_aiperf_qual\n"),
+    ],
+)
+def test_validation_rejects_dependents_of_an_isolated_application(
+    tmp_path: Path, path: str, source: str
+) -> None:
+    repo = _repo(tmp_path)
+    app = repo / "apps/aiperf_qual/trtmc_aiperf_qual/models.py"
+    app.parent.mkdir(parents=True)
+    app.write_text("from trtmc_aiperf_qual.config import CONFIG_ROOT\n")
+    dependent = repo / path
+    dependent.parent.mkdir(parents=True, exist_ok=True)
+    dependent.write_text("VALUE = 1\n")
+    test_impact.validate(repo)
+    dependent.write_text(source)
+    with pytest.raises(ValueError, match=f"{path} depends on isolated apps/aiperf_qual"):
+        test_impact.validate(repo)
+
+
 def test_validation_rejects_central_model_cpp_tests(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     source = repo / "tests/cpp/models/test_alpha.cpp"

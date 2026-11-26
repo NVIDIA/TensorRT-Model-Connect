@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  adapter: families/siglip2/reference/adapter.py  # NaFlex: the image alone with its patch mask and spatial shape

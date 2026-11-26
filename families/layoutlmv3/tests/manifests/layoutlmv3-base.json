@@ -1,0 +1,24 @@
+{
+  "name": "layoutlmv3-base",
+  "hf_id": "microsoft/layoutlmv3-base",
+  "hf_revision": "cfbbbff0762e6aab37086fdd4739ad14fe7d5db4",
+  "family": "layoutlmv3",
+  "bundle": "layoutlmv3-base.bundle",
+  "task": "document_words_to_token_features",
+  "precision": "fp32",
+  "max_sequence_length": 128,
+  "image_height": 224,
+  "image_width": 224,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "layoutlmv3-base-document-features",
+      "premerge": true,
+      "image": "test_img.jpeg",
+      "max_abs_error": 0.0002,
+      "min_cosine": 0.99999,
+      "pixel_atol": 2e-06
+    }
+  ],
+  "reference_environment": "isolated"
+}

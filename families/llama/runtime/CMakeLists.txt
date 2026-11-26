@@ -53,7 +53,8 @@ if(TRTMC_BUILD_TESTS)
       trtmc_core nlohmann_json::nlohmann_json ${TRTMC_CUDART_LIBRARY})
   endforeach()
   add_test(NAME test_llama_speculative_contract COMMAND test_llama_speculative_contract)
-  foreach(test_name IN ITEMS test_llama_chat_template test_llama_native_kv_cache)
+  foreach(test_name IN ITEMS test_llama_chat_template test_llama_native_kv_cache
+                             test_llama_pretokenizer_variant test_llama_tokenizer_special_tokens)
     add_executable(${test_name}
       ${PROJECT_SOURCE_DIR}/families/llama/tests/cpp/${test_name}.cpp
     )
@@ -68,6 +69,7 @@ if(TRTMC_BUILD_TESTS)
     )
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
+  target_link_libraries(test_llama_tokenizer_special_tokens PRIVATE nlohmann_json::nlohmann_json)
   set_tests_properties(test_llama_native_kv_cache PROPERTIES SKIP_RETURN_CODE 77)
 
   add_executable(test_llama_plugin_helpers
@@ -116,3 +118,20 @@ if(TRTMC_BUILD_TESTS)
 endif()
 
 include(edge_llm/Adapter.cmake)
+
+if(TRTMC_BUILD_TESTS)
+  # CPU-backed KV-cache test: CUDA calls are served from host memory, and an
+  # overlapping copy fails the test.
+  add_executable(test_llama_kv_cache
+    ${PROJECT_SOURCE_DIR}/families/llama/tests/cpp/test_kv_cache.cpp
+    kv_cache.cpp
+    ${PROJECT_SOURCE_DIR}/core/runtime/primitives/device_tensor.cpp
+  )
+  target_include_directories(test_llama_kv_cache PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_llama_kv_cache SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_llama_kv_cache PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME llama_kv_cache COMMAND test_llama_kv_cache)
+endif()

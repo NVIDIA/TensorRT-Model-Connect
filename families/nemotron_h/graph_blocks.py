@@ -168,8 +168,12 @@ def add_attention_block(
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
     decompose_attention: bool = False,
+    sequence_length: int | None = 1,
 ) -> dict[str, trt.ITensor]:
     """Pre-norm -> QKV -> RoPE -> cache concat -> attention -> output proj.
+
+    ``sequence_length`` is the query row count, or None for ``S`` runtime rows
+    (the mask then covers the cache plus the rows).
 
     Returns {"normed": ..., "attn_out": ..., "present_k": ..., "present_v": ...}.
     Does NOT apply residual -- callers compose the residual pattern.
@@ -181,7 +185,8 @@ def add_attention_block(
     native IAttention.
     """
     matmul = _make_matmul_fn(network, dtype, quant_ctx)
-    attention_window = max_cache_length + 1
+    if sequence_length is None and alibi_slopes_tensor is not None:
+        raise NotImplementedError("ALiBi attention runs one row per launch")
     if num_kv_heads is None:
         num_kv_heads = num_heads
     if kv_attention_size is None:
@@ -213,12 +218,14 @@ def add_attention_block(
     q_norm = weights.get(f"{prefix}.q_norm")
     if q_norm is not None:
         q = graph_ops.add_rms_norm_per_head(
-            network, q, num_heads, head_dim, q_norm, eps_tensor, dtype=dtype
+            network, q, num_heads, head_dim, q_norm, eps_tensor, dtype=dtype,
+            sequence_length=sequence_length,
         )
     k_norm = weights.get(f"{prefix}.k_norm")
     if k_norm is not None:
         k = graph_ops.add_rms_norm_per_head(
-            network, k, num_kv_heads, head_dim, k_norm, eps_tensor, dtype=dtype
+            network, k, num_kv_heads, head_dim, k_norm, eps_tensor, dtype=dtype,
+            sequence_length=sequence_length,
         )
     present_k = k
     present_v = v
@@ -231,14 +238,15 @@ def add_attention_block(
         present_k, k, cache_k = _fp8_cache_qdq(network, k, cache_k, k_scale)
         present_v, v, cache_v = _fp8_cache_qdq(network, v, cache_v, v_scale)
     k_reshape = network.add_shuffle(k)
-    k_reshape.reshape_dims = (1, kv_attention_size)
+    rows = -1 if sequence_length is None else sequence_length
+    k_reshape.reshape_dims = (rows, kv_attention_size)
     v_reshape = network.add_shuffle(v)
-    v_reshape.reshape_dims = (1, kv_attention_size)
+    v_reshape.reshape_dims = (rows, kv_attention_size)
     all_k = network.add_concatenation([cache_k, k_reshape.get_output(0)])
     all_k.axis = 0
     all_v = network.add_concatenation([cache_v, v_reshape.get_output(0)])
     all_v.axis = 0
-    kv_seq = attention_window
+    kv_seq = None if sequence_length is None else max_cache_length + sequence_length
     if alibi_slopes_tensor is not None:
         if alibi_indices_tensor is None:
             raise ValueError("ALiBi attention requires cache position indices")
@@ -260,7 +268,7 @@ def add_attention_block(
         num_heads=num_heads,
         head_dim=head_dim,
         num_kv_heads=num_kv_heads,
-        q_seq=1,
+        q_seq=sequence_length,
         kv_seq=kv_seq,
         causal=False,
         mask=mask_4d,

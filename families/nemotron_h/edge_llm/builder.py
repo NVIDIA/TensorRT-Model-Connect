@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import json
+import os
+import logging
+from importlib.util import find_spec
 from pathlib import Path
 import shutil
 import subprocess
@@ -14,6 +17,11 @@ import sys
 from tensorrt_model_connect.build import cmake_prefixes, detect_local_platform, subprocess_environment
 
 EDGE_REVISION = "95515c2f87fba8982db5a519f9022277667b3cc9"
+_RELEASES = {
+    "0.11.0": (1, "revision", EDGE_REVISION, "experimental.builder.cli", "tensorrt_edgellm.scripts.export"),
+    "0.12.0": (2, "release_revision", "513dcd18291e587c80928911a480761352f3c2d8",
+               "tensorrt_edgellm.builder.cli", "tensorrt_edgellm.onnx.cli"),
+}
 _QUANTIZED_EXTERNAL_WEIGHTS = (
     "int4_ffn", "int4_moe", "nvfp4_moe", "nvfp4_tp", "lm_head", "embedding",
 )
@@ -24,16 +32,44 @@ def local_target() -> dict:
     return detect_local_platform()
 
 
+def _package_prefixes(*, report_conflict: bool = False) -> list[Path]:
+    """Use the active wheel's SDK with its native runner, or standalone prefixes."""
+    package = find_spec("tensorrt_model_connect")
+    if package is None or not package.origin:
+        return cmake_prefixes()
+    module_dir = Path(package.origin).resolve().parent
+    if (module_dir / "bin/trtmc").is_file():
+        if report_conflict and any(
+            (prefix / "share/trtmc/edge-llm.json").is_file() and prefix.resolve() != module_dir
+            for prefix in cmake_prefixes()
+        ):
+            logging.getLogger(__name__).warning(
+                "Ignoring a standalone Edge SDK: the installed Model Connect runner uses "
+                "only its packaged Nemotron-H capability."
+            )
+        return [module_dir]
+    return cmake_prefixes()
+
+
 def package_present() -> bool:
     """Absence of the optional SDK is a non-match, not a failed Edge build."""
-    for prefix in cmake_prefixes():
+    for prefix in _package_prefixes():
         manifest = prefix / "share/trtmc/edge-llm.json"
         if manifest.exists() or manifest.is_symlink():
             return True
     return False
 
 
-def installed_package(target: dict) -> dict:
+def selected_release() -> str | None:
+    """Identify the selected receipt; prepare validates the complete SDK before use."""
+    for prefix in _package_prefixes():
+        manifest = prefix / "share/trtmc/edge-llm.json"
+        if manifest.is_file():
+            return json.loads(manifest.read_text(encoding="utf-8")).get("version")
+    return None
+
+
+def installed_package(target: dict, *, dense_fp16: bool = False) -> dict:
     """Resolve CMake installation via standard prefixes; never install anything.
 
     Args:
@@ -46,23 +82,30 @@ def installed_package(target: dict) -> dict:
         FileNotFoundError: No CMake installation or required artifact exists.
         ValueError: Pin, architecture, SDK or contained-path contract differs.
     """
-    for prefix in cmake_prefixes():
+    for prefix in _package_prefixes(report_conflict=True):
         manifest = prefix / "share/trtmc/edge-llm.json"
         if not manifest.is_file():
             continue
         package = json.loads(manifest.read_text(encoding="utf-8"))
-        if package.get("schema_version") != 1 or package.get("revision") != EDGE_REVISION:
-            raise ValueError(f"Edge package has an unsupported revision/schema: {manifest}")
-        if package.get("all_native_kernels") is not True:
+        release = _RELEASES.get(package.get("version"))
+        if release is None or package.get("schema_version") != release[0]:
+            raise ValueError(f"Unsupported Edge package release or schema: {manifest}")
+        key, pinned = release[1:3]
+        allowed = (pinned, None) if package["version"] == "0.12.0" else (pinned,)
+        if key not in package or package[key] not in allowed:
+            raise ValueError(f"Unsupported Edge package revision: {manifest}")
+        # Dense FP16 on 0.12 can use the Mamba plugin's scalar prefill.
+        # Its builder checks the required plugins; failure retries unchanged native.
+        if not (dense_fp16 and package["version"] == "0.12.0") and package.get("all_native_kernels") is not True:
             raise ValueError("Nemotron-H requires an Edge package with all native operator groups")
-        if package.get("version") != "0.11.0" or package.get("arch") != target["arch"]:
+        if package.get("arch") != target["arch"]:
             raise ValueError("Edge package version/architecture differs from executing worker")
         if target["sm"] not in package.get("architectures", []):
             raise ValueError("Edge package was not built for this local GPU")
         cuda_version = ".".join(str(package.get("cuda_version", "")).split(".")[:2])
         if cuda_version != target["cuda_version"] or package.get("tensorrt_version") != target["tensorrt_version"]:
             raise ValueError("Edge package CUDA/TensorRT differs from executing worker")
-        for name in ("python", "plugin") + (("onnx_builder",) if package.get("onnx") is True else ()):
+        for name in ("plugin",) + (("python",) if package["version"] == "0.11.0" else ()) + (("onnx_builder",) if package.get("onnx") is True else ()):
             relative = Path(package[name])
             path = (prefix / relative).resolve()
             if relative.is_absolute() or not path.is_relative_to(prefix.resolve()):
@@ -75,19 +118,19 @@ def installed_package(target: dict) -> dict:
                             "and set CMAKE_PREFIX_PATH to its install prefix")
 
 
-def builder_python(package: dict, target: dict, *, onnx: bool = False) -> str:
-    """Use installed 0.11.0 Python tools when compatible, otherwise the SDK Python.
+def builder_python(package: dict, target: dict, requested: Path | None = None, *, onnx: bool = False) -> str:
+    """Use a version-matched wheel or source-installed builder interpreter.
 
     The native SDK remains required. This only discovers an interpreter; it
     never installs packages or substitutes the wheel's runtime for the C++ SDK.
     An incompatible ambient install is ignored.
     """
-    interpreter = sys.executable
-    imports = (
-        "from tensorrt_edgellm.scripts.export import main; "
-        if onnx
-        else "from experimental.builder.cli import main; "
-    )
+    version = package["version"]
+    interpreter = sys.executable if requested is None else str(requested)
+    module = _RELEASES[version][4 if onnx else 3]
+    imports = f"from {module} import main; "
+    if version == "0.12.0":
+        imports += "import transformers; assert transformers.__version__ == '5.17.0'; "
     try:
         if not Path(interpreter).is_absolute() or not Path(interpreter).is_file():
             raise ValueError("Edge builder Python must be an existing absolute interpreter path")
@@ -105,11 +148,13 @@ def builder_python(package: dict, target: dict, *, onnx: bool = False) -> str:
             text=True,
             timeout=30,
         )
-        if json.loads(probe.stdout) != ["0.11.0", target["tensorrt_version"]]:
+        if json.loads(probe.stdout) != [version, target["tensorrt_version"]]:
             raise ValueError(
-                "Edge builder Python must match Edge 0.11.0 and the native TensorRT SDK"
+                f"Edge builder Python must match Edge {version} and the native TensorRT SDK"
             )
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        if requested is not None or version == "0.12.0":
+            raise ValueError(f"Edge {version} requires a matching --edge-builder-python interpreter") from error
         return package["python"]
     return interpreter
 
@@ -147,20 +192,37 @@ def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path) -> 
     source_precision = source_quantization(request, raw)
     if source_precision is None:
         raise ValueError("Unsupported Nemotron-H checkpoint precision")
-    package = installed_package(target)
+    from .edge_config import layers
+
+    kinds = layers(raw)
+    dense_fp16 = source_precision == "fp16" and kinds is not None and "moe" not in kinds
+    package = installed_package(target, dense_fp16=dense_fp16)
     checkpoint = staging / "edge_llm/checkpoint"
     checkpoint.mkdir(parents=True)
+    # A read-only mount already prevents the builder from changing source weights.
+    # Expose only those weights through our private input view; configs remain
+    # private copies. The bundle writer later streams ordinary file sections,
+    # never symlinks or host paths. Writable inputs keep their isolated copy.
+    readonly_weights = {}
     for source in Path(request.model_dir).iterdir():
         if source.is_file() and (source.suffix in {".json", ".safetensors", ".model", ".jinja"}
                                  or source.name in {"merges.txt", "vocab.txt"}):
-            shutil.copy2(source, checkpoint / source.name)
+            dest = checkpoint / source.name
+            if (package["version"] == "0.12.0" and source.suffix == ".safetensors"
+                    and os.statvfs(source).f_flag & os.ST_RDONLY):
+                weight_path = source.resolve(strict=True)
+                stat = weight_path.stat()
+                readonly_weights[dest] = (weight_path, (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns))
+                dest.symlink_to(weight_path)
+            else:
+                shutil.copy2(source, dest)
     if not list(checkpoint.glob("*.safetensors")):
         raise ValueError("Edge direct builder requires a safetensors checkpoint")
     limit = sequence_length(request, raw)
     engine = staging / "edge_llm/engine"
     # Calling upstream main preserves its complete build/artifact orchestration.
-    command = [builder_python(package, target), "-I", "-c",
-               "from experimental.builder.cli import main; main()",
+    command = [builder_python(package, target, getattr(request, "edge_builder_python", None)), "-I", "-c",
+               f"from {_RELEASES[package['version']][3]} import main; main()",
                "--model-dir", str(checkpoint), "--engine-dir", str(engine),
                "--components", "llm", "--plugin-path", package["plugin"],
                "--dense", "fp16" if source_precision == "fp16" else "auto", "--max-input-len", str(limit),
@@ -204,12 +266,23 @@ def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path) -> 
     files = {}
     for directory in (engine, checkpoint, runtime_tokenizer):
         for path in sorted(directory.rglob("*")):
-            if path.is_symlink():
+            name = path.relative_to(staging).as_posix()
+            if path in readonly_weights:
+                weight_path, before = readonly_weights.pop(path)
+                if not path.is_symlink() or path.readlink() != weight_path:
+                    raise ValueError("Edge builder replaced a read-only checkpoint weight")
+                stat = weight_path.stat()
+                if before != (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns):
+                    raise ValueError("Source checkpoint weight changed during Edge build")
+                files[name] = weight_path
+            elif path.is_symlink():
                 raise ValueError(f"Edge output must not contain symlinks: {path}")
-            if path.is_file():
-                files[path.relative_to(staging).as_posix()] = path
+            elif path.is_file():
+                files[name] = path
+    if readonly_weights:
+        raise ValueError("Edge builder removed a read-only checkpoint weight")
     return files, {
-        "version": 1, "edge_revision": EDGE_REVISION, "target": target, "precision": "fp16",
+        "version": 1, "edge_revision": package[_RELEASES[package["version"]][1]], "edge_release": package["version"], "target": target, "precision": "fp16",
         "max_sequence_length": limit, "max_input_length": limit, "max_batch_size": 1,
         "artifacts": list(files), "checkpoint_precision": source_precision,
         "tokenizer_policy": "native_full_eos", "native_eos_token_ids": eos,
@@ -224,6 +297,18 @@ def publish(request, writer, files: dict, marker: dict) -> None:
         with path.open("rb") as source, writer.open_section(name) as destination:
             shutil.copyfileobj(source, destination, length=1024 * 1024)
     writer.add_json("edge_llm.json", marker)
+
+
+def _validate_dspark_w2(engine: Path) -> None:
+    """Require the separate Markov W2 when the 0.12 exporter declares packed weights."""
+    info = json.loads((engine / "dspark_heads_info.json").read_text(encoding="utf-8"))
+    if info.get("w2_format") == "fp16":
+        return
+    if info.get("w2_format") != "nvfp4":
+        raise ValueError("Unexpected Edge DSpark W2 format")
+    packed = engine / "dspark_w2_nvfp4.safetensors"
+    if not packed.is_file() or packed.stat().st_size == 0:
+        raise ValueError("Edge DSpark declares NVFP4 W2 but its packed sidecar is missing or empty")
 
 
 def prepare_paired(request, raw: dict, target: dict, staging: Path, log_path: Path,
@@ -251,23 +336,29 @@ def prepare_paired(request, raw: dict, target: dict, staging: Path, log_path: Pa
     source = Path(request.model_dir).resolve()
     draft = draft.resolve()
     draft_config = json.loads((draft / "config.json").read_text(encoding="utf-8"))
-    draft_policy = draft_config.get("dspark_config") or draft_config.get("dflash_config", {})
-    layer_ids = draft_policy.get("target_layer_ids", draft_config.get("target_layer_ids", []))
-    architecture = "Qwen3DSparkModel" if dspark else "DFlashDraftModel"
-    if (draft_config.get("architectures") != [architecture]
-            or draft_config.get("hidden_size") != raw["hidden_size"]
-            or draft_config.get("vocab_size") != raw["vocab_size"]
-            or not layer_ids or len(set(layer_ids)) != len(layer_ids)
-            or any(type(i) is not int or not 0 <= i < raw["num_hidden_layers"] for i in layer_ids)
-            or draft_policy.get("block_size", draft_config.get("block_size", block_size)) != block_size):
-        raise ValueError("Nemotron-H companion geometry does not match its target")
-    if dspark and (
-        draft_policy.get("sample_from_anchor", draft_config.get("sample_from_anchor")) is not False
-        or draft_policy.get("causal") is not True
-        or draft_config.get("sliding_window") != 1024
-        or draft_config.get("attention_sink_bias") is not True
-    ):
-        raise ValueError("Nemotron-H DSpark requires the published block8 anchor-only SWA draft")
+    if package["version"] == "0.12.0":
+        # Both routes must implement the same anchor, feature, and attention contract.
+        from ..draft import DraftConfig
+
+        DraftConfig.from_dict(draft_config, raw, variant)
+    else:
+        draft_policy = draft_config.get("dspark_config") or draft_config.get("dflash_config", {})
+        layer_ids = draft_policy.get("target_layer_ids", draft_config.get("target_layer_ids", []))
+        architecture = "Qwen3DSparkModel" if dspark else "DFlashDraftModel"
+        if (draft_config.get("architectures") != [architecture]
+                or draft_config.get("hidden_size") != raw["hidden_size"]
+                or draft_config.get("vocab_size") != raw["vocab_size"]
+                or not layer_ids or len(set(layer_ids)) != len(layer_ids)
+                or any(type(i) is not int or not 0 <= i < raw["num_hidden_layers"] for i in layer_ids)
+                or draft_policy.get("block_size", draft_config.get("block_size", block_size)) != block_size):
+            raise ValueError("Nemotron-H companion geometry does not match its target")
+        if dspark and (
+            draft_policy.get("sample_from_anchor", draft_config.get("sample_from_anchor")) is not False
+            or draft_policy.get("causal") is not True
+            or draft_config.get("sliding_window") != 1024
+            or draft_config.get("attention_sink_bias") is not True
+        ):
+            raise ValueError("Nemotron-H DSpark requires the published block8 anchor-only SWA draft")
     if not list(source.glob("*.safetensors")) or not list(draft.glob("*.safetensors")):
         raise ValueError("Nemotron-H paired execution requires both local safetensors checkpoints")
     limit = sequence_length(request, raw)
@@ -287,19 +378,31 @@ def prepare_paired(request, raw: dict, target: dict, staging: Path, log_path: Pa
          "EDGELLM_NVFP4_MOE_TARGET": "sm12x" if target["sm"] in {120, 121} else f"sm{target['sm']}"},
         prepend_paths={"LD_LIBRARY_PATH": str(Path(package["plugin"]).parent)},
     )
-    for role, subdirectory, flag in (("draft", f"{spec_type}_draft", "--specDraft"),
-                                      ("base", "llm", "--specBase")):
+    modern = package["version"] == "0.12.0"
+    exporter = builder_python(package, target, getattr(request, "edge_builder_python", None), onnx=True)
+    for role, subdirectory in (("draft", f"{spec_type}_draft"), ("base", "llm")):
         export_flag = f"--{spec_type}-{role}"
-        if role == "base" and variant == "dspark_tree":
+        if not modern and role == "base" and variant == "dspark_tree":
             export_flag = "--dspark-tree-base"
+        if modern:
+            # Chain and tree share the DSpark base export. The base verify budget
+            # is root-inclusive; the Lightning draft needs one extra input slot
+            # for its unsampled anchor.
+            profile = (["--max-spec-draft-tokens", str(draft_size)] if role == "draft"
+                       else ["--max-spec-verify-tokens", str(verify_size)])
+            build_args = ["--onnx-dir", str(onnx / subdirectory), "--engine-dir", str(engine),
+                          f"--spec-{role}", "--max-input-len", str(min(limit, 1024)),
+                          "--max-kv-cache-capacity", str(limit), "--max-batch-size", "1", *profile]
+        else:
+            flag = "--specDraft" if role == "draft" else "--specBase"
+            build_args = ["--onnxDir", str(onnx / subdirectory), "--engineDir", str(engine), flag,
+                          "--maxInputLen", str(min(limit, 1024)), "--maxKVCacheCapacity", str(limit),
+                          "--maxBatchSize", "1", "--maxVerifyTreeSize", str(verify_size),
+                          "--maxDraftTreeSize", str(draft_size)]
         commands = [
-            [builder_python(package, target, onnx=True), "-I", "-m", "tensorrt_edgellm.scripts.export",
-             str(source), str(onnx), export_flag, f"--{spec_type}-draft-dir", str(draft),
-             "--skip-visual", "--skip-audio"],
-            [package["onnx_builder"], "--onnxDir", str(onnx / subdirectory),
-             "--engineDir", str(engine), flag, "--maxInputLen", str(min(limit, 1024)),
-             "--maxKVCacheCapacity", str(limit), "--maxBatchSize", "1",
-             "--maxVerifyTreeSize", str(verify_size), "--maxDraftTreeSize", str(draft_size)],
+            [exporter, "-I", "-m", _RELEASES[package["version"]][4], str(source), str(onnx),
+             export_flag, f"--{spec_type}-draft-dir", str(draft), "--skip-visual", "--skip-audio"],
+            [package["onnx_builder"], *build_args],
         ]
         with log_path.open("a", encoding="utf-8") as log:
             for command in commands:
@@ -317,6 +420,8 @@ def prepare_paired(request, raw: dict, target: dict, staging: Path, log_path: Pa
     for name in required:
         if not (engine / name).is_file() or (engine / name).stat().st_size == 0:
             raise ValueError(f"Edge ONNX builder did not produce required artifact: {name}")
+    if dspark and modern:
+        _validate_dspark_w2(engine)
     for role in ("base", "draft"):
         config = json.loads((engine / f"{role}_config.json").read_text(encoding="utf-8"))
         policy = config.get(f"{spec_type}_config", {})
@@ -335,7 +440,7 @@ def prepare_paired(request, raw: dict, target: dict, staging: Path, log_path: Pa
             if path.is_file():
                 files[path.relative_to(staging).as_posix()] = path
     return files, {
-        "version": 1, "edge_revision": EDGE_REVISION, "target": target, "precision": "fp16",
+        "version": 1, "edge_revision": package[_RELEASES[package["version"]][1]], "edge_release": package["version"], "target": target, "precision": "fp16",
         "max_sequence_length": limit, "max_input_length": min(limit, 1024), "max_batch_size": 1,
         "artifacts": list(files), "checkpoint_precision": source_quantization(request, raw),
         "tokenizer_policy": "native_full_eos", "native_eos_token_ids": eos,
@@ -343,4 +448,5 @@ def prepare_paired(request, raw: dict, target: dict, staging: Path, log_path: Pa
         "builder_flow": "onnx", f"{spec_type}_block_size": block_size,
         "spec_verify_size": verify_size, "spec_draft_size": draft_size,
         "spec_draft_top_k": 4 if variant == "dspark_tree" else 1,
+        **({"spec_proposal_tokens": block_size if dspark else block_size - 1} if modern else {}),
     }

@@ -54,3 +54,20 @@ if(TRTMC_BUILD_TESTS)
   )
   target_compile_options(qwen_moe_logits_trace PRIVATE -Wall -Wextra -Wpedantic)
 endif()
+
+if(TRTMC_BUILD_TESTS)
+  # CPU-backed KV-cache test: CUDA calls are served from host memory, and an
+  # overlapping copy fails the test.
+  add_executable(test_qwen_moe_kv_cache
+    ${PROJECT_SOURCE_DIR}/families/qwen_moe/tests/cpp/test_kv_cache.cpp
+    kv_cache.cpp
+    ${PROJECT_SOURCE_DIR}/core/runtime/primitives/device_tensor.cpp
+  )
+  target_include_directories(test_qwen_moe_kv_cache PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_qwen_moe_kv_cache SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_qwen_moe_kv_cache PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME qwen_moe_kv_cache COMMAND test_qwen_moe_kv_cache)
+endif()

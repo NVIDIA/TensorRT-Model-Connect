@@ -47,6 +47,7 @@ def _make_executable(path: Path) -> None:
 
 def _package_families(source: Path, package: Path) -> None:
     """Keep test reference implementations out of the product wheel."""
+
     def ignore(directory: str, names: list[str]) -> set[str]:
         excluded = {"__pycache__"}
         if Path(directory).name == "tests":
@@ -230,11 +231,11 @@ class TensorRTModelConnectConan(ConanFile):
             *module_bin.glob("libtrtmc_cli_*.so"),
         ):
             runpaths = ["$ORIGIN", "$ORIGIN/../../tensorrt_libs", "/usr/local/cuda/lib64"]
-            if any(
-                dependency.startswith(("libtorch", "libc10"))
-                for dependency in _needed_libraries(library)
-            ):
+            dependencies = _needed_libraries(library)
+            if any(dependency.startswith(("libtorch", "libc10")) for dependency in dependencies):
                 runpaths.append("$ORIGIN/../../torch/lib")
+            if any(dependency.startswith("libtvm_ffi.so") for dependency in dependencies):
+                runpaths.append("$ORIGIN/../../tvm_ffi/lib")
             _set_runpath(
                 library,
                 ":".join(runpaths),

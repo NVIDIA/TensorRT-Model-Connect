@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+benchmarks:
+  # From one FP8 build to the next, top-1 on ImageNetV2 moves by 0.13 points: 0.38 to 0.51 below the fp16
+  # native model on GB300, DGX Spark and Jetson Thor. The runtime repeats each build's number exactly. This
+  # profile gets twice the shared margin, as the language benchmarks give quantized bundles. Other quantized
+  # classifiers keep 0.5 until their own builds are measured.
+  imagenet:
+    quantized_gate: {margin: 1.0}

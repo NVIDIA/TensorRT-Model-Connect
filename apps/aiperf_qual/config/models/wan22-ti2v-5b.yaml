@@ -3,9 +3,18 @@
 
 reference:
   requirements: families/wan2_2_ti2v/requirements.txt  # the family's dependencies, layered on the serving interpreter
+  # flash-attn (a family requirement) builds from source where no wheel matches (Jetson AGX Thor), against the
+  # installed torch: an isolated build has no torch.
+  build_isolation: false
   model: Wan-AI/Wan2.2-TI2V-5B-Diffusers  # the Diffusers export of the same weights
   revision: b8fff7315c768468a5333511427288870b2e9635
 
 # The catalog request states guidance_scale 5.0 (TRTMC's Wan 2.2 option and the Diffusers WanPipeline
 # both use it) and leaves cfg_scale at -1; stated as the same 5.0 for every request built on it.
-request: {cfg_scale: 5.0}
+# Its empty negative prompt means different work on each side: TRTMC's Wan 2.2 runtime replaces it with the
+# official negative prompt (families/wan2_2_ti2v/model_config.py), the Diffusers WanPipeline encodes "". From the
+# same seed and noise the two sides then generate different clips, so the official one is stated for both.
+request:
+  cfg_scale: 5.0
+  negative_prompt: >-
+    色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走

@@ -1,8 +1,110 @@
-# Qwen3.5: optional Edge-LLM 0.11 execution
+# Qwen3.5: optional Edge-LLM execution
 
 This family owns Edge selection, checkpoint admission, build arguments, bundles,
 runtime orchestration and validation. Model-specific dispatch does not change
 shared Model Connect code.
+The default SDK is 0.11.0. To use the official 0.12.0 release, configure
+`-DTRTMC_EDGELLM_RELEASE=0.12.0` and select its matching wheel- or source-installed
+builder with the family option `--edge-builder-python /absolute/path/to/python`.
+The option selects builder tools, not a different C++ runtime.
+
+To check which path ran, use `trtmc inspect MODEL.bundle`: the Edge bundle
+contains `edge_llm.json`; an ordinary single-GPU native bundle contains
+`engine.plan` instead. If no compatible builder is available, Model Connect
+warns and retries the same request on native TensorRT. On the original 0.8B
+FP16 text fixture, both paths of the installed 0.12-enabled Model Connect
+wheel returned the FP32 reference answer without the checkpoint or builder
+environment present at inference time. This check does not qualify sampled
+generation or a different model.
+
+### Measured 0.12 text profiles
+
+The ordinary runs below used original weights, FP16 compute, one GPU, batch
+one and a 256-token capacity. MC Edge and native TRT passed the short HF FP32
+text gate for each listed checkpoint. The long checks use the release's
+128-token greedy and sampled fixtures; standalone Edge consumed the engine
+built by MC. A quality miss does not disable execution.
+
+| Checkpoint | Long-answer results |
+| --- | --- |
+| 2B, 2B-Base, 4B, 4B-Base, 9B, 9B-Base | Both fixtures passed on MC Edge, standalone Edge and native TRT. |
+| 0.8B, 27B | Both Edge paths passed. Native passed greedy but missed sampled ROUGE-L (0.172 and 0.181, respectively; minimum 0.20). |
+| 0.8B-Base | Native passed both. Both Edge paths passed greedy and missed sampled ROUGE-L (0.174). |
+
+For **4B embedded MTP**, MC used the trained head with three draft steps and
+four verification positions (2,048 input tokens, 4,096 total capacity). MC Edge
+and native matched their respective ordinary targets on both short prompts
+(thinking on and off) and passed the independent FP32 check at the input
+limit. Both and standalone Edge passed the released long greedy fixture;
+standalone Edge reported nonzero speculative verification counts.
+
+For **27B embedded MTP** (FP16, 4,096 total capacity), MC Edge and standalone
+Edge passed the measured short and long greedy checks. Native built the
+target and embedded draft but exhausted a 335 GiB **host** memory limit while
+building the four-token verifier. The native verifier produced no serialized
+output, so native inference was not run or qualified for this profile.
+This was not GPU OOM, and the working Edge route remains available.
+
+The original **4B and 9B linear DFlash** pairs passed both short checks and
+the released long greedy fixture on MC Edge, native and standalone Edge
+(1,024 input / 2,048 total tokens). Standalone Edge reported 56 and 48
+verification steps respectively on the long request. The original **27B
+linear DFlash** pair also passed these checks at a 256-token capacity.
+
+The prepared **Qwen3.5-4B-NVFP4 + Qwen3.5-4B-DFlash-NVFP4** pair uses
+the 0.12 ONNX exporter and native Edge compilers. The direct builder recurses
+while resolving the tied quantized output head. Install the `onnx` extra for
+the matching Edge Python package and configure the SDK with
+`-DTRTMC_EDGELLM_ONNX=ON`. For example:
+
+```sh
+trtmc qwen3_5 build "$TARGET" -o model.bundle --task text_generation --precision fp16 \
+  --execution-variant dflash --companion "draft=$DRAFT" --max-sequence-length 2048
+```
+
+If those tools are unavailable, the family retains both checkpoints and builds native TensorRT
+target and draft plans; native does not export ONNX. On SM120, both MC routes
+matched the HF FP32 reference text for the two short thinking-mode checks at
+batch one and capacity 2,048, and passed the released long greedy check.
+Separate vision bundles on both routes also passed the existing car-color
+fixture against the original 4B HF FP32 reference (normalized edit distance
+0). These results do not establish exact token parity, tree decoding, larger
+batches, or speedup.
+
+The **4B, 9B and 27B DFlash DDTree** profiles use their respective original targets
+and drafts with a top-k-four tree. Both MC routes matched their ordinary
+targets on both short prompts, and all three routes passed the long greedy
+check. Standalone Edge reported 43, 40 and 36 verification steps, respectively.
+The 27B run used a 256-token capacity. These checks do not qualify the
+separately prepared NVFP4 pair, sampled tree decoding, or media.
+
+In a 0.12 build, use `--task vision_language_generation` for the legacy
+single-image interface. To select the ordered-media Task SDK, build with
+`--task images_text_to_text`. The bundle retains the requested primary task;
+specifying a second image does not turn a single-image request into an ordered
+one.
+
+For **2B visual generation** at 8,192-token capacity, the public CLI consumed
+one image and two ordered images on both backends. Reversing the images changed
+the answer as expected. Both runtimes also matched the FP32 reference on the
+final color of a video played in either order. Mixed still-image/video requests
+executed, but did not pass the combined grounding check: neither Edge nor the
+reference finished the two-color answer within ten tokens, and native differed
+from the reference. These results do not qualify other shapes or modalities.
+
+For the original **27B TP2 image** fixture (FP16, capacity 8,192), native
+built two decoder and two visual rank plans and matched the HF FP32 answer.
+On two non-peer NVIDIA A100 PCIe 40 GB devices with CUDA 13.4 and TensorRT
+11.4.0.106, the 0.12 Edge build also produced both decoder ranks and the
+visual engine. Both MC Edge and the standalone Edge runner then reported
+illegal CUDA memory access in image prefill. With synchronous launches, the
+standalone runner first reported the Edge paged FMHA-v2 kernel (head width
+256). On this configuration the
+family selects native before building. This is an Edge runtime failure on
+the measured pair, not a general TP2 failure or proof of a faulty interconnect.
+
+## Default 0.11 execution
+
 The native SDK is pinned to the official public Edge-LLM **0.11.0** revision
 `95515c2f87fba8982db5a519f9022277667b3cc9`. Build on the executing GPU; there is
 no cross-compilation or alternate vendor checkout.
@@ -42,7 +144,7 @@ use SM120. Checkpoint-driven weight precision is separate from compute precision
 | 2B NVFP4 weights with NVFP4 LM head | Standalone text, checkpoint-driven component precision |
 
 This table describes execution admission, **not universal quality qualification**.
-NVFP4 MTP uses the same four topology admissions as original-weight MTP. Edge
+In the default 0.11 Edge route, NVFP4 MTP uses the same four topology admissions as original-weight MTP. Edge
 offload model-engine evidence covers the 4B NVFP4 profile; the native fallback
 also has the 2B NVFP4 execution and accuracy limitations detailed below. The
 other NVFP4 sizes are command mappings, not locally executed or qualified results.
@@ -140,8 +242,9 @@ trtmc qwen3_5 build /models/Qwen3.5-2B --precision fp16 \
 MTP reads the embedded draft layer and rejects `--companion`. DFlash checks the
 draft architecture, vocabulary/hidden widths, target layers, mask token, context
 and matching weight format. Linear uses top-k one; DDTree uses top-k four.
-Text speculative builds cap input at min(context, 1024) while retaining the
-requested KV capacity. Runtime sampling qualification remains greedy.
+For text, Edge 0.12 MTP caps input at min(context, 2048), matching its
+documented 2048-input/4096-KV example. DFlash and Edge 0.11 MTP cap input at
+min(context, 1024). All retain the requested KV capacity. Runtime sampling qualification remains greedy.
 
 Python callers can use the existing family extension
 `with_execution(request, BuildExecutionInputs(...))` from

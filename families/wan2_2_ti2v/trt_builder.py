@@ -106,6 +106,7 @@ def build_wan22_components(
     precision: str = "bf16",
     verbose: bool = False,
     fp8_scales: dict | None = None,
+    nvfp4_scales: dict | None = None,
     **_kwargs,
 ) -> dict:
     """Build all five plans for one qualified checkpoint profile."""
@@ -116,6 +117,13 @@ def build_wan22_components(
     if fp8_scales is not None and generation_profile != WAN22_TI2V_5B:
         raise ValueError(
             "Wan2.2 FP8 scales are qualified only for the official "
+            "1280x704, 121-frame, 50-step profile"
+        )
+    if nvfp4_scales is not None and fp8_scales is not None:
+        raise ValueError("Wan2.2 NVFP4 cannot be combined with FP8 scales")
+    if nvfp4_scales is not None and generation_profile != WAN22_TI2V_5B:
+        raise ValueError(
+            "Wan2.2 NVFP4 scales are qualified only for the official "
             "1280x704, 121-frame, 50-step profile"
         )
     ffn_fp8_scales, cross_qo_fp8_scales = _split_qualified_fp8_scales(
@@ -132,6 +140,7 @@ def build_wan22_components(
         profile=generation_profile,
         ffn_fp8_scales=ffn_fp8_scales,
         cross_qo_fp8_scales=cross_qo_fp8_scales,
+        nvfp4_scales=nvfp4_scales,
         verbose=verbose,
     )
 

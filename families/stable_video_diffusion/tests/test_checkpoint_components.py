@@ -1,0 +1,297 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""One call of each engine built from the real checkpoint against its reference module.
+
+A hardware test (GPU and TensorRT). The checkpoint is the E2E manifests' pinned
+revision, from TRTMC_STABLE_VIDEO_DIFFUSION_MODEL_DIR or the Hugging Face cache, as
+the E2E resolves it. Shapes are reduced (the graphs are shape-specialized, the
+weights are the real ones). The oracles are relative to the reference itself: an FP32
+engine's error against a float64 run of the reference must stay within a small
+factor of the reference's own FP32 error, and an FP16 engine's error against the
+reference's FP32 run within a per-component factor of the reference's own FP16
+error.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+from pathlib import Path
+
+import pytest
+
+torch = pytest.importorskip("torch")
+trt = pytest.importorskip("tensorrt")
+diffusers = pytest.importorskip("diffusers")
+transformers = pytest.importorskip("transformers")
+
+from families.stable_video_diffusion import clip_builder, unet_builder, vae_builder  # noqa: E402
+from families.stable_video_diffusion import config as config_module  # noqa: E402
+from families.stable_video_diffusion.model import (  # noqa: E402
+    _compile,
+    _load_weights,
+    _vae_encoder_work,
+)
+
+pytestmark = [pytest.mark.gpu, pytest.mark.trt]
+MANIFEST = Path(__file__).resolve().parent / "manifests" / "svd-xt-fp32.json"
+FRAMES = 3
+LATENT = (8, 16)
+# Allowed ratio of the engine's error to the reference's own error at the same precision.
+# An FP16 engine rounds along other paths than the reference, so its error is of the order
+# of the reference's FP16 error, not equal to it. Each FP16 bound lies between the healthy
+# engine and the same engine with plain FP16 linear and convolution layers, whose
+# FP16-accumulating tactics it must reject (relative L2 ratios, healthy / plain FP16):
+# image encoder 1.5 / 2.9 (1.5 with every attention and activation precision tried),
+# VAE encoder 0.8 / 2.1 (an FP16 encoder: bundles of a VAE with force_upcast build it in
+# FP32, and the test then judges it as FP32), VAE decoder 0.8 / 2.9. The UNet measures
+# 1.0 / 1.1 at these shapes, so its bound only limits general precision loss; FP16
+# accumulation in the UNet is caught by the end-to-end FP16 shortfall bound.
+# An FP32 engine's largest error moves between builds of the same network, as TensorRT picks
+# its FP32 convolution (Winograd among them) and GEMM kernels by timing, and the reference's
+# own FP32 error moves with the PyTorch build and the GPU (UNet: 1.8e-4 to 3.3e-4). The FP32
+# bound lies between healthy builds and the same engines built with TF32 allowed, the precision
+# loss it must reject (largest-error ratios, healthy builds on B300 and GB300 with two PyTorch
+# builds / TF32): UNet 0.70-3.12 over 19 builds / 108-142, image encoder 0.23-0.70 over 6 / 856,
+# VAE encoder 0.86-1.53 over 6 / 438, VAE decoder 0.33-1.06 over 6 / 133.
+FP32_RATIO = 8.0
+FP16_RATIOS = {"image encoder": 2.0, "VAE encoder": 1.5, "VAE decoder": 1.5, "UNet": 1.5}
+
+
+@pytest.fixture(scope="module")
+def model_dir() -> Path:
+    """The pinned checkpoint, resolved as the E2E resolves it."""
+    explicit = os.environ.get("TRTMC_STABLE_VIDEO_DIFFUSION_MODEL_DIR")
+    if explicit:
+        return Path(explicit)
+    from huggingface_hub import snapshot_download
+
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    return Path(snapshot_download(repo_id=manifest["hf_id"], revision=manifest["hf_revision"],
+                                  local_files_only=True))
+
+
+@pytest.fixture(autouse=True)
+def _exact_fp32():
+    matmul, cudnn = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    yield
+    torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = matmul, cudnn
+
+
+def _check_io(engine, inputs: dict, outputs: dict) -> None:
+    """The engine declares exactly these FP32 inputs and outputs, with these shapes: no buffer
+    is read or written past its end, and no output is compared under another layout."""
+    declared = {engine.get_tensor_name(index) for index in range(engine.num_io_tensors)}
+    assert declared == set(inputs) | set(outputs), (
+        sorted(declared), sorted(inputs), sorted(outputs))
+    expected = {**{name: tuple(value.shape) for name, value in inputs.items()},
+                **{name: tuple(shape) for name, shape in outputs.items()}}
+    for name, shape in expected.items():
+        mode = trt.TensorIOMode.INPUT if name in inputs else trt.TensorIOMode.OUTPUT
+        assert engine.get_tensor_mode(name) == mode, name
+        assert engine.get_tensor_dtype(name) == trt.float32, name
+        actual = tuple(engine.get_tensor_shape(name))
+        assert actual == shape, (name, actual, shape)
+
+
+def _run(plan: bytes, inputs: dict, outputs: dict) -> dict:
+    # The engine allocates outside PyTorch's caching allocator: hand the blocks the reference
+    # run left cached back to the device first, so that a GPU shared with other jobs suffices.
+    torch.cuda.empty_cache()
+    engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(plan)
+    assert engine is not None
+    _check_io(engine, inputs, outputs)
+    context = engine.create_execution_context()
+    keep = {}
+    for name, value in inputs.items():
+        keep[name] = value.detach().float().contiguous().cuda()
+        context.set_tensor_address(name, keep[name].data_ptr())
+    results = {}
+    for name, shape in outputs.items():
+        results[name] = torch.empty(shape, dtype=torch.float32, device="cuda")
+        context.set_tensor_address(name, results[name].data_ptr())
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    assert context.execute_async_v3(stream.cuda_stream)
+    stream.synchronize()
+    return results
+
+
+def _relative_error(actual, expected) -> float:
+    return float((actual.double() - expected.double()).abs().max() / expected.double().abs().max())
+
+
+def _relative_l2(actual, expected) -> float:
+    return float((actual.double() - expected.double()).norm() / expected.double().norm())
+
+
+def _work(precision: str):
+    return trt.float16 if precision == "fp16" else trt.float32
+
+
+def _reference_run(module, call, precision: str):
+    """(reference output at the engine's precision, the stricter reference it is judged against)."""
+    with torch.no_grad():
+        float32 = call(module.float())
+        if precision == "fp32":
+            return float32, call(module.double())
+        return call(module.half()), float32
+
+
+def _check(name: str, precision: str, actual, reference, baseline) -> None:
+    """FP32 is judged on the largest error; FP16 on the relative L2 error, which does not
+    swing with the single worst element as FP16 tactics change between builds."""
+    # An infinite reference error would accept any engine error, and inf <= inf holds.
+    for label, tensor in (("engine", actual), ("reference", reference), ("baseline", baseline)):
+        assert bool(torch.isfinite(tensor).all()), (
+            f"{name} {precision}: {label} output is not finite")
+    errors = {metric: (function(actual, baseline), function(reference, baseline))
+              for metric, function in (("max", _relative_error), ("l2", _relative_l2))}
+    assert all(math.isfinite(value) for pair in errors.values() for value in pair), (
+        f"{name} {precision}: errors are not finite: {errors}")
+    print(f"{name} {precision}: " + ", ".join(
+        f"{metric} engine {engine:.3e} reference {ref:.3e}" for metric, (engine, ref) in errors.items()))
+    if precision == "fp32":
+        engine, ref = errors["max"]
+        assert engine <= FP32_RATIO * ref
+    else:
+        engine, ref = errors["l2"]
+        assert engine <= FP16_RATIOS[name] * ref
+
+
+class _Engine:
+    """The I/O declarations of an engine: name -> (mode, dtype, shape)."""
+
+    def __init__(self, tensors: dict):
+        self.tensors = tensors
+        self.num_io_tensors = len(tensors)
+
+    def get_tensor_name(self, index: int) -> str:
+        return list(self.tensors)[index]
+
+    def get_tensor_mode(self, name: str):
+        return self.tensors[name][0]
+
+    def get_tensor_dtype(self, name: str):
+        return self.tensors[name][1]
+
+    def get_tensor_shape(self, name: str):
+        return self.tensors[name][2]
+
+
+def test_engine_io_must_match_the_bound_buffers():
+    inputs = {"latents": torch.zeros((FRAMES, 4, *LATENT))}
+    outputs = {"frames": (FRAMES, 3, 64, 128)}
+    declared = {"latents": (trt.TensorIOMode.INPUT, trt.float32, (FRAMES, 4, *LATENT)),
+                "frames": (trt.TensorIOMode.OUTPUT, trt.float32, (FRAMES, 3, 64, 128))}
+    _check_io(_Engine(declared), inputs, outputs)
+    wrong = [
+        {"frames": (trt.TensorIOMode.OUTPUT, trt.float32, (FRAMES, 3, 64, 256))},  # larger output
+        {"frames": (trt.TensorIOMode.OUTPUT, trt.float32, (3 * FRAMES, 64, 128))},  # other layout
+        {"frames": (trt.TensorIOMode.OUTPUT, trt.float16, (FRAMES, 3, 64, 128))},
+        {"latents": (trt.TensorIOMode.OUTPUT, trt.float32, (FRAMES, 4, *LATENT))},
+        {"extra": (trt.TensorIOMode.OUTPUT, trt.float32, (1,))},
+    ]
+    for change in wrong:
+        with pytest.raises(AssertionError):
+            _check_io(_Engine({**declared, **change}), inputs, outputs)
+
+
+def test_the_check_refuses_nonfinite_outputs_and_errors():
+    finite = torch.ones(4)
+    infinite = torch.tensor([1.0, 1.0, float("inf"), 1.0])
+    missing = torch.tensor([1.0, float("nan"), 1.0, 1.0])
+    for actual, reference, baseline in ((finite, infinite, finite), (missing, finite, finite),
+                                        (finite, finite, infinite)):
+        with pytest.raises(AssertionError, match="not finite"):
+            _check("UNet", "fp32", actual, reference, baseline)
+    # An all-zero baseline makes both relative errors infinite.
+    with pytest.raises(AssertionError, match="errors are not finite"):
+        _check("UNet", "fp32", finite, finite, torch.zeros(4))
+    _check("UNet", "fp32", finite, finite, finite)
+
+
+@pytest.mark.parametrize("precision", ["fp32", "fp16"])
+def test_image_encoder_matches_the_checkpoint(precision, model_dir):
+    cfg = config_module.resolve(model_dir)
+    weights = _load_weights(model_dir, "image_encoder", "model.safetensors")
+    work = _work(precision)
+    plan = _compile(lambda network: clip_builder.build_image_encoder(
+        network, weights, cfg["image_encoder"], work), work=work, verbose=False)
+    module = transformers.CLIPVisionModelWithProjection.from_pretrained(
+        model_dir / "image_encoder", torch_dtype=torch.float32).cuda().eval()
+    pixels = torch.randn((1, 3, 224, 224), generator=torch.Generator().manual_seed(1)).cuda()
+    reference, baseline = _reference_run(
+        module, lambda m: m(pixels.to(next(m.parameters()).dtype)).image_embeds, precision)
+    del module
+    actual = _run(plan, {"pixel_values": pixels}, {"image_embeds": tuple(baseline.shape)})
+    _check("image encoder", precision, actual["image_embeds"], reference, baseline)
+
+
+@pytest.mark.parametrize("precision", ["fp32", "fp16"])
+def test_vae_matches_the_checkpoint(precision, model_dir):
+    cfg = config_module.resolve(model_dir)
+    weights = _load_weights(model_dir, "vae", "diffusion_pytorch_model.safetensors")
+    height, width = LATENT[0] * 8, LATENT[1] * 8
+    work = _work(precision)
+    # The encoder is judged at the precision the bundle builds it in (FP32 under force_upcast).
+    encoder_work = _vae_encoder_work(cfg["vae"], work)
+    encoder_precision = "fp32" if encoder_work == trt.float32 else precision
+    encoder_plan = _compile(lambda network: vae_builder.build_encoder(
+        network, weights, cfg["vae"], height, width, encoder_work), work=encoder_work,
+        verbose=False)
+    decoder_plan = _compile(lambda network: vae_builder.build_decoder(
+        network, weights, cfg["vae"], FRAMES, *LATENT, work), work=work, verbose=False)
+    generator = torch.Generator().manual_seed(2)
+    image = torch.rand((1, 3, height, width), generator=generator).cuda() * 2 - 1
+    latents = torch.randn((FRAMES, 4, *LATENT), generator=generator).cuda()
+
+    def module():
+        """The FP32 checkpoint module; each stage starts from it, as precision casts are in place."""
+        return diffusers.AutoencoderKLTemporalDecoder.from_pretrained(
+            model_dir / "vae", torch_dtype=torch.float32).cuda().eval()
+
+    def dtype(m):
+        return next(m.parameters()).dtype
+
+    reference, baseline = _reference_run(
+        module(), lambda m: m.encode(image.to(dtype(m))).latent_dist.mode(), encoder_precision)
+    actual = _run(encoder_plan, {"image": image}, {"image_latent": tuple(baseline.shape)})
+    _check("VAE encoder", encoder_precision, actual["image_latent"], reference, baseline)
+    reference, baseline = _reference_run(
+        module(), lambda m: m.decode(latents.to(dtype(m)), num_frames=FRAMES).sample, precision)
+    actual = _run(decoder_plan, {"latents": latents}, {"frames": tuple(baseline.shape)})
+    _check("VAE decoder", precision, actual["frames"], reference, baseline)
+
+
+@pytest.mark.parametrize("precision", ["fp32", "fp16"])
+def test_unet_matches_the_checkpoint(precision, model_dir):
+    cfg = config_module.resolve(model_dir)
+    weights = _load_weights(model_dir, "unet", "diffusion_pytorch_model.safetensors")
+    work = _work(precision)
+    plan = _compile(lambda network: unet_builder.build_unet(
+        network, weights, cfg["unet"], FRAMES, *LATENT, work), work=work, verbose=False)
+    module = diffusers.UNetSpatioTemporalConditionModel.from_pretrained(
+        model_dir / "unet", torch_dtype=torch.float32).cuda().eval()
+    generator = torch.Generator().manual_seed(3)
+    sample = torch.randn((2, FRAMES, 8, *LATENT), generator=generator).cuda()
+    context = torch.randn((2, 1, 1024), generator=generator).cuda()
+    context[0] = 0.0
+    sample[0, :, 4:] = 0.0
+    timestep = torch.tensor([0.25 * math.log(30.0)], dtype=torch.float32).cuda()
+    time_ids = torch.tensor([[6.0, 127.0, 0.02]], dtype=torch.float32).cuda()
+
+    def call(m):
+        dtype = next(m.parameters()).dtype
+        return m(sample.to(dtype), timestep[0].to(dtype), encoder_hidden_states=context.to(dtype),
+                 added_time_ids=time_ids.repeat(2, 1).to(dtype)).sample
+
+    reference, baseline = _reference_run(module, call, precision)
+    del module
+    actual = _run(plan, {"sample": sample, "timestep": timestep, "encoder_hidden_states": context,
+                         "added_time_ids": time_ids}, {"noise_pred": tuple(baseline.shape)})
+    _check("UNet", precision, actual["noise_pred"], reference, baseline)

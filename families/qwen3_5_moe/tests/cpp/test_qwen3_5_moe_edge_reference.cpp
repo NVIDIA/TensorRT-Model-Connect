@@ -5,9 +5,15 @@
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <dlfcn.h>
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+#include <tensorrt_edgellm/common/trtInterop.h>
+#include <tensorrt_edgellm/runtime/llmInferenceRuntime.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#else
 #include <edgellm/cpp/common/logger.h>
 #include <edgellm/cpp/runtime/llmInferenceRuntime.h>
 #include <edgellm/cpp/runtime/streaming.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -61,7 +67,7 @@ trt_edgellm::rt::LLMGenerationRequest native_request(const nlohmann::json& value
         if (h <= 0 || w <= 0 || bytes.size() != static_cast<std::size_t>(h) * w * 3)
             throw std::runtime_error("Invalid reference RGB fixture");
         trt_edgellm::rt::Tensor tensor({1, h, w, 3}, trt_edgellm::rt::DeviceType::kCPU,
-                                       nvinfer1::DataType::kUINT8);
+                                       decltype(trt_edgellm::rt::Tensor{}.getDataType())::kUINT8);
         std::memcpy(tensor.rawPointer(), bytes.data(), bytes.size());
         request.requests.front().imageBuffers.emplace_back(std::move(tensor));
     }
@@ -100,7 +106,12 @@ int main(int argc, char** argv) {
             throw std::runtime_error(std::string("Cannot load Edge plugin: ") + dlerror());
         using InitializeFn = bool (*)(void*, const char*);
         auto initialize = reinterpret_cast<InitializeFn>(dlsym(plugin.get(), "initEdgellmPlugins"));
-        if (!initialize || !initialize(static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger), ""))
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+        auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::TrtLogger::instance());
+#else
+        auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger);
+#endif
+        if (!initialize || !initialize(logger, ""))
             throw std::runtime_error("Cannot initialize Edge plugin");
         Stream stream;
         trt_edgellm::rt::LLMInferenceRuntime runtime(
@@ -144,6 +155,11 @@ int main(int argc, char** argv) {
             }
             report["results"].push_back(std::move(output));
         }
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+        report["edge_release"] = "0.12.0";
+#else
+        report["edge_release"] = "0.11.0";
+#endif
         report["passed"] = passed;
         std::ofstream output(args.at("--output"));
         output << report.dump(2) << '\n';

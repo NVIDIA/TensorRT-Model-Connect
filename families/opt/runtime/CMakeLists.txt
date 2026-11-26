@@ -35,3 +35,45 @@ set_target_properties(trtmc_model_opt PROPERTIES
 install(TARGETS trtmc_model_opt
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_opt_task_config
+    ${PROJECT_SOURCE_DIR}/families/opt/tests/cpp/test_task_config.cpp
+  )
+  target_include_directories(test_opt_task_config PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_compile_options(test_opt_task_config PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME opt_task_config COMMAND test_opt_task_config)
+  set_tests_properties(opt_task_config PROPERTIES LABELS "cpu")
+
+  foreach(_language IN ITEMS c cpp)
+    add_executable(test_opt_sdk_${_language}
+      ${PROJECT_SOURCE_DIR}/families/opt/tests/sdk_consumer.${_language}
+    )
+    target_link_libraries(test_opt_sdk_${_language} PRIVATE trtmc_c)
+    target_compile_options(test_opt_sdk_${_language} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    set_target_properties(test_opt_sdk_${_language} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
+  endforeach()
+  add_dependencies(test_opt_task_config test_opt_sdk_c test_opt_sdk_cpp)
+
+endif()
+
+if(TRTMC_BUILD_TESTS)
+  # CPU-backed KV-cache test: CUDA calls are served from host memory, and an
+  # overlapping copy fails the test.
+  add_executable(test_opt_kv_cache
+    ${PROJECT_SOURCE_DIR}/families/opt/tests/cpp/test_kv_cache.cpp
+    kv_cache.cpp
+    ${PROJECT_SOURCE_DIR}/core/runtime/primitives/device_tensor.cpp
+  )
+  target_include_directories(test_opt_kv_cache PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_opt_kv_cache SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_opt_kv_cache PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME opt_kv_cache COMMAND test_opt_kv_cache)
+endif()

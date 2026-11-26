@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Ready catalog profiles that no machine runs: the qualification cannot qualify them as cataloged. A profile whose
+# Task has no defaults (config/tasks.yaml) is left out without an entry here; what one kind of hardware cannot run
+# belongs in config/platforms/, what one machine cannot run in its environment's models.exclude. Each entry is
+# {profile: <name or glob pattern>, reason}, and the run's excluded.json keeps the reason. A change that lets the
+# qualification serve a profile removes its entry in the same pull request.
+exclude:
+  - profile: deberta-v3-base*
+    reason: TRTMC frames the text with [CLS] and [SEP]; the checkpoint's tokenizer.json adds neither, so the generic encode reference returns two rows fewer
+  - profile: gte-base-en-v1_5*
+    reason: the generic embed reference mean-pools and L2-normalizes; GTE pools the CLS token without normalizing, and its catalog testcase has no prompt
+  - profile: nomic-embed-text-v1_5*
+    reason: the generic embed reference sends unprefixed text; nomic-embed needs a query or document role, and its catalog testcase has no prompt
+  - profile: nemotron-omni-nvfp4-text-image
+    reason: the native reference cannot load the checkpoint, which needs its own modeling code and is ModelOpt mixed FP8/NVFP4 (Transformers has no modelopt quantizer); the family's independent reference is a pinned vLLM snapshot, and AIPerf has no vLLM native backend
+  - profile: pi05-openpi-*
+    reason: the native reference runs LeRobot's pi0.5 policy and processors on LIBERO observations; the openpi policies use their own normalization, camera mapping and action horizon, and the family's openpi reference is a recorded FP32 action set, not a native model the qualification can serve
+  - profile: qwen3-moe-tiny-random
+    reason: random-weight test model; there is no accuracy to measure, and its timing of a few ms per call adds no qualification signal (on Jetson Thor it varied beyond the 5% comparability bound)

@@ -7,6 +7,7 @@
 #include "cli/io.h"
 #include "config.h"
 #include "task_runtime.h"
+#include "text_generation_config.h"
 #include "trtmc/action.hpp"
 #include "trtmc/audio.hpp"
 #include "trtmc/control.hpp"
@@ -14,6 +15,7 @@
 #include "trtmc/language.hpp"
 #include "trtmc/numeric.hpp"
 #include "trtmc/perception.hpp"
+#include "trtmc/point_cloud.hpp"
 #include "trtmc/runtime/family_loader.h"
 #include "trtmc/speech.hpp"
 #include "trtmc/structure.hpp"
@@ -43,6 +45,7 @@
 #include <tuple>
 #include <unistd.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -173,24 +176,7 @@ std::vector<float> read_float32(const std::string& path) {
 }
 
 trtmc::TextGenerationConfig text_config(const Json& request) {
-    trtmc::TextGenerationConfig config;
-    config.max_new_tokens = optional_value<std::int32_t>(request, "max_new_tokens", 128);
-    config.temperature = optional_value<float>(request, "temperature", 1.0F);
-    config.top_k = optional_value<std::int32_t>(request, "top_k", 1);
-    config.top_p = optional_value<float>(request, "top_p", 1.0F);
-    config.min_p = optional_value<float>(request, "min_p", 0.0F);
-    config.seed = optional_value<std::int32_t>(request, "seed", -1);
-    config.guidance_scale = optional_value<float>(request, "guidance_scale", -1.0F);
-    config.cfg_scale = optional_value<float>(request, "cfg_scale", -1.0F);
-    config.num_steps = optional_value<std::int32_t>(request, "num_steps", -1);
-    config.text_generation_mode =
-        optional_value<std::string>(request, "text_generation_mode", "auto");
-    config.block_length = optional_value<std::int32_t>(request, "block_length", 0);
-    config.confidence_threshold = optional_value<float>(request, "confidence_threshold", -1.0F);
-    config.use_chat_template = optional_value<bool>(request, "use_chat_template", false);
-    config.enable_thinking = optional_value<bool>(request, "enable_thinking", true);
-    config.repetition_penalty = optional_value<float>(request, "repetition_penalty", 1.0F);
-    return config;
+    return trtmc::benchmark_worker::text_generation_config(request);
 }
 
 trtmc::ImageGenerationConfig image_config(const Json& request) {
@@ -547,6 +533,43 @@ void write_binary_artifact(const std::string& path, const T* values, std::uint64
     output.write(reinterpret_cast<const char*>(values),
                  static_cast<std::streamsize>(count * sizeof(T)));
     output.close();
+}
+
+Json depth_values(const std::vector<float>& values) {
+    auto result = Json::array();
+    for (const float value : values) {
+        if (!std::isfinite(value))
+            throw std::runtime_error("benchmark output contains a non-finite value");
+        result.push_back(value);
+    }
+    return result;
+}
+
+Json run_depth(trtmc::ITask& task, const Json& request, const Timing& timing) {
+    auto& interface = require_interface<trtmc::IMonocularDepth>(task, "IMonocularDepth");
+    const auto path = request.at("image_path").get<std::string>();
+    std::optional<Image> cached;
+    if (!timing.asset_loading_included)
+        cached = read_image(path);
+    return measure(
+        timing,
+        [&]() {
+            std::optional<Image> loaded;
+            if (!cached)
+                loaded = read_image(path);
+            const auto& image = cached ? *cached : *loaded;
+            return interface.estimate_depth(image.pixels.data(), image.height, image.width);
+        },
+        [](const trtmc::MonocularDepthResult& result) {
+            if (result.height <= 0 || result.width <= 0 ||
+                result.depth.size() != static_cast<std::size_t>(result.height) * result.width)
+                throw std::runtime_error("monocular depth returned inconsistent dimensions");
+            return Json{{"depth_images", 1},
+                        {"depth_pixels", result.depth.size()},
+                        {"height", result.height},
+                        {"width", result.width},
+                        {"depth", depth_values(result.depth)}};
+        });
 }
 
 Json run_geometry(trtmc::ITask& task, const Json& request, const Timing& timing) {
@@ -923,6 +946,159 @@ Json run_control(trtmc::ITask& task, const Json& request, const Timing& timing) 
                         {"actions", result.actions},
                         {"within_training_bounds", result.within_training_bounds},
                         {"inference_ms", result.inference_ms}};
+        });
+}
+
+// A bundle with the existing pose_hypothesis_refinement runtime (FoundationPose): the caller's
+// crops (rendered and observed features, [N,H,W,6] float32 files) for each stage and iteration,
+// served as the runtime asks for them; the poses it asks with are reported.
+Json run_refine_pose_hypotheses(trtmc::ITask& task, const Json& request, const Timing& timing) {
+    auto& refiner =
+        require_interface<trtmc::IPoseHypothesisRefinement>(task, "IPoseHypothesisRefinement");
+    static const std::unordered_set<std::string> known = {
+        "candidate_poses_path", "hypothesis_count", "mesh_diameter_meters", "refinement_iterations",
+        "crop_batches"};
+    for (const auto& [name, value] : request.items())
+        if (!known.count(name))
+            throw std::invalid_argument("pose refinement does not accept '" + name + "'");
+    const auto count = request.at("hypothesis_count").get<std::int32_t>();
+    if (count <= 0)
+        throw std::invalid_argument("hypothesis_count must be positive");
+    struct Batch {
+        trtmc::PoseCropStage stage;
+        std::int32_t iteration;
+        trtmc::PoseCropBatch crops;
+    };
+    auto read = [&]() {
+        std::pair<std::vector<float>, std::vector<Batch>> inputs{
+            read_float32(request.at("candidate_poses_path").get<std::string>()), {}};
+        if (inputs.first.size() != static_cast<std::size_t>(count) * 16)
+            throw std::invalid_argument("candidate poses must hold hypothesis_count 4x4 matrices");
+        for (const auto& entry : request.at("crop_batches")) {
+            const auto stage = entry.at("stage").get<std::string>();
+            if (stage != "refinement" && stage != "scoring")
+                throw std::invalid_argument("unknown crop stage");
+            const auto shape = entry.at("shape").get<std::vector<std::int32_t>>();
+            if (shape.size() != 4 || shape[0] != count || shape[1] <= 0 || shape[2] <= 0 ||
+                shape[3] != 6)
+                throw std::invalid_argument("crop shape must be [hypothesis_count,H,W,6]");
+            Batch batch{stage == "refinement" ? trtmc::PoseCropStage::kRefinement
+                                              : trtmc::PoseCropStage::kScoring,
+                        entry.at("iteration").get<std::int32_t>(),
+                        {read_float32(entry.at("rendered_path").get<std::string>()),
+                         read_float32(entry.at("observed_path").get<std::string>()), shape[0],
+                         shape[1], shape[2], shape[3]}};
+            const auto values = static_cast<std::size_t>(shape[0]) * shape[1] * shape[2] * 6;
+            if (batch.crops.rendered_features.size() != values ||
+                batch.crops.observed_features.size() != values)
+                throw std::invalid_argument("crop files do not match their shape");
+            inputs.second.push_back(std::move(batch));
+        }
+        return inputs;
+    };
+    std::optional<decltype(read())> cached;
+    if (!timing.asset_loading_included)
+        cached = read();
+    Json queries;
+    return measure(
+        timing,
+        [&]() {
+            std::optional<decltype(read())> loaded;
+            if (!cached)
+                loaded = read();
+            const auto& inputs = cached ? *cached : *loaded;
+            queries = Json::array();
+            trtmc::PoseEstimationRequest input;
+            input.candidate_poses = inputs.first;
+            input.num_hypotheses = count;
+            input.mesh_diameter = request.at("mesh_diameter_meters").get<float>();
+            input.refinement_iterations = request.value("refinement_iterations", 1);
+            input.use_tracked_pose = false;
+            input.update_tracking_state = false;
+            input.crop_provider = [&](const std::vector<float>& poses, trtmc::PoseCropStage stage,
+                                      std::int32_t iteration) {
+                queries.push_back(
+                    {{"stage",
+                      stage == trtmc::PoseCropStage::kRefinement ? "refinement" : "scoring"},
+                     {"iteration", iteration},
+                     {"poses", poses}});
+                for (const auto& batch : inputs.second)
+                    if (batch.stage == stage && batch.iteration == iteration)
+                        return batch.crops;
+                throw std::invalid_argument("no crops for the requested stage and iteration");
+            };
+            refiner.reset_pose_tracking();
+            return refiner.estimate_pose_hypotheses(input);
+        },
+        [&](const trtmc::PoseEstimationResult& result) {
+            return Json{{"refined_hypotheses", result.num_hypotheses},
+                        {"refined_poses", result.refined_poses},
+                        {"scores", result.scores},
+                        {"best_index", result.best_index},
+                        {"all_poses_rigid", result.all_poses_rigid},
+                        {"refinement_ms", result.refinement_ms},
+                        {"scoring_ms", result.scoring_ms},
+                        {"crop_queries", queries}};
+        });
+}
+
+// A bundle with the existing structure_prediction runtime (Boltz-2): the document is the bundle's
+// embedded request or a family-prepared one; the structure and its metadata are written as files.
+Json run_predict_structure(trtmc::ITask& task, const Json& request, const Timing& timing) {
+    auto& predictor = require_interface<trtmc::IStructurePrediction>(task, "IStructurePrediction");
+    static const std::unordered_set<std::string> known = {
+        "document_path",     "source_path", "recycling_steps", "sampling_steps",
+        "diffusion_samples", "seed",        "_artifact_prefix"};
+    for (const auto& [name, value] : request.items())
+        if (!known.count(name))
+            throw std::invalid_argument("structure prediction does not accept '" + name + "'");
+    const auto path = request.at("document_path").get<std::string>();
+    trtmc::StructurePredictionRequest input;
+    input.source_path = request.value("source_path", path);
+    input.config.recycling_steps = request.value("recycling_steps", input.config.recycling_steps);
+    input.config.sampling_steps = request.value("sampling_steps", input.config.sampling_steps);
+    input.config.diffusion_samples =
+        request.value("diffusion_samples", input.config.diffusion_samples);
+    input.config.seed = request.value("seed", input.config.seed);
+    auto read = [&]() {
+        std::ifstream stream(path, std::ios::binary);
+        if (!stream)
+            throw std::runtime_error("cannot read structure request " + path);
+        return std::string{std::istreambuf_iterator<char>(stream),
+                           std::istreambuf_iterator<char>()};
+    };
+    if (!timing.asset_loading_included)
+        input.document = read();
+    const auto prefix = request.at("_artifact_prefix").get<std::string>();
+    return measure(
+        timing,
+        [&]() {
+            if (!timing.asset_loading_included)
+                return predictor.predict_structure(input);
+            auto loaded = input;
+            loaded.document = read();
+            return predictor.predict_structure(loaded);
+        },
+        [&](const trtmc::StructurePredictionResult& result) {
+            const bool pdb = result.format == trtmc::StructureFormat::kPdb;
+            const auto structure_path = prefix + (pdb ? ".pdb" : ".cif");
+            const auto metadata_path = prefix + ".metadata.json";
+            write_binary_artifact(structure_path, result.structure.data(), result.structure.size());
+            write_binary_artifact(metadata_path, result.metadata_json.data(),
+                                  result.metadata_json.size());
+            const auto& confidence = result.confidence;
+            return Json{{"structures", 1},
+                        {"structure_bytes", result.structure.size()},
+                        {"format", pdb ? "pdb" : "mmcif"},
+                        {"structure_artifact", structure_path},
+                        {"metadata_artifact", metadata_path},
+                        {"confidence",
+                         {{"confidence_score", confidence.confidence_score},
+                          {"ptm", confidence.ptm},
+                          {"iptm", confidence.iptm},
+                          {"complex_plddt", confidence.complex_plddt},
+                          {"complex_iplddt", confidence.complex_iplddt},
+                          {"plddt", confidence.plddt}}}};
         });
 }
 
@@ -1771,6 +1947,132 @@ Json run_classify(const trtmc::Model& model, const Json& request, const Timing& 
         });
 }
 
+Json run_classify_audio(const trtmc::Model& model, const Json& request, const Timing& timing,
+                        const std::string& task_id) {
+    if (task_id != trtmc::AudioToClassScores::kTask)
+        throw std::invalid_argument("classify_audio requires AudioToClassScores");
+    const auto task = task_for_operation<trtmc::AudioToClassScores>(model, task_id);
+    const auto config = sdk_config(request, task.config_fields(), {"audio_path"});
+    const auto path = request.at("audio_path").get<std::string>();
+    std::optional<trtmc::cli::io::LoadedAudio> cached;
+    if (!timing.asset_loading_included)
+        cached = trtmc::cli::io::read_wav_interleaved(path);
+    return measure(
+        timing,
+        [&]() {
+            std::optional<trtmc::cli::io::LoadedAudio> loaded;
+            if (!cached)
+                loaded = trtmc::cli::io::read_wav_interleaved(path);
+            return task.run({audio_view(cached ? *cached : *loaded)}, config);
+        },
+        [](const trtmc::LabelScoresResult& result) {
+            const auto scores = result.scores();
+            auto labels = Json::array();
+            for (auto label : result.labels())
+                labels.push_back(std::string(label));
+            Json output{{"classified_clips", 1},
+                        {"scores", json_values(scores)},
+                        {"score_kind", score_kind(result.kind())},
+                        {"labels", std::move(labels)},
+                        {"top_class", -1}};
+            if (!scores.empty())
+                output["top_class"] =
+                    std::max_element(scores.begin(), scores.end()) - scores.begin();
+            return output;
+        });
+}
+
+// Every query against the one image (a zero-shot choice scores the image against each class
+// prompt): one TextImageToRelevance call per query inside the timed call.
+Json run_relevance(const trtmc::Model& model, const Json& request, const Timing& timing,
+                   const std::string& task_id) {
+    if (task_id != trtmc::TextImageToRelevance::kTask)
+        throw std::invalid_argument("relevance requires TextImageToRelevance");
+    const auto task = task_for_operation<trtmc::TextImageToRelevance>(model, task_id);
+    const auto config = sdk_config(request, task.config_fields(), {"image_path", "queries"});
+    const auto path = request.at("image_path").get<std::string>();
+    const auto queries = request.at("queries").get<std::vector<std::string>>();
+    if (queries.empty())
+        throw std::invalid_argument("relevance requires at least one query");
+    std::optional<Image> cached;
+    if (!timing.asset_loading_included)
+        cached = read_image(path);
+    return measure(
+        timing,
+        [&]() {
+            std::optional<Image> loaded;
+            if (!cached)
+                loaded = read_image(path);
+            const Image& image = cached ? *cached : *loaded;
+            std::vector<float> scores;
+            scores.reserve(queries.size());
+            for (const auto& query : queries)
+                scores.push_back(task.run({query, sdk_image_view(image)}, config).score());
+            return scores;
+        },
+        [&queries](const std::vector<float>& scores) {
+            for (const float score : scores)
+                if (!std::isfinite(score))
+                    throw std::runtime_error("benchmark output contains a non-finite value");
+            return Json{
+                {"scored_pairs", scores.size()},
+                {"scores", scores},
+                {"queries", queries},
+                {"top_class", std::max_element(scores.begin(), scores.end()) - scores.begin()}};
+        });
+}
+
+trtmc::TextSource read_text_source(const Json& request);
+
+Json run_token_scores(const trtmc::Model& model, const Json& request, const Timing& timing,
+                      const std::string& task_id) {
+    if (task_id != trtmc::MaskedTextToTokenScores::kTask)
+        throw std::invalid_argument("token_scores requires MaskedTextToTokenScores");
+    const auto task = task_for_operation<trtmc::MaskedTextToTokenScores>(model, task_id);
+    const auto config = sdk_config(request, task.config_fields(), {"prompt", "token_ids"});
+    const auto text = read_text_source(request);
+    return measure(
+        timing, [&]() { return task.run({text}, config); },
+        [](const trtmc::VocabularyScoresResult& result) {
+            const auto logits = result.logits();
+            return Json{{"scored_sequences", 1},
+                        {"logits", json_values(logits.values)},
+                        {"logits_shape", {logits.rows, logits.columns}},
+                        {"vocabulary_id", std::string(result.vocabulary_id())}};
+        });
+}
+
+// One point cloud (row-major float32 [num_points, input_dim]) to one class per point.
+Json run_segment_points(const trtmc::Model& model, const Json& request, const Timing& timing,
+                        const std::string& task_id) {
+    const auto task = task_for_operation<trtmc::PointsToSemanticSegmentation>(model, task_id);
+    const auto config =
+        sdk_config(request, task.config_fields(), {"points_path", "num_points", "input_dim"});
+    const auto path = request.at("points_path").get<std::string>();
+    const auto num_points = request.at("num_points").get<std::uint32_t>();
+    const auto input_dim = request.value("input_dim", std::uint32_t{9});
+    std::optional<std::vector<float>> cached;
+    if (!timing.asset_loading_included)
+        cached = read_float32(path);
+    return measure(
+        timing,
+        [&]() {
+            std::optional<std::vector<float>> loaded;
+            if (!cached)
+                loaded = read_float32(path);
+            const auto& points = cached ? *cached : *loaded;
+            return task.run({{points.data(), points.size()}, num_points, input_dim}, config);
+        },
+        [](const trtmc::PointsToSemanticSegmentationResult& result) {
+            const auto view = result.view();
+            if (!view.labels && view.num_points)
+                throw std::runtime_error("point-cloud segmentation returned no labels");
+            return Json{{"segmented_points", view.num_points},
+                        {"num_classes", view.num_classes},
+                        {"labels", json_values(view.labels, view.num_points)}};
+        });
+}
+
 template <class Result>
 Json image_token_observation(const Result& result) {
     const auto matrix = result.features();
@@ -2139,6 +2441,51 @@ Json run_control(const trtmc::Model& model, const Json& request, const Timing& t
         });
 }
 
+// Named camera images, the robot state and the instruction to one action chunk (LeRobot GR00T,
+// pi0.5). Family Config (for example the flow ``noise``) travels as flat request fields.
+Json run_control_chunk(const trtmc::Model& model, const Json& request, const Timing& timing,
+                       const std::string& task_id) {
+    const auto task = task_for_operation<trtmc::ImagesStateTextToActionChunk>(model, task_id);
+    const auto config = sdk_config(request, task.config_fields(), {"images", "state", "prompt"});
+    std::vector<std::string> names, paths;
+    for (const auto& camera : request.at("images")) {
+        names.push_back(camera.at("name").get<std::string>());
+        paths.push_back(camera.at("image_path").get<std::string>());
+    }
+    if (names.empty())
+        throw std::invalid_argument("control_chunk requires at least one named image");
+    const auto state = request.at("state").get<std::vector<float>>();
+    const auto prompt = request.value("prompt", std::string{});
+    auto read = [&]() {
+        std::vector<Image> images;
+        for (const auto& path : paths)
+            images.push_back(read_image(path));
+        return images;
+    };
+    std::optional<std::vector<Image>> cached;
+    if (!timing.asset_loading_included)
+        cached = read();
+    return measure(
+        timing,
+        [&]() {
+            std::optional<std::vector<Image>> loaded;
+            if (!cached)
+                loaded = read();
+            const auto& images = cached ? *cached : *loaded;
+            std::vector<trtmc::NamedImage> named;
+            for (std::size_t i = 0; i < images.size(); ++i)
+                named.push_back({names[i], sdk_image_view(images[i])});
+            return task.run({{{named.data(), named.size()}, {state.data(), state.size()}, prompt}},
+                            config);
+        },
+        [](const trtmc::ImagesStateTextActionChunkResult& result) {
+            auto output = action_sequence_observation(result.view().actions);
+            output["within_training_bounds"] = result.within_training_bounds();
+            output["inference_ms"] = result.inference_ms();
+            return output;
+        });
+}
+
 float input_float(const Json& request, const char* name, float default_value) {
     if (!request.contains(name))
         return default_value;
@@ -2368,8 +2715,9 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
     auto write_images = image_artifact_writer(request.at("_artifact_prefix").get<std::string>());
     auto write_inputs =
         image_artifact_writer(request.at("_artifact_prefix").get<std::string>() + ".input");
-    const bool video =
-        primary == trtmc::TextToVideo::kTask || primary == trtmc::ImageTextActionToVideo::kTask;
+    const bool initial = primary == trtmc::InitialImageTextToVideo::kTask;
+    const bool video = primary == trtmc::TextToVideo::kTask ||
+                       primary == trtmc::ImageTextActionToVideo::kTask || initial;
     if (request.contains("media_type") &&
         (!request.at("media_type").is_string() ||
          request.at("media_type").get<std::string>() != (video ? "video" : "image")))
@@ -2445,8 +2793,8 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
         paths = request.at("image_paths").get<std::vector<std::string>>();
     const bool edit = primary == trtmc::ImagesTextToImageEdit::kTask;
     const bool world = primary == trtmc::ImageTextActionToVideo::kTask;
-    if ((!edit && !world && !paths.empty()) || (edit && paths.empty()) ||
-        (world && paths.size() != 1))
+    if ((!edit && !world && !initial && !paths.empty()) || (edit && paths.empty()) ||
+        ((world || initial) && paths.size() != 1))
         throw std::invalid_argument("conditioning image count does not match the selected Task");
     const auto replay_path = request.value("initial_latents_path", std::string{});
     if (request.contains("initial_latents_path") && replay_path.empty())
@@ -2546,6 +2894,26 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
                                                  {assets.second.data(), assets.second.size()}};
             },
             observe_video);
+    }
+    if (initial) {
+        // The frame count is fixed by the bundle; a stated one must be what it produced.
+        const auto expected = request.value("num_frames", std::int64_t{0});
+        const auto task = task_for_operation<trtmc::InitialImageTextToVideo>(model, task_id);
+        const auto config = sdk_config(request, task.config_fields(),
+                                       {"prompt", "image_path", "image_paths", "num_frames",
+                                        "batch_size", "media_type", "_artifact_prefix"});
+        return run(
+            task, config,
+            [&](const auto& assets) {
+                return trtmc::InitialImageTextToVideoRequest{sdk_image_view(assets.first[0]),
+                                                             prompt};
+            },
+            [&](const trtmc::VideoGenerationResult& result) {
+                auto output = observe_video(result);
+                if (expected > 0 && output.at("num_frames").get<std::int64_t>() != expected)
+                    throw std::runtime_error("generated video does not have the stated num_frames");
+                return output;
+            });
     }
     if (!world)
         throw std::invalid_argument(
@@ -3579,6 +3947,18 @@ Json run_latent_step(const trtmc::Model& model, const Json& request, const Timin
 
 Json run_generate(const trtmc::Model& model, const Json& request, const Timing& timing,
                   const std::string& task_id) {
+    // An image-video-text bundle (Cosmos3-Edge) asked without a video, decided per request: the
+    // same bundle's image-text Task, or its text continuation without an image (the SDK
+    // image-video Task requires every modality in one request).
+    if (task_id == trtmc::ImageVideoTextToText::kTask) {
+        const bool image = request.contains("image_path");
+        if (image && model.supports<trtmc::ImagesTextToText>())
+            return run_generate(model, request, timing,
+                                std::string(trtmc::ImagesTextToText::kTask));
+        if (!image && model.supports<trtmc::TextContinuation>())
+            return run_generate(model, request, timing,
+                                std::string(trtmc::TextContinuation::kTask));
+    }
     const auto primary = task_id;
     const bool source_task = primary == trtmc::TextContinuation::kTask ||
                              primary == trtmc::ConditionalTextGeneration::kTask;
@@ -4035,6 +4415,14 @@ Json dispatch(const Session& session, const Json& operation_request, const Timin
             measured = run_disparity(model, operation_request, timing, selected);
         else if (operation == "classify")
             measured = run_classify(model, operation_request, timing, selected);
+        else if (operation == "classify_audio")
+            measured = run_classify_audio(model, operation_request, timing, selected);
+        else if (operation == "relevance")
+            measured = run_relevance(model, operation_request, timing, selected);
+        else if (operation == "token_scores")
+            measured = run_token_scores(model, operation_request, timing, selected);
+        else if (operation == "segment_points")
+            measured = run_segment_points(model, operation_request, timing, selected);
         else if (operation == "detect")
             measured = run_detect(model, operation_request, timing, selected);
         else if (operation == "detect_prompted")
@@ -4053,6 +4441,8 @@ Json dispatch(const Session& session, const Json& operation_request, const Timin
             measured = run_rerank(model, operation_request, timing, selected);
         else if (operation == "control")
             measured = run_control(model, operation_request, timing, selected);
+        else if (operation == "control_chunk")
+            measured = run_control_chunk(model, operation_request, timing, selected);
         else if (operation == "control_queue")
             measured = run_control_queue(model, operation_request, timing, selected);
         else if (operation == "track_masks")
@@ -4086,6 +4476,7 @@ Json dispatch(const Session& session, const Json& operation_request, const Timin
             {"detect", run_detect},
             {"extract_features", run_extract_features},
             {"geometry", run_geometry},
+            {"depth", run_depth},
             {"disparity", run_disparity},
             {"rerank", run_rerank},
             {"decide", run_decide},
@@ -4093,6 +4484,8 @@ Json dispatch(const Session& session, const Json& operation_request, const Timin
             {"embed", run_embed},
             {"solve", run_solve},
             {"control", run_control},
+            {"predict_structure", run_predict_structure},
+            {"refine_pose", run_refine_pose_hypotheses},
         };
         const auto runner = runners.find(operation);
         if (runner == runners.end())

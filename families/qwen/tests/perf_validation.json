@@ -3,7 +3,7 @@
     {
       "model": "Qwen/Qwen3-0.6B",
       "family": "qwen",
-      "task": "text_generation",
+      "task": "text_continuation",
       "label": "A1-decode-small",
       "benchmark": {
         "label": "CPU argmax",
@@ -15,7 +15,7 @@
     {
       "model": "Qwen/Qwen2.5-7B-Instruct",
       "family": "qwen",
-      "task": "text_generation",
+      "task": "text_continuation",
       "label": "A3-decode-large",
       "benchmark": {
         "label": "CPU argmax",

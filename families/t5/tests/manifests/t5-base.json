@@ -1,0 +1,20 @@
+{
+  "name": "t5-base",
+  "hf_id": "google-t5/t5-base",
+  "hf_revision": "a9723ea7f1b39c1eae772870f3b547bf6ef7e6c1",
+  "bundle": "t5-base.bundle",
+  "family": "t5",
+  "task": "text_generation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "t5-base",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "translate English to German: The house is wonderful.",
+      "max_new_tokens": 20
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 256
+}

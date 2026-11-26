@@ -22,6 +22,14 @@ namespace trtmc {
 
 namespace {
 
+// The next decode step would store one more K/V row. A full cache ends the
+// generation, as max_new_tokens does, instead of dropping the prompt's rows.
+// A state without a length limit (max_length() < 0) never fills.
+bool kv_cache_full(const MixtralInferenceState& state) {
+    const int32_t max_length = state.max_length();
+    return max_length >= 0 && state.position() >= max_length;
+}
+
 bool contains_boxed_answer(const std::string& text) {
     const std::string marker = "\\boxed{";
     const auto start = text.find(marker);
@@ -225,7 +233,9 @@ void MixtralTextGenerationPipeline::prime_decoder_after_batched_prefill(
 
 void MixtralTextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
                                                 std::vector<float>& logits) {
-    if (prefill_) {
+    // A prompt longer than the prefill profile keeps the token loop. One longer
+    // than the KV cache was already rejected by set_prompt_length().
+    if (prefill_ && static_cast<int32_t>(input_ids.size()) <= config_.prefill_max_length) {
         run_prefill_batched(input_ids, logits);
         prime_decoder_after_batched_prefill(input_ids);
     } else {
@@ -315,6 +325,8 @@ int32_t MixtralTextGenerationPipeline::run_decode_loop(
                                   result.is_eos))
             break;
         if (result.is_eos)
+            break;
+        if (kv_cache_full(*state_))
             break;
         run_step(result.token_id, logits);
     }

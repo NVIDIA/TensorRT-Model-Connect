@@ -6,8 +6,13 @@
 
 #include "families/qwen3_5_moe/runtime/edge_llm/contract.h"
 
+#ifdef TRTMC_QWEN35_MOE_EDGE_012
+#include <tensorrt_edgellm/runtime/llmRuntimeUtils.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#else
 #include <edgellm/cpp/runtime/llmRuntimeUtils.h>
 #include <edgellm/cpp/runtime/streaming.h>
+#endif
 #include <nlohmann/json.hpp>
 
 namespace trtmc::qwen3_5_moe::edge_llm {

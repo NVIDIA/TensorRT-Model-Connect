@@ -179,18 +179,18 @@ def test_official_reference_declares_its_real_import_dependencies() -> None:
         if line and not line.startswith("#")
     }
     assert {
-        "accelerate>=1.1.1",
-        "dashscope",
-        "diffusers>=0.31.0",
-        "easydict",
+        "accelerate==1.16.0",
+        "dashscope==2.1.1",
+        "diffusers==0.39.0",
+        "easydict==1.14",
         "flash-attn==2.8.3",
-        "imageio[ffmpeg]",
-        "librosa",
-        "opencv-python>=4.9.0.80",
-        "peft",
-        "tokenizers>=0.20.3",
+        "imageio[ffmpeg]==2.38.2",
+        "librosa==1.0.1",
+        "opencv-python==5.1.0.95",
+        "peft==0.22.0",
+        "tokenizers==0.21.4",
         "tqdm",
-        "transformers>=4.49.0,<=4.51.3",
+        "transformers==4.51.3",
     } <= requirements
 
 

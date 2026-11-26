@@ -56,6 +56,42 @@ identity field, write a small `describe(metadata)` function that checks its
 exact family-owned root JSON shape or declare a minimal set of exact sentinel
 files; do not match the repository name.
 
+`support.py` may also declare the precision and quantization combinations the
+family builds:
+
+```python
+from tensorrt_model_connect.model_support import Variant, family_support
+
+describe = family_support(
+    model_types=("my_model",),
+    tasks=("text_continuation",),
+    default_task="text_continuation",
+    default_precision="bf16",
+    variants=(
+        Variant(precision="bf16"),
+        Variant(precision="bf16", quantization="fp8"),
+        Variant(precision="bf16", quantization="nvfp4", status="experimental"),
+    ),
+)
+```
+
+A `supported` variant (the default) is expected to have a manifest testcase
+with that `precision` and `quantization` and a hardware test marked with
+`tools.variant_coverage.covers_variant(precision=..., quantization=...)`. An
+`experimental` variant builds without that coverage. When a variant is covered
+only by specific manifests, for example a profile-restricted one, list them with
+`manifests=("<manifest name>",)`. `python -m tools.variant_coverage report`
+lists the gaps between the declaration, the quantizations `model.py` accepts,
+the manifests and the hardware tests; `python -m tools.variant_coverage
+bootstrap <family>` prints a draft declaration. The report is informational and
+does not gate pull requests yet. Its view of `model.py` is a heuristic: it finds
+string literals compared with `request.quantization`, so a format accepted
+through a lookup table is missed, and a manifest without a `quantization` field
+counts as unquantized even when the family detects a quantized checkpoint. A
+named manifest must still build the variant's precision and quantization, and
+only a collected `test*` function with a `gpu` or `trt` mark (on the function,
+its `Test*` class or the module `pytestmark`) counts as a hardware test.
+
 `model.py` must expose exactly one plain function. Any helper it calls is
 implemented in this file or elsewhere in the same family directory:
 
@@ -171,8 +207,8 @@ of public APIs; neither a family nor core may import their implementation.
 
 ## Reproduce the pre-merge gates before you push
 
-`.github/workflows/community-ci.yml` runs four jobs on every pull request, and
-`Community CPU / Required` fails unless all four pass. Each has a local
+`.github/workflows/community-ci.yml` runs five jobs on every pull request, and
+`Community CPU / Required` fails unless all five pass. Each has a local
 equivalent, so a failure does not have to cost a push and a CI round trip.
 
 The gates shell out to `lizard`, `ruff` and `clang-format` by name, and one
@@ -194,6 +230,7 @@ from (`upstream/main` or `github/main`):
 | `Community CPU / Ownership and impact` | `python3 -m tools.community_ci impact --base <base-ref>` | ownership resolution and the CPU test scope your change selects |
 | `Community CPU / Unit / C++ and Python` | `python3 -m tools.community_ci unit` | compiles the C++ and runs the source-only C++ and Python unit tests in the CI container |
 | `Community CPU / Docs` | `cd website && npm ci && npm run test:model-support && npm run build` | the generated model support inventory and the production documentation build |
+| `Community CPU / AIPerf qualification` | in a separate virtual environment, `pip install -r apps/aiperf_qual/requirements.txt pytest`, `pip install --no-deps apps/aiperf_qual/plugins`, then `CUDA_VISIBLE_DEVICES= HF_HUB_OFFLINE=1 PYTHONPATH=apps/aiperf_qual:apps/aiperf_qual/plugins:core/builder:apps/benchmark:. python -m pytest apps/aiperf_qual/tests -m "not gpu and not trt"` | the AIPerf qualification application against the catalog. A new profile the application cannot qualify yet is left out with its reason; it does not fail this job |
 
 `unit` is the one that needs more than the virtual environment. It
 builds and runs the CI container, so it needs a working Docker daemon, and two

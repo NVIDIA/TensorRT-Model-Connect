@@ -243,7 +243,7 @@ def add_attention_block(
     all_v.axis = 0
 
     # ------------------------------------------------------------------ #
-    # Attention core — native IAttention                                  #
+    # Attention core                                                      #
     # ------------------------------------------------------------------ #
     kv_seq = attention_window
     if alibi_slopes_tensor is not None:

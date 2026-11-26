@@ -1,0 +1,25 @@
+{
+  "name": "qwen2.5-omni-7b-text-fp8",
+  "hf_id": "Qwen/Qwen2.5-Omni-7B",
+  "hf_revision": "ae9e1690543ffd5c0221dc27f79834d0294cba00",
+  "family": "qwen2_5_omni",
+  "bundle": "qwen2.5-omni-7b-text-fp8.bundle",
+  "task": "text_continuation",
+  "precision": "fp32",
+  "quantization": "fp8",
+  "max_sequence_length": 128,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "qwen2.5-omni-7b-text-fp8",
+      "premerge": true,
+      "prompts": [
+        "<|im_start|>user\nWhat is 2 + 2?<|im_end|>\n<|im_start|>assistant\n",
+        "<|im_start|>user\nName the capital of France.<|im_end|>\n<|im_start|>assistant\n"
+      ],
+      "expected_words": ["4", "Paris"],
+      "min_equal_prefix_tokens": 4,
+      "max_new_tokens": 16
+    }
+  ]
+}

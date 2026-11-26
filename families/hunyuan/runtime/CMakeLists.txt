@@ -48,12 +48,32 @@ if(TRTMC_BUILD_TESTS)
     ${PROJECT_SOURCE_DIR}/families/hunyuan/tests/cpp/test_hunyuan_contract.cpp)
   target_include_directories(test_hunyuan_contract PRIVATE
     ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include)
-  if(TARGET EdgeLLM::Core)
+  if(DEFINED _hunyuan_sdk)
+    if(TARGET TensorRTEdgeLLM::Core)
+      target_compile_definitions(test_hunyuan_contract PRIVATE TRTMC_HUNYUAN_EDGE_012=1)
+    endif()
     target_compile_definitions(test_hunyuan_contract PRIVATE TRTMC_HAS_EDGE_LLM=1)
     target_include_directories(test_hunyuan_contract PRIVATE
-      $<TARGET_PROPERTY:EdgeLLM::Core,INTERFACE_INCLUDE_DIRECTORIES>)
+      $<TARGET_PROPERTY:${_hunyuan_sdk}::Core,INTERFACE_INCLUDE_DIRECTORIES>)
   endif()
   target_link_libraries(test_hunyuan_contract PRIVATE
     trtmc_model_hunyuan trtmc_core nlohmann_json::nlohmann_json ${TRTMC_CUDART_LIBRARY})
   add_test(NAME test_hunyuan_contract COMMAND test_hunyuan_contract)
+endif()
+
+if(TRTMC_BUILD_TESTS)
+  # CPU-backed KV-cache test: CUDA calls are served from host memory, and an
+  # overlapping copy fails the test.
+  add_executable(test_hunyuan_kv_cache
+    ${PROJECT_SOURCE_DIR}/families/hunyuan/tests/cpp/test_kv_cache.cpp
+    kv_cache.cpp
+    ${PROJECT_SOURCE_DIR}/core/runtime/primitives/device_tensor.cpp
+  )
+  target_include_directories(test_hunyuan_kv_cache PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_hunyuan_kv_cache SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_hunyuan_kv_cache PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME hunyuan_kv_cache COMMAND test_hunyuan_kv_cache)
 endif()

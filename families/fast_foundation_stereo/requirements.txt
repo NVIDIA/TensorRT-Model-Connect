@@ -3,7 +3,7 @@
 
 Pillow
 # Imported by the official checkpoint source used by this family E2E.
-imageio>=2.37
+imageio==2.38.2
 omegaconf==2.3.0
-opencv-python-headless>=4.11
-timm>=1.0
+opencv-python-headless==4.13.0.92
+timm==1.0.31

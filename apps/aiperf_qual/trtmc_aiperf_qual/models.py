@@ -6,10 +6,12 @@ A model's configuration is its catalog entry (checkpoint, revision, precision, b
 with the defaults of its Task (config/tasks.yaml). The candidate is the catalog bundle as shipped;
 accuracy comes from the Task's gold-labelled benchmarks (``absolute``) and whole-output checks
 (``supplementary``); a model with neither declares ``accuracy_source: none`` (Perf only). The native
-reference is the generic Hugging Face adapter of the operation. Family-owned exceptions live in
-families/<family>/tests/aiperf/<profile>.yaml. Legacy config/models/<profile>.yaml remains supported;
-the family's definition is merged last. A quantized profile is qualified as its model's highest-precision
+reference is the generic Hugging Face adapter of the operation, or the family's own (``reference.adapter``).
+A profile's own settings live in config/models/<profile>.yaml; the families hold no AIPerf configuration.
+Whether a profile runs is not part of its configuration (``selection``). A quantized profile is qualified as its
+model's highest-precision
 configuration (``qualified_as``): the same benchmarks, requests and native reference, its own candidate.
+A precision variant without a configuration of its own takes its highest-precision sibling's the same way.
 """
 
 from __future__ import annotations
@@ -31,11 +33,13 @@ HF_OPERATIONS = {"generate", "translate", "encode", "embed", "rerank", "classify
                  "solve", "regress"}
 # Tasks whose inputs the generic adapters would silently ignore (a world-model context, a text prompt for
 # masks): only a family's own native adapter (``reference.adapter``) serves them.
-NO_GENERIC_TASKS = {"world_model_generation", "text_prompted_segmentation"}
+NO_GENERIC_TASKS = {"world_model_generation", "text_prompted_segmentation", "initial_image_text_to_video"}
 PRECISIONS = ("fp16", "bf16", "fp32")
 # A configuration's numeric precision (its quantization, else its precision): a quantized checkpoint ranks below
 # every unquantized one, and bf16, the usual checkpoint dtype, above fp16.
-PRECISION_RANK = {"int4": 1, "nvfp4": 1, "int8": 2, "fp8": 2, "fp16": 3, "bf16": 4, "fp32": 5}
+PRECISION_RANK = {"int4": 1, "int4_awq": 1, "nvfp4": 1, "int8": 2, "fp8": 2, "fp16": 3, "bf16": 4, "fp32": 5}
+# Profile-name parts that only name a precision or quantization (``nemotron-nano-4b-int4-awq``).
+PRECISION_NAME_PARTS = set(PRECISION_RANK) | {"awq"}
 # Checkpoints above this size (bytes) measure fewer requests per run: native references of large models
 # take seconds per request, and three runs still give the confidence interval.
 LARGE_CHECKPOINT_BYTES = 16 * 2**30
@@ -71,13 +75,21 @@ def _import_repository(repository: Path) -> None:
             sys.path.insert(0, str(root))
 
 
+def smoke_variant(name: str, hf_id: str) -> bool:
+    """An L0 smoke or regression variant: the marker is in the profile's own suffix, not in its checkpoint's
+    name (``patchtst-etth1-regression-distribution`` is a regression model, not a regression variant)."""
+    checkpoint = hf_id.rsplit("/", 1)[-1].lower()
+    suffix = name.lower().replace(checkpoint, "", 1) if checkpoint else name.lower()
+    return "-l0-" in f"-{suffix}-" or "-regression-" in f"-{suffix}-"
+
+
 def catalog_profiles(repository: Path) -> list[Any]:
     """Ready catalog profiles, excluding L0 smoke and regression variants (release coverage rule)."""
     _import_repository(repository)
     from trtmc_benchmark.catalog import ManifestCatalog
 
     return [entry for entry in ManifestCatalog(repository / "families").entries()
-            if entry.status == "ready" and "-l0" not in f"-{entry.name}-" and "-regression-" not in f"-{entry.name}-"]
+            if entry.status == "ready" and not smoke_variant(entry.name, entry.hf_id)]
 
 
 def _reference_backend(operation: str, task: str) -> str:
@@ -90,6 +102,8 @@ def _suite(reference: str | Mapping[str, Any], profile: str, catalog_request: Ma
     leaves to each side's default, in every suite built on that request (the suite's own request wins)."""
     if isinstance(reference, Mapping):
         suite = dict(reference)
+        if (suite.get("source") or {}).get("kind") == "catalog_testcase" and not suite["source"].get("profile"):
+            suite["source"] = {**suite["source"], "profile": profile}  # the profile's own testcases
     elif reference == "catalog":
         suite = {"suite": f"{profile}-catalog", "version": 1,
                  "source": {"kind": "catalog_testcase", "profile": profile},
@@ -129,6 +143,7 @@ def _absolute(names: list[Any], definitions: Mapping[str, Any], testcase: Mappin
             item.update(gate=gates["sampled"] or item["gate"], seeds=list(seeds))
         elif quantized and gates["quantized"]:
             item["gate"] = gates["quantized"]
+            item.pop("mismatched_precision_gate", None)  # the quantization tolerance covers the precision too
         if item.get("window"):  # a forecast window (ETTh1): the model's columns, context, and horizon
             suite = item["suite_definition"]
             suite = load_suite(suite) if isinstance(suite, str) else dict(suite)
@@ -148,16 +163,16 @@ def _definition(path: Path) -> Any:
         raise ConfigError(f"{path}: {error}") from error
 
 
-def profile_override(profile: str, family: str, repository: Path, root: Path = CONFIG_ROOT) -> dict[str, Any]:
-    """A profile's own configuration: legacy config/models/<profile>.yaml, then the family's definition."""
-    override_path = root / "models" / f"{profile}.yaml"
-    override = configuration((_definition(override_path) if override_path.is_file() else None) or {})
-    family_path = repository / "families" / family / "tests" / "aiperf" / f"{profile}.yaml"
-    if family_path.is_file():
-        owned = _definition(family_path)
-        if not isinstance(owned, dict):
-            raise ConfigError(f"{family_path} must contain a mapping")
-        override = deep_merge(override, configuration(owned))
+def profile_override(profile: str, root: Path = CONFIG_ROOT) -> dict[str, Any]:
+    """A profile's own configuration (config/models/<profile>.yaml). Whether a profile runs is not part of it:
+    config/exclusions.yaml decides that (``selection``)."""
+    path = root / "models" / f"{profile}.yaml"
+    override = (_definition(path) if path.is_file() else None) or {}
+    if not isinstance(override, dict):
+        raise ConfigError(f"{path} must contain a mapping")
+    override = configuration(override)
+    if "exclude" in override:
+        raise ConfigError(f"{profile}: exclude belongs in config/exclusions.yaml, not in the profile's configuration")
     return override
 
 
@@ -167,17 +182,22 @@ def _catalog_manifest(entry: Any) -> dict[str, Any]:
 
 def qualified_as(profile: str, entries: Mapping[str, Any]) -> str:
     """The configuration a quantized profile is qualified as: its model's ready profile of the highest precision
-    (``PRECISION_RANK``; the same family and Task, and the same name apart from precision and quantization,
-    so qwen35-9b for qwen35-9b-nvfp4), else the profile itself (not quantized, or nothing ranks higher)."""
+    (``highest_precision_sibling``), else the profile itself (not quantized, or nothing ranks higher)."""
+    if not _catalog_manifest(entries[profile]).get("quantization"):
+        return profile
+    return highest_precision_sibling(profile, entries)
+
+
+def highest_precision_sibling(profile: str, entries: Mapping[str, Any]) -> str:
+    """The model's ready profile of the highest precision (``PRECISION_RANK``; the same family and Task, and the
+    same name apart from precision and quantization, so qwen35-9b for qwen35-9b-nvfp4), else the profile itself."""
     def stem(name: str) -> str:
-        return "-".join(part for part in name.split("-") if part not in PRECISION_RANK)
+        return "-".join(part for part in name.split("-") if part not in PRECISION_NAME_PARTS)
 
     def rank(manifest: Mapping[str, Any]) -> int:
         return PRECISION_RANK.get(manifest.get("quantization") or manifest.get("precision"), 0)
 
     own, manifest = entries[profile].model, _catalog_manifest(entries[profile])
-    if not manifest.get("quantization"):
-        return profile
     best, best_rank = profile, rank(manifest)
     for name, entry in sorted(entries.items()):
         if name == profile or (entry.model.family, entry.model.task, stem(name)) != (own.family, own.task, stem(profile)):
@@ -193,19 +213,20 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     entries = {entry.name: entry for entry in catalog_profiles(repository)}
     if profile not in entries:
         raise ConfigError(f"{profile} is not a ready catalog profile")
-    _import_repository(repository)
-    from trtmc_benchmark.catalog import ManifestCatalog
-
-    catalog_model = ManifestCatalog(repository / "families").resolve(profile)
+    catalog_model = entries[profile].model  # what ManifestCatalog.resolve returns, without reading every manifest again
     manifest = json.loads(Path(catalog_model.manifest_path).read_text())
     tasks = yaml.safe_load((root / "tasks.yaml").read_text())
     if catalog_model.task not in tasks["tasks"]:
         raise ConfigError(f"no Task defaults for {catalog_model.task!r} ({profile})")
-    override = profile_override(profile, catalog_model.family, repository, root)
+    override = profile_override(profile, root)
     base = qualified_as(profile, entries)
-    if base != profile:  # the base's configuration under the profile's own; the candidate stays the profile's
-        inherited = profile_override(base, catalog_model.family, repository, root)
+    # A precision variant without a configuration of its own (an fp16 bundle of an fp32 model) takes its
+    # highest-precision sibling's, as a quantized profile takes its base's: the family adapter and benchmarks.
+    sibling = base if base != profile or override else highest_precision_sibling(profile, entries)
+    if sibling != profile:  # the sibling's configuration under the profile's own; the candidate stays the profile's
+        inherited = profile_override(sibling, root)
         inherited.pop("candidate", None)
+        inherited.pop("capacity_limits", None)  # the sibling's build size, not this candidate's
         override = deep_merge(inherited, override)
     config = deep_merge(deep_merge(configuration(tasks["defaults"]),
                         configuration(tasks["tasks"][catalog_model.task])), override)
@@ -245,6 +266,9 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     absolute = _absolute(list(config.get("absolute") or []), definitions, testcase, bool(quantization))
     for item in absolute:  # gold suites: the suite definition, with the benchmark's request settings
         if item.get("metric"):
+            if not item.get("suite_definition"):  # a benchmark whose suite each profile states
+                raise ConfigError(f"{profile}: benchmark {item.get('suite')!r} names no suite_definition; the "
+                                  "profile's own configuration states its suite")
             suite = _suite(item["suite_definition"], profile, config.get("request"))
             if item.get("request"):  # a null removes the suite's field (a Task that declares no such config)
                 request = {**suite.get("request", {}), **item.pop("request")}
@@ -304,9 +328,19 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         **({"accuracy_note": str(config["accuracy_note"])} if accuracy_source == "none" else {}),
         "absolute": absolute, "supplementary": supplementary,
         **({"coverage": str(config["coverage"])} if config.get("coverage") else {}),
+        **({"capacity_limits": capacity_limits(profile, config["capacity_limits"])} if config.get("capacity_limits") else {}),
         "performance": policy,
         **({"service_metrics": dict(config["service_metrics"])} if config.get("service_metrics") else {}),
     }
+
+
+def capacity_limits(profile: str, limits: Any) -> dict[str, str]:
+    """``capacity_limits``: GPU architecture (the platform fingerprint's ``gpu_arch``, e.g. ``sm110``) -> why the
+    candidate cannot be built or run there. Such a platform reports the profile as blocked by device capacity."""
+    if not isinstance(limits, Mapping) or not all(isinstance(key, str) and key.startswith("sm") and str(value).strip()
+                                                   for key, value in limits.items()):
+        raise ConfigError(f"{profile}: capacity_limits maps GPU architectures (sm110) to a reason")
+    return {key: str(value).strip() for key, value in limits.items()}
 
 
 def checkpoints(model: Mapping[str, Any]) -> set[str]:
