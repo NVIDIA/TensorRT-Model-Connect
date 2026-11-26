@@ -6,3 +6,6 @@ absolute: [{name: ocrbench_text, request: {prompt: "OCR:"}}]
 
 reference:
   requirements: families/paddleocr_vl/tests/requirements.txt  # the family test reference's Transformers (PaddleOCR-VL)
+# Perf times the first text-recognition crop: the catalog testcases are not a request the catalog payload can build
+# (an empty prompt, images under another key, or several images).
+performance: {suite: {from_benchmark: ocrbench-text}}

@@ -7,3 +7,6 @@ absolute: [{name: ocrbench_text, request: {prompt: "Text Recognition:"}}]
 
 reference:
   requirements: families/minicpm_ocr/requirements.txt  # Transformers 5.22 (MiniCPM-OCR), layered on the serving interpreter
+# Perf times the first text-recognition crop: the catalog testcases are not a request the catalog payload can build
+# (an empty prompt, images under another key, or several images).
+performance: {suite: {from_benchmark: ocrbench-text}}
