@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Generated from the pinned UnicodeData.txt by generate_split_unicode.py.
+// Generated from Unicode 16.0.0 UnicodeData.txt; see the family README.
 // Note (Jiaxin Deng): Reference properties must not vary with the host ICU version.
 // clang-format off
 #pragma once

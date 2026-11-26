@@ -27,8 +27,8 @@ target_include_directories(trtmc_model_llama SYSTEM PRIVATE
 target_link_libraries(trtmc_model_llama PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
-    ICU::uc
-    ICU::i18n
+  ICU::uc
+  ICU::i18n
   ${TRTMC_CUDART_LIBRARY}
 )
 target_compile_options(trtmc_model_llama PRIVATE
