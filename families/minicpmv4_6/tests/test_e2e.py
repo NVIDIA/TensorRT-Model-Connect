@@ -323,41 +323,51 @@ def _reference(model_dir: Path, case: dict, images: list[Path], native_ids: list
     """FP32 Transformers reference: greedy tokens and the scores of the native tokens."""
     from transformers import AutoModelForImageTextToText, AutoProcessor
 
+    # Exact FP32: TF32 off, and both global switches restored afterwards, also when loading or inference fails.
+    saved = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    assert torch.get_float32_matmul_precision() == "highest"
-    processor = AutoProcessor.from_pretrained(model_dir, local_files_only=True)
-    model = AutoModelForImageTextToText.from_pretrained(
-        model_dir, local_files_only=True, dtype=torch.float32).eval().to("cuda")
     try:
-        inputs = _reference_inputs(processor, case, images).to("cuda")
-        prompt_length = inputs["input_ids"].shape[1]
-        with torch.inference_mode():
-            generated = model.generate(**inputs, max_new_tokens=int(case["max_new_tokens"]), do_sample=False)
-            reference_ids = generated[0, prompt_length:].tolist()
-            # Re-score the native continuation: logits[i] predicts native token i.
-            forced = torch.tensor([native_ids], dtype=inputs["input_ids"].dtype, device="cuda")
-            scored = dict(inputs)
-            scored["input_ids"] = torch.cat([inputs["input_ids"], forced], dim=1)
-            scored["attention_mask"] = torch.ones_like(scored["input_ids"])
-            logits = model(**scored).logits[0, prompt_length - 1: prompt_length - 1 + len(native_ids)].float()
-            native = logits.gather(1, forced[0].unsqueeze(1)).squeeze(1)
-            best = logits.max(dim=1)
-            gaps = (best.values - native).tolist()
-        eos = model.generation_config.eos_token_id
-        return {
-            "prompt_tokens": prompt_length,
-            "reference_ids": reference_ids,
-            "reference_text": processor.tokenizer.decode(reference_ids, skip_special_tokens=True),
-            "teacher_forced_argmax_ids": best.indices.tolist(),
-            "native_logit_gaps": gaps,
-            "native_ids_decoded": processor.tokenizer.decode(native_ids, skip_special_tokens=True),
-            "eos_token_ids": [eos] if isinstance(eos, int) else list(eos or []),
-        }
+        assert torch.get_float32_matmul_precision() == "highest"
+        processor = AutoProcessor.from_pretrained(model_dir, local_files_only=True)
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_dir, local_files_only=True, dtype=torch.float32).eval().to("cuda")
+        try:
+            return _reference_run(processor, model, case, images, native_ids, torch)
+        finally:
+            del model
+            gc.collect()
+            torch.cuda.empty_cache()
     finally:
-        del model
-        gc.collect()
-        torch.cuda.empty_cache()
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = saved
+
+
+def _reference_run(processor, model, case: dict, images: list[Path], native_ids: list[int], torch) -> dict:
+    """Greedy reference tokens and the scores of the native tokens."""
+    inputs = _reference_inputs(processor, case, images).to("cuda")
+    prompt_length = inputs["input_ids"].shape[1]
+    with torch.inference_mode():
+        generated = model.generate(**inputs, max_new_tokens=int(case["max_new_tokens"]), do_sample=False)
+        reference_ids = generated[0, prompt_length:].tolist()
+        # Re-score the native continuation: logits[i] predicts native token i.
+        forced = torch.tensor([native_ids], dtype=inputs["input_ids"].dtype, device="cuda")
+        scored = dict(inputs)
+        scored["input_ids"] = torch.cat([inputs["input_ids"], forced], dim=1)
+        scored["attention_mask"] = torch.ones_like(scored["input_ids"])
+        logits = model(**scored).logits[0, prompt_length - 1: prompt_length - 1 + len(native_ids)].float()
+        native = logits.gather(1, forced[0].unsqueeze(1)).squeeze(1)
+        best = logits.max(dim=1)
+        gaps = (best.values - native).tolist()
+    eos = model.generation_config.eos_token_id
+    return {
+        "prompt_tokens": prompt_length,
+        "reference_ids": reference_ids,
+        "reference_text": processor.tokenizer.decode(reference_ids, skip_special_tokens=True),
+        "teacher_forced_argmax_ids": best.indices.tolist(),
+        "native_logit_gaps": gaps,
+        "native_ids_decoded": processor.tokenizer.decode(native_ids, skip_special_tokens=True),
+        "eos_token_ids": [eos] if isinstance(eos, int) else list(eos or []),
+    }
 
 
 def _record_teacher_forced(native_ids: list[int], reference: dict, worst: float, tolerance: float,

@@ -381,3 +381,28 @@ def test_a_snapshot_cached_without_its_file_listing_resolves_offline(tmp_path, m
     monkeypatch.setattr(constants, "HF_HUB_OFFLINE", True)
     monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path))
     assert e2e._checkpoint(_MANIFEST) == snapshot
+
+
+def _torch_with_tf32():
+    """The parts of torch that the reference reads: both TF32 switches on, FP32 matmul precision "highest"."""
+    return types.SimpleNamespace(
+        backends=types.SimpleNamespace(cuda=types.SimpleNamespace(matmul=types.SimpleNamespace(allow_tf32=True)),
+                                       cudnn=types.SimpleNamespace(allow_tf32=True)),
+        get_float32_matmul_precision=lambda: "highest", float32="float32",
+    )
+
+
+@pytest.mark.parametrize("failing", ["AutoProcessor", "AutoModelForImageTextToText"])
+def test_the_reference_restores_the_tf32_switches_when_loading_fails(tmp_path, monkeypatch, failing):
+    def fail(*args, **kwargs):
+        raise RuntimeError("load failed")
+
+    classes = {name: types.SimpleNamespace(from_pretrained=lambda *args, **kwargs: types.SimpleNamespace())
+               for name in ("AutoProcessor", "AutoModelForImageTextToText")}
+    classes[failing] = types.SimpleNamespace(from_pretrained=fail)
+    monkeypatch.setitem(sys.modules, "transformers", types.SimpleNamespace(**classes))
+    torch = _torch_with_tf32()
+    with pytest.raises(RuntimeError, match="load failed"):
+        e2e._reference(tmp_path, {}, [], [], torch)
+    assert torch.backends.cuda.matmul.allow_tf32 is True
+    assert torch.backends.cudnn.allow_tf32 is True
