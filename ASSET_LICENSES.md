@@ -411,4 +411,24 @@ checkpoint weights and no dataset text; like
 activations. The source checkpoint is distributed under the
 [LFM Open License v1.0](https://huggingface.co/LiquidAI/LFM2-1.2B/blob/main/LICENSE).
 
+## ESMFold2 checkpoints and ubiquitin fixture
+
+The `esmfold2` family builds
+[`biohub/ESMFold2`](https://huggingface.co/biohub/ESMFold2/tree/69869f737beffec5294845ede23db5fc0b4f509e)
+at revision `69869f737beffec5294845ede23db5fc0b4f509e` and
+[`biohub/ESMFold2-Fast`](https://huggingface.co/biohub/ESMFold2-Fast/tree/45fe8656f5b3ef493c17fcf9abe9a2968902e712)
+at revision `45fe8656f5b3ef493c17fcf9abe9a2968902e712`. Their model cards
+declare the MIT License (copyright 2026 Chan Zuckerberg Biohub, Inc.) and link
+the publisher's
+[`THIRD_PARTY_NOTICE.md`](https://github.com/Biohub/esm/blob/main/THIRD_PARTY_NOTICE.md),
+which lists the third-party libraries of the publisher's own `esm` package;
+none of them is part of this repository or of a bundle. The checkpoints are not
+included in this repository and are obtained separately; a bundle built from
+them contains their weights, which remain under the MIT License.
+
+The test request below holds the 76-residue sequence of human ubiquitin from PDB
+entry 1UBQ (wwPDB archive data, CC0 1.0):
+
+- `families/esmfold2/tests/data/ubiquitin.txt`
+
 <!-- Collaborative review anchor: batch 2. -->
