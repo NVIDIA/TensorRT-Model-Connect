@@ -197,6 +197,172 @@ def test_group_norm_matches_torch_for_small_and_large_groups(shape):
     assert _relative_error(actual, expected) <= 1e-6
 
 
+def test_fp16_vae_attention_keeps_fp32_scores_and_sums():
+    """The VAE's one-head, 512-wide attention over the 9216 positions of a 576 x 1024 frame,
+    in an FP16 network.
+
+    TensorRT has no fused attention kernel at this head width. Its decomposition of an
+    attention layer accumulates the score and value products in FP16 and runs the softmax in
+    FP16: a nearly uniform softmax then comes out percent-level wrong. diffusers' FP16
+    attention keeps scores, softmax and sums in FP32, and so must the graph.
+    """
+    from families.stable_video_diffusion import blocks
+    from families.stable_video_diffusion import graph as g
+
+    channels, height, width, prefix, eps = 512, 96, 96, "attention", 1e-6
+    generator = torch.Generator().manual_seed(10)
+    x = 0.01 * torch.randn((1, channels, height, width), generator=generator)
+    eye = torch.eye(channels)
+    # Tiny query and key projections give a nearly uniform softmax; the value bias keeps every
+    # value near 1, so the result is a mean over all positions that an FP16 sum cannot hold.
+    weights = {
+        f"{prefix}.group_norm.weight": torch.ones(channels),
+        f"{prefix}.group_norm.bias": torch.zeros(channels),
+        f"{prefix}.to_q.weight": 1e-3 * torch.randn((channels, channels), generator=generator),
+        f"{prefix}.to_q.bias": torch.zeros(channels),
+        f"{prefix}.to_k.weight": 1e-3 * torch.randn((channels, channels), generator=generator),
+        f"{prefix}.to_k.bias": torch.zeros(channels),
+        f"{prefix}.to_v.weight": 0.1 * torch.randn((channels, channels), generator=generator)
+        / math.sqrt(channels),
+        f"{prefix}.to_v.bias": torch.ones(channels),
+        f"{prefix}.to_out.0.weight": eye,
+        f"{prefix}.to_out.0.bias": torch.zeros(channels),
+    }
+    weights = {key: value.half().float() for key, value in weights.items()}
+
+    def populate(network):
+        image = g.cast(network, network.add_input("x", trt.float32, tuple(x.shape)), trt.float16)
+        out = g.cast(network, blocks.map_attention(
+            network, image, {key: value.numpy() for key, value in weights.items()}, prefix, eps,
+            trt.float16), trt.float32)
+        out.name = "y"
+        network.mark_output(out)
+
+    actual = _run(_compile(populate, work=trt.float16, verbose=False), {"x": x.half().float()},
+                  {"y": tuple(x.shape)})["y"]
+    exact = {key: value.double() for key, value in weights.items()}
+
+    def project(name, values):
+        return values @ exact[f"{prefix}.{name}.weight"].T + exact[f"{prefix}.{name}.bias"]
+
+    with torch.no_grad():
+        image = x.half().double()
+        normed = torch.nn.functional.group_norm(image, 32, exact[f"{prefix}.group_norm.weight"],
+                                                exact[f"{prefix}.group_norm.bias"], eps)
+        tokens = normed.flatten(2).transpose(1, 2)
+        scores = project("to_q", tokens) @ project("to_k", tokens).transpose(1, 2)
+        attended = torch.softmax(scores / math.sqrt(channels), dim=-1) @ project("to_v", tokens)
+        expected = project("to_out.0", attended).transpose(1, 2).reshape(image.shape) + image
+    # Measured on a B300, seeds 10-12: at most 9.9e-4 with FP32 scores, softmax and sums;
+    # 3.3e-2 to 3.4e-2 with the decomposed FP16 attention layer the graph used before.
+    assert _relative_error(actual.cpu(), expected) <= 4e-3
+
+
+def test_fp16_geglu_keeps_a_product_beyond_the_fp16_range():
+    """An FP16 GEGLU feed-forward whose hidden and gate values are near 300: their product,
+    about 90000, exceeds the FP16 maximum (65504) while the projected result (about 1400)
+    does not. An FP16 product turns it into infinity."""
+    from families.stable_video_diffusion import graph as g
+
+    tokens, width, inner, prefix = 4, 8, 16, "ff"
+    generator = torch.Generator().manual_seed(12)
+    x = (1.0 + 0.01 * torch.randn((1, tokens, width), generator=generator)).half().float()
+    weights = {
+        f"{prefix}.net.0.proj.weight": torch.full((2 * inner, width), 37.5),
+        f"{prefix}.net.0.proj.bias": torch.zeros(2 * inner),
+        f"{prefix}.net.2.weight": torch.full((width, inner), 1.0 / 1024),
+        f"{prefix}.net.2.bias": torch.zeros(width),
+    }
+
+    def populate(network):
+        tensor = g.cast(network, network.add_input("x", trt.float32, tuple(x.shape)), trt.float16)
+        out = g.cast(network, g.geglu_feed_forward(
+            network, tensor, {key: value.numpy() for key, value in weights.items()}, prefix,
+            trt.float16), trt.float32)
+        out.name = "y"
+        network.mark_output(out)
+
+    actual = _run(_compile(populate, work=trt.float16, verbose=False), {"x": x},
+                  {"y": (1, tokens, width)})["y"].cpu()
+    exact = {key: value.double() for key, value in weights.items()}
+    # The graph rounds the projection to FP16, as the reference module stores it.
+    projected = (x.double() @ exact[f"{prefix}.net.0.proj.weight"].T
+                 + exact[f"{prefix}.net.0.proj.bias"]).half().double()
+    hidden, gate = projected[..., :inner], projected[..., inner:]
+    product = hidden * torch.nn.functional.gelu(gate)
+    expected = product @ exact[f"{prefix}.net.2.weight"].T + exact[f"{prefix}.net.2.bias"]
+    assert float(product.min()) > 65504.0
+    assert bool(torch.isfinite(actual).all()), actual
+    # What remains: a TF32 kernel's rounding of the product (2^-11, or 2^-10 if it truncates)
+    # and the FP16 rounding of the ~1400 result (3.6e-4). Measured on a B300: 7.8e-5.
+    assert _relative_error(actual, expected) <= 2e-3
+
+
+def test_fp16_unet_attention_sums_in_fp32():
+    """The UNet's FP16 self-attention at its full-size shape: five 64-wide heads over the 9216
+    positions of a 576 x 1024 frame. TensorRT runs it in its fused attention kernel, which
+    accumulates in FP32, so a uniform softmax returns the mean of the values to FP16 output
+    rounding; a decomposed attention layer with FP16 sums is percent-level off (see the VAE
+    attention test above)."""
+    from families.stable_video_diffusion import graph as g
+
+    batch, heads, tokens, dim = 2, 5, 9216, 64
+    shape = (batch, tokens, heads * dim)
+    generator = torch.Generator().manual_seed(13)
+    inputs = {"q": torch.zeros(shape), "k": torch.randn(shape, generator=generator).half().float(),
+              "v": (1.0 + 0.01 * torch.randn(shape, generator=generator)).half().float()}
+
+    def populate(network):
+        operands = [g.split_heads(network, g.cast(network, network.add_input(
+            name, trt.float32, shape), trt.float16), heads) for name in inputs]
+        out = g.cast(network, g.merge_heads(network, g.attention(network, *operands)), trt.float32)
+        out.name = "y"
+        network.mark_output(out)
+
+    actual = _run(_compile(populate, work=trt.float16, verbose=False), inputs, {"y": shape})["y"]
+    expected = inputs["v"].double().mean(dim=1, keepdim=True).expand(shape)
+    # Measured on a B300: 3.5e-4; a decomposed FP16 attention gives 5e-2 at this length.
+    assert _relative_error(actual.cpu(), expected) <= 1e-3
+
+
+@pytest.mark.parametrize("component", ["image_encoder", "vae_decoder"])
+def test_fp16_networks_keep_clip_and_vae_attention_explicit(component):
+    """FP16 networks compute the CLIP and VAE attention with explicit FP32 matrix multiplies
+    around an FP32 softmax (graph.fp32_attention), not with an attention layer, whose FP16
+    decomposition TensorRT may pick even for FP32 operands (the VAE attention test above). At
+    the CLIP's head width TensorRT 11.4 picks a fused kernel that accumulates in FP32, so only
+    the network shows the difference there."""
+    if component == "image_encoder":
+        config = transformers.CLIPVisionConfig(
+            hidden_size=64, intermediate_size=128, num_hidden_layers=1, num_attention_heads=4,
+            image_size=56, patch_size=14, projection_dim=48, hidden_act="gelu", layer_norm_eps=1e-5)
+        weights = _weights(_randomize(transformers.CLIPVisionModelWithProjection(config), 1))
+        cfg = {"image_size": 56, "patch_size": 14, "hidden_size": 64, "num_hidden_layers": 1,
+               "num_attention_heads": 4, "projection_dim": 48, "layer_norm_eps": 1e-5}
+
+        def populate(network, work):
+            clip_builder.build_image_encoder(network, weights, cfg, work)
+    else:
+        weights = _weights(_tiny_vae())
+        cfg = {"in_channels": 3, "block_out_channels": [32, 64, 64], "layers_per_block": 2,
+               "latent_channels": 4}
+
+        def populate(network, work):
+            vae_builder.build_decoder(network, weights, cfg, FRAMES, 8, 12, work)
+
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    attention = {trt.LayerType.ATTENTION_INPUT, trt.LayerType.ATTENTION_OUTPUT}
+    found = {}
+    for work in (trt.float16, trt.float32):
+        network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+        populate(network, work)
+        found[work] = sum(network.get_layer(index).type in attention
+                          for index in range(network.num_layers))
+    assert found[trt.float16] == 0
+    assert found[trt.float32] > 0  # FP32 networks keep the attention layer, computed in FP32
+
+
 def test_frame_position_table_matches_diffusers_timesteps():
     from diffusers.models.embeddings import get_timestep_embedding
 

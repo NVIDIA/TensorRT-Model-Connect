@@ -4,14 +4,21 @@
 """TensorRT graph helpers for the Stable Video Diffusion components.
 
 Every helper takes the network's working dtype explicitly. Tensors between
-layers are kept in that dtype; normalization statistics and activation functions
-are computed in FP32 whatever the working dtype is, which is what the reference's
-FP16 kernels do internally.
+layers are kept in that dtype, except the GEGLU product and the inside of
+``fp32_attention``; normalization statistics and activation functions are computed
+in FP32 whatever the working dtype is, which is what the reference's FP16 kernels
+do internally.
 
 In an FP16 network every linear and convolution layer accumulates in FP32: it
 receives FP32 copies of its FP16 operands (weights rounded to FP16 first) and the
 engine is built with TF32 enabled. FP16 values are exact in TF32, so this is FP16
 arithmetic with FP32 accumulation; FP16 tactics may otherwise accumulate in FP16.
+The GEGLU product reaches its down projection in FP32. Attention keeps its scores,
+softmax and sums in FP32 as well, as the reference's SDPA kernels do: the UNet's
+multi-head attention (head width 64) runs in TensorRT's fused attention kernel,
+which accumulates in FP32 (``tests/test_graphs.py`` checks it at the full-size
+shape), and the CLIP and VAE attention runs as explicit FP32 matrix multiplies
+around an FP32 softmax (``fp32_attention``).
 """
 
 from __future__ import annotations
@@ -247,11 +254,33 @@ def attention(network, query, key, value):
     return layer.get_output(0)
 
 
+def fp32_attention(network, query, key, value):
+    """softmax(query @ key^T) @ value in FP32, returned in the operands' dtype.
+
+    Two FP32 matrix multiplies around an FP32 softmax over the last axis, for FP16
+    networks (TF32 on). Where TensorRT has no fused attention kernel (head width
+    512) it decomposes an attention layer of such a network into score and value
+    products that accumulate in FP16 and an FP16 softmax, also for FP32 operands.
+    FP16 operands are exact in TF32; a TF32 kernel rounds the probabilities to the
+    precision of FP16 for the second product, as the reference's FP16 kernels do.
+    """
+    dtype = query.dtype
+    query, key, value = (cast(network, tensor, trt.float32) for tensor in (query, key, value))
+    scores = network.add_matrix_multiply(query, trt.MatrixOperation.NONE, key,
+                                         trt.MatrixOperation.TRANSPOSE).get_output(0)
+    softmax = network.add_softmax(scores)
+    softmax.axes = 1 << (len(shape_of(scores)) - 1)
+    attended = network.add_matrix_multiply(softmax.get_output(0), trt.MatrixOperation.NONE, value,
+                                           trt.MatrixOperation.NONE).get_output(0)
+    return cast(network, attended, dtype)
+
+
 def self_attention(network, tensor, weights, prefix: str, heads: int, work: trt.DataType,
-                   *, bias: bool):
+                   *, bias: bool, attend=attention):
     """Multi-head self-attention with diffusers' to_q/to_k/to_v/to_out.0 projections.
 
     The softmax scale 1/sqrt(head_dim) multiplies the query projection's FP32 result.
+    ``attend`` computes softmax(query @ key^T) @ value on the split heads.
     """
     width = int(np.asarray(weights[f"{prefix}.to_q.weight"]).shape[0])
     query = linear(network, tensor, weights[f"{prefix}.to_q.weight"],
@@ -261,20 +290,26 @@ def self_attention(network, tensor, weights, prefix: str, heads: int, work: trt.
                  weights[f"{prefix}.to_k.bias"] if bias else None, work)
     value = linear(network, tensor, weights[f"{prefix}.to_v.weight"],
                    weights[f"{prefix}.to_v.bias"] if bias else None, work)
-    attended = attention(network, split_heads(network, query, heads),
-                         split_heads(network, key, heads), split_heads(network, value, heads))
+    attended = attend(network, split_heads(network, query, heads),
+                      split_heads(network, key, heads), split_heads(network, value, heads))
     return linear(network, merge_heads(network, attended), weights[f"{prefix}.to_out.0.weight"],
                   weights[f"{prefix}.to_out.0.bias"], work)
 
 
 def geglu_feed_forward(network, tensor, weights, prefix: str, work: trt.DataType):
-    """diffusers FeedForward(activation_fn="geglu"): proj to 2x, value * gelu(gate), project."""
+    """diffusers FeedForward(activation_fn="geglu"): proj to 2x, value * gelu(gate), project.
+
+    GELU, the product and the input of the down projection stay in FP32: a product of
+    two FP16 values can exceed the FP16 range although the projected result fits. In an
+    FP16 network a TF32 kernel of the down projection rounds the product to the
+    precision of FP16, without its range limit.
+    """
     projected = linear(network, tensor, weights[f"{prefix}.net.0.proj.weight"],
                        weights[f"{prefix}.net.0.proj.bias"], work)
     width = shape_of(projected)[-1] // 2
     axis = len(shape_of(projected)) - 1
-    hidden = slice_axis(network, projected, axis, 0, width)
-    gate = slice_axis(network, projected, axis, width, width)
+    hidden = cast(network, slice_axis(network, projected, axis, 0, width), trt.float32)
+    gate = cast(network, slice_axis(network, projected, axis, width, width), trt.float32)
     return linear(network, mul(network, hidden, gelu(network, gate)),
                   weights[f"{prefix}.net.2.weight"], weights[f"{prefix}.net.2.bias"], work)
 

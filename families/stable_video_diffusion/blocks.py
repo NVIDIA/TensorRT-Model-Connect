@@ -109,12 +109,19 @@ def spatial_map(network, tokens, height: int, width: int):
 
 
 def map_attention(network, x, weights, prefix: str, eps: float, work):
-    """diffusers Attention(norm_num_groups=32, bias=True, residual_connection=True), one head."""
+    """diffusers Attention(norm_num_groups=32, bias=True, residual_connection=True), one head.
+
+    The head is as wide as the channels (512 in the VAE), for which TensorRT has no
+    fused attention kernel. In an FP16 network the attention runs as explicit FP32
+    matrix multiplies around an FP32 softmax (``graph.fp32_attention``); an FP32
+    network keeps the attention layer, which TensorRT computes in FP32 there.
+    """
     _, _, height, width = g.shape_of(x)
     normed = g.group_norm(network, x, weights[f"{prefix}.group_norm.weight"],
                           weights[f"{prefix}.group_norm.bias"], GROUPS, eps, work)
+    attend = g.fp32_attention if work == trt.float16 else g.attention
     attended = g.self_attention(network, spatial_tokens(network, normed), weights, prefix, 1, work,
-                                bias=True)
+                                bias=True, attend=attend)
     return g.add(network, spatial_map(network, attended, height, width), x)
 
 
