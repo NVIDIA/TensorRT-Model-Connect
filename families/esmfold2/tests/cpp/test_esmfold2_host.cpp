@@ -340,14 +340,21 @@ void checkPlanContract() {
     broken([](PlanFacts& facts) { facts["atom_mask"].input = false; },
            "an input reported as output");
     expectThrows([&] { check_plan_contract("unknown", denoise, config); }, "an unknown plan");
-    // TensorRT bool (the dropout mask) has no DType: its type is not checked, its profile is.
+    // The dropout mask is a 0/1 int32 tensor, the type the runtime uploads; any other type
+    // (TensorRT bool reports kFloat32) is rejected.
     auto pair = [&](DType dtype) { return input(dtype, {1, 2, 2, 256}, {1, t, t, 256}); };
     PlanFacts loop = {{"state", pair(bf16)},
                       {"base_pair", pair(bf16)},
                       {"lm_pair", pair(bf16)},
-                      {"lm_keep", pair(DType::kFloat32)},
+                      {"lm_keep", pair(DType::kInt32)},
                       {"next_state", output(bf16, {1, t, t, 256})}};
     check_plan_contract("loop", loop, config);
+    for (const DType other : {DType::kFloat32, DType::kInt8, DType::kBFloat16}) {
+        PlanFacts mask = loop;
+        mask["lm_keep"].dtype = other;
+        expectThrows([&] { check_plan_contract("loop", mask, config); },
+                     "plan contract rejects a mask of another type");
+    }
     loop["lm_keep"].max_profile = {1, t, t, 128};
     expectThrows([&] { check_plan_contract("loop", loop, config); },
                  "plan contract rejects a mask of another width");

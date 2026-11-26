@@ -314,7 +314,9 @@ def define_loop(net: Net, config: EsmFold2Config, decay: np.ndarray, matrix: np.
             ("state", net.compute, pair_shape),
             ("base_pair", net.compute, pair_shape),
             ("lm_pair", net.compute, pair_shape),
-            ("lm_keep", trt.bool, pair_shape),
+            # A 0/1 int32 mask: the runtime checks its type at load (it has no type for TensorRT bool, and
+            # TensorRT takes int8 as quantized).
+            ("lm_keep", trt.int32, pair_shape),
         ],
     )
     keep = net.cast(inputs["lm_keep"], net.f32)

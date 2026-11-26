@@ -16,9 +16,7 @@ namespace {
 
 using Shape = std::vector<std::int64_t>;
 
-// kMask is TensorRT bool, which the backend's DType cannot name: its shapes are checked, not its
-// type.
-enum class Kind { kCompute, kFloat, kInt, kMask };
+enum class Kind { kCompute, kFloat, kInt };
 
 struct Input {
     std::string name;
@@ -109,7 +107,7 @@ Contract contractOf(const std::string& plan, const BundleConfig& config) {
     } else if (plan == "loop") {
         contract.inputs = {pairInput("state", Kind::kCompute),
                            pairInput("base_pair", Kind::kCompute),
-                           pairInput("lm_pair", Kind::kCompute), pairInput("lm_keep", Kind::kMask)};
+                           pairInput("lm_pair", Kind::kCompute), pairInput("lm_keep", Kind::kInt)};
         contract.outputs = {{"next_state", Kind::kCompute, pair_out}};
     } else if (plan == "decode") {
         contract.inputs = {pairInput("state", Kind::kCompute)};
@@ -193,7 +191,7 @@ void check_plan_contract(const std::string& plan, const PlanFacts& facts,
     };
     for (const Input& expected : contract.inputs) {
         const TensorFacts& actual = factsFor(plan, facts, expected.name, true);
-        if (expected.kind != Kind::kMask && actual.dtype != dtypeOf(expected.kind, config))
+        if (actual.dtype != dtypeOf(expected.kind, config))
             fail(expected.name, "element type does not match runtime.json");
         if (expected.fixed) {
             if (actual.shape != expected.max ||

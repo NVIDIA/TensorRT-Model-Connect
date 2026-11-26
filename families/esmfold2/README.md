@@ -85,39 +85,44 @@ two diffusion samples.
 | pLDDT mean absolute difference | 0.014 | 0.009 | 0.023 | 0.016 |
 | pTM absolute difference | 0.020 | 0.017 | 0.026 | 0.028 |
 | Median all-atom RMSD in the shared frame (A) | 0.38 | 0.33 | 0.46 | 0.44 |
+| All-atom RMSD after superposition (A) | 0.61 | 0.53 | 0.96 | 1.04 |
+| All-atom lDDT | 0.950 | 0.963 | 0.928 | 0.907 |
 
-  The native bf16 build deviates from the fp32 reference as much as the reference's own bf16 run. A few samples per
-  fold turn their global pose under bf16 rounding in both (frame RMSD of single samples up to 10 A), so the frame check
-  takes the median. The premerge thresholds (`tests/thresholds/`) keep about 2x; a fold from another seed (median frame
-  RMSD 15-18 A) and a trunk without the language-model pair (lDDT 0.40-0.46) fail them.
+  The native bf16 build deviates from the fp32 reference as much as the reference's own bf16 run (the all-atom rows
+  come from a second build of the same cases; their worst samples sit in the flexible ends of Trp-cage and villin). A
+  few samples per fold turn their global pose under bf16 rounding in both (frame RMSD of single samples up to 10 A), so
+  the frame check takes the median, and every sample is gated on its own atoms after superposition and by lDDT. The
+  premerge thresholds (`tests/thresholds/`) keep about 2x; a fold from another seed (median frame RMSD 15-18 A), a
+  trunk without the language-model pair (lDDT 0.40-0.46) and one sample with its side-chain atoms moved by 2 A or its
+  atoms out of order inside each residue (all-atom lDDT 0.60-0.76) fail them.
 
 ## Performance
 
 1x NVIDIA B300 (143 GiB), CUDA 13.x, TensorRT 11.4. Controls of the model cards' example: 3 trunk loops, 50 configured
 sampling steps (34 run), 32 diffusion samples, seed 0. Inputs: random single-chain sequences, uniform over the 20
-standard residues. Native: `trtmc-bench` (`public_task_call_wall`; bundle load, about 8 s, and engine build, about
-6 min, excluded), one bf16 bundle per row with `--max-sequence-length` equal to the length. Eager and `torch.compile`:
+standard residues. Native: `trtmc-bench` (`public_task_call_wall`; bundle load, 9 to 11 s, and engine build, about
+7 min, excluded), one bf16 bundle per row with `--max-sequence-length` equal to the length. Eager and `torch.compile`:
 the reference `EsmFold2Model.fold` in bf16 (PyTorch 2.15, transformers 5.24.1); `torch.compile` compiles the trunk,
 the diffusion module and the confidence head (default mode, compilation excluded). Median of 5 calls after 2 warmups;
 peak memory: `nvidia-smi` device memory, sampled every 100 ms.
 
 | Residues | Native | Eager PyTorch | `torch.compile` | Native peak | Eager peak | `torch.compile` peak |
 |---|---|---|---|---|---|---|
-| 128 | 0.64 s | 1.04 s | 0.51 s | 14.3 GiB | 19.9 GiB | 19.3 GiB |
-| 256 | 1.51 s | 3.03 s | 1.43 s | 17.8 GiB | 31.7 GiB | 32.4 GiB |
-| 512 | 4.58 s | 13.1 s | 6.45 s | 30.4 GiB | 87.2 GiB | 88.0 GiB |
-| 1024 | 16.7 s | out of memory | not run | 78.7 GiB | > 143 GiB | - |
+| 128 | 0.67 s | 1.23 s | 0.55 s | 14.3 GiB | 19.9 GiB | 19.3 GiB |
+| 256 | 1.66 s | 3.08 s | 1.47 s | 17.8 GiB | 31.7 GiB | 32.3 GiB |
+| 512 | 4.94 s | 12.6 s | 6.51 s | 30.5 GiB | 87.2 GiB | 88.0 GiB |
+| 1024 | 18.0 s | out of memory | not run | 79.5 GiB | > 143 GiB | - |
 
-The native runtime is 1.6x to 2.9x faster than eager PyTorch and needs 1.4x to 2.9x less memory, and it folds 1024
-residues where eager PyTorch runs out of memory. `torch.compile` (308 to 585 s of compilation per length) is 1.25x and
-1.06x faster than the native runtime at 128 and 256 residues, and 1.4x slower at 512, where it needs 2.9x the memory.
+The native runtime is 1.8x to 2.5x faster than eager PyTorch and needs 1.4x to 2.9x less memory, and it folds 1024
+residues where eager PyTorch runs out of memory. `torch.compile` (382 to 696 s of compilation per length) is 1.21x and
+1.12x faster than the native runtime at 128 and 256 residues, and 1.3x slower at 512, where it needs 2.9x the memory.
 One request folds one sequence; the 32 samples run as one batch, so throughput is one structure (32 samples) per
-latency (0.64 s at 128 residues: 50 samples/s). Every fold of the validation and the benchmarks finished with finite
-coordinates and confidences (52 folds, 1,664 samples; the runtime rejects a non-finite output).
+latency (0.67 s at 128 residues: 48 samples/s). Every fold of the validation and the benchmarks finished with finite
+coordinates and confidences (46 folds, 1,472 samples; the runtime rejects a non-finite output).
 
 ### Limits
 
-- Sequence length: 2 to 1024 residues per bundle. Device memory grows with the square of the bundle's maximum (78.7 GiB
+- Sequence length: 2 to 1024 residues per bundle. Device memory grows with the square of the bundle's maximum (79.5 GiB
   at 1024), and TensorRT cannot build the plans at 2046 residues; longer chains need chunked pair updates.
 - Samples per request: at most the checkpoint's 32 (the denoiser's profile).
 

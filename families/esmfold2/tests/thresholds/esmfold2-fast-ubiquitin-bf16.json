@@ -1,7 +1,9 @@
 {
   "threshold_overrides": {
     "aligned_rmsd_max": 1.4,
+    "allatom_rmsd_max": 2.1,
     "lddt_min": 0.95,
+    "allatom_lddt_min": 0.81,
     "plddt_mae_max": 0.05,
     "ptm_abs_max": 0.06,
     "frame_rmsd_median_max": 1.0

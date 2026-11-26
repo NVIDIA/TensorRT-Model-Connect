@@ -110,10 +110,10 @@ std::vector<std::uint8_t> pairStateBytes(const RandomStreams& random, std::size_
 }
 
 void keepMask(const RandomStreams& random, std::uint64_t first, std::uint32_t threshold,
-              std::vector<std::uint8_t>& mask) {
+              std::vector<std::int32_t>& mask) {
     parallelFor(mask.size(), [&](std::size_t begin, std::size_t end) {
         for (std::size_t index = begin; index < end; ++index)
-            mask[index] = random.keep(Stream::kLmDropout, first + index, threshold) ? 1U : 0U;
+            mask[index] = random.keep(Stream::kLmDropout, first + index, threshold) ? 1 : 0;
     });
 }
 
@@ -267,14 +267,14 @@ EsmFold2Pipeline::predict_structure(const StructurePredictionRequest& request) {
     const auto initial_state = pairStateBytes(
         random, pair_elements, static_cast<float>(config_.trunk_init_std), config_.bf16);
     DeviceTensor& state = uploads.add(pair_shape, compute, initial_state.data());
-    DeviceTensor& keep = uploads.add(pair_shape, DType::kInt8, nullptr);
-    std::vector<std::uint8_t> keep_host(pair_elements);
+    DeviceTensor& keep = uploads.add(pair_shape, DType::kInt32, nullptr);
+    std::vector<std::int32_t> keep_host(pair_elements);
     const std::uint32_t threshold = keep_threshold(config_.lm_dropout);
     ITrtModule& loop = *engines_.loop;
     for (std::int32_t iteration = 0; iteration <= controls.loops; ++iteration) {
         keepMask(random, static_cast<std::uint64_t>(iteration) * pair_elements, threshold,
                  keep_host);
-        check(cudaMemcpyAsync(keep.data(), keep_host.data(), pair_elements, cudaMemcpyHostToDevice,
+        check(cudaMemcpyAsync(keep.data(), keep_host.data(), keep.nbytes(), cudaMemcpyHostToDevice,
                               stream_),
               "upload LM dropout mask");
         bindInput(loop, "state", state);

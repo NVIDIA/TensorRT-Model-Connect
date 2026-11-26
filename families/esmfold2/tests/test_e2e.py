@@ -5,7 +5,8 @@
 
 The native CLI folds the case's protein; the pinned transformers port folds it again with the same random draws
 (``reference.py``), so every sample is compared with its reference twin: coordinates in the same frame, aligned
-C-alpha RMSD, C-alpha lDDT, per-residue pLDDT and pTM, against the case's calibrated thresholds.
+C-alpha and all-atom RMSD, C-alpha and all-atom lDDT, per-residue pLDDT and pTM, against the case's calibrated
+thresholds.
 """
 
 from __future__ import annotations
@@ -171,6 +172,13 @@ def _calpha(atom_ids: list[tuple[str, str, int]], coords: np.ndarray) -> np.ndar
     return np.asarray([coords[index] for index, (name, _, _) in enumerate(atom_ids) if name == "CA"])
 
 
+def _reference_atom_ids(reference_pdb: str) -> list[tuple[str, str, int]]:
+    """``(atom name, residue name, residue number)`` of every atom the reference writes, in its order."""
+
+    return [(line[12:16].strip(), line[17:20].strip(), int(line[22:26]))
+            for line in reference_pdb.splitlines() if line.startswith("ATOM")]
+
+
 def _reference_calpha(reference_pdb: str) -> np.ndarray:
     rows = [line for line in reference_pdb.splitlines() if line.startswith("ATOM") and line[12:16].strip() == "CA"]
     return np.asarray([[float(line[30:38]), float(line[38:46]), float(line[46:54])] for line in rows])
@@ -185,7 +193,8 @@ def _compare(native: list[dict], reference, sequence: str, thresholds: dict, wor
     for name in ("coords", "plddt", "ptm", "complex_plddt"):
         assert np.isfinite(getattr(reference, name)).all(), f"the reference {name} is not finite"
     worst: dict[str, float] = {
-        "aligned_rmsd": 0.0, "lddt": 1.0, "plddt_mae": 0.0, "ptm_abs": 0.0, "complex_plddt_abs": 0.0,
+        "aligned_rmsd": 0.0, "allatom_rmsd": 0.0, "lddt": 1.0, "allatom_lddt": 1.0, "plddt_mae": 0.0, "ptm_abs": 0.0,
+        "complex_plddt_abs": 0.0,
     }
     frames: list[float] = []
     native_all: list[np.ndarray] = []
@@ -194,6 +203,8 @@ def _compare(native: list[dict], reference, sequence: str, thresholds: dict, wor
         index = int(entry["sample_index"])
         atom_ids, coords, bfactors = read_mmcif_atoms(entry["structure_path"])
         assert len(atom_ids) == reference.real_atoms, "native structure has another atom count"
+        # Coordinates are compared row by row, so every row must name the reference's atom.
+        assert atom_ids == _reference_atom_ids(reference.pdb[index]), "native atoms differ from the reference's"
         assert len({seq for _, _, seq in atom_ids}) == tokens and np.isfinite(coords).all()
         native_ca = _calpha(atom_ids, coords)
         reference_ca = _reference_calpha(reference.pdb[index])
@@ -204,30 +215,42 @@ def _compare(native: list[dict], reference, sequence: str, thresholds: dict, wor
         # The B-factor column carries each atom's residue pLDDT (written with four decimals).
         residues = np.asarray([seq - 1 for _, _, seq in atom_ids])
         assert np.abs(bfactors - native_plddt[residues]).max() <= 5.1e-5, "B-factors are not the residue pLDDT"
+        reference_atoms = reference.coords[index][: reference.real_atoms]
         metrics = {
-            "frame_rmsd": rmsd(coords, reference.coords[index][: reference.real_atoms]),
+            "frame_rmsd": rmsd(coords, reference_atoms),
             "aligned_rmsd": kabsch_rmsd(native_ca, reference_ca),
+            "allatom_rmsd": kabsch_rmsd(coords, reference_atoms),
             "lddt": lddt(native_ca, reference_ca),
+            "allatom_lddt": lddt(coords, reference_atoms),
             "plddt_mae": float(np.abs(native_plddt - reference.plddt[index]).mean()),
             "ptm_abs": abs(float(entry["ptm"]) - float(reference.ptm[index])),
             "complex_plddt_abs": abs(float(entry["complex_plddt"]) - float(reference.complex_plddt[index])),
         }
         assert all(np.isfinite(value) for value in metrics.values()), metrics
         frames.append(metrics["frame_rmsd"])
-        native_all.append(native_ca)
-        reference_all.append(reference_ca)
-        for key in ("aligned_rmsd", "plddt_mae", "ptm_abs", "complex_plddt_abs"):
+        native_all.append(coords)
+        reference_all.append(reference_atoms)
+        for key in ("aligned_rmsd", "allatom_rmsd", "plddt_mae", "ptm_abs", "complex_plddt_abs"):
             worst[key] = max(worst[key], metrics[key])
-        worst["lddt"] = min(worst["lddt"], metrics["lddt"])
+        for key in ("lddt", "allatom_lddt"):
+            worst[key] = min(worst[key], metrics[key])
         native_path = workdir / f"native_ca_{index}.npy"
         reference_path = workdir / f"reference_ca_{index}.npy"
         np.save(native_path, native_ca.astype(np.float32))
         np.save(reference_path, reference_ca.astype(np.float32))
+        native_atoms_path = workdir / f"native_atoms_{index}.npy"
+        reference_atoms_path = workdir / f"reference_atoms_{index}.npy"
+        np.save(native_atoms_path, coords.astype(np.float32))
+        np.save(reference_atoms_path, np.asarray(reference_atoms, dtype=np.float32))
         checks = [
             {"name": "aligned_rmsd", "label": "C-alpha RMSD after superposition (A)", "operator": "<=",
              "actual": metrics["aligned_rmsd"], "expected": thresholds["aligned_rmsd_max"]},
+            {"name": "allatom_rmsd", "label": "All-atom RMSD after superposition (A)", "operator": "<=",
+             "actual": metrics["allatom_rmsd"], "expected": thresholds["allatom_rmsd_max"]},
             {"name": "lddt", "label": "C-alpha lDDT", "operator": ">=",
              "actual": metrics["lddt"], "expected": thresholds["lddt_min"]},
+            {"name": "allatom_lddt", "label": "All-atom lDDT", "operator": ">=",
+             "actual": metrics["allatom_lddt"], "expected": thresholds["allatom_lddt_min"]},
             {"name": "plddt_mae", "label": "Per-residue pLDDT mean absolute difference", "operator": "<=",
              "actual": metrics["plddt_mae"], "expected": thresholds["plddt_mae_max"]},
             {"name": "ptm_abs", "label": "pTM absolute difference", "operator": "<=",
@@ -240,16 +263,24 @@ def _compare(native: list[dict], reference, sequence: str, thresholds: dict, wor
             check["passed"] = (
                 check["actual"] <= check["expected"] if check["operator"] == "<=" else check["actual"] >= check["expected"]
             )
-        record_evidence(
-            "reference_comparison",
-            {"label": f"sample {index}", "scope": "independent_reference", "enforced": True,
-             "native": native_path, "reference": reference_path, "checks": checks},
-        )
+        # Each record carries the arrays its checks read: the C-alpha rows, or every atom.
+        all_atom = {"allatom_rmsd", "allatom_lddt"}
+        for label, native_array, reference_array, selected in (
+            (f"sample {index}", native_path, reference_path, [c for c in checks if c["name"] not in all_atom]),
+            (f"sample {index}, all atoms", native_atoms_path, reference_atoms_path,
+             [c for c in checks if c["name"] in all_atom]),
+        ):
+            record_evidence(
+                "reference_comparison",
+                {"label": label, "scope": "independent_reference", "enforced": True,
+                 "native": native_array, "reference": reference_array, "checks": selected},
+            )
     # The same draws put every sample in the reference's frame; bf16 rounding can still turn a few samples' global
-    # pose, so the frame check takes the median over samples (a fold from other noise is tens of A off).
+    # pose, so the frame check takes the median over samples (a fold from other noise is tens of A off). Every
+    # sample's own atoms are gated after superposition (all-atom RMSD) and without it (all-atom lDDT).
     worst["frame_rmsd_median"] = float(np.median(frames))
     record_evidence("worst_sample", worst)
-    native_stack, reference_stack = workdir / "native_ca_all.npy", workdir / "reference_ca_all.npy"
+    native_stack, reference_stack = workdir / "native_atoms_all.npy", workdir / "reference_atoms_all.npy"
     np.save(native_stack, np.stack(native_all).astype(np.float32))
     np.save(reference_stack, np.stack(reference_all).astype(np.float32))
     record_evidence("reference_comparison", {
@@ -264,12 +295,17 @@ def _compare(native: list[dict], reference, sequence: str, thresholds: dict, wor
     # Calibration (B300, TensorRT 11.4; 4 proteins of 20-76 residues x 2 seeds x 32 samples against the fp32
     # reference): the worst healthy sample of the native bf16 build and of the reference's own bf16 run reached, for
     # ESMFold2, aligned RMSD 0.28 A, lDDT 0.991, pLDDT MAE 0.014, pTM 0.020 and a median frame RMSD of 0.38 A; for
-    # ESMFold2-Fast 0.67 A, 0.976, 0.023, 0.028 and 0.46 A. The thresholds keep about 2x. A fold from another seed has
-    # a median frame RMSD of 15-18 A; a trunk without the language-model pair 4.5-7.8 A median aligned RMSD and
-    # lDDT 0.40-0.46.
+    # ESMFold2-Fast 0.67 A, 0.976, 0.023, 0.028 and 0.46 A; all-atom RMSD 0.61 A and lDDT 0.950 (ESMFold2), 1.04 A
+    # and 0.907 (Fast), at the flexible ends of Trp-cage and villin. The thresholds keep about 2x. A fold from another
+    # seed has a median frame RMSD of 15-18 A; a trunk without the language-model pair 4.5-7.8 A median aligned RMSD
+    # and lDDT 0.40-0.46. One sample whose non-C-alpha atoms are out of order inside each residue (all-atom RMSD
+    # 2.39-2.50 A, lDDT 0.60) or whose side-chain atoms moved by 2 A (1.37-1.43 A, lDDT 0.76) fails, while its C-alpha
+    # metrics and the median stay healthy.
     assert worst["frame_rmsd_median"] <= thresholds["frame_rmsd_median_max"], worst
     assert worst["aligned_rmsd"] <= thresholds["aligned_rmsd_max"], worst
+    assert worst["allatom_rmsd"] <= thresholds["allatom_rmsd_max"], worst
     assert worst["lddt"] >= thresholds["lddt_min"], worst
+    assert worst["allatom_lddt"] >= thresholds["allatom_lddt_min"], worst
     assert worst["plddt_mae"] <= thresholds["plddt_mae_max"], worst
     assert worst["ptm_abs"] <= thresholds["ptm_abs_max"], worst
     assert worst["complex_plddt_abs"] <= thresholds["plddt_mae_max"], worst
