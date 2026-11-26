@@ -450,7 +450,7 @@ static void test_mtp_sampling_lifecycle() {
         bool rejected = false;
         try {
             pipeline.generate_ids({0}, request);
-        } catch (const std::runtime_error&) {
+        } catch (const trtmc::internal::ConfigError&) {
             rejected = true;
         }
         check(rejected, "MTP rejects output beyond the admitted context capacity");
