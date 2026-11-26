@@ -413,12 +413,18 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
         official_psnrs = _frame_psnrs(references["fp16"], exact)
         print(f"{FAMILY} {case_name} official fp16 vs official fp32: "
               f"min {min(official_psnrs):.2f} mean {np.mean(official_psnrs):.2f} dB")
-        # The bound (2.2 dB, thresholds/svd-xt-fp16*.json) lies between healthy FP16 builds and
-        # builds whose linear and convolution layers accumulate in FP16, the defect this check
-        # catches; FP16 tactic choices move the shortfall between builds of the same source.
-        # Calibration on svd-xt-fp16-l0: healthy builds -0.17 to 1.71 dB over nine runs (-0.17,
-        # 0.14, 0.42, 0.43, 0.71, 0.99, 1.37, 1.65 and 1.71), builds with FP16-accumulating
-        # layers 2.72 to 3.23 dB over four runs (2.72, 3.05, 3.16 and 3.23).
+        # Each bound (thresholds/svd-xt-fp16*.json) lies between healthy FP16 builds and builds
+        # whose linear and convolution layers accumulate in FP16, the defect this check catches.
+        # FP16 tactic choices move the shortfall between builds of the same source, and the
+        # official FP16 run moves with the GPU: at 576 x 1024 it is about 1.4 dB closer to FP32
+        # on GB300 than on B300.
+        # svd-xt-fp16-l0, 2.2 dB: healthy -0.17 to 1.71 dB over nine B300 runs (-0.17, 0.14,
+        # 0.42, 0.43, 0.71, 0.99, 1.37, 1.65 and 1.71), FP16-accumulating 2.72 to 3.23 dB over
+        # four (2.72, 3.05, 3.16 and 3.23).
+        # svd-xt-fp16, 3.2 dB: healthy -0.47 to 1.88 dB over six B300 builds (-0.47, 0.72, 0.93,
+        # 1.23, 1.30 and 1.88) and up to 2.9 dB over three GB300 runs, FP16-accumulating 3.56
+        # and 5.14 dB over two B300 builds. Those two builds' mean PSNRs (37.97 and 36.39 dB)
+        # lie 5.0 and 6.5 dB below GB300's official FP16 run (42.93 dB).
         shortfall = float(np.mean(official_psnrs)) - float(np.mean(native_psnrs))
         checks.append(_check_row(
             "mean_psnr_shortfall_vs_official_fp16",
