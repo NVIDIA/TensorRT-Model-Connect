@@ -592,6 +592,20 @@ def audio_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] 
     return match, reason
 
 
+def text_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                gate: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """Generated text (a caption) against the native text: the character edit distance over the longer text
+    (case and whitespace folded, the plugins' ``parity_edit_distance``) at most ``max_distance``. An empty native
+    text is no evidence."""
+    from trtmc_aiperf_plugins.accuracy import normalized_edit_distance
+
+    mine, theirs = _text(candidate), _text(native)
+    if not theirs.strip():
+        return None, "no native text"
+    distance = normalized_edit_distance(mine, theirs)
+    return distance <= float(gate.get("max_distance", 0.0)), f"edit distance {distance:.3f}: {mine[:80]!r} vs {theirs[:80]!r}"
+
+
 @lru_cache(maxsize=None)
 def _family_checker(entrypoint: str) -> Callable:
     module, separator, name = entrypoint.partition(":")
@@ -616,7 +630,7 @@ PARITY: dict[str, Callable[..., tuple[bool | None, str]]] = {"family_parity": fa
                                                       "geometry_parity": geometry_parity,
                                                       "action_parity": action_parity, "disparity_parity": disparity_parity,
                                                       "audio_parity": audio_parity, "structure_parity": structure_parity,
-                                                      "pose_parity": pose_parity}
+                                                      "pose_parity": pose_parity, "text_parity": text_parity}
 # Parity metrics that read the output files the servers write (their artifacts are kept).
 ARTIFACT_METRICS = {"geometry_parity", "disparity_parity", "structure_parity"}
 
