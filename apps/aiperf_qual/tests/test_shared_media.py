@@ -112,3 +112,39 @@ def test_the_server_is_started_with_the_runs_media_store(tmp_path, monkeypatch):
 
         command = json.loads((out / "command.json").read_text())
         assert command[command.index("--media-root") + 1] == str(tmp_path / "datasets" / "trtmc-media")
+
+
+def test_a_profile_drops_images_it_cannot_encode_and_letterboxes_into_its_built_size(tmp_path):
+    from PIL import Image
+
+    sizes = {"word": (104, 27), "sliver": (51, 13), "tall": (20, 60)}
+    for name, size in sizes.items():
+        Image.new("RGB", size, (0, 0, 0)).save(tmp_path / f"{name}.png")
+    base = {**definition([{"id": name, "image": str(tmp_path / f"{name}.png")} for name in sizes]),
+            "fields": {"image": "image_path"}}
+    environment = Environment({"hf_datasets_cache": str(tmp_path / "datasets")})
+
+    kept = build_suite({**base, "min_image_side": {"image": 15}}, environment)
+    assert [sample["sample_id"] for sample in kept.samples] == ["word", "tall"]  # dropped before the selection
+
+    fitted = build_suite({**base, "letterbox": {"image": [560, 280]}}, environment)
+    resolved = [materialize_files(sample["request"], tmp_path / f"request-{index}", media_root=environment.media_root())
+                for index, sample in enumerate(fitted.samples)]
+    white, black = (255, 255, 255), (0, 0, 0)
+    with Image.open(resolved[0]["image_path"]) as word:  # fills the width, padded above and below
+        assert word.size == (560, 280) and word.getpixel((280, 140)) == black and word.getpixel((280, 2)) == white
+    with Image.open(resolved[2]["image_path"]) as tall:  # fills the height, padded left and right
+        assert tall.size == (560, 280) and tall.getpixel((280, 140)) == black and tall.getpixel((2, 140)) == white
+    assert fitted.key != build_suite(base, environment).key
+
+
+def test_a_benchmark_entry_states_image_limits_for_its_suite_and_the_perf_suite_from_it():
+    from trtmc_aiperf_qual.models import resolve_model
+
+    environment = Environment({"repo": str(Path(__file__).resolve().parents[3]), "bundle_root": "/tmp/bundles"})
+    for profile, option in (("paddleocr-vl-1.6", {"letterbox": {"image": [560, 280]}}),
+                            ("lightonocr-2-1b-fp32", {"min_image_side": {"image": 15}})):
+        model = resolve_model(profile, environment)
+        (key, value), = option.items()
+        assert model["absolute"][0]["suite_definition"][key] == value and key not in model["absolute"][0], profile
+        assert model["performance"]["suite"][key] == value, profile

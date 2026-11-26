@@ -9,20 +9,28 @@ from pathlib import Path
 
 import numpy as np
 import tensorrt as trt
+from tensorrt_model_connect.build import cmake_prefixes
 
 
+_LIBRARY = "libtrtmc_model_blip.so"
 _LIBRARIES: dict[Path, ctypes.CDLL] = {}
 
 
 def _model_library():
+    """The native model library: a native build directory named in CMAKE_PREFIX_PATH (a source build), else the
+    installed native package's."""
+    roots = list(cmake_prefixes())
     try:
-        distribution = metadata.distribution("tensorrt-model-connect")
-    except metadata.PackageNotFoundError as error:
-        raise RuntimeError("Install BLIP's matching native package before building bundles") from error
-    path = Path(distribution.locate_file("tensorrt_model_connect/bin/libtrtmc_model_blip.so"))
-    if not path.is_file():
-        raise FileNotFoundError(f"BLIP native model library was not built: {path}")
-    return path.resolve()
+        roots.append(Path(metadata.distribution("tensorrt-model-connect").locate_file("tensorrt_model_connect/bin")))
+    except metadata.PackageNotFoundError:
+        pass
+    for root in roots:
+        if (root / _LIBRARY).is_file():
+            return (root / _LIBRARY).resolve()
+    raise FileNotFoundError(
+        f"BLIP requires its native model library {_LIBRARY}: install BLIP's matching native package or include "
+        "the native build directory in CMAKE_PREFIX_PATH"
+    )
 
 
 def load_native_kernels():

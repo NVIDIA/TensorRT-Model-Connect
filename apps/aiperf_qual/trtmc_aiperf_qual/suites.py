@@ -522,14 +522,48 @@ def _square_crop(path: Path, cache: Path) -> Path:
     return target
 
 
+def _image_bytes(image_file: Any) -> bytes:
+    """An image field's bytes: a path, or inline ``$file`` bytes as a Hugging Face image column decodes."""
+    return (base64.b64decode(image_file["$file"]["b64"]) if isinstance(image_file, Mapping)
+            else Path(image_file).read_bytes())
+
+
+def _shorter_side(image_file: Any) -> int:
+    from PIL import Image
+
+    with Image.open(io.BytesIO(_image_bytes(image_file))) as image:
+        return min(image.size)
+
+
+def _letterbox(image_file: Any, cache: Path, width: int, height: int) -> Path:
+    """The image scaled to fit ``width`` x ``height`` with its aspect ratio kept, centered on white padding
+    (cached by content and size), for a model that reads an image only at its built size: both sides get the
+    same pixels, and no text is cut as a cover crop would cut it."""
+    from PIL import Image
+
+    data = _image_bytes(image_file)
+    digest = hashlib.sha256(data).hexdigest()[:24]
+    target = cache / "trtmc-derived" / f"{digest}-letterbox-{width}x{height}.png"
+    if not target.is_file():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(io.BytesIO(data)) as image:
+            rgb = image.convert("RGB")
+            scale = min(width / rgb.width, height / rgb.height)
+            size = (min(width, max(1, round(rgb.width * scale))), min(height, max(1, round(rgb.height * scale))))
+            canvas = Image.new("RGB", (width, height), (255, 255, 255))
+            canvas.paste(rgb.resize(size, Image.Resampling.BICUBIC),
+                         ((width - size[0]) // 2, (height - size[1]) // 2))
+            canvas.save(target)
+    return target
+
+
 def _cover_crop(image_file: Any, cache: Path, width: int, height: int) -> Path:
     """The image (a path, or inline ``$file`` bytes as a Hugging Face image column decodes) scaled to cover
     ``width`` x ``height`` and center-cropped to it (cached by content and size), for a model that takes a
     conditioning image only at its built size: both sides get the same pixels."""
     from PIL import Image
 
-    data = (base64.b64decode(image_file["$file"]["b64"]) if isinstance(image_file, Mapping)
-            else Path(image_file).read_bytes())
+    data = _image_bytes(image_file)
     digest = hashlib.sha256(data).hexdigest()[:24]
     target = cache / "trtmc-derived" / f"{digest}-{width}x{height}.png"
     if not target.is_file():
@@ -792,6 +826,10 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
     # (for example a generation's size, steps, and seed around a dataset prompt).
     base = (_catalog_testcase_records({"profile": definition["base_profile"]}, environment)[0]["request"]
             if definition.get("base_profile") else {})
+    # min_image_side ({record field: pixels}, a profile's own): images shorter on a side than its processor can
+    # encode are dropped for both sides before the selection.
+    for field, side in (definition.get("min_image_side") or {}).items():
+        records = [record for record in records if _shorter_side(record[field]) >= int(side)]
     samples = []
     chosen = select(records, selection)
     if environment.values.get("smoke"):  # one logical problem (``smoke_samples`` requests, default 1)
@@ -799,6 +837,11 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
     for record in chosen:
         for field in source.get("square_crop", []):  # only the selected images
             record = {**record, field: str(_square_crop(Path(record[field]), Path(environment["hf_datasets_cache"])))}
+        # letterbox ({record field: [width, height]}, a profile's own): an image the bundle reads only at its
+        # built size, fitted into it on both sides.
+        for field, (width, height) in (definition.get("letterbox") or {}).items():
+            record = {**record, field: str(_letterbox(record[field], Path(environment["hf_datasets_cache"]),
+                                                      int(width), int(height)))}
         request = {**base, **(record.get("request") or {})}
         for field, value in (definition.get("request") or {}).items():
             if value is None:  # a control the model takes on neither side (a null in config/models ``request``)
