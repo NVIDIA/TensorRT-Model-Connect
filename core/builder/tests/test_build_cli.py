@@ -225,6 +225,8 @@ def test_console_build_rejects_invalid_arguments_before_model_resolution(
 def test_console_build_resolves_a_valid_remote_model(monkeypatch, tmp_path: Path) -> None:
     from tensorrt_model_connect import __main__ as launcher
 
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
     model = tmp_path / "model"
     model.mkdir()
     (model / "config.json").write_text('{"model_type":"example_model"}', encoding="utf-8")
@@ -387,6 +389,8 @@ def test_console_help_includes_build_and_delegates_native_help(monkeypatch, caps
 
 
 def test_hugging_face_model_id_resolves_to_a_local_snapshot(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
     calls = []
 
     def snapshot_download(**kwargs):
@@ -407,6 +411,24 @@ def test_hugging_face_model_id_resolves_to_a_local_snapshot(monkeypatch, tmp_pat
             "ignore_patterns": ["*flax_model*", "*tf_model*"],
         }
     ]
+
+
+def test_offline_hugging_face_model_id_reads_only_the_cache(monkeypatch, tmp_path: Path) -> None:
+    calls = []
+
+    def snapshot_download(**kwargs):
+        calls.append(kwargs)
+        return str(tmp_path)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(snapshot_download=snapshot_download),
+    )
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+
+    assert build_cli._resolve_model("openai-community/gpt2", "revision-1") == tmp_path
+    assert calls[0]["local_files_only"] is True
 
 
 def test_build_command_rejects_a_task_the_family_does_not_own(monkeypatch, tmp_path: Path) -> None:
