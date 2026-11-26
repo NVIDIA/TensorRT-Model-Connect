@@ -1,0 +1,41 @@
+{
+  "name": "openai-gpt",
+  "hf_id": "openai-community/openai-gpt",
+  "hf_revision": "1e0d4f3028acbffb47fe933cea64619c5ec1a002",
+  "bundle": "openai-gpt.bundle",
+  "family": "openai_gpt",
+  "task": "text_continuation",
+  "precision": "fp32",
+  "max_sequence_length": 512,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "openai-gpt-text",
+      "premerge": true,
+      "input": "text",
+      "oracle": "token_exact",
+      "prompt": "The old harbor was quiet at dawn. A single fishing boat drifted past the breakwater while the gulls circled overhead, and the harbor master, still half asleep, walked down to the pier with his notebook.",
+      "max_new_tokens": 40
+    },
+    {
+      "name": "openai-gpt-full-context",
+      "premerge": true,
+      "input": "token_ids",
+      "oracle": "token_exact",
+      "filler": "The old lighthouse keeper climbed the spiral stairs every evening to light the lamp, and the ships passed safely through the narrow channel below.",
+      "max_new_tokens": 16
+    },
+    {
+      "name": "openai-gpt-sampling",
+      "premerge": true,
+      "input": "text",
+      "oracle": "sampling_support",
+      "prompt": "She opened the letter slowly, afraid of what it might say.",
+      "max_new_tokens": 32,
+      "temperature": 0.8,
+      "top_k": 40,
+      "top_p": 0.9,
+      "seed": 1234
+    }
+  ]
+}
