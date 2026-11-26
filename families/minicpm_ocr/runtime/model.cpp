@@ -10,6 +10,7 @@
 #include "families/minicpm_ocr/runtime/prompt.h"
 #include "families/minicpm_ocr/runtime/tokenizer.h"
 #include "families/minicpm_ocr/runtime/vision_encoder.h"
+#include "trtmc/internal/config.h"
 #include "trtmc/internal/language.h"
 #include "trtmc/internal/model.h"
 #include "trtmc/runtime/trt_backend.h"
@@ -269,7 +270,7 @@ class MiniCpmOcrModel final : public api::IModel, public trtmc::internal::IImage
         if (budget <= 0 || budget > INT32_MAX)
             throw std::invalid_argument("MiniCPM-OCR max_new_tokens must be positive");
         if (budget > capacity)
-            throw std::invalid_argument("MiniCPM-OCR prompt (" +
+            throw internal::ConfigError("MiniCPM-OCR prompt (" +
                                         std::to_string(prompt.token_ids.size()) +
                                         " tokens) plus max_new_tokens (" + std::to_string(budget) +
                                         ") exceeds the bundle's sequence capacity (" +

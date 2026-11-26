@@ -6,6 +6,7 @@
 #include "families/qwen3_5_moe/runtime/paired.h"
 
 #include "families/qwen3_5_moe/runtime/plugin_helpers.h"
+#include "trtmc/internal/config.h"
 #include "trtmc/runtime/trt_backend.h"
 
 #include <algorithm>
@@ -103,7 +104,7 @@ void Qwen35MoePairedDraft::reset(ITrtModule& target, std::size_t prompt_length,
     if (prompt_length > static_cast<std::size_t>(config_.max_input_length) || max_new_tokens < 0 ||
         prompt_length + static_cast<std::size_t>(max_new_tokens) >
             static_cast<std::size_t>(config_.capacity))
-        throw std::invalid_argument(
+        throw internal::ConfigError(
             "Qwen3.5-MoE paired prompt and generation exceed bundle capacity");
     if (tree() && !qwen35_is_greedy(sampling))
         throw std::invalid_argument("Qwen3.5-MoE speculative tree supports greedy decoding only");

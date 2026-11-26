@@ -6,6 +6,7 @@
 #include "families/nemotron_h/runtime/paired.h"
 
 #include "families/nemotron_h/runtime/plugin_helpers.h"
+#include "trtmc/internal/config.h"
 #include "trtmc/runtime/trt_backend.h"
 
 #include <algorithm>
@@ -103,7 +104,7 @@ void NemotronHPairedDraft::reset(ITrtModule& target, std::size_t prompt_length,
     if (prompt_length > static_cast<std::size_t>(config_.max_input_length) || max_new_tokens < 0 ||
         prompt_length + static_cast<std::size_t>(max_new_tokens) >
             static_cast<std::size_t>(config_.capacity))
-        throw std::invalid_argument("Nemotron paired prompt and generation exceed bundle capacity");
+        throw internal::ConfigError("Nemotron paired prompt and generation exceed bundle capacity");
     if ((tree() || config_.variant == "dflash") && !nemotron_h_is_greedy(sampling))
         throw std::invalid_argument("Nemotron DFlash and DSpark tree support greedy decoding only");
     require_tensor(target, "target_hidden", DType::kFloat16,

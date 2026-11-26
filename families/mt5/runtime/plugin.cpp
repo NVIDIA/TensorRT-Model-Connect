@@ -17,6 +17,7 @@
 #include "families/mt5/runtime/plugin_helpers.h"
 #include "families/mt5/runtime/runtime_config.h"
 #include "families/mt5/runtime/tokenizer.h"
+#include "trtmc/internal/config.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
@@ -193,7 +194,7 @@ class MT5Pipeline final : public ITextGeneration {
         const int32_t max_new =
             cfg.max_new_tokens > 0 ? cfg.max_new_tokens : default_max_new_tokens();
         if (max_new > cache_->max_length())
-            throw std::invalid_argument("mt5 output length exceeds decoder cache capacity");
+            throw internal::ConfigError("mt5 output length exceeds decoder cache capacity");
         // 1. Tokenize input
         auto input_ids = tokenizer_->encode(prompt);
         // Ensure EOS at end
@@ -220,7 +221,7 @@ class MT5Pipeline final : public ITextGeneration {
   private:
     void run_encoder(const std::vector<int32_t>& input_ids) {
         if (input_ids.size() > static_cast<std::size_t>(max_enc_seq_len_))
-            throw std::invalid_argument("mt5 input length exceeds encoder capacity");
+            throw internal::ConfigError("mt5 input length exceeds encoder capacity");
         // Pad input_ids to the encoder profile.
         std::vector<int32_t> padded(static_cast<size_t>(max_enc_seq_len_), 0);
         size_t copy_len = std::min(input_ids.size(), static_cast<size_t>(max_enc_seq_len_));

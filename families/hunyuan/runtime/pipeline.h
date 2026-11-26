@@ -14,6 +14,7 @@
 #include "families/hunyuan/runtime/inference_state.h"
 #include "families/hunyuan/runtime/sampler.h"
 #include "families/hunyuan/runtime/tokenizer.h"
+#include "trtmc/internal/config.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
@@ -58,7 +59,7 @@ inline void hunyuan_validate_native_capacity(std::size_t prompt_tokens, int32_t 
         prompt_tokens > static_cast<std::size_t>(max_length) ||
         static_cast<std::size_t>(new_tokens - 1) >
             static_cast<std::size_t>(max_length) - prompt_tokens)
-        throw std::invalid_argument("Hunyuan request exceeds the native KV cache capacity");
+        throw internal::ConfigError("Hunyuan request exceeds the native KV cache capacity");
 }
 
 class HunyuanTextGenerationPipeline final : public ITextGeneration {

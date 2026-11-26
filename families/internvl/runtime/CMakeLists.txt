@@ -77,6 +77,7 @@ if(TRTMC_BUILD_TESTS)
   )
   target_include_directories(test_internvl_tiling PRIVATE
     ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
     ${CMAKE_CURRENT_SOURCE_DIR}
   )
   target_include_directories(test_internvl_tiling SYSTEM PRIVATE

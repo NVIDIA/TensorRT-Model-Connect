@@ -6,6 +6,7 @@
 #include "families/k2_horizon_uno/runtime/pipeline.h"
 
 #include "families/k2_horizon_uno/runtime/chat_template.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <chrono>
@@ -114,7 +115,7 @@ K2HorizonUnoTextGenerationPipeline::generate_from_ids(const std::vector<int32_t>
     if (input_ids.size() > static_cast<std::size_t>(cache_->max_length()) ||
         static_cast<std::size_t>(cfg.max_new_tokens) >
             static_cast<std::size_t>(cache_->max_length()) - input_ids.size()) {
-        throw std::invalid_argument(
+        throw internal::ConfigError(
             "K2-Horizon-Uno prompt and generation exceed fixed KV capacity");
     }
 
