@@ -5,6 +5,8 @@
 
 #include "families/roberta/runtime/pipeline.h"
 
+#include "trtmc/internal/config.h"
+
 #include <cmath>
 #include <cstring>
 #include <stdexcept>
@@ -111,7 +113,7 @@ EmbeddingResult EncoderPipeline::encode(const std::string& text) {
 EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_ids) {
     const auto n = input_ids.size();
     if (sequence_capacity_ != 0 && n > sequence_capacity_)
-        throw std::invalid_argument("RoBERTa input has " + std::to_string(n) +
+        throw internal::ConfigError("RoBERTa input has " + std::to_string(n) +
                                     " tokens, exceeding engine capacity " +
                                     std::to_string(sequence_capacity_));
     std::vector<int32_t> mask_i32(n, 1);

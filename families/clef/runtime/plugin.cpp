@@ -4,6 +4,7 @@
  */
 #include "families/clef/runtime/media.h"
 #include "families/clef/runtime/record.h"
+#include "trtmc/internal/config.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
@@ -105,7 +106,7 @@ class Pipeline final : public IStructuredDecision {
             o_count += q.option_ids.size();
         if (q_count > config_.at("max_questions").get<int>() ||
             o_count > config_.at("max_options").get<int>())
-            throw std::invalid_argument("record exceeds bundle question or option capacity");
+            throw internal::ConfigError("record exceeds bundle question or option capacity");
         std::vector<std::uint16_t> embedded(padded * hidden_, 0);
         const auto* embedding = reinterpret_cast<const std::uint16_t*>(embedding_.data());
         for (std::int64_t i = 0; i < sequence; ++i) {
@@ -295,7 +296,7 @@ class Pipeline final : public IStructuredDecision {
         const auto capacity =
             vision_->input_profile_shape("patches", 0, ProfileShapeSelector::kMax);
         if (capacity.empty() || count > capacity[0])
-            throw std::invalid_argument("media exceeds the bundle vision capacity");
+            throw internal::ConfigError("media exceeds the bundle vision capacity");
         TensorMap inputs = {
             {"patches", {patches.data(), {count, 1536}, DType::kFloat32}},
             {"positions", {positions.data(), {count, width}, DType::kFloat32}},

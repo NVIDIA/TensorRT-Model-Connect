@@ -4,6 +4,7 @@
  */
 #include "families/clipseg/runtime/image_preprocess_seam.h"
 #include "families/clipseg/runtime/tokenizer.h"
+#include "trtmc/internal/config.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
@@ -42,7 +43,7 @@ class Pipeline final : public ITextPromptedSegmentation {
             throw std::invalid_argument("CLIPSeg requires a text prompt");
         auto ids = tokenizer_->encode(prompt);
         if (ids.empty() || ids.size() > static_cast<std::size_t>(length_))
-            throw std::invalid_argument("CLIPSeg prompt exceeds its text profile");
+            throw internal::ConfigError("CLIPSeg prompt exceeds its text profile");
         int32_t index =
             static_cast<int32_t>(std::max_element(ids.begin(), ids.end()) - ids.begin());
         ids.resize(length_, ids.back());

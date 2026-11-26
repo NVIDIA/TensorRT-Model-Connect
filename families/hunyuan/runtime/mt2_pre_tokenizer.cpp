@@ -4,6 +4,8 @@
  */
 #include "families/hunyuan/runtime/mt2_pre_tokenizer.h"
 
+#include "trtmc/internal/config.h"
+
 #include <cstdint>
 #include <stdexcept>
 #include <unicode/uchar.h>
@@ -235,7 +237,7 @@ void validate_mt2_tokenizer(const json& config) {
 std::vector<std::string> split_mt2(const std::string& text) {
     constexpr std::size_t limit = 1024 * 1024;
     if (text.size() > limit)
-        throw std::invalid_argument("Hunyuan tokenizer input exceeds size limit");
+        throw internal::ConfigError("Hunyuan tokenizer input exceeds size limit");
     std::vector<std::string> pieces{text};
     for (const auto stage : {Stage::digits, Stage::cjk, Stage::lexical}) {
         std::vector<std::string> next;

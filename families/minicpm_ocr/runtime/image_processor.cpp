@@ -5,6 +5,8 @@
 
 #include "families/minicpm_ocr/runtime/image_processor.h"
 
+#include "trtmc/internal/config.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -193,7 +195,7 @@ ImagePiece make_piece(const ImageProcessorConfig& c, const std::vector<uint8_t>&
     piece.width = width / p;
     const std::size_t count = static_cast<std::size_t>(piece.height) * piece.width;
     if (count > static_cast<std::size_t>(c.max_piece_patches))
-        throw std::invalid_argument("MiniCPM-OCR image slice has " + std::to_string(count) +
+        throw internal::ConfigError("MiniCPM-OCR image slice has " + std::to_string(count) +
                                     " patches, more than the vision engine profile allows (" +
                                     std::to_string(c.max_piece_patches) +
                                     "); the image aspect ratio is too extreme");

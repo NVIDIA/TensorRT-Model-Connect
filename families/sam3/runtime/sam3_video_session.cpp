@@ -5,6 +5,8 @@
 
 #include "families/sam3/runtime/sam3_video_session.h"
 
+#include "trtmc/internal/config.h"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -96,7 +98,7 @@ std::vector<Sam3VideoFrame> make_borrowed_tail(const Sam3VideoFrameView* frames,
     if (frames == nullptr || num_frames == 0)
         throw std::invalid_argument("SAM3 continuation requires frame zero");
     if (num_frames > static_cast<std::size_t>(max_video_frames))
-        throw std::length_error("SAM3 video session frame limit exceeded");
+        throw internal::ConfigError("SAM3 video session frame limit exceeded");
     std::vector<Sam3VideoFrame> tail;
     tail.reserve(num_frames - 1U);
     for (std::size_t index = 0; index < num_frames; ++index) {
