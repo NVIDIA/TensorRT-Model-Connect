@@ -698,6 +698,18 @@ if(TRTMC_BUILD_TESTS)
   add_dependencies(test_cli trtmc_test_default_runtime_root)
   add_test(NAME family_loader COMMAND test_family_loader "${_trtmc_test_runtime_root}")
 
+  add_executable(test_trt_backend_without_cuda core/runtime/tests/test_trt_backend_without_cuda.cpp)
+  target_include_directories(test_trt_backend_without_cuda PRIVATE
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_trt_backend_without_cuda SYSTEM PRIVATE
+    ${CUDAToolkit_INCLUDE_DIRS}
+  )
+  target_link_libraries(test_trt_backend_without_cuda PRIVATE trtmc_backend_trt)
+  target_compile_options(test_trt_backend_without_cuda PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME trt_backend_without_cuda COMMAND test_trt_backend_without_cuda)
+  set_tests_properties(trt_backend_without_cuda PROPERTIES LABELS cpu)
+
   set(_trtmc_api_test_runtime_root "${CMAKE_BINARY_DIR}/tests/api-runtime")
   add_library(trtmc_api_test_backend SHARED core/runtime/tests/fake_backend.cpp)
   target_include_directories(trtmc_api_test_backend PRIVATE
