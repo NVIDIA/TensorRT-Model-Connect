@@ -137,6 +137,11 @@ std::vector<float> Pipeline::embed_image(const internal::ImageView& image) {
     pixels.shape = {1, 3, config_.preprocess.input_image_h, config_.preprocess.input_image_w};
     pixels.dtype = DType::kFloat32;
 
+    // `forward` hands back tensors that point into the module's own staging buffer, which the
+    // next `forward` on that module overwrites. The copy out of it therefore has to happen
+    // before any other call reaches the same tower: one lock, held across both. Each engine runs
+    // once per request here, so serialising them costs nothing a caller would notice.
+    const std::lock_guard<std::mutex> guard(vision_mutex_);
     auto outputs = vision_->forward({{"pixel_values", pixels}});
     return l2_normalise(require_output(outputs, "image_embeds", config_.embedding_dim));
 }
@@ -176,6 +181,9 @@ std::vector<float> Pipeline::embed_text(std::string_view text) {
     input_ids.shape = {config_.max_text_len};
     input_ids.dtype = DType::kInt32;
 
+    // The same rule as the image tower: the read out of the module's staging buffer is inside
+    // the lock that the `forward` writing it holds.
+    const std::lock_guard<std::mutex> guard(text_mutex_);
     auto outputs = text_->forward({{"input_ids", input_ids}});
     return l2_normalise(require_output(outputs, "text_embeds", config_.embedding_dim));
 }

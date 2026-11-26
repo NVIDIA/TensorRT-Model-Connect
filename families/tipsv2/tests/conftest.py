@@ -59,22 +59,28 @@ def pytest_collection_modifyitems(session, config, items) -> None:
     e2e_items = [item for item in items
                  if fnmatch.fnmatch(getattr(item, "originalname", "") or "", "test_*e2e")]
 
-    # **A family may only judge its own collection.** Another family's E2E in the session means
-    # the selection may name one of its cases, and this file cannot tell: a sibling is free to
-    # parametrize on something other than `case_name` (`families/clef` and `families/laya`
-    # parametrize on the manifest and the case), so its cases are invisible here. Aborting the
-    # session on that would make this family's presence break a selection that is correct for
-    # the one that owns it - which is exactly what family isolation forbids.
-    if any(not item.nodeid.startswith(_FAMILY_PREFIX) for item in e2e_items):
+    def case_name(item):
+        spec = getattr(item, "callspec", None)
+        value = spec.params.get("case_name") if spec else None
+        return value if isinstance(value, str) else None
+
+    # Every family's cases count, not only this one's: the check is whether the selection names
+    # anything the **session** collected.
+    collected = {name for name in map(case_name, e2e_items) if name}
+    if testcases & collected:
         return
 
-    collected = {
-        item.callspec.params["case_name"]
-        for item in e2e_items
-        if getattr(item, "callspec", None)
-        and isinstance(item.callspec.params.get("case_name"), str)
-    }
-    if not (testcases & collected):
-        raise pytest.UsageError(
-            f"--e2e-testcase {sorted(testcases)} matches none of the E2E cases this session "
-            f"collected ({sorted(collected)})")
+    # Nothing matched. Before calling that a typo, allow for a sibling whose cases this file
+    # cannot see: a family is free to parametrize on something other than `case_name`
+    # (`families/clef` and `families/laya` parametrize on the manifest and the case). If any
+    # foreign E2E item is opaque that way, the selection may well be correct for the family that
+    # owns it, and aborting the whole session would make this family's presence break someone
+    # else's run - which is what family isolation forbids. Only when every E2E item in the
+    # session is one this file can read, and none matches, is the selection a typo.
+    if any(not item.nodeid.startswith(_FAMILY_PREFIX) and case_name(item) is None
+           for item in e2e_items):
+        return
+
+    raise pytest.UsageError(
+        f"--e2e-testcase {sorted(testcases)} matches none of the E2E cases this session "
+        f"collected ({sorted(collected)})")

@@ -332,14 +332,27 @@ void test_tokenizer() {
                             "a"),
                 "normalize");
 
-    // Without the user-defined type "[sep]" is an ordinary piece, so nothing freezes and "b"
-    // still cannot join it - but the symbol is no longer indivisible. The ids are the same here;
-    // what changes is that the whole string is one piece rather than a frozen one, so this only
-    // pins that the type is read at all.
+    // Without the user-defined type "[sep]" is an ordinary piece: nothing freezes it, and with
+    // no merge path to build it the text falls back to bytes. The vocabulary is the same size in
+    // both fixtures, so only the **ids** can show that the type was read at all.
     const trtmc::tipsv2::Tokenizer plain(
         trtmc::tipsv2::parse_tokenizer_asset(miniature_asset(/*with_user_defined=*/false)));
     check_equal<std::size_t>(plain.asset().pieces.size(), tokenizer.asset().pieces.size(),
                              "both miniature assets have the same vocabulary");
+    const auto frozen_ids = tokenizer.encode("a[sep]b");
+    const auto plain_ids = plain.encode("a[sep]b");
+    if (frozen_ids == plain_ids) {
+        std::cerr << "FAIL: the user-defined piece encodes like an ordinary one, so the piece "
+                     "type is not being read\n";
+        ++g_failures;
+    }
+    // The frozen one keeps "[sep]" whole; the ordinary one cannot build it and spells it out.
+    check_equal<std::size_t>(frozen_ids.size(), 3, "a[sep]b is three symbols when frozen");
+    if (plain_ids.size() <= frozen_ids.size()) {
+        std::cerr << "FAIL: without the user-defined type the bracketed text should fall back to "
+                     "bytes, giving more ids than the frozen piece\n";
+        ++g_failures;
+    }
 }
 
 // The same asset with the two cased ranges swapped, so they are no longer in order.
@@ -376,10 +389,12 @@ void test_asset_refusals() {
     // The flags word sits at offset 12 (8 magic + 4 version); bit 5 is not defined.
     check_throws([&] { parse_tokenizer_asset(with_byte(asset, 12, static_cast<char>(0x2FU))); },
                  "unknown flag bit", "unknown flags");
-    // Clearing the byte-fallback bit leaves 256 byte pieces with no fallback.
+    // Byte fallback is required, not optional: without it the reference answers a run of unknown
+    // characters with one unknown id where this encoder emits one per symbol, so a bundle built
+    // for that mode is refused rather than tokenized by a rule this family never qualified on.
     check_throws(
         [&] { Tokenizer{parse_tokenizer_asset(with_byte(asset, 12, static_cast<char>(0x07U)))}; },
-        "byte pieces without byte fallback", "byte pieces but no byte fallback");
+        "a tokenizer without byte fallback", "needs a tokenizer with byte fallback");
     // The version word sits at offset 8.
     check_throws([&] { parse_tokenizer_asset(with_byte(asset, 8, static_cast<char>(2))); },
                  "unsupported version", "version is not supported");
@@ -433,8 +448,14 @@ void test_image_preprocess(const char* path) {
         config.input_image_h = output_h;
         config.input_image_w = output_w;
         const auto actual = preprocess_tipsv2_image(source.data(), input_h, input_w, config);
-        check_equal(actual.size(), static_cast<std::size_t>(3 * output_h * output_w),
-                    note + ": output size");
+        // Return, do not merely record: `check_equal` counts the failure and carries on, and the
+        // loop below would then index samples the result does not have.
+        if (actual.size() != static_cast<std::size_t>(3 * output_h * output_w)) {
+            std::cerr << "FAIL: " << note << ": output size " << actual.size() << ", expected "
+                      << 3 * output_h * output_w << "\n";
+            ++g_failures;
+            return;
+        }
 
         const auto plane = static_cast<std::size_t>(output_h) * output_w;
         for (std::int32_t y = 0; y < output_h; ++y) {
@@ -446,7 +467,9 @@ void test_image_preprocess(const char* path) {
                                             static_cast<std::size_t>(y) * output_w + x];
                     // The rescale is the only float step; the resize itself is exact integer
                     // arithmetic, so the comparison is against the recorded 8-bit value.
-                    if (std::abs(got * 255.0F - want) > 1e-3F) {
+                    // `std::abs(NaN - want) > tol` is false, so a NaN would pass the tolerance
+                    // and an output of the right size full of NaNs would look correct.
+                    if (!std::isfinite(got) || std::abs(got * 255.0F - want) > 1e-3F) {
                         std::cerr << "FAIL: " << note << " at (" << y << "," << x << "," << c
                                   << "): expected " << want << ", got " << got * 255.0F << "\n";
                         ++g_failures;

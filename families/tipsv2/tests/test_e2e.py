@@ -28,7 +28,8 @@ absolute difference per coordinate is the gate, set an order of magnitude below 
 and two above a correct build.
 
 **The fp32 case is the structural gate; the fp16 case is not.** A correct fp16 build already
-differs from the reference by 3.70e-04 - ten times what the weakest structural break costs - and
+differs from the reference by 3.70e-04 - more than twice what the weakest structural break
+costs, so it has nothing left to show above the lowering's own noise - and
 measuring the same three breaks at fp16 confirms it: the GELU one lands at 3.71e-04 and the case
 *passes* with the break in place. The fp16 tolerances therefore gate the lowering, not the graph;
 the other two breaks (1.52e-02 and 3.67e-01) are still caught there.
@@ -349,6 +350,18 @@ def _check(name: str, label: str, actual: float, operator: str, expected: float)
             "operator": operator, "expected": expected, "passed": passed}
 
 
+def reference_comparison_record(name: str, native, reference, checks: list) -> dict:
+    """The whole `reference_comparison` record, in one place.
+
+    `tests/test_model.py` renders what this builds and asserts the badge it earns, so the fields
+    `tools.e2e_report` validates - two **different** retained artifacts, one name per check -
+    cannot regress here while a test that rebuilt them separately still passed.
+    """
+    return {"label": f"{name} against the checkpoint's own Transformers code",
+            "scope": "independent_reference", "enforced": True,
+            "native": native, "reference": reference, "checks": checks}
+
+
 def reference_checks(*, image_delta: float, image_cosine: float, text_delta: float,
                      logit_delta: float, agrees: bool, embedding_tolerance: float,
                      logit_tolerance: float, cosine_floor: float) -> list[dict]:
@@ -457,10 +470,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         logit_delta=max(logit_deltas), agrees=native_top == reference_top,
         embedding_tolerance=embedding_tolerance, logit_tolerance=logit_tolerance,
         cosine_floor=cosine_floor)
-    record_evidence("reference_comparison", {
-        "label": f"{manifest['name']} against the checkpoint's own Transformers code",
-        "scope": "independent_reference", "enforced": True,
-        "native": native_file, "reference": reference_file, "checks": checks})
+    record_evidence("reference_comparison",
+                    reference_comparison_record(manifest["name"], native_file, reference_file,
+                                                checks))
 
     # The ids themselves, against SentencePiece: the one part of the text path an embedding
     # comparison can only see second-hand.

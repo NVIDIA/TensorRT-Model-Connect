@@ -38,11 +38,13 @@ over.
   the weights rather than assumed away.
 - **The text tower has no learned position table**: the position signal is a computed sinusoid,
   sines then cosines, not interleaved.
-- **The text tower's padding mask is used three times** — the attention keys, both MLP maskings,
-  and the pooled average. Because of all three, the embedding of a prompt that fits does not
-  depend on how much padding follows it. `tests/test_model.py` runs the tower over two window
-  lengths and compares, then does it again with each masking disabled in turn: the embedding
-  then moves by 0.26 to 7.6, against 2.7e-07 when all three are in place.
+- **The text tower's padding mask is used three times** — the attention keys, the pooled
+  average, and both MLP maskings — but only the first two carry the property that the embedding
+  of a prompt that fits does not depend on how much padding follows it. `tests/test_model.py`
+  runs the tower over two window lengths and compares, then does it again with each of those two
+  disabled: the embedding moves by 0.26 and 0.59, against 2.7e-07 with them in place. Disabling
+  the MLP maskings changes nothing — nothing downstream reads a padded row — and they are kept
+  because they are what the reference computes, in the one form that cannot spread a NaN.
 - **The vision head count comes from the reference's factory table**, keyed on
   `(hidden_size, num_hidden_layers)`, not from `vision_config.num_attention_heads`, which the
   reference ignores. `config.py` refuses a file that disagrees with the factory rather than
@@ -64,8 +66,10 @@ a sigma.
 
 `tipsv2_tokenizer_check` diffs the bundle's own tokenizer against the reference SentencePiece
 processor; `tests/test_e2e.py` runs it on prompts chosen for the parts an embedding comparison
-cannot reach on its own (the lowercase table, NFKC, byte fallback, whitespace collapsing,
-truncation, and text that spells a special token).
+cannot reach on its own (the lowercase table, NFKC, byte fallback, whitespace collapsing, a
+prompt longer than the window, and text that spells a special token). It compares the tokenizer's
+full output against SentencePiece's; the window limit belongs to `Pipeline::embed_text`, which
+this check does not call.
 
 ## Precision
 
@@ -117,9 +121,10 @@ could carry it: no cosine floor one would dare set separates 0.9999990 from 1.0,
 class agrees even for a tower that reads its own attention projection in the wrong order.
 
 The fp32 case is the structural gate and the fp16 case is not. A correct fp16 build already
-differs from the reference by 3.70e-04, ten times the weakest break, and the same three breaks
-measured at fp16 confirm it: the GELU one lands at 3.71e-04 and the case passes with the break in
-place. The fp16 tolerances gate the lowering, not the graph.
+differs from the reference by 3.70e-04 - more than twice what the weakest break costs - so that
+break has nothing left to show above the lowering's own noise. Measuring the same three breaks at
+fp16 confirms it: the GELU one lands at 3.71e-04 and **the case passes with the break in place**.
+The fp16 tolerances gate the lowering, not the graph.
 
 `families/tipsv2/requirements.txt` pins Pillow deliberately. The runtime reproduces one resampler
 coefficient for coefficient, including which axis Pillow resamples first — observable because its

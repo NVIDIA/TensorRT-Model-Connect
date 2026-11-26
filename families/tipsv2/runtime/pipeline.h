@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -59,6 +60,11 @@ class Pipeline final : public internal::IModel,
 
     std::unique_ptr<ITrtModule> vision_;
     std::unique_ptr<ITrtModule> text_;
+    // One per tower. `ITrtModule::forward` returns tensors that point into the module's own
+    // staging buffer, so the lock has to cover the copy out of it as well as the call: without
+    // it two overlapping requests on one model would silently read each other's embedding.
+    std::mutex vision_mutex_;
+    std::mutex text_mutex_;
     std::shared_ptr<Tokenizer> tokenizer_;
     RuntimeConfig config_;
     std::string primary_task_;

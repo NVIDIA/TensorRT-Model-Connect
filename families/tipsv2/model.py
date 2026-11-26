@@ -249,7 +249,9 @@ def build(request, writer) -> None:
 
     height = _require_integer(request.image_height, "image_height")
     width = _require_integer(request.image_width, "image_width")
-    image_size = height or vision["image_size"]
+    # Only an **absent** height falls back: `image_height=0` is a request this family cannot
+    # serve, not an omission, and the width check below already refuses an explicit zero.
+    image_size = vision["image_size"] if height is None else height
     if width is not None and width != image_size:
         raise NotImplementedError("tipsv2 needs a square input size")
     if image_size != vision["image_size"]:

@@ -263,14 +263,19 @@ def _validate_special_ids(asset: TokenizerAsset, byte_pieces: set) -> None:
     if len(set(enabled)) != len(enabled):
         raise ValueError("tipsv2 tokenizer special ids are not distinct")
 
-    if asset.byte_fallback:
-        if len(byte_pieces) != 256:
-            missing = sorted(set(_BYTE_PIECES) - byte_pieces)
-            raise ValueError(
-                "tipsv2 tokenizer byte fallback needs one piece per byte; "
-                f"{len(missing)} are missing, first {missing[:4]}")
-    elif byte_pieces:
-        raise ValueError("tipsv2 tokenizer has byte pieces but no byte fallback")
+    # Byte fallback is required, not merely supported. Without it SentencePiece answers a run of
+    # unknown characters with **one** unknown id for the whole run, and the runtime here emits one
+    # per symbol; rather than carry a second segmentation rule for a mode this family has never
+    # been qualified on, such a model is refused where it is read.
+    if not asset.byte_fallback:
+        raise NotImplementedError(
+            "tipsv2 is qualified for a SentencePiece model with byte fallback; without it the "
+            "reference coalesces a run of unknown characters into one unknown id")
+    if len(byte_pieces) != 256:
+        missing = sorted(set(_BYTE_PIECES) - byte_pieces)
+        raise ValueError(
+            "tipsv2 tokenizer byte fallback needs one piece per byte; "
+            f"{len(missing)} are missing, first {missing[:4]}")
 
 
 def _validate_lowercase(table: List[Tuple[int, str]]) -> None:
@@ -433,6 +438,7 @@ def parse_tokenizer_asset(data: bytes) -> TokenizerAsset:
     _validate_special_ids(asset, byte_pieces)
     _validate_lowercase(asset.lowercase)
     _validate_case_tables(asset)
+    _validate_charsmap(asset.charsmap)
     return asset
 
 

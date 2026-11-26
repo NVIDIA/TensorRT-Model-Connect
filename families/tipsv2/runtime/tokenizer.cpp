@@ -202,9 +202,13 @@ void validate_asset(const TokenizerAsset& asset) {
         throw std::invalid_argument(
             "tipsv2 tokenizer byte fallback needs one piece for every byte");
     }
-    if (!asset.byte_fallback && any_byte) {
-        throw std::invalid_argument("tipsv2 tokenizer has byte pieces but no byte fallback");
+    if (!asset.byte_fallback) {
+        // Required, not optional: without it the reference answers a run of unknown characters
+        // with one unknown id and this encoder emits one per symbol. A bundle built for that
+        // mode is refused rather than tokenized by a rule this family was never qualified on.
+        throw std::invalid_argument("tipsv2 needs a tokenizer with byte fallback");
     }
+    static_cast<void>(any_byte);
 
     std::int64_t previous = -1;
     for (const auto& entry : asset.lowercase) {
@@ -728,6 +732,11 @@ std::vector<std::int32_t> Tokenizer::encode(std::string_view text) const {
         const PieceIndex* found = lookup(piece);
         const std::int32_t id = found != nullptr ? found->id : asset_.unknown_id;
         const PieceType type = asset_.pieces[static_cast<std::size_t>(id)].type;
+        // An unused piece is not a token the model has. If a merge recorded how it was built,
+        // the two halves are emitted instead; with no such record SentencePiece treats the
+        // symbol as unknown, so it goes down the same path here rather than emitting an id the
+        // model never trained.
+        bool unknown = type == PieceType::kUnknown;
         if (type == PieceType::kUnused) {
             const auto reverse = reverse_unused_merges.find(std::string(piece));
             if (reverse != reverse_unused_merges.end()) {
@@ -735,8 +744,9 @@ std::vector<std::int32_t> Tokenizer::encode(std::string_view text) const {
                 self(reverse->second.second, self);
                 return;
             }
+            unknown = true;
         }
-        if (type == PieceType::kUnknown && asset_.byte_fallback) {
+        if (unknown && asset_.byte_fallback) {
             for (const unsigned char byte : piece) {
                 const std::int32_t byte_id = byte_ids_[byte];
                 if (byte_id < 0) {
@@ -746,7 +756,7 @@ std::vector<std::int32_t> Tokenizer::encode(std::string_view text) const {
             }
             return;
         }
-        ids.push_back(id);
+        ids.push_back(unknown ? asset_.unknown_id : id);
     };
 
     for (std::int32_t index = symbols.empty() ? -1 : 0; index >= 0;

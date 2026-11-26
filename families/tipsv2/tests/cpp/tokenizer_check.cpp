@@ -66,7 +66,23 @@ int main(int argc, char** argv) {
         std::size_t checked = 0;
         for (const auto& entry : cases) {
             const auto text = entry.at("text").get<std::string>();
-            const auto expected = entry.at("ids").get<std::vector<std::int32_t>>();
+            // `get<std::int32_t>` narrows silently: 261.5 in the case file would compare equal
+            // to a returned 261 and report parity that does not exist. Each id has to be a real
+            // integer inside the vocabulary before it is used as one.
+            std::vector<std::int32_t> expected;
+            for (const auto& value : entry.at("ids")) {
+                if (!value.is_number_integer() || value.is_number_float()) {
+                    std::cerr << "tokenizer_check: a case id is not an integer\n";
+                    return 2;
+                }
+                const auto wide = value.get<std::int64_t>();
+                if (wide < 0 ||
+                    wide >= static_cast<std::int64_t>(tokenizer.asset().pieces.size())) {
+                    std::cerr << "tokenizer_check: a case id is outside the vocabulary\n";
+                    return 2;
+                }
+                expected.push_back(static_cast<std::int32_t>(wide));
+            }
             const auto actual = tokenizer.encode(text);
             if (actual != expected) {
                 nlohmann::json failure{{"status", "mismatch"},

@@ -8,16 +8,23 @@ reference's tokenizer does (``is_padding = (tokens == 0)``). The padding id is a
 control piece, so no prompt can produce it and there is no second input that could disagree with
 the first.
 
-The mask is used in three places, and dropping any one of them silently changes the answer:
+The mask is used in three places:
 
 * the attention adds it to the scores, so a padding row is never attended **as a key**;
-* the MLP masks both its hidden and its output rows with it;
-* the pooling averages over the non-padding rows only.
+* the pooling averages over the non-padding rows only - they are dropped from the sum and from
+  the count;
+* the MLP masks both its hidden and its output rows with it.
 
-Because of those three, the embedding of a prompt that fits does not depend on how much padding
-follows it. `tests/test_model.py` pins that: it runs this builder over two windows of different
-length and compares, and it runs the same comparison three more times with one of the maskings
-disabled, where the embeddings move by 0.26 to 7.6 instead.
+**The first two carry the property; the third does not.** Because of them the embedding of a
+prompt that fits does not depend on how much padding follows it, and `tests/test_model.py` pins
+exactly that: the builder runs over two window lengths and is compared, then compared again with
+each of those two disabled, where the embedding moves by 0.26 and 0.59 instead of 2.7e-07.
+
+The MLP masking is kept for a different reason. Nothing downstream reads a padded row - the
+attention will not attend it and the pooling discards it - so zeroing it cannot move the
+embedding, and the test says so. It is here because it is what the reference computes
+(`x * mlp_mask`), and because a selection is the one form of it that could not turn a non-finite
+padded row into a NaN if a later change ever made those rows observable.
 
 **Precision.** The pooled average is the one reduction that cannot be taken in the network's
 dtype: the reference divides by ``count + 1e-8``, and 1e-8 is below FP16's smallest normal, so in
@@ -86,6 +93,16 @@ def _masks(network, input_ids, cfg):
     return keep_rows, reshaped.get_output(0), valid
 
 
+def _masked_rows(network, tensor, keep_rows, zero):
+    """The reference's `x * mlp_mask`, as a selection so a non-finite row cannot spread.
+
+    A named function rather than a closure because it is one of the three uses of the padding
+    mask that `tests/test_model.py` disables one at a time: `keep_rows` also drives the pooled
+    average, so a test that replaced the tensor could not tell the two apart.
+    """
+    return network.add_select(keep_rows, tensor, zero).get_output(0)
+
+
 def build_text_tower(network, input_ids, weights, cfg, *, dtype=np.float32):
     """``input_ids[seq]`` (int32) to the unnormalised pooled embedding ``[width]``."""
     width = cfg["hidden_size"]
@@ -94,8 +111,7 @@ def build_text_tower(network, input_ids, weights, cfg, *, dtype=np.float32):
     zero = g.add_constant(network, (1, 1), np.zeros((1,), dtype=np.float32), dtype=dtype)
 
     def masked(tensor):
-        """The reference's `x * mlp_mask`, as a selection so a non-finite row cannot spread."""
-        return network.add_select(keep_rows, tensor, zero).get_output(0)
+        return _masked_rows(network, tensor, keep_rows, zero)
 
     table = g.add_constant(network, (cfg["vocab_size"], width),
                            weights[f"{PREFIX}.token_embedding.weight"], dtype=dtype)

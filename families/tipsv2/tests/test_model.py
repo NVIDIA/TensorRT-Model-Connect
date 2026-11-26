@@ -720,6 +720,15 @@ def test_the_testcase_guard_never_judges_another_family(monkeypatch) -> None:
     with pytest.raises(pytest.UsageError, match="matches none of the E2E cases"):
         hook(None, _config(["a-clef-case"]), [mine])
 
+    # And a sibling whose cases *are* readable must not switch the guard off: a selection that
+    # names nobody is still a typo, however many families the session collected.
+    readable = _item("test_official_e2e", "other-family-case",
+                     file_name="../../other/tests/test_e2e.py")
+    readable.nodeid = "families/other/tests/test_e2e.py::test_official_e2e[other-family-case]"
+    hook(None, _config(["other-family-case"]), [mine, readable])   # owned by the sibling: quiet
+    with pytest.raises(pytest.UsageError, match="matches none of the E2E cases"):
+        hook(None, _config(["neither-families-case"]), [mine, readable])
+
 
 @pytest.mark.parametrize("value", [448.5, 448.0, "448", None])
 def test_a_build_option_that_is_not_an_integer_is_refused(value) -> None:
@@ -1348,16 +1357,17 @@ def test_the_e2e_comparison_record_earns_the_reference_badge(tmp_path: Path) -> 
 
     # The checks `test_e2e.py` itself builds, from a healthy fp32 run's measured numbers - not a
     # copy of them here, or the production record could regress while this still passed.
-    from families.tipsv2.tests.test_e2e import reference_checks
+    from families.tipsv2.tests.test_e2e import reference_checks, reference_comparison_record
 
     checks = reference_checks(image_delta=1.1e-07, image_cosine=1.0, text_delta=6.0e-08,
                               logit_delta=6.2e-06, agrees=True, embedding_tolerance=1e-05,
                               logit_tolerance=1e-03, cosine_floor=0.999)
     assert all(check["passed"] for check in checks)
-    record = {"label": "tipsv2-so400m14 against the checkpoint's own Transformers code",
-              "scope": "independent_reference", "enforced": True,
-              "native": artifact("native_image_embedding.npy"),
-              "reference": artifact("reference_image_embedding.npy"), "checks": checks}
+    # The record production writes, not a copy of it: if `test_e2e.py` pointed both fields at one
+    # artifact, or named two checks the same, the badge would be lost there and here together.
+    record = reference_comparison_record("tipsv2-so400m14",
+                                         artifact("native_image_embedding.npy"),
+                                         artifact("reference_image_embedding.npy"), checks)
     data = {"status": "passed", "family": "tipsv2", "case": "tipsv2-so400m14", "checks": [],
             "reference_comparison": record}
 
@@ -1413,7 +1423,7 @@ def _text_embedding(ids: list, window: int) -> np.ndarray:
 
 
 def test_the_text_embedding_does_not_depend_on_the_padding_behind_it() -> None:
-    """The property the three maskings exist for, run rather than asserted in prose.
+    """The property the padding mask exists for, run rather than asserted in prose.
 
     The padding mask is used in the attention keys, in both MLP maskings and in the pooled
     average. Because of all three, a prompt that fits gives the same embedding at any window at
@@ -1426,8 +1436,10 @@ def test_the_text_embedding_does_not_depend_on_the_padding_behind_it() -> None:
     Not *exactly* equal here, and the reason is the harness rather than the tower: the pooled
     sum runs over a different number of rows in the two windows, and NumPy's pairwise summation
     adds them in a different order, which float32 addition is not associative under. That is
-    2.7e-07 on this fixture. Dropping any one of the three maskings costs between 0.26 and 7.6 -
-    six orders of magnitude away - so the gate sits between them, nowhere near either.
+    2.7e-07 on this fixture. Disabling either of the two maskings that carry the property costs
+    0.26 (the attention keys) or 0.59 (the pooled average) - six orders of magnitude away - so
+    the gate sits between them, nowhere near either. The MLP maskings are a third use of the
+    same mask and do **not** carry it; the test below that measures them says why.
     """
     ids = [5, 7, 3, 9]
     short, long = _text_embedding(ids, 8), _text_embedding(ids, 24)
@@ -1437,9 +1449,9 @@ def test_the_text_embedding_does_not_depend_on_the_padding_behind_it() -> None:
     assert float(np.abs(short - long).max()) < 1e-5, np.abs(short - long).max()
 
 
-@pytest.mark.parametrize("mask_use", ["keys", "mlp", "pooling"])
-def test_dropping_any_one_of_the_three_maskings_breaks_that(monkeypatch, mask_use: str) -> None:
-    """And the same property, with each of the three uses disabled in turn.
+@pytest.mark.parametrize("mask_use", ["keys", "pooling"])
+def test_dropping_either_masking_that_carries_it_breaks_that(monkeypatch, mask_use: str) -> None:
+    """And the same property, with each of the two loadbearing uses disabled in turn.
 
     Without this the test above would pass on a tower that never masked anything: with no
     padding in the short window the two runs could still agree. Each case here removes one use
@@ -1453,29 +1465,54 @@ def test_dropping_any_one_of_the_three_maskings_breaks_that(monkeypatch, mask_us
             text_builder.g, "add_attention",
             lambda *args, additive_mask=None, **kwargs: original(*args, **kwargs))
     elif mask_use == "mlp":
-        # `masked()` becomes the identity: the MLP keeps its padding rows.
-        monkeypatch.setattr(text_builder, "_masks", _masks_without("mlp"))
+        # Only the two MLP selections, which is why they are their own function: `keep_rows`
+        # also drives the pooled average, so replacing that tensor would disable both uses and
+        # the number below would belong to neither.
+        monkeypatch.setattr(text_builder, "_masked_rows",
+                            lambda _network, tensor, _keep, _zero: tensor)
     else:
-        monkeypatch.setattr(text_builder, "_masks", _masks_without("pooling"))
+        monkeypatch.setattr(text_builder, "_masks", _masks_without_pooling())
 
     short, long = _text_embedding(ids, 8), _text_embedding(ids, 24)
-    # Measured: 0.26 (keys), 7.56 (mlp), 0.59 (pooling), against 2.7e-07 for the correct tower.
+    # Measured: 0.26 (keys), 0.59 (pooling), against 2.7e-07 for the correct tower.
     assert float(np.abs(short - long).max()) > 0.1, (mask_use, np.abs(short - long).max())
 
 
-def _masks_without(use: str):
-    """`_masks`, with the tensor one of its consumers relies on replaced by an all-true one."""
+def test_the_mlp_masking_is_reference_fidelity_and_not_what_carries_the_property(
+        monkeypatch) -> None:
+    """The third use of the mask does **not** carry padding invariance, and saying it did was
+    wrong.
+
+    The attention's additive mask already keeps a padding row from being read as a key, and the
+    pooled average already drops it from both the sum and the count. Nothing downstream ever
+    reads a padded row, so zeroing it in the MLP cannot move the embedding: disabling the two
+    selections leaves this at the same 2.7e-07 as a correct tower, with a padded row that
+    overflows just as much as with one that does not.
+
+    They are kept because they are what the reference computes (`x * mlp_mask`), and because a
+    selection is the one form that could not turn a non-finite padded row into a NaN if a later
+    change ever made those rows observable. That is a different claim from the one this file
+    used to make, and the number belongs to it.
+    """
+    ids = [5, 7, 3, 9]
+    before = _text_embedding(ids, 8), _text_embedding(ids, 24)
+    monkeypatch.setattr(text_builder, "_masked_rows",
+                        lambda _network, tensor, _keep, _zero: tensor)
+    after = _text_embedding(ids, 8), _text_embedding(ids, 24)
+
+    assert float(np.abs(after[0] - after[1]).max()) < 1e-5     # invariance survives without them
+    assert float(np.abs(before[0] - after[0]).max()) == 0.0    # and the embedding is unchanged
+
+
+def _masks_without_pooling():
+    """`_masks` with `valid` all-ones: the pooled average then divides by the window, not by the
+    number of real tokens."""
     original = text_builder._masks
 
     def patched(network, input_ids, cfg):
         keep_rows, additive_mask, valid = original(network, input_ids, cfg)
         ones = _RecordedTensor(np.ones_like(np.asarray(valid.values)), valid.dtype)
-        if use == "mlp":
-            keep_rows = _RecordedTensor(np.ones_like(np.asarray(keep_rows.values), dtype=bool),
-                                        keep_rows.dtype)
-        else:
-            valid = ones
-        return keep_rows, additive_mask, valid
+        return keep_rows, additive_mask, ones
 
     return patched
 
