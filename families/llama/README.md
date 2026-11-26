@@ -23,6 +23,25 @@ Rebuild the family runtime to obtain corrected token IDs. ICU `uc` and `i18n`
 are required. The bundle schema and public API are unchanged. Native token-ID
 comparisons do not establish GPU generation, model quality or performance.
 
+## Native E2E regressions
+
+The existing MiniCPM5-1B checkpoint manifest pins revision
+`87179e5c1f455ef22e6223592d2d61351b525bfc`. Two optional cases exercise spaces
+before grouped ASCII digits and a Unicode number. They use the existing native
+prefill-ID receipt and HF input check, so a changed tokenizer cannot be hidden
+by matching generated text. Existing precision and comparison criteria apply.
+
+```sh
+PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \
+  families/llama/tests/test_e2e.py \
+  --e2e-testcase=minicpm5-1b-ordered-splits \
+  --e2e-testcase=minicpm5-1b-ordered-splits-unicode-number -vv
+```
+
+Set the native CLI/runtime paths as required by the family E2E harness.
+These cases require an authorized GPU; adding them does not establish GPU
+qualification or change the premerge selection.
+
 ## Regenerate the Unicode ranges
 
 Run from the repository root. This offline maintenance step does not run during

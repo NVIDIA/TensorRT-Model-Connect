@@ -55,6 +55,41 @@
       "use_chat_template": false,
       "reference_precision": "fp32",
       "expected_runtime_prefill_tokens": 1
+    },
+    {
+      "name": "minicpm5-1b-ordered-splits",
+      "premerge": false,
+      "prompt": "The code is  1234.",
+      "expected_prompt_token_ids": [
+        0,
+        608,
+        5018,
+        357,
+        282,
+        5645,
+        41,
+        35
+      ],
+      "max_new_tokens": 4,
+      "use_chat_template": false,
+      "reference_precision": "fp32",
+      "expected_runtime_prefill_tokens": 8
+    },
+    {
+      "name": "minicpm5-1b-ordered-splits-unicode-number",
+      "premerge": false,
+      "prompt": "a  ١",
+      "expected_prompt_token_ids": [
+        0,
+        86,
+        282,
+        171,
+        116
+      ],
+      "max_new_tokens": 4,
+      "use_chat_template": false,
+      "reference_precision": "fp32",
+      "expected_runtime_prefill_tokens": 5
     }
   ],
   "max_sequence_length": 256,
