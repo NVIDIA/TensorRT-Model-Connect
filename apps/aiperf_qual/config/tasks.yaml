@@ -196,6 +196,11 @@ benchmarks:
   speech_parity: {suite: speech-parity, suite_definition: librispeech-test-clean-speech-20, metric: audio_parity,
                   gate: {min_duration_ratio: 0.8, max_duration_ratio: 1.2, min_rms_ratio: 0.5, max_rms_ratio: 2.0,
                          max_log_spectral_distance: 3.0}}
+  # Captioners without a question input (BLIP, PaliGemma pt) have no OCRBench answer: their greedy captions of 200
+  # COCO images against the native model's (conversion parity), each within an edit distance of the native caption.
+  caption_parity: {suite: caption-parity, suite_definition: coco-val2017-caption-200, metric: text_parity,
+                   gate: {max_distance: 0.15, outliers: {max_fraction: 0.05, gate: {max_distance: 0.5}}},
+                   quantized_gate: {max_distance: 0.3, outliers: {max_fraction: 0.10, gate: {max_distance: 0.7}}}}
   # HumanEval and MBPP completions run against their unit tests (as nobody, with CPU, memory, and time limits);
   # prompts that leave fewer than 64 tokens to generate on the bundle are dropped for both sides.
   code: {suite: code, suite_definition: code-humaneval-mbpp-664, metric: code_pass, fit_prompt: true,

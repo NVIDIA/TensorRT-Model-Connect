@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A pretrained checkpoint that follows only task prefixes: its "caption en" captions of COCO images against the
+# native model's, not OCRBench. The bf16 and fp8 profiles inherit this configuration.
+absolute: [{name: caption_parity, request: {prompt: "caption en"}}]
+
+reference:
+  adapter: families/paligemma/reference/adapter.py  # the processor has no chat template

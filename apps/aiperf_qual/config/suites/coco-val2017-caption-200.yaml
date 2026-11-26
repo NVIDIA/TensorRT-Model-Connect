@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# COCO val2017 (pinned public export): 200 seeded images for caption parity against the native model. The
+# captioning prompt is the model's own (its benchmark entry's request in config/models).
+# Image rights follow each original image's license: https://cocodataset.org/#termsofuse
+suite: coco-val2017-caption-200
+version: 1
+source:
+  kind: hf_dataset
+  dataset: detection-datasets/coco
+  split: val
+  revision: cf0b22332314a937e9dc8a1957b21725430bb41d
+  data_files: {val: data/val-*.parquet}
+  image_column: image
+  # Pixels decoded once and sent as PNG: the two JPEG decoders' differences would flip greedy near-ties.
+  lossless_images: true
+selection: {method: seeded, count: 200}
+fields: {image: image_path}
+request:
+  max_new_tokens: 32

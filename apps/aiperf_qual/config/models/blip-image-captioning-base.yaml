@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A captioner with no question input: unconditional captions (an empty prompt) of COCO images against the native
+# model's, not OCRBench.
+absolute: [{name: caption_parity, request: {prompt: ""}}]
+
+reference:
+  adapter: families/blip/reference/adapter.py  # the processor has no chat template
