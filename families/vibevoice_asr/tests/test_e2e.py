@@ -18,10 +18,13 @@ timestamps. Oracles:
   ids equal the reference ones, with identical raw output and transcript; or the
   runs part at a near-tie of the reference: at the first differing step the
   native token's reference logit is at most ``NEAR_TIE_BF16_STEPS`` BF16 values
-  below the reference best (the reference logits are BF16). Ids after that step
-  are not comparable position by position, so the segments must then agree:
-  same count, identical text and speaker, and timestamps within one acoustic
-  frame (3200 samples at 24 kHz).
+  below the reference best (the reference logits are BF16). The text that the
+  reference tokenizer decodes from the ids before that step must begin both raw
+  outputs, character for character. Ids after that step are not comparable
+  position by position, and the two tokens of a near-tie can spell the same
+  words differently ("Queen Mother", "queen mother"), so the segments must then
+  agree: same count, the same words (``_words``, as for ``transcript_words``)
+  and speaker, and timestamps within one acoustic frame (3200 samples at 24 kHz).
 * ``transcript_words``: the transcripts have the same words, each with the same
   speaker. Used
   for 16 kHz input, which the reference resamples with torchaudio and the
@@ -38,6 +41,7 @@ import subprocess
 import sys
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -90,7 +94,8 @@ def _case_index() -> dict[str, tuple[Path, dict, dict]]:
 CASES = _case_index()
 
 
-def _selected_cases(config) -> tuple[list[str], bool]:
+def _filters(config) -> tuple[set[str], set[str]]:
+    """Names selected by --e2e-model or --e2e-models-file, and testcases selected by --e2e-testcase."""
     model_filters = set()
     for raw in config.getoption("--e2e-model") or []:
         model_filters.update(item.strip() for item in str(raw).split(",") if item.strip())
@@ -104,6 +109,39 @@ def _selected_cases(config) -> tuple[list[str], bool]:
     testcase_filters = set()
     for raw in config.getoption("--e2e-testcase") or []:
         testcase_filters.update(item.strip() for item in str(raw).split(",") if item.strip())
+    return model_filters, testcase_filters
+
+
+def _testcases_of_another_family(config) -> set[str]:
+    """The --e2e-testcase names of a selection made by them alone that names no case of this
+    family, which another family collected in the session must own; empty otherwise."""
+    model_filters, testcase_filters = _filters(config)
+    if model_filters or testcase_filters & set(CASES):
+        return set()
+    return testcase_filters
+
+
+def _collected_cases(items) -> set[str]:
+    """The E2E cases of every family collected in this session: the ``case_name`` parameter of
+    each ``test_*e2e`` item."""
+    cases = set()
+    for item in items:
+        parameters = getattr(getattr(item, "callspec", None), "params", {})
+        if re.fullmatch(r"test_.*e2e", getattr(item, "originalname", "") or "") and "case_name" in parameters:
+            cases.add(str(parameters["case_name"]))
+    return cases
+
+
+def _require_another_owner(testcases: set[str], collected: set[str]) -> None:
+    """Skip when an E2E case of another family collected in this session matches ``testcases``;
+    fail otherwise, so a selection that matches no case cannot pass by running none."""
+    if testcases & collected:
+        pytest.skip(f"--e2e-testcase {sorted(testcases & collected)} belongs to another family")
+    pytest.fail(f"--e2e-testcase {sorted(testcases)} matches no E2E case collected in this session")
+
+
+def _selected_cases(config) -> tuple[list[str], bool]:
+    model_filters, testcase_filters = _filters(config)
     if not model_filters and not testcase_filters:
         return sorted(CASES), False
     selected = []
@@ -142,6 +180,10 @@ def pytest_generate_tests(metafunc) -> None:
                 )
                 for name in names
             ]
+        elif not names and _testcases_of_another_family(metafunc.config):
+            # Checked when the cases run, against every family's collected cases
+            # (_require_another_owner): a testcase no family owns fails instead of skipping.
+            names = parameters = sorted(CASES)
         metafunc.parametrize("case_name", parameters, ids=names)
 
 
@@ -313,6 +355,25 @@ def _reference(case: dict, audio: Path, directory: Path) -> dict:
     context = case.get("context_info")
     output = directory / f"{case['name']}.reference.json"
     return run_reference(weights, audio, str(context) if context else None, output)
+
+
+def _reference_decoder():
+    """The reference tokenizer's decode of an id list, special tokens skipped, as the reference
+    decodes its output (``tokenizer.json`` of the reference weights)."""
+    from tokenizers import Tokenizer
+
+    weights = _snapshot(REFERENCE_REPOSITORY, REFERENCE_REVISION, list(REFERENCE_FILES))
+    tokenizer = Tokenizer.from_file(str(weights / "tokenizer.json"))
+    return lambda ids: tokenizer.decode(list(ids), skip_special_tokens=True)
+
+
+def _text_before_split(decode, reference_ids: list[int], first: int) -> str:
+    """The text both runs decode from the ids they share, those before step ``first``.
+
+    A trailing U+FFFD stands for the start of a character that the shared ids do not
+    complete, so it is not shared text and is dropped.
+    """
+    return decode(reference_ids[:first]).rstrip("\ufffd")
 
 
 def _segments(raw: str) -> list[dict] | None:
@@ -581,17 +642,23 @@ def _transcript_matches(default: dict, raw_segments: list[dict]) -> bool:
 
 
 def _comparison_checks(
-    default: dict, raw: dict, reference: dict, case: dict, expected_samples: int | None = None
+    default: dict,
+    raw: dict,
+    reference: dict,
+    case: dict,
+    decode,
+    expected_samples: int | None = None,
 ) -> list[dict]:
     """The assertions of a case after its runs, as check rows of the evidence report.
 
     ``contract`` rows: the reference encoded ``expected_samples`` (when given),
     the two native runs agree, the reference stopped at the end of text with a
-    non-empty segment list, and the native raw output is a segment list whose
-    contents and times are the transcript. ``independent_reference`` rows: the
-    case's oracle against the transformers implementation. Without
-    ``expected_samples``, every row passes exactly when ``_assert_parity``
-    passes (``test_comparison_checks_agree_with_the_assertions``).
+    non-empty segment list, the native raw output is a segment list whose
+    contents and times are the transcript, and after a split the text of the
+    shared ids (``decode``, the reference tokenizer) begins the reference output.
+    ``independent_reference`` rows: the case's oracle against the transformers
+    implementation. Without ``expected_samples``, every row passes exactly when
+    ``_assert_parity`` passes (``test_comparison_checks_agree_with_the_assertions``).
     """
     contract, independent = "contract", "independent_reference"
     native_ids, reference_ids = raw["token_ids"], reference["generated_ids"]
@@ -692,6 +759,7 @@ def _comparison_checks(
             ]
         else:
             pairs = list(zip(native_segments, segments))
+            shared = _text_before_split(decode, reference_ids, first)
             checks += [
                 _check(
                     "first_divergence_bf16_values",
@@ -703,6 +771,24 @@ def _comparison_checks(
                     NEAR_TIE_BF16_STEPS,
                 ),
                 _check(
+                    "reference_starts_with_text_before_split",
+                    f"The reference tokenizer's text of the {first} ids before the split begins"
+                    " the reference output",
+                    contract,
+                    reference["text"].startswith(shared),
+                    "==",
+                    True,
+                ),
+                _check(
+                    "differing_text_before_split",
+                    f"Native raw output unlike the reference in the {len(shared)} characters"
+                    " before the split: 1 = differs",
+                    independent,
+                    int(not raw["text"].startswith(shared)),
+                    "==",
+                    0,
+                ),
+                _check(
                     "segment_count_difference",
                     "Segments, native minus reference",
                     independent,
@@ -711,11 +797,11 @@ def _comparison_checks(
                     0,
                 ),
                 _check(
-                    "segment_content_mismatches",
-                    "Segments whose content or speaker differs from the reference",
+                    "segment_word_mismatches",
+                    "Segments whose words (case-folded) or speaker differ from the reference",
                     independent,
                     sum(
-                        str(ours["Content"]) != str(theirs["Content"])
+                        _words(str(ours["Content"])) != _words(str(theirs["Content"]))
                         or _speaker(ours) != _speaker(theirs)
                         for ours, theirs in pairs
                     ),
@@ -785,6 +871,7 @@ def _record_comparison(
     raw: dict,
     reference: dict,
     case: dict,
+    decode,
     directory: Path,
     expected_samples: int,
 ) -> None:
@@ -796,7 +883,7 @@ def _record_comparison(
     if not evidence_enabled():
         return
     try:
-        checks = _comparison_checks(default, raw, reference, case, expected_samples)
+        checks = _comparison_checks(default, raw, reference, case, decode, expected_samples)
         native_file = directory / "native.json"
         reference_file = directory / "reference.json"
         native_file.write_text(
@@ -826,9 +913,11 @@ def _record_comparison(
 
 
 def _assert_segments_agree(native: list[dict], reference: list[dict]) -> None:
+    """After a near-tie split: same count, and per segment the same words and speaker, and
+    times within one frame. The text before the split is compared verbatim beforehand."""
     assert len(native) == len(reference), f"{len(native)} native vs {len(reference)} segments"
     for ours, theirs in zip(native, reference):
-        assert str(ours["Content"]) == str(theirs["Content"]), (ours, theirs)
+        assert _words(str(ours["Content"])) == _words(str(theirs["Content"])), (ours, theirs)
         assert _speaker(ours) == _speaker(theirs), (ours, theirs)
         for gap in _time_gaps([(ours, theirs)]):
             assert gap <= FRAME_SECONDS, (ours, theirs)
@@ -842,7 +931,8 @@ def _assert_transcript_consistent(default: dict, raw_segments: list[dict]) -> No
     ] == _timed(raw_segments)
 
 
-def _assert_parity(default: dict, raw: dict, reference: dict, case: dict) -> None:
+def _assert_parity(default: dict, raw: dict, reference: dict, case: dict, decode) -> None:
+    """The case's oracle; ``decode`` is the reference tokenizer's decode of an id list."""
     assert default["token_ids"] == raw["token_ids"], "the two native runs generated different ids"
     segments = _segments(reference["text"])
     assert reference["stopped_at_eos"], "the reference run hit its token limit"
@@ -865,6 +955,15 @@ def _assert_parity(default: dict, raw: dict, reference: dict, case: dict) -> Non
             return
         gap = _assert_reference_tie(native_ids, reference, first)
         print(f"{case['name']}: the runs part at step {first}, a reference near-tie (gap {gap})")
+        shared = _text_before_split(decode, reference_ids, first)
+        assert reference["text"].startswith(shared), (
+            f"the reference tokenizer's text of the {first} shared ids does not begin the "
+            f"reference output: {shared!r}"
+        )
+        assert raw["text"].startswith(shared), (
+            f"the native output differs from the reference before the split: "
+            f"{raw['text'][: len(shared)]!r} vs {shared!r}"
+        )
         _assert_segments_agree(native_segments, segments)
     else:
         assert case["oracle"] == "transcript_words"
@@ -938,16 +1037,102 @@ def test_an_explicit_selection_without_a_case_is_an_error() -> None:
     assert _selected_cases(Options(**{"--e2e-testcase": ["other-case"]})) == ([], True)
 
 
+def test_a_testcase_selection_that_no_collected_family_owns_fails() -> None:
+    def config(**options):
+        return SimpleNamespace(getoption=options.get)
+
+    # A selection by testcases alone that names no case of this family still gives this
+    # family's cases, which then check the session (pytest would skip an empty one).
+    calls = []
+    pytest_generate_tests(
+        SimpleNamespace(
+            fixturenames=["case_name"],
+            config=config(**{"--e2e-testcase": ["typo"]}),
+            parametrize=lambda name, values, ids: calls.append((name, values, ids)),
+        )
+    )
+    assert calls == [("case_name", sorted(CASES), sorted(CASES))]
+    assert _testcases_of_another_family(config(**{"--e2e-testcase": ["typo"]})) == {"typo"}
+    for options in (
+        {"--e2e-testcase": [sorted(CASES)[0]]},
+        {"--e2e-model": ["other_family"], "--e2e-testcase": ["typo"]},
+        {},
+    ):
+        assert _testcases_of_another_family(config(**options)) == set(), options
+
+    def item(name: str, **params):
+        return SimpleNamespace(originalname=name, callspec=SimpleNamespace(params=params))
+
+    collected = _collected_cases(
+        [
+            item("test_e2e", case_name=sorted(CASES)[0]),
+            item("test_e2e", case_name="other-case"),
+            item("test_helper", case_name="not-an-e2e-case"),
+            item("test_e2e", case="no-case-name"),
+            SimpleNamespace(originalname="test_e2e"),
+        ]
+    )
+    assert collected == {sorted(CASES)[0], "other-case"}
+    with pytest.raises(pytest.fail.Exception, match="matches no E2E case"):
+        _require_another_owner({"typo"}, collected)
+    with pytest.raises(pytest.skip.Exception, match="another family"):
+        _require_another_owner({"other-case"}, collected)
+
+
 def test_first_difference_counts_an_early_stop() -> None:
     assert _first_difference([1, 2, 3], [1, 2, 3]) is None
     assert _first_difference([1, 2, 4], [1, 2, 3]) == 2
     assert _first_difference([1, 2], [1, 2, 3]) == 2
 
 
+def test_the_text_before_a_split_is_the_shared_ids_whole_characters() -> None:
+    decoded = {(5, 9): '[{"Content": "caf\ufffd', (5,): "[", (): ""}
+
+    def decode(ids) -> str:
+        return decoded[tuple(ids)]
+
+    # Exactly the ids before the split are decoded; a character they leave unfinished is dropped.
+    assert _text_before_split(decode, [5, 9, 7], 2) == '[{"Content": "caf'
+    assert _text_before_split(decode, [5, 9, 7], 1) == "["
+    assert _text_before_split(decode, [5, 9, 7], 0) == ""
+
+
+def _replaced(segments, old: str, new: str) -> tuple[dict, ...]:
+    """``segments`` with ``old`` replaced by ``new`` in every Content."""
+    return tuple({**s, "Content": s["Content"].replace(old, new)} for s in segments)
+
+
 _SEGMENT = {"Start": 0.0, "End": 1.5, "Speaker": 0, "Content": "Hello world."}
 _OTHER_TEXT = {**_SEGMENT, "Content": "Hello there."}
 _TIE = [{"ids": [5], "values": [20.0]}, {"ids": [6, 7], "values": [20.125, 20.0]}]
 _FAR = [{"ids": [5], "values": [20.0]}, {"ids": [6, 7], "values": [20.125, 19.75]}]
+# Issue #2736 (GB300): the runs part at a near-tie (one BF16 value) between two spellings of
+# the same words, so every text after the split differs in case only. The text before the
+# split is the reference output up to the split token.
+_QUEEN_REFERENCE = (
+    {
+        "Start": 0,
+        "End": 23.45,
+        "Speaker": 0,
+        "Content": "She appeared an object of worship. The queen mother gave the French the"
+        " most affectionate reception.",
+    },
+    {
+        "Start": 35.81,
+        "End": 47.8,
+        "Speaker": 0,
+        "Content": "The queen mother gave the French the most affectionate reception.",
+    },
+)
+_QUEEN_NATIVE = _replaced(_QUEEN_REFERENCE, "queen mother", "Queen Mother")
+_QUEEN_SPLIT = json.dumps(list(_QUEEN_REFERENCE)).split("queen")[0]
+_QUEEN = {
+    "native_ids": (5, 7, 2),
+    "top": _TIE,
+    "native_segments": _QUEEN_NATIVE,
+    "reference_segments": _QUEEN_REFERENCE,
+    "split_text": _QUEEN_SPLIT,
+}
 _PARITY_SCENARIOS = {
     "identical": ({}, True),
     "near_tie": ({"native_ids": (5, 7, 2), "top": _TIE}, True),
@@ -959,6 +1144,22 @@ _PARITY_SCENARIOS = {
     ),
     "late_end_after_tie": (
         {"native_ids": (5, 7, 2), "top": _TIE, "native_segments": ({**_SEGMENT, "End": 1.7},)},
+        False,
+    ),
+    "near_tie_case_differs_after_split": (_QUEEN, True),
+    "near_tie_word_differs_after_split": (
+        {**_QUEEN, "native_segments": _replaced(_QUEEN_NATIVE, "French", "English")},
+        False,
+    ),
+    # The text before the split stays verbatim: a case change there fails.
+    "near_tie_case_differs_before_split": (
+        {**_QUEEN, "native_segments": _replaced(_QUEEN_NATIVE, "She appeared", "she appeared")},
+        False,
+    ),
+    # A text of the ids before the split that does not begin the reference output (here it
+    # runs into the native split token) is a broken decode, never shared text.
+    "near_tie_split_text_not_in_the_reference": (
+        {**_QUEEN, "split_text": json.dumps(list(_QUEEN_NATIVE)).split("Mother")[0]},
         False,
     ),
     "same_ids_other_raw_output": ({"native_segments": (_OTHER_TEXT,)}, False),
@@ -1087,12 +1288,21 @@ def _parity_inputs(
     raw_text=None,
     transcript=None,
     default_ids=None,
-) -> tuple[dict, dict, dict, dict]:
-    """Native and reference results shaped like the runs' JSON, for the oracle tests.
+    split_text="",
+):
+    """Native and reference results shaped like the runs' JSON, for the oracle tests, and
+    the reference decode.
 
     The default output is built from ``native_segments``, which must be well formed; a
-    malformed raw output is given as ``raw_text``.
+    malformed raw output is given as ``raw_text``. The decode knows one id list, the ids
+    before the runs part, and gives ``split_text`` for it; any other list is an error.
     """
+    first = _first_difference(list(native_ids), list(reference_ids))
+    texts = {} if first is None else {tuple(reference_ids[:first]): split_text}
+
+    def decode(ids) -> str:
+        return texts[tuple(ids)]
+
     native_segments, reference_segments = list(native_segments), list(reference_segments)
     raw = {
         "text": json.dumps(native_segments) if raw_text is None else raw_text,
@@ -1115,19 +1325,19 @@ def _parity_inputs(
         "stopped_at_eos": stopped,
         "eos_id": 2,
     }
-    return default, raw, reference, {"name": "case", "oracle": oracle}
+    return default, raw, reference, {"name": "case", "oracle": oracle}, decode
 
 
 @pytest.mark.parametrize("scenario", sorted(_PARITY_SCENARIOS))
 def test_comparison_checks_agree_with_the_assertions(scenario: str) -> None:
     changes, expected = _PARITY_SCENARIOS[scenario]
-    default, raw, reference, case = _parity_inputs(**changes)
+    default, raw, reference, case, decode = _parity_inputs(**changes)
     try:
-        _assert_parity(default, raw, reference, case)
+        _assert_parity(default, raw, reference, case, decode)
         asserted = True
     except AssertionError:
         asserted = False
-    checks = _comparison_checks(default, raw, reference, case)
+    checks = _comparison_checks(default, raw, reference, case, decode)
     assert asserted is expected
     assert all(check["passed"] for check in checks) is expected
     for check in checks:
@@ -1152,7 +1362,10 @@ def bundle_root(tmp_path_factory) -> Path:
     return tmp_path_factory.mktemp("vibevoice-asr-bundles")
 
 
-def test_e2e(tmp_path: Path, bundle_root: Path, case_name: str) -> None:
+def test_e2e(tmp_path: Path, bundle_root: Path, case_name: str, request) -> None:
+    other = _testcases_of_another_family(request.config)
+    if other:
+        _require_another_owner(other, _collected_cases(request.session.items))
     manifest_path, manifest, case = CASES[case_name]
     assert manifest_path.is_file()
     binary, runtime_root = _runtime()
@@ -1195,8 +1408,9 @@ def test_e2e(tmp_path: Path, bundle_root: Path, case_name: str) -> None:
     # Resampling to 24 kHz gives ceil(n * 24000 / rate) samples on both sides.
     expected_samples = -(-frames * SAMPLE_RATE // rate)
     with evidence_stage("compare"):
+        decode = _reference_decoder()
         try:
             assert reference["speech_samples"] == expected_samples
-            _assert_parity(default, raw, reference, case)
+            _assert_parity(default, raw, reference, case, decode)
         finally:
-            _record_comparison(default, raw, reference, case, tmp_path, expected_samples)
+            _record_comparison(default, raw, reference, case, decode, tmp_path, expected_samples)
