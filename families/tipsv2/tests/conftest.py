@@ -59,26 +59,35 @@ def pytest_collection_modifyitems(session, config, items) -> None:
     e2e_items = [item for item in items
                  if fnmatch.fnmatch(getattr(item, "originalname", "") or "", "test_*e2e")]
 
-    def case_name(item):
+    def names(item):
+        """Every name this item could be selected by, from what pytest exposes publicly.
+
+        Two sources, because a family is free to parametrize however it likes: the `case_name`
+        parameter, which this family uses, and the item's **parameter id**, which is the last
+        bracketed part of the nodeid. `families/clef` and `families/laya` parametrize on
+        `(manifest, case)` and pass `id=case["name"]`, so the name a caller would type is right
+        there even though `case_name` is not.
+
+        A family whose items carry the name in neither place cannot be selected by name by
+        anyone, so there is nothing to defer to.
+        """
         spec = getattr(item, "callspec", None)
         value = spec.params.get("case_name") if spec else None
-        return value if isinstance(value, str) else None
+        if isinstance(value, str):
+            yield value
+        nodeid = getattr(item, "nodeid", "") or ""
+        if nodeid.endswith("]") and "[" in nodeid:
+            identifier = nodeid[nodeid.rindex("[") + 1:-1]
+            # A family that deselected itself leaves one placeholder whose id is pytest's NOTSET
+            # sentinel rather than a case; it is not a name anyone can select.
+            if identifier != "NOTSET":
+                yield identifier
 
-    # Every family's cases count, not only this one's: the check is whether the selection names
-    # anything the **session** collected.
-    collected = {name for name in map(case_name, e2e_items) if name}
+    # Every family's names count, this one's and its siblings'. The question is only whether the
+    # **session** collected the name that was asked for - which is decidable from what pytest
+    # already publishes, without this file reaching into how another family parametrizes.
+    collected = {name for item in e2e_items for name in names(item)}
     if testcases & collected:
-        return
-
-    # Nothing matched. Before calling that a typo, allow for a sibling whose cases this file
-    # cannot see: a family is free to parametrize on something other than `case_name`
-    # (`families/clef` and `families/laya` parametrize on the manifest and the case). If any
-    # foreign E2E item is opaque that way, the selection may well be correct for the family that
-    # owns it, and aborting the whole session would make this family's presence break someone
-    # else's run - which is what family isolation forbids. Only when every E2E item in the
-    # session is one this file can read, and none matches, is the selection a typo.
-    if any(not item.nodeid.startswith(_FAMILY_PREFIX) and case_name(item) is None
-           for item in e2e_items):
         return
 
     raise pytest.UsageError(

@@ -69,6 +69,13 @@ int main(int argc, char** argv) {
             // `get<std::int32_t>` narrows silently: 261.5 in the case file would compare equal
             // to a returned 261 and report parity that does not exist. Each id has to be a real
             // integer inside the vocabulary before it is used as one.
+            // `null` iterates as empty in nlohmann/json, and the tokenizer also returns nothing
+            // for empty text - so an `ids: null` record would report parity it never checked.
+            // `ids: []` stays valid; it is the right answer for text that tokenizes to nothing.
+            if (!entry.at("ids").is_array()) {
+                std::cerr << "tokenizer_check: a case has no ids array\n";
+                return 2;
+            }
             std::vector<std::int32_t> expected;
             for (const auto& value : entry.at("ids")) {
                 if (!value.is_number_integer() || value.is_number_float()) {

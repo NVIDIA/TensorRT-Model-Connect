@@ -708,26 +708,25 @@ def test_the_testcase_guard_never_judges_another_family(monkeypatch) -> None:
     """
     hook = _collection_hook()
     mine = _item("test_official_checkpoint_e2e", "tipsv2-so400m14")
+    # `families/clef` and `families/laya` parametrize on `(manifest, case)` with
+    # `id=case["name"]`, so the name is in the parameter id and not in a `case_name` parameter.
     sibling = SimpleNamespace(
         originalname="test_e2e",
-        nodeid="families/clef/tests/test_e2e.py::test_e2e[manifest0-case0]",
+        nodeid="families/clef/tests/test_e2e.py::test_e2e[a-clef-case]",
         callspec=SimpleNamespace(params={"manifest": object(), "case": object()}))
 
-    # The sibling's case is not named here and cannot be seen; the session must still run.
+    # The sibling's name is in its parameter id even though `case_name` is not, so selecting it
+    # is a correct run and must stay quiet.
     hook(None, _config(["a-clef-case"]), [mine, sibling])
 
     # With this family alone, the same selection is the typo the guard exists for.
     with pytest.raises(pytest.UsageError, match="matches none of the E2E cases"):
         hook(None, _config(["a-clef-case"]), [mine])
 
-    # And a sibling whose cases *are* readable must not switch the guard off: a selection that
-    # names nobody is still a typo, however many families the session collected.
-    readable = _item("test_official_e2e", "other-family-case",
-                     file_name="../../other/tests/test_e2e.py")
-    readable.nodeid = "families/other/tests/test_e2e.py::test_official_e2e[other-family-case]"
-    hook(None, _config(["other-family-case"]), [mine, readable])   # owned by the sibling: quiet
+    # And a sibling in the session does **not** switch the guard off: a name nobody collected is
+    # still a typo, which is what the first attempt at this exemption got wrong.
     with pytest.raises(pytest.UsageError, match="matches none of the E2E cases"):
-        hook(None, _config(["neither-families-case"]), [mine, readable])
+        hook(None, _config(["neither-families-case"]), [mine, sibling])
 
 
 @pytest.mark.parametrize("value", [448.5, 448.0, "448", None])
