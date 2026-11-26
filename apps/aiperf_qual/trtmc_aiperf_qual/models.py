@@ -44,6 +44,9 @@ PRECISION_NAME_PARTS = set(PRECISION_RANK) | {"awq"}
 # take seconds per request, and three runs still give the confidence interval.
 LARGE_CHECKPOINT_BYTES = 16 * 2**30
 LARGE_MODEL_MEASUREMENT = {"settle_s": 0, "warmup": 1, "requests": 3, "runs": 5}
+# A benchmark entry's image limits, which go into its suite definition (and the Perf suite taken from it):
+# ``min_image_side`` drops images its processor cannot encode, ``letterbox`` fits images into a fixed built size.
+SUITE_IMAGE_OPTIONS = ("min_image_side", "letterbox")
 
 
 def checkpoint_bytes(hf_id: str, revision: str | None) -> int | None:
@@ -277,6 +280,9 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
                 # config/models' nulls stay: building the suite removes them from the catalog request too.
                 suite = {**suite, "request": {key: value for key, value in request.items()
                                               if value is not None or key not in own}}
+            for option in SUITE_IMAGE_OPTIONS:  # the profile's own image limits on a shared suite
+                if item.get(option):
+                    suite = {**suite, option: item.pop(option)}
             item["suite_definition"] = suite
     supplementary = [dict(item) for item in config.get("supplementary", [])]
     if config.get("accuracy_source") not in (None, "none"):

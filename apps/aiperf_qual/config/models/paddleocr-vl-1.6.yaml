@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # An OCR model prompted only with "OCR:": OCRBench's text-recognition crops with that prompt.
-absolute: [{name: ocrbench_text, request: {prompt: "OCR:"}}]
+# The bundle reads one fixed image size, the catalog profile's 560x280 (the checkpoint's resize keeps it), and
+# rejects any other: each crop is fitted into 560x280 with its aspect ratio kept and white padding, the same
+# pixels on both sides.
+absolute: [{name: ocrbench_text, request: {prompt: "OCR:"}, letterbox: {image: [560, 280]}}]
 
 reference:
   requirements: families/paddleocr_vl/tests/requirements.txt  # the family test reference's Transformers (PaddleOCR-VL)

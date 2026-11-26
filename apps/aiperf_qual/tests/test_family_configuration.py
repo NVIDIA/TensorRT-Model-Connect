@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 from pathlib import Path
 
 from trtmc_aiperf_qual import absolute, gold_metrics
@@ -26,6 +27,16 @@ def test_serve_env_extends_the_environment_of_servers_and_builds():
     assert {key: build_env(env)[key] for key in ("LD_PRELOAD", "BUILD_ONLY")} == {
         "LD_PRELOAD": "/opt/cudnn/libcudnn.so.9", "BUILD_ONLY": "1"}
     assert "BUILD_ONLY" not in _serve_env(env)
+
+
+def test_builds_find_native_libraries_in_the_runtime_build_directory(tmp_path, monkeypatch):
+    monkeypatch.setenv("CMAKE_PREFIX_PATH", f"/opt/sdk{os.pathsep}{tmp_path / 'runtime'}")
+    env = Environment({"repo": str(REPOSITORY), "runtime_root": str(tmp_path / "runtime")})
+    assert build_env(env)["CMAKE_PREFIX_PATH"] == f"{tmp_path / 'runtime'}{os.pathsep}/opt/sdk"
+    assert _serve_env(env)["CMAKE_PREFIX_PATH"] == f"/opt/sdk{os.pathsep}{tmp_path / 'runtime'}"  # servers unchanged
+    monkeypatch.delenv("CMAKE_PREFIX_PATH")
+    assert build_env(env)["CMAKE_PREFIX_PATH"] == str(tmp_path / "runtime")
+    assert "CMAKE_PREFIX_PATH" not in build_env(Environment({"repo": str(REPOSITORY)}))
 
 
 def mask(values, height=2, width=2):

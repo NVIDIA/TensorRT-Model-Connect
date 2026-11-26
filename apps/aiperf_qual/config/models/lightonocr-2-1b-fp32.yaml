@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # A page OCR model with no question input: OCRBench's text-recognition crops, the image alone (an empty prompt).
-absolute: [{name: ocrbench_text, request: {prompt: ""}}]
+# Its processor rounds each side up to the 14-pixel patch and merges 2x2 patches: a crop 14 pixels or less on a
+# side has no merged patch, and neither the native model nor the bundle can encode it (one of the 300 crops,
+# 51x13). It is dropped for both sides.
+absolute: [{name: ocrbench_text, request: {prompt: ""}, min_image_side: {image: 15}}]
 reference:
   # The image-text-to-text auto class loads this checkpoint without its vision weights; the family's official
   # reference loads it with LightOnOcrForConditionalGeneration and the slow (Pillow) image processor.
