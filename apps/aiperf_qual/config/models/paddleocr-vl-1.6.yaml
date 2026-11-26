@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# An OCR model prompted only with "OCR:": OCRBench's text-recognition crops with that prompt.
+absolute: [{name: ocrbench_text, request: {prompt: "OCR:"}}]
+
+reference:
+  requirements: families/paddleocr_vl/tests/requirements.txt  # the family test reference's Transformers (PaddleOCR-VL)

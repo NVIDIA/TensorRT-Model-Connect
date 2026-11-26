@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A single-line printed-text OCR model with no prompt input: OCRBench's text-recognition crops, the image alone.
+absolute: [ocrbench_text]  # no prompt field: the runtime takes none
+
+reference:
+  adapter: families/trocr/reference/adapter.py  # a vision encoder-decoder: no chat template or image-text-to-text class

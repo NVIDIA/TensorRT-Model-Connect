@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# An OCR model prompted only with "Text Recognition:": OCRBench's text-recognition crops with that prompt. The
+# bf16 profile inherits this configuration.
+absolute: [{name: ocrbench_text, request: {prompt: "Text Recognition:"}}]
+
+reference:
+  requirements: families/glm_ocr/requirements.txt  # Transformers 5.22 (GLM-OCR), layered on the serving interpreter

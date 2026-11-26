@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# OCRBench's six text-recognition categories (50 word or digit-string crops each); gold is the list of accepted
+# answers. For OCR models that read an image with their own fixed prompt (or none), not a question: the prompt is
+# the model's (its benchmark entry's request in config/models).
+suite: ocrbench-text-recognition-300
+version: 1
+source:
+  kind: hf_dataset
+  dataset: echo840/OCRBench
+  split: test
+  revision: 92a54bd1384387c178d5a07140a2d85e0a3d12e1
+  image_column: image
+  label_column: answer
+  task_column: question_type
+  where:
+    question_type: [Regular Text Recognition, Irregular Text Recognition, Artistic Text Recognition,
+                    Handwriting Recognition, Digit String Recognition, Non-Semantic Text Recognition]
+selection: {method: first, count: 300}
+fields: {image: image_path}
+request:
+  max_new_tokens: 32

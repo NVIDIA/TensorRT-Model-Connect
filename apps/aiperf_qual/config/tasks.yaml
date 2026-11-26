@@ -66,6 +66,10 @@ benchmarks:
            gate: {margin: 1.5}, quantized_gate: {margin: 3.0}, sampled_gate: {margin: 3.0}}
   ocrbench: {suite: ocrbench, suite_definition: ocrbench-1000, metric: contains,
              gate: {margin: 2.0}, quantized_gate: {margin: 3.0}, sampled_gate: {margin: 3.0}}
+  # OCR models that read with their own fixed prompt (or none) cannot answer OCRBench's questions: its 300
+  # text-recognition crops, scored as OCRBench scores them; a smaller set, so a wider margin.
+  ocrbench_text: {suite: ocrbench-text, suite_definition: ocrbench-text-recognition-300, metric: contains,
+                  gate: {margin: 3.0}, quantized_gate: {margin: 4.0}}
   librispeech: {suite: librispeech-test-clean, suite_definition: librispeech-test-clean-500, metric: wer,
                 gate: {margin: 0.3, relative_margin: 0.05}}
   # Japanese has no word boundaries: the character error rate of FLEURS ja (models that state it).

@@ -336,10 +336,11 @@ def _hf_rows(name: str, meta: Any, revision: str, source: Mapping[str, Any],
     if meta.streaming:
         table = list(table)
     candidates = range(len(table))
-    if source.get("where"):  # rows whose columns equal the given values (read before any media is decoded)
+    if source.get("where"):  # rows whose columns equal the given values, or one of a list's (read before any media)
         columns = {name: (table[name] if not meta.streaming else [row[name] for row in table]) for name in source["where"]}
+        accepted = {name: value if isinstance(value, list) else [value] for name, value in source["where"].items()}
         candidates = [index for index in candidates
-                      if all(columns[name][index] == value for name, value in source["where"].items())]
+                      if all(columns[name][index] in values for name, values in accepted.items())]
     # A stratified selection reads its field (the label column) before any media are decoded.
     field = selection.get("field") if selection.get("method") in ("stratified", "seeded") else None
     column = (label_column if field == "label" else field) if field else None

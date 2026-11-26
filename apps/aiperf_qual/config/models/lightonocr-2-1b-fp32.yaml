@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A page OCR model with no question input: OCRBench's text-recognition crops, the image alone (an empty prompt).
+absolute: [{name: ocrbench_text, request: {prompt: ""}}]
