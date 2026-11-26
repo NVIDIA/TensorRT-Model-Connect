@@ -729,6 +729,29 @@ def test_the_testcase_guard_never_judges_another_family(monkeypatch) -> None:
         hook(None, _config(["neither-families-case"]), [mine, sibling])
 
 
+def test_an_empty_parametrization_contributes_no_selectable_name() -> None:
+    """The leftover of a family that deselected itself is not a case anyone can ask for.
+
+    pytest spells that item's id differently by version - `NOTSET` on 8.x, `case_name0` on the
+    7.3 the test extra still allows - so the id cannot identify it and a check that read the id
+    would let `--e2e-testcase case_name0` satisfy itself on 7.3 while running nothing. The
+    parameter *values* identify it on every version: pytest fills them with its own sentinel.
+    """
+    hook = _collection_hook()
+
+    class NotSetType:                      # what pytest puts in the params of an empty set
+        def __repr__(self):
+            return "<NOTSET>"
+
+    for identifier in ("NOTSET", "case_name0"):
+        placeholder = SimpleNamespace(
+            originalname="test_official_checkpoint_e2e",
+            nodeid=f"families/tipsv2/tests/test_e2e.py::test_official_checkpoint_e2e[{identifier}]",
+            callspec=SimpleNamespace(params={"case_name": NotSetType()}))
+        with pytest.raises(pytest.UsageError, match="matches none of the E2E cases"):
+            hook(None, _config([identifier]), [placeholder])
+
+
 @pytest.mark.parametrize("value", [448.5, 448.0, "448", None])
 def test_a_build_option_that_is_not_an_integer_is_refused(value) -> None:
     """``int(448.5)`` is 448: a size this family cannot serve, truncated into the one it can.

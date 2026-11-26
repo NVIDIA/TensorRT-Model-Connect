@@ -59,6 +59,17 @@ def pytest_collection_modifyitems(session, config, items) -> None:
     e2e_items = [item for item in items
                  if fnmatch.fnmatch(getattr(item, "originalname", "") or "", "test_*e2e")]
 
+    def is_placeholder(item):
+        """True for the single item an **empty** parametrization leaves behind.
+
+        Its id is spelled differently by different pytest versions - `NOTSET` on 8.x, but
+        `case_name0` on 7.3, which the test extra still allows - so the id cannot identify it.
+        The parameter *values* can: pytest fills them with its own sentinel rather than a case.
+        """
+        spec = getattr(item, "callspec", None)
+        return bool(spec) and any(repr(value) == "<NOTSET>" or type(value).__name__ == "NotSetType"
+                                  for value in spec.params.values())
+
     def names(item):
         """Every name this item could be selected by, from what pytest exposes publicly.
 
@@ -71,17 +82,18 @@ def pytest_collection_modifyitems(session, config, items) -> None:
         A family whose items carry the name in neither place cannot be selected by name by
         anyone, so there is nothing to defer to.
         """
+        if is_placeholder(item):
+            return  # a deselected family's leftover, not a name anyone can select
         spec = getattr(item, "callspec", None)
         value = spec.params.get("case_name") if spec else None
         if isinstance(value, str):
             yield value
+        # The parameter id, which is where a family that does not use `case_name` puts the name.
+        # Only for a sibling: this family's own cases are already covered by `case_name` above,
+        # and reading its own ids back would be one more way for a placeholder to slip in.
         nodeid = getattr(item, "nodeid", "") or ""
-        if nodeid.endswith("]") and "[" in nodeid:
-            identifier = nodeid[nodeid.rindex("[") + 1:-1]
-            # A family that deselected itself leaves one placeholder whose id is pytest's NOTSET
-            # sentinel rather than a case; it is not a name anyone can select.
-            if identifier != "NOTSET":
-                yield identifier
+        if not nodeid.startswith(_FAMILY_PREFIX) and nodeid.endswith("]") and "[" in nodeid:
+            yield nodeid[nodeid.rindex("[") + 1:-1]
 
     # Every family's names count, this one's and its siblings'. The question is only whether the
     # **session** collected the name that was asked for - which is decidable from what pytest
