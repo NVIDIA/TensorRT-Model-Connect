@@ -14,7 +14,7 @@ from tensorrt_model_connect.build import subprocess_environment
 from . import builder
 
 
-def companion_version(draft: Path) -> int:
+def companion_version(draft: Path, *, tree: bool = False) -> int:
     """Validate the published assistant geometry without rewriting its weights."""
     config = json.loads((draft / "config.json").read_text(encoding="utf-8"))
     architectures = config.get("architectures")
@@ -32,22 +32,27 @@ def companion_version(draft: Path) -> int:
             or policy.get("target_layer_ids") != [1, 13, 25, 37, 49]
             or config.get("vocab_size", 202048) != 202048):
         raise ValueError("Muse-Glimmer requires its documented matched block-16 companion")
+    if tree and (version != 2 or policy.get("selector_top_k") != 16 or policy.get("selector_rank") != 256):
+        raise ValueError("Muse-Glimmer DDTree requires the matched rank-256, top-16 V2 selector")
     if not list(draft.glob("*.safetensors")):
         raise ValueError("Muse-Glimmer companion requires local safetensors weights")
     return version
 
 
-def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path) -> tuple[dict, dict]:
+def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path, package: dict) -> tuple[dict, dict]:
     """Export and build a complete pair; never substitute a base-only bundle."""
     source = Path(request.model_dir)
     draft = Path(request.companion)
-    version = companion_version(draft)
-    package = builder.installed_package(target)
+    tree = request.execution_variant == "dflash_tree"
+    if tree and package["version"] != "0.12.0":
+        raise ValueError("Muse-Glimmer DDTree requires the 0.12.0 Edge SDK")
+    version = companion_version(draft, tree=tree)
     weight_format = builder.request_weight_format(request, raw)
     limit = request.max_sequence_length or 1024
     if limit < 16:
         raise ValueError("Muse-Glimmer paired capacity must fit the complete verify block")
-    input_limit = min(limit, 512)
+    vision = builder.media_contract(request, raw, weight_format, limit)
+    input_limit = limit if vision else min(limit, 512)
     engine = staging / "edge_llm/engine"
     checkpoint = staging / "edge_llm/checkpoint"
     checkpoint.mkdir(parents=True)
@@ -58,24 +63,28 @@ def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path) -> 
         {"EDGELLM_PLUGIN_PATH": package["plugin"]},
         prepend_paths={"LD_LIBRARY_PATH": str(Path(package["plugin"]).parent)},
     )
-    interpreter = builder.exporter_python(package, target)
+    exporter = builder.export_prefix(request, package, target)
+    current = package["version"] == "0.12.0"
     for role, subdirectory, flag, profile in (
-        ("base", "llm", "--specBase", "--maxVerifyTreeSize"),
-        ("draft", "dflash_draft", "--specDraft", "--maxDraftTreeSize"),
+        ("base", "llm", "--specBase", "--maxSpecVerifyTokens" if current else "--maxVerifyTreeSize"),
+        ("draft", "dflash_draft", "--specDraft", "--maxSpecDraftTokens" if current else "--maxDraftTreeSize"),
     ):
         onnx = staging / f"{role}-export"
         commands = [
-            [interpreter, "-I", "-m", "tensorrt_edgellm.scripts.export", str(source),
-             str(onnx), "--skip-visual", "--skip-audio", f"--dflash-{role}",
+            [*exporter, str(source),
+             str(onnx), *([] if vision and role == "base" else ["--skip-visual"]), "--skip-audio", f"--dflash-{role}",
              "--dflash-draft-dir", str(draft)],
             [package["onnx_builder"], "--onnxDir", str(onnx / subdirectory),
              "--engineDir", str(engine), "--maxBatchSize", "1",
              "--maxInputLen", str(input_limit), "--maxKVCacheCapacity", str(limit),
-             profile, "16", flag],
+             profile, "32" if tree and role == "base" else "16", flag],
         ]
         with log_path.open("a", encoding="utf-8") as log:
             for command in commands:
                 builder._run(command, log, cwd=staging, env=environment)
+            if vision and role == "base":
+                builder.build_visual(onnx, engine, source, package, vision, limit, log,
+                                     staging, environment)
         shutil.rmtree(onnx)  # Only this preparation's intermediate files.
     required = (
         "spec_base.engine", "spec_draft.engine", "base_config.json", "draft_config.json",
@@ -106,9 +115,11 @@ def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path) -> 
             if path.is_file():
                 files[path.relative_to(staging).as_posix()] = path
     return files, {
-        "version": 1, "edge_revision": builder.EDGE_REVISION, "target": target,
-        "precision": "fp16", "weight_format": weight_format, "execution_variant": "dflash",
+        "version": 1, **builder.release_marker(package), "target": target,
+        "precision": "fp16", "weight_format": weight_format, "execution_variant": request.execution_variant,
+        **({"dflash_top_k": 4, "dflash_verify": 32} if tree else {}),
         "dflash_version": version, "dflash_block_size": 16,
         "max_sequence_length": limit, "max_input_length": input_limit, "max_batch_size": 1,
+        **({"vision": vision} if vision else {}),
         "artifacts": list(files),
     }
