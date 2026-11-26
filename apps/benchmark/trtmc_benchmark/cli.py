@@ -264,6 +264,9 @@ def _resolve_cases(
                 operation=operation,
                 selected_task=selected_task,
                 overrides=overrides,
+                # Preparing or listing bundles needs no request: a testcase trtmc-bench cannot build into one
+                # (a family test that prepares its own inputs) still names its bundle.
+                bundle_only=bool(arguments.dry_run or arguments.prepare_only),
             ).with_values(
                 name=display, runtime_root=runtime_root, bundle_is_explicit=explicit is not None
             )

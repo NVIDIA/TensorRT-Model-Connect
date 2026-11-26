@@ -62,6 +62,30 @@ def test_vision_language_catalog_case_carries_its_prompt_and_image(profile: str,
     assert Path(case.request["image_path"]).is_file()
 
 
+def test_bundle_only_resolution_keeps_a_testcase_that_is_no_request(tmp_path: Path) -> None:
+    # blip's first testcase is an unconditional caption (an empty prompt): its family test sends it, trtmc-bench
+    # cannot. Preparing or listing the bundle needs no request; executing it still fails.
+    model = ManifestCatalog(REPO / "families").resolve("blip-image-captioning-base")
+    with pytest.raises(BenchmarkError, match="non-empty prompt"):
+        resolve_case(model, tmp_path / "model.bundle")
+    case = resolve_case(model, tmp_path / "model.bundle", bundle_only=True)
+    assert case.request == {} and "non-empty prompt" in case.request_error
+    assert case.to_json()["request_error"] == case.request_error
+    with pytest.raises(BenchmarkError, match="has no request"):
+        case.with_values(runtime_root=tmp_path).worker_request()
+    assert "request_error" not in resolve_case(ManifestCatalog(REPO / "families").resolve("distilgpt2"),
+                                               tmp_path / "model.bundle", bundle_only=True).to_json()
+
+
+def test_cli_dry_run_lists_the_bundle_of_a_testcase_that_is_no_request(tmp_path: Path, capsys) -> None:
+    bundle = tmp_path / "model.bundle"
+    bundle.write_bytes(b"bundle")
+    assert main(["run", "--model", "blip-image-captioning-base", "--manifest-root", str(REPO / "families"),
+                 "--bundle", str(bundle), "--dry-run", "--no-build"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "non-empty prompt" in payload[0]["request_error"]
+
+
 def test_forecast_case_uses_public_forecast_request(tmp_path: Path) -> None:
     model = ManifestCatalog(REPO / "families").resolve("chronos-bolt-tiny-official")
     case = resolve_case(model, tmp_path / "model.bundle")
