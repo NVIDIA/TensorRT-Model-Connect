@@ -63,6 +63,8 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 - `families/timm_resnet/tests/data/test_img.jpeg`
 - `families/timm_vgg/tests/data/test_img.jpeg`
 - `families/timm_vit/tests/data/test_img.jpeg`
+- `families/videomae/tests/data/test_img.jpeg` (the E2E cuts a 16-frame
+  camera pan of 224x224 crops from it)
 
 `families/gemma3n/tests/data/test_img_car.jpeg` is a byte-identical copy of
 `families/timm_resnet/tests/data/test_img_car.jpeg`, a crop of the same
