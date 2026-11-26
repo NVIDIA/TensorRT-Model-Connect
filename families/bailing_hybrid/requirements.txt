@@ -1,0 +1,6 @@
+numpy
+safetensors
+torch
+fla-core==0.6.0
+einops
+accelerate

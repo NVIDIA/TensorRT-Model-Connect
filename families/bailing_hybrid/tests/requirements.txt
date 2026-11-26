@@ -1,0 +1,6 @@
+# Install only in the isolated upstream-reference environment.
+transformers==4.57.6
+fla-core==0.6.0
+einops
+accelerate
+pytest
