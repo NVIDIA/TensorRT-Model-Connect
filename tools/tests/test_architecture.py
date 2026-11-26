@@ -451,6 +451,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/tests/test_family_loader.cpp",
         "core/runtime/tests/test_internal_config.cpp",
         "core/runtime/tests/test_task_api.cpp",
+        "core/runtime/tests/test_trt_backend_without_cuda.cpp",
         "core/runtime/tests/test_trt_module_dynamic_input.cpp",
     }
     expected_api = {
