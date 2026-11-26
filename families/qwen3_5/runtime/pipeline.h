@@ -104,6 +104,10 @@ class RecurrentPipeline final : public ITextGeneration {
     // Feed the prompt to prefill_ in chunks of up to prefill_rows_ tokens and
     // return the logits of the last token.
     void run_prefill_chunks(const std::vector<int32_t>& input_ids, std::vector<float>& logits);
+    // Media inputs of prefill rows [start, start + rows): visual rows, selectors and MRoPE offsets.
+    void prepare_prefill_media(TensorMap& inputs, int32_t start, int32_t rows,
+                               std::vector<uint8_t>& visual, std::vector<int32_t>& use_visual,
+                               std::vector<int32_t>& offsets) const;
     void* hidden_state_device_ptr_{nullptr};
     std::size_t hidden_state_numel_{0};
 
