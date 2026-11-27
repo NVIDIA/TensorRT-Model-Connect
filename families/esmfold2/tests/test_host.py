@@ -125,15 +125,27 @@ def test_noise_schedule_matches_the_reference(host_binary: Path, tmp_path: Path)
     for steps in (1, 2, 14, 50):
         native = _dump(host_binary, [{"kind": "schedule", **SAMPLER, "steps": steps}], tmp_path)[0]
         schedule, gammas = sampler._build_noise_schedule(steps, "cpu")
-        np.testing.assert_allclose(native["sigmas"], schedule.numpy(), rtol=1.0e-6)
+        # torch's float32 operations in torch's order: only pow may differ (SLEEF vectors against libm), by an
+        # ulp. A base rounded otherwise (a product fused into the addition) moves a sigma by 3 ulps or more,
+        # since pow(base, 7) multiplies its relative error by 7.
+        sigmas = np.asarray(native["sigmas"], dtype=np.float32)
+        reference = schedule.numpy()
+        assert sigmas.shape == reference.shape
+        ulps = np.abs(sigmas.view(np.int32).astype(np.int64) - reference.view(np.int32).astype(np.int64))
+        assert ulps.max() <= 2, (steps, ulps.tolist())
         assert native["gammas"] == pytest.approx(gammas.numpy().tolist())
+        # The reference's step formulas on the schedule the native sampler walks: mixing in the reference's
+        # sigma would turn its last ulp into churn at the steps without any (a difference of near-equal squares).
+        assert len(native["levels"]) == len(sigmas) - 1
         for index, (noise_level, churn, sigma_next) in enumerate(native["levels"]):
-            sigma_prev = schedule[index].item()
+            sigma_prev = float(sigmas[index])
             gamma = gammas[index + 1].item()
-            assert noise_level == pytest.approx(sigma_prev * (1.0 + gamma), rel=1.0e-6)
+            assert noise_level == sigma_prev * (1.0 + gamma)
+            if gamma == 0.0:
+                assert churn == 0.0, (steps, index)
             assert churn == pytest.approx(SAMPLER["noise_scale"] * max(noise_level**2 - sigma_prev**2, 0.0) ** 0.5,
                                           rel=1.0e-5, abs=1.0e-6)
-            assert sigma_next == pytest.approx(schedule[index + 1].item())
+            assert sigma_next == float(sigmas[index + 1])
     assert len(sampler._build_noise_schedule(14, "cpu")[0]) == 11
 
 

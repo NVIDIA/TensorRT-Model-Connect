@@ -182,6 +182,10 @@ void checkSampler() {
     collapsing.sigma_min_ratio = 1.0e-12;
     collapsing.exponent = 1.0;
     expectThrows([&] { noise_schedule(collapsing, 14); }, "a schedule with two zero levels");
+    // 160^(1/0.001) overflows: the NaN levels must not vanish in the cap filter, leaving [cap, 0].
+    SamplerSettings overflowing = checkpointSampler();
+    overflowing.exponent = 1.0e-3;
+    expectThrows([&] { noise_schedule(overflowing, 14); }, "a schedule whose bounds overflow");
 
     const Mat3 rotation = rotation_from_quaternion({0.3F, -1.2F, 0.7F, 0.4F});
     for (int i = 0; i < 3; ++i)

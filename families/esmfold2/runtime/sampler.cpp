@@ -14,6 +14,15 @@ namespace {
 
 using Mat4 = std::array<std::array<double, 4>, 4>;
 
+// The reference rounds every float32 (torch) and double (Python) operation on its own. A compiler
+// may fuse a product into the following addition (GCC does by default where the ISA has FMA, as on
+// aarch64), which skips the product's rounding; the volatile round trip keeps it on every target.
+template <typename T>
+T rounded(T value) {
+    volatile T stored = value;
+    return stored;
+}
+
 // Jacobi eigen-decomposition of a symmetric 4x4 matrix; returns the eigenvector of the largest
 // eigenvalue.
 std::array<double, 4> dominantEigenvector(Mat4 matrix) {
@@ -77,14 +86,26 @@ NoiseSchedule noise_schedule(const SamplerSettings& settings, std::int32_t confi
         const double inverse = 1.0 / settings.exponent;
         const double high = std::pow(settings.sigma_max_ratio, inverse);
         const double span = std::pow(settings.sigma_min_ratio, inverse) - high;
+        // The cap filter below drops NaN silently, so overflow must be caught before it.
+        if (!std::isfinite(high) || !std::isfinite(span))
+            throw std::invalid_argument("ESMFold2 noise schedule overflows for exponent " +
+                                        std::to_string(settings.exponent));
         const float last = static_cast<float>(configured_steps - 1);
         for (std::int32_t step = 0; step < configured_steps; ++step) {
             const float ramp = static_cast<float>(step) / last;
-            const float base = ramp * static_cast<float>(span) + static_cast<float>(high);
+            // torch: high + (ramp / (steps - 1)) * span, two float32 roundings; pow(base, 7) turns
+            // one ulp of base into several of the sigma.
+            const float base = rounded(ramp * static_cast<float>(span)) + static_cast<float>(high);
             raw.push_back(static_cast<float>(settings.sigma_data) *
                           std::pow(base, static_cast<float>(settings.exponent)));
         }
         raw.push_back(0.0F);
+    }
+    for (const float sigma : raw) {
+        if (!std::isfinite(sigma))
+            throw std::invalid_argument("ESMFold2 noise schedule of " +
+                                        std::to_string(configured_steps) +
+                                        " steps has a non-finite level");
     }
     NoiseSchedule schedule;
     const float cap = static_cast<float>(settings.sigma_cap);
@@ -121,7 +142,10 @@ StepLevels step_levels(const SamplerSettings& settings, const NoiseSchedule& sch
     StepLevels levels;
     levels.sigma_next = schedule.sigmas[index + 1U];
     levels.noise_level = sigma_prev * (1.0 + static_cast<double>(schedule.gammas[index + 1U]));
-    const double excess = levels.noise_level * levels.noise_level - sigma_prev * sigma_prev;
+    // Python rounds both squares, so a step with gamma 0 gets exactly no churn; fused, it would get
+    // the square's rounding error.
+    const double excess =
+        rounded(levels.noise_level * levels.noise_level) - rounded(sigma_prev * sigma_prev);
     levels.churn_std = settings.noise_scale * std::pow(excess > 0.0 ? excess : 0.0, 0.5);
     return levels;
 }
