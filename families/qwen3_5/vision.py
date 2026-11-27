@@ -318,3 +318,26 @@ def add_mrope_rows(network, cosine, sine, coordinates, rope, half_dim, dtype):
         selected = network.add_elementwise(rows, mask, trt.ElementWiseOperation.PROD).get_output(0)
         outputs.append(network.add_reduce(selected, trt.ReduceOperation.SUM, 1, keep_dims=True).get_output(0))
     return tuple(outputs)
+
+
+def add_mrope_prompt_rows(network, cosine, sine, coordinates, rope, half_dim, dtype):
+    """Per-row MRoPE tables for ``S`` prompt rows: ``coordinates`` ``[S, 3]`` -> ``[S, half_dim]`` each,
+    the same section routing as :func:`add_mrope_rows`."""
+    sections = rope.get("mrope_section")
+    if (not isinstance(sections, (list, tuple)) or len(sections) != 3
+            or any(type(n) is not int or n < 0 for n in sections) or sum(sections) != half_dim):
+        raise ValueError("Qwen media requires three MRoPE sections matching partial rotary dimensions")
+    axes = np.zeros(half_dim, dtype=np.int32)
+    if rope.get("mrope_interleaved", True):
+        for axis in (1, 2):
+            axes[axis:sections[axis] * 3:3] = axis
+    else:
+        axes = np.repeat(np.arange(3, dtype=np.int32), sections)
+    masks = (np.arange(3, dtype=np.int32)[:, None] == axes[None, :]).astype(dtype).reshape(1, 3, half_dim)
+    mask = graph_ops.add_constant(network, masks.shape, masks, dtype=dtype)
+    outputs = []
+    for table in (cosine, sine):
+        rows = network.add_gather(table, coordinates, 0).get_output(0)  # [S, 3, half]
+        selected = network.add_elementwise(rows, mask, trt.ElementWiseOperation.PROD).get_output(0)
+        outputs.append(network.add_reduce(selected, trt.ReduceOperation.SUM, 1 << 1, keep_dims=False).get_output(0))
+    return tuple(outputs)

@@ -296,6 +296,11 @@ two-frame appearance case passed Model Connect/direct parity and independent
 FP32 NED0.0; it is not a motion-quality or all-configuration qualification.
 The generic image CLI is unchanged. See the owning recipe for API boundaries.
 
+A native single-GPU Qwen3.5 bundle without MTP or a draft ships `prefill.plan`
+next to `engine.plan`. The runtime prefills text and media prompts, NVFP4
+included, up to 64 rows per call and decodes with `engine.plan`. A bundle whose
+two engines need more than 80% of the GPU memory fails to build instead.
+
 When Edge offload is unavailable or fails, this family builds with the TensorRT
 Python API and executes with the Model Connect C++ runtime. Native execution
 owns the prepared projections, FP8 KV storage, visual processing, TP2 and

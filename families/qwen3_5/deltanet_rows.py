@@ -287,33 +287,37 @@ def add_chunked_delta_rule(
 def add_short_conv_rows(
     network: trt.INetworkDefinition,
     *,
-    columns: trt.ITensor,
+    inputs: trt.ITensor,
     conv_state: trt.ITensor,
     weight: trt.ITensor,
     channels: int,
     kernel: int,
 ) -> tuple[trt.ITensor, trt.ITensor]:
-    """Causal depthwise conv over ``columns`` ``[C, S]`` with a ``[C, kernel]`` history.
+    """Causal depthwise conv over ``inputs`` ``[S, C]`` with a ``[C, kernel]`` history.
 
-    The history holds the last ``kernel`` inputs (newest last). Output column
-    ``t`` is ``sum_j weight[:, j] * window[:, t + j]`` over
-    ``window = [history[:, 1:], columns]``; the new history is the last
-    ``kernel`` columns of the window. Returns ``(outputs [C, S], history)``.
+    The history holds the last ``kernel`` inputs (newest last). Output row
+    ``t`` is ``sum_j weight[:, j] * window[t + j]`` over
+    ``window = [history[:, 1:].T; inputs]``; the new history is the last
+    ``kernel`` rows of the window, transposed. Returns ``(outputs [S, C], history)``.
+    Rows stay the leading axis: TensorRT 11.4 cannot lower an NVFP4 projection
+    whose output is transposed to ``[C, S]`` and concatenated with the history.
     """
-    rows = row_count(network, _shuffle(network, columns, transpose=(1, 0)))
+    rows = row_count(network, inputs)
+    taps = _shuffle(network, weight, transpose=(1, 0))  # [kernel, C]
     if kernel > 1:
-        past = network.add_slice(conv_state, (0, 1), (channels, kernel - 1), (1, 1)).get_output(0)
-        window = network.add_concatenation([past, columns])
-        window.axis = 1
+        history = _shuffle(network, conv_state, transpose=(1, 0))  # [kernel, C]
+        past = network.add_slice(history, (1, 0), (kernel - 1, channels), (1, 1)).get_output(0)
+        window = network.add_concatenation([past, inputs])
+        window.axis = 0
         window = window.get_output(0)
     else:
-        window = columns
+        window = inputs
     total = None
     for tap in range(kernel):
-        tap_weight = network.add_slice(weight, (0, tap), (channels, 1), (1, 1)).get_output(0)
-        shifted = dynamic_slice(network, window, (0, tap), (channels, rows))
+        tap_weight = network.add_slice(taps, (tap, 0), (1, channels), (1, 1)).get_output(0)
+        shifted = dynamic_slice(network, window, (tap, 0), (rows, channels))
         term = _ew(network, shifted, tap_weight, trt.ElementWiseOperation.PROD)
         total = term if total is None else _ew(network, total, term, trt.ElementWiseOperation.SUM)
     last = _ew(network, rows, _i64(network, [1]), trt.ElementWiseOperation.SUB)
-    history = dynamic_slice(network, window, (_i64(network, [0]), last), (channels, kernel))
-    return total, history
+    history = dynamic_slice(network, window, (last, _i64(network, [0])), (kernel, channels))
+    return total, _shuffle(network, history, transpose=(1, 0))
