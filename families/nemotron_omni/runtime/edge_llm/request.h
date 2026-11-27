@@ -7,11 +7,21 @@
 #include "contract.h"
 
 #include <cstring>
+#ifdef TRTMC_NEMOTRON_OMNI_EDGE_012
+#include "../resampler.h"
+
+#include <tensorrt_edgellm/runtime/audioUtils.h>
+#include <tensorrt_edgellm/runtime/llmRuntimeUtils.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#else
 #include <edgellm/cpp/runtime/llmRuntimeUtils.h>
 #include <edgellm/cpp/runtime/streaming.h>
+#endif
 
 namespace trtmc::nemotron_omni::edge_llm {
 using namespace internal;
+
+using EdgeDataType = decltype(trt_edgellm::rt::Tensor{}.getDataType());
 
 inline void validate_capacity(int prompt, int input_limit, int capacity, int64_t budget) {
     if (prompt <= 0 || prompt > input_limit || budget <= 0 || budget > int64_t(capacity) - prompt)
@@ -66,7 +76,7 @@ inline trt_edgellm::rt::imageUtils::ImageData image_data(Span<const ImageView> f
             throw std::invalid_argument("Nemotron Omni video requires equal frame dimensions");
     }
     trt_edgellm::rt::Tensor tensor({int64_t(frames.size()), first.height, first.width, 3},
-                                   trt_edgellm::rt::DeviceType::kCPU, nvinfer1::DataType::kUINT8);
+                                   trt_edgellm::rt::DeviceType::kCPU, EdgeDataType::kUINT8);
     auto* output = static_cast<uint8_t*>(tensor.rawPointer());
     for (const auto& frame : frames) {
         if (frame.format == ImageFormat::UInt8)
@@ -87,10 +97,46 @@ inline trt_edgellm::rt::imageUtils::ImageData image_data(Span<const ImageView> f
     return result;
 }
 
-/// Map only qualified text/image command routes; never emulate video with images.
+#ifdef TRTMC_NEMOTRON_OMNI_EDGE_012
+using EdgePart = std::variant<TextPartView, ImageView, AudioView>;
+
+inline auto audio_data(AudioView audio) {
+    const auto rate = audio.sample_rate.value_or(16000);
+    if (!rate || rate > uint32_t(INT32_MAX) || !audio.channels || audio.samples.empty() ||
+        audio.samples.size() % audio.channels != 0 ||
+        audio.samples.size() / audio.channels > size_t(INT32_MAX))
+        throw std::invalid_argument("Omni audio requires a sample rate and complete PCM frames");
+    const auto frames = audio.samples.size() / audio.channels;
+    // The acoustic builder profile ends at 6000 steps, with a 160-sample hop.
+    if (frames * uint64_t(16000) / rate >= 6001ULL * 160)
+        throw std::invalid_argument("Omni audio exceeds the acoustic profile; it is not truncated");
+    std::vector<float> mono(frames);
+    for (size_t i = 0; i < frames; ++i) {
+        double sum = 0;
+        for (size_t ch = 0; ch < audio.channels; ++ch) {
+            float sample = audio.samples[i * audio.channels + ch];
+            if (!std::isfinite(sample))
+                throw std::invalid_argument("Omni PCM must be finite");
+            sum += sample;
+        }
+        mono[i] = float(sum / audio.channels);
+    }
+    if (rate != 16000)
+        mono = resample_pcm(mono.data(), int32_t(mono.size()), int32_t(rate), 16000);
+    auto samples = std::make_shared<trt_edgellm::rt::Tensor>(
+        trt_edgellm::rt::Coords{int64_t(mono.size())}, trt_edgellm::rt::DeviceType::kCPU,
+        EdgeDataType::kFLOAT);
+    std::memcpy(samples->rawPointer(), mono.data(), mono.size() * sizeof(float));
+    return trt_edgellm::rt::audioUtils::wrapPcm(std::move(samples), 16000);
+}
+#else
+using EdgePart = ImageVideoTextPart;
+#endif
+using EdgeMessage = MediaMessage<EdgePart>;
+
+/// Translate typed content in caller order without synthesizing media or timestamps.
 inline trt_edgellm::rt::LLMGenerationRequest
-make_request(Span<const ImageVideoTextMessage> messages, const TextGenerationConfig& cfg,
-             int capacity) {
+make_request(Span<const EdgeMessage> messages, const TextGenerationConfig& cfg, int capacity) {
     validate_request(cfg);
     if (cfg.min_p != 0 || cfg.repetition_penalty != 1 || cfg.top_k < 0 || cfg.top_p <= 0)
         throw std::invalid_argument(
@@ -126,6 +172,11 @@ make_request(Span<const ImageVideoTextMessage> messages, const TextGenerationCon
             if (const auto* image = std::get_if<ImageView>(&part)) {
                 target.contents.push_back({"image", ""});
                 request.imageBuffers.push_back(image_data({image, 1}, false));
+#ifdef TRTMC_NEMOTRON_OMNI_EDGE_012
+            } else if (const auto* audio = std::get_if<AudioView>(&part)) {
+                target.contents.push_back({"audio", ""});
+                request.audioBuffers.push_back(audio_data(*audio));
+#endif
             } else {
                 throw std::invalid_argument(
                     "Nemotron Omni Edge video is unavailable; build task=video_text_to_text "
@@ -136,7 +187,12 @@ make_request(Span<const ImageVideoTextMessage> messages, const TextGenerationCon
     result.applyChatTemplate = cfg.use_chat_template;
     result.enableThinking = cfg.enable_thinking;
     result.temperature = cfg.temperature;
+#ifdef TRTMC_NEMOTRON_OMNI_EDGE_012
+    // With an active nucleus, native sampling does not cap the default top_k=1.
+    result.topK = cfg.top_k == 1 && cfg.top_p < 1.0F - 1e-6F ? 0 : cfg.top_k;
+#else
     result.topK = cfg.top_k;
+#endif
     result.topP = cfg.top_p;
     result.maxGenerateLength = cfg.max_new_tokens;
     if (cfg.seed >= 0)

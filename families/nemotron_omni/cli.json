@@ -1,0 +1,135 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "help": "Build one Nemotron Omni TensorRT bundle",
+      "executor": "python",
+      "handler": "edge_llm.cli:build",
+      "arguments": [
+        {
+          "name": "model",
+          "type": "string",
+          "help": "Hugging Face model ID or local snapshot"
+        },
+        {
+          "name": "output",
+          "flags": [
+            "-o",
+            "--output"
+          ],
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "flags": [
+            "--revision"
+          ],
+          "type": "string"
+        },
+        {
+          "name": "task",
+          "flags": [
+            "--task"
+          ],
+          "type": "string",
+          "choices": [
+            "text_generation",
+            "vision_language_generation",
+            "text_continuation",
+            "images_text_to_text",
+            "video_text_to_text",
+            "audio_text_to_text",
+            "image_audio_text_to_text",
+            "audio_video_text_to_text"
+          ],
+          "default": "vision_language_generation"
+        },
+        {
+          "name": "precision",
+          "flags": [
+            "--precision"
+          ],
+          "type": "string",
+          "choices": [
+            "fp16",
+            "fp32"
+          ],
+          "help": "TensorRT compute precision",
+          "default": "fp16"
+        },
+        {
+          "name": "backend",
+          "flags": [
+            "--backend"
+          ],
+          "type": "string",
+          "choices": [
+            "trt",
+            "trt_rtx"
+          ],
+          "default": "trt"
+        },
+        {
+          "name": "max_sequence_length",
+          "flags": [
+            "--max-sequence-length"
+          ],
+          "type": "int"
+        },
+        {
+          "name": "max_batch_size",
+          "flags": [
+            "--max-batch-size"
+          ],
+          "type": "int",
+          "choices": [
+            1
+          ],
+          "default": 1,
+          "help": "Maximum supported batch size"
+        },
+        {
+          "name": "tensor_parallel_size",
+          "flags": [
+            "--tensor-parallel-size"
+          ],
+          "type": "int",
+          "choices": [
+            1
+          ],
+          "default": 1
+        },
+        {
+          "name": "verbose",
+          "flags": [
+            "--verbose"
+          ],
+          "type": "bool",
+          "action": "store_true",
+          "default": false
+        },
+        {
+          "name": "quantization",
+          "flags": [
+            "--quantization"
+          ],
+          "type": "string",
+          "choices": [
+            "nvfp4"
+          ],
+          "help": "Source checkpoint quantization; no recalibration"
+        },
+        {
+          "name": "edge_builder_python",
+          "flags": [
+            "--edge-builder-python"
+          ],
+          "type": "path",
+          "help": "Absolute Python interpreter for the optional Edge builder"
+        }
+      ]
+    }
+  ]
+}

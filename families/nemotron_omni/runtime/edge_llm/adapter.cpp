@@ -13,9 +13,15 @@
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <dlfcn.h>
+#ifdef TRTMC_NEMOTRON_OMNI_EDGE_012
+#include <tensorrt_edgellm/common/trtInterop.h>
+#include <tensorrt_edgellm/runtime/llmInferenceRuntime.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#else
 #include <edgellm/cpp/common/logger.h>
 #include <edgellm/cpp/runtime/llmInferenceRuntime.h>
 #include <edgellm/cpp/runtime/streaming.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -85,6 +91,14 @@ class Artifacts {
             if (!names.count(required) || bundle.find_section(required)->length == 0)
                 throw std::runtime_error(
                     std::string("Required Nemotron Omni Edge artifact missing: ") + required);
+#ifdef TRTMC_NEMOTRON_OMNI_EDGE_012
+        if (marker.at("builder_flow") == "direct_with_onnx_audio") {
+            for (const auto* key : {"edge_llm/engine/audio/audio_encoder.engine",
+                                    "edge_llm/engine/audio/config.json"})
+                if (!names.count(key) || !bundle.find_section(key)->length)
+                    throw std::runtime_error(std::string("Missing Omni acoustic artifact: ") + key);
+        }
+#endif
         const auto temporary_root = fs::temp_directory_path();
         require_artifact_space(required_bytes, fs::space(temporary_root).available);
         std::string pattern = (temporary_root / "trtmc-nemotron_omni-edge-XXXXXX").string();
@@ -142,7 +156,12 @@ std::unique_ptr<void, CloseLibrary> load_plugin() {
                                  std::string(dlerror()));
     using Initialize = bool (*)(void*, const char*);
     auto initialize = reinterpret_cast<Initialize>(dlsym(plugin.get(), "initEdgellmPlugins"));
+#ifdef TRTMC_NEMOTRON_OMNI_EDGE_012
+    if (!initialize ||
+        !initialize(static_cast<nvinfer1::ILogger*>(&trt_edgellm::TrtLogger::instance()), ""))
+#else
     if (!initialize || !initialize(static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger), ""))
+#endif
         throw std::runtime_error("Cannot initialize Nemotron Omni Edge plugin");
     return plugin;
 }
@@ -165,6 +184,10 @@ class EdgeTask final : public ITextGeneration,
                        public IVisionLanguageGeneration,
                        public IModel,
                        public ITextContinuation,
+#ifdef TRTMC_NEMOTRON_OMNI_EDGE_012
+                       public IAudioTextToText,
+                       public IImageAudioTextToText,
+#endif
                        public IImagesTextToText {
   public:
     EdgeTask(const BundleReader& bundle, const nlohmann::json& marker)
@@ -173,28 +196,40 @@ class EdgeTask final : public ITextGeneration,
                    std::unordered_map<std::string, std::string>{}, stream_.get(),
                    trt_edgellm::rt::ContextCacheConfig{}, artifacts_.checkpoint()),
           task_(bundle.info().task), capacity_(marker.at("max_sequence_length")),
-          input_limit_(marker.at("max_input_length")) {}
+          input_limit_(marker.at("max_input_length"))
+#ifdef TRTMC_NEMOTRON_OMNI_EDGE_012
+          ,
+          has_audio_(marker.at("builder_flow") == "direct_with_onnx_audio")
+#endif
+    {
+    }
     ~EdgeTask() override { cudaStreamSynchronize(stream_.get()); }
     const char* task() const noexcept override { return task_.c_str(); }
     int32_t default_max_new_tokens() const override { return 128; }
     std::vector<TaskInstance> task_bindings() override {
-        return {bind<ITextContinuation>(*this, field_view(false)),
-                bind<IImagesTextToText>(*this, field_view())};
+        std::vector<TaskInstance> tasks = {bind<ITextContinuation>(*this, field_view(false)),
+                                           bind<IImagesTextToText>(*this, field_view())};
+#ifdef TRTMC_NEMOTRON_OMNI_EDGE_012
+        if (has_audio_) {
+            tasks.push_back(bind<IAudioTextToText>(*this, field_view()));
+            tasks.push_back(bind<IImageAudioTextToText>(*this, field_view()));
+        }
+#endif
+        return tasks;
     }
     TextResult generate(const std::string& text, const TextGenerationConfig& cfg) override {
-        std::vector<ImageVideoTextPart> parts{TextPartView{text}};
-        ImageVideoTextMessage message{MessageRole::User, {parts.data(), parts.size()}};
+        std::vector<EdgePart> parts{TextPartView{text}};
+        EdgeMessage message{MessageRole::User, {parts.data(), parts.size()}};
         return execute({&message, 1}, cfg);
     }
     TextResult generate(const std::string& text, const float* pixels, int32_t h, int32_t w,
                         const TextGenerationConfig& cfg) override {
         if (h <= 0 || w <= 0)
             throw std::invalid_argument("Nemotron Omni image dimensions must be positive");
-        std::vector<ImageVideoTextPart> parts{ImageView{pixels, size_t(h) * w * 3 * sizeof(float),
-                                                        uint32_t(h), uint32_t(w), 3,
-                                                        ImageFormat::Float32},
-                                              TextPartView{text}};
-        ImageVideoTextMessage message{MessageRole::User, {parts.data(), parts.size()}};
+        std::vector<EdgePart> parts{ImageView{pixels, size_t(h) * w * 3 * sizeof(float),
+                                              uint32_t(h), uint32_t(w), 3, ImageFormat::Float32},
+                                    TextPartView{text}};
+        EdgeMessage message{MessageRole::User, {parts.data(), parts.size()}};
         return execute({&message, 1}, cfg);
     }
     TextResult run(const TextContinuationRequest& input, ConfigView supplied) override {
@@ -209,10 +244,18 @@ class EdgeTask final : public ITextGeneration,
             throw std::invalid_argument("Nemotron Omni reasoning does not expose tools");
         return media_messages(input.messages, supplied);
     }
+#ifdef TRTMC_NEMOTRON_OMNI_EDGE_012
+    TextResult run(const AudioTextToTextRequest& input, ConfigView supplied) override {
+        return media_messages(input.messages, supplied);
+    }
+    TextResult run(const ImageAudioTextToTextRequest& input, ConfigView supplied) override {
+        return media_messages(input.messages, supplied);
+    }
+#endif
     template <class Part>
     TextResult media_messages(Span<const MediaMessage<Part>> input, ConfigView supplied) {
-        std::vector<std::vector<ImageVideoTextPart>> storage;
-        std::vector<ImageVideoTextMessage> messages;
+        std::vector<std::vector<EdgePart>> storage;
+        std::vector<EdgeMessage> messages;
         storage.reserve(input.size());
         messages.reserve(input.size());
         for (const auto& source : input) {
@@ -221,8 +264,7 @@ class EdgeTask final : public ITextGeneration,
                 std::visit(
                     [&](const auto& value) {
                         using Value = std::decay_t<decltype(value)>;
-                        if constexpr (std::is_same_v<Value, TextPartView> ||
-                                      std::is_same_v<Value, ImageView>)
+                        if constexpr (std::is_constructible_v<EdgePart, Value>)
                             storage.back().emplace_back(value);
                         else
                             throw std::invalid_argument(
@@ -243,10 +285,12 @@ class EdgeTask final : public ITextGeneration,
     trt_edgellm::rt::LLMInferenceRuntime runtime_;
     std::string task_;
     int capacity_, input_limit_;
+#ifdef TRTMC_NEMOTRON_OMNI_EDGE_012
+    bool has_audio_;
+#endif
     std::mutex mutex_;
 
-    TextResult execute(Span<const ImageVideoTextMessage> messages,
-                       const TextGenerationConfig& cfg) {
+    TextResult execute(Span<const EdgeMessage> messages, const TextGenerationConfig& cfg) {
         auto request = make_request(messages, cfg, capacity_);
         const auto budget = request.maxGenerateLength;
         std::lock_guard<std::mutex> lock(mutex_);
@@ -269,7 +313,16 @@ class EdgeTask final : public ITextGeneration,
 ITask* create(const BundleReader& bundle) {
     const auto bytes = bundle.read_section("edge_llm.json");
     const auto marker = nlohmann::json::parse(bytes.begin(), bytes.end());
-    if (marker.at("version") != 1 || marker.at("edge_revision") != kRevision ||
+    const auto& revision = marker.at("edge_revision");
+#ifdef TRTMC_NEMOTRON_OMNI_EDGE_012
+    const bool compatible = marker.at("edge_release") == "0.12.0" &&
+                            (marker.at("builder_flow") == "direct" ||
+                             marker.at("builder_flow") == "direct_with_onnx_audio") &&
+                            (revision.is_null() || revision == kRevision);
+#else
+    const bool compatible = revision == kRevision;
+#endif
+    if (marker.at("version") != 1 || !compatible ||
         marker.at("max_sequence_length").get<int>() <= 1 ||
         marker.at("max_input_length").get<int>() <= 0 ||
         marker.at("max_input_length").get<int>() > marker.at("max_sequence_length").get<int>() ||
