@@ -1,0 +1,174 @@
+{
+  "hf_id": "google/siglip2-base-patch16-224",
+  "hf_revision": "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2",
+  "config": {
+    "initializer_factor": 1.0,
+    "model_type": "siglip",
+    "text_config": {
+      "model_type": "siglip_text_model",
+      "vocab_size": 256000
+    },
+    "transformers_version": "4.49.0.dev0",
+    "vision_config": {
+      "model_type": "siglip_vision_model"
+    }
+  },
+  "preprocessor": {
+    "do_convert_rgb": null,
+    "do_normalize": true,
+    "do_rescale": true,
+    "do_resize": true,
+    "image_mean": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "image_processor_type": "SiglipImageProcessor",
+    "image_std": [
+      0.5,
+      0.5,
+      0.5
+    ],
+    "processor_class": "SiglipProcessor",
+    "resample": 2,
+    "rescale_factor": 0.00392156862745098,
+    "size": {
+      "height": 224,
+      "width": 224
+    }
+  },
+  "shapes": {
+    "logit_bias": [
+      1
+    ],
+    "logit_scale": [
+      1
+    ],
+    "text_model.embeddings.position_embedding.weight": [
+      64,
+      768
+    ],
+    "text_model.embeddings.token_embedding.weight": [
+      256000,
+      768
+    ],
+    "text_model.encoder.layers.0.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "text_model.encoder.layers.1.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "text_model.encoder.layers.10.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "text_model.encoder.layers.11.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "text_model.encoder.layers.2.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "text_model.encoder.layers.3.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "text_model.encoder.layers.4.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "text_model.encoder.layers.5.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "text_model.encoder.layers.6.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "text_model.encoder.layers.7.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "text_model.encoder.layers.8.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "text_model.encoder.layers.9.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "text_model.head.weight": [
+      768,
+      768
+    ],
+    "vision_model.embeddings.patch_embedding.weight": [
+      768,
+      3,
+      16,
+      16
+    ],
+    "vision_model.embeddings.position_embedding.weight": [
+      196,
+      768
+    ],
+    "vision_model.encoder.layers.0.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "vision_model.encoder.layers.1.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "vision_model.encoder.layers.10.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "vision_model.encoder.layers.11.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "vision_model.encoder.layers.2.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "vision_model.encoder.layers.3.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "vision_model.encoder.layers.4.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "vision_model.encoder.layers.5.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "vision_model.encoder.layers.6.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "vision_model.encoder.layers.7.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "vision_model.encoder.layers.8.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "vision_model.encoder.layers.9.mlp.fc1.weight": [
+      3072,
+      768
+    ],
+    "vision_model.head.attention.in_proj_weight": [
+      2304,
+      768
+    ],
+    "vision_model.head.mlp.fc1.weight": [
+      3072,
+      768
+    ]
+  }
+}

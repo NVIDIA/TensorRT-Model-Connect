@@ -1,10 +1,102 @@
 # SigLIP
 
+The family serves `image_to_embedding`, `text_to_embedding`, and
+`text_image_to_relevance` from one bundle containing separate text and vision
+engines. The FP32 manifests cover Google's SigLIP base and SigLIP 2 base
+patch16 checkpoints at 224 pixels.
+
+SigLIP uses Unigram tokenization and Pillow bicubic resize. The fixed-resolution
+SigLIP 2 checkpoint uses Gemma BPE with byte fallback and Pillow bilinear resize.
+The BPE implementation accepts the checkpoint's declared space replacement,
+split, decoder, added-token options, and EOS template. Unsupported processing
+is rejected. Padding and truncation remain owned by the runtime's fixed text
+window. This does not add NaFlex or a different model architecture.
+
+## Validation
+
+The standard E2E test builds the selected manifest and compares all three Task
+outputs with the official reference, using the existing FP32 tolerances:
+
+```sh
+PYTHONPATH=core/builder:apps/benchmark:. python -m pytest families/siglip/tests \
+  --e2e-model siglip2-base-patch16-224 -q
+```
+
+This requires the native runtime, TensorRT, CUDA, and model weights. CPU tokenizer
+and preprocessing tests do not establish engine, embedding, score, or performance
+parity. The recorded H200 run below qualifies the pinned SigLIP 2 FP32 case
+without quantization. BPE checkpoints reject FP8 because the existing SigLIP
+activation scales are not calibrated for them.
+
+The native `siglip_bpe_tokenizer` CTest runs the small self-contained BPE fixture
+and a Unigram regression. `siglip_image_preprocess_seam` compares both resize
+filters against Pillow pixels, including upsampling, downsampling, mixed axes,
+and single-pixel dimensions.
+
+For the pinned official tokenizer comparison, download only its tokenizer asset:
+
+```sh
+hf download google/siglip2-base-patch16-224 tokenizer.json \
+  --revision 75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2 --local-dir /tmp/siglip2-tokenizer
+build/families/siglip/test_siglip_bpe_tokenizer \
+  families/siglip/tests/data/siglip2-tokenizer-golden.json \
+  /tmp/siglip2-tokenizer/tokenizer.json
+```
+
+The golden IDs and decoded strings were generated with `tokenizers==0.22.2`,
+after `Tokenizer.from_file(...)`, `no_padding()`, and `no_truncation()`, using
+`encode(text, add_special_tokens=False)`, `encode(text)`, and `decode(ids)`.
+The checkpoint-shape fixture records selected safetensors header shapes, not
+tensor values. Official assets are from Google's Apache-2.0 model repository
+at the revision above; the full tokenizer and weights are not vendored.
+
 This family builds SigLIP (`SiglipModel`) as a vision engine and a text engine
 for the `image_to_embedding`, `text_to_embedding` and
 `text_image_to_relevance` tasks (`google/siglip-base-patch16-224` in the
 manifests). Batch is 1. The family builds fp32 only: an all-fp16 engine moves
 the embeddings by more than the family's E2E tolerance.
+
+### Recorded SigLIP 2 H200 validation
+
+On 2026-11-19, source `98c79235993ba44a48dae02b5a6a51e080f6b72f` passed after
+merging NVIDIA `main` at `b1db0296`:
+
+```sh
+PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \
+  families/siglip/tests/test_e2e.py --e2e-testcase siglip2-base-patch16-224 \
+  -vv -s -p no:cacheprovider --tb=short
+```
+
+The one selected E2E builds the FP32 bundle and executes all three Tasks against
+the official Hugging Face FP32 reference with Pillow preprocessing. It uses
+`data/test_img.png` and the car/cat text pair from the unchanged manifest.
+Checkpoint/tokenizer revision: `75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2`.
+The same pinned identity is recorded in the documentation checkpoint snapshot
+`website/data/hf-model-metadata.json`. The publisher configuration has
+`model_type: siglip` and no `architectures` field; the snapshot retains that
+absence instead of inventing an architecture declaration.
+
+| Comparison | Maximum absolute error | Existing tolerance |
+| --- | ---: | ---: |
+| Image embedding | 2.682e-7 | 1e-4 |
+| Car text embedding | 5.588e-8 | 1e-4 |
+| Cat text embedding | 6.100e-8 | 1e-4 |
+| Relevance logit | 5.908e-6 | 0.002 |
+
+The native car/cat probabilities were 0.00528349 and 0.00000012; the existing
+ranking and cosine checks also passed. No gate or threshold was changed.
+
+Environment: one NVIDIA H200, TP1/batch1, x86_64 Ubuntu 24.04, driver 595.71.05,
+CUDA 13.4.3, TensorRT 11.4.0.106, PyTorch 2.12.0+cu130,
+Transformers 5.2.0 and Tokenizers 0.22.2. The development image uses the repository
+Dockerfile with x86_64 TensorRT include paths and Hopper architecture settings.
+Production CLI, backend and SigLIP DSO compiled; both native tokenizer and
+preprocessing CTests passed. The reference model uses CPU FP32; native engines
+execute on H200. The documentation-only evidence commit leaves the tested
+runtime, builder, test and snapshot source blobs unchanged.
+
+This qualifies this image/text case only. Other resolutions, checkpoints,
+platforms, batches, FP16, BPE FP8/NVFP4 and performance remain outside the evidence.
 
 ## Quantization
 

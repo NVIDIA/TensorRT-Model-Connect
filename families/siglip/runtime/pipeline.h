@@ -22,7 +22,6 @@ struct SiglipRuntimeConfig {
     std::int32_t max_text_len{64};
     std::int32_t embedding_dim{768};
     std::int32_t pad_token_id{1};
-    std::int32_t resample{3};
     float logit_scale{117.33F};
     float logit_bias{-12.93F};
 };

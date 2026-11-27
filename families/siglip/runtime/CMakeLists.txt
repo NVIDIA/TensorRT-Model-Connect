@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 add_library(trtmc_model_siglip SHARED
+  bpe_tokenizer.cpp
   unigram_tokenizer.cpp
   image_preprocess_seam.cpp
   pipeline.cpp
@@ -34,6 +35,17 @@ install(TARGETS trtmc_model_siglip
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_siglip_bpe_tokenizer
+    ${PROJECT_SOURCE_DIR}/families/siglip/tests/cpp/test_bpe_tokenizer.cpp
+  )
+  target_include_directories(test_siglip_bpe_tokenizer PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_siglip_bpe_tokenizer PRIVATE
+    trtmc_model_siglip nlohmann_json::nlohmann_json
+  )
+  target_compile_options(test_siglip_bpe_tokenizer PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME siglip_bpe_tokenizer COMMAND test_siglip_bpe_tokenizer
+    ${PROJECT_SOURCE_DIR}/families/siglip/tests/data/bpe-tokenizer-small.json
+  )
   add_executable(test_siglip_image_preprocess_seam
     ${PROJECT_SOURCE_DIR}/families/siglip/tests/cpp/test_image_preprocess_seam.cpp
   )
@@ -43,6 +55,7 @@ if(TRTMC_BUILD_TESTS)
   )
   target_link_libraries(test_siglip_image_preprocess_seam PRIVATE
     trtmc_model_siglip
+    nlohmann_json::nlohmann_json
     trtmc_core
     ${TRTMC_CUDART_LIBRARY}
   )
@@ -52,5 +65,6 @@ if(TRTMC_BUILD_TESTS)
   add_test(
     NAME siglip_image_preprocess_seam
     COMMAND test_siglip_image_preprocess_seam
+      ${PROJECT_SOURCE_DIR}/families/siglip/tests/data/pillow-resize-golden.json
   )
 endif()

@@ -37,7 +37,7 @@ SiglipRuntimeConfig parse_config(const std::vector<char>& data) {
     config.preprocess.input_image_w = json.at("input_image_w").get<std::int32_t>();
     config.preprocess.image_mean = triple(json, "image_mean");
     config.preprocess.image_std = triple(json, "image_std");
-    config.resample = json.at("resample").get<std::int32_t>();
+    config.preprocess.resample = json.at("resample").get<std::int32_t>();
     config.max_text_len = json.at("max_text_len").get<std::int32_t>();
     config.embedding_dim = json.at("embedding_dim").get<std::int32_t>();
     config.pad_token_id = json.at("pad_token_id").get<std::int32_t>();
