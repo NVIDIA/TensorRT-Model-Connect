@@ -5,10 +5,13 @@
 
 #pragma once
 
+#include "families/sam/runtime/sam_bilinear.h"
 #include "families/sam/runtime/sam_types.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <vector>
 
 namespace trtmc {
@@ -42,6 +45,17 @@ inline float sample_mask_bilinear(const std::vector<float>& mask, int32_t src_w,
     return top * (1.0F - wy) + bottom * wy;
 }
 
+// One axis of a mask resize from `src_len` to `dst_len` samples (the
+// half-pixel-center mapping), limited to its first `count` destination indices.
+inline SamBilinearAxis make_sam_mask_resize_axis(int32_t src_len, int32_t dst_len, int32_t count) {
+    const float scale = static_cast<float>(src_len) / static_cast<float>(dst_len);
+    return make_sam_bilinear_axis(src_len, count, [scale](int32_t i) {
+        return (static_cast<float>(i) + 0.5F) * scale - 0.5F;
+    });
+}
+
+// sample_mask_bilinear at every destination pixel, computed in separable
+// passes (sam_bilinear.h).
 inline std::vector<float> resize_mask_bilinear(const std::vector<float>& mask, int32_t src_w,
                                                int32_t src_h, int32_t dst_w, int32_t dst_h) {
     if (src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0) {
@@ -53,25 +67,23 @@ inline std::vector<float> resize_mask_bilinear(const std::vector<float>& mask, i
 
     std::vector<float> resized(static_cast<std::size_t>(dst_w) * static_cast<std::size_t>(dst_h),
                                0.0F);
-    const float scale_x = static_cast<float>(src_w) / static_cast<float>(dst_w);
-    const float scale_y = static_cast<float>(src_h) / static_cast<float>(dst_h);
-    for (int32_t y = 0; y < dst_h; ++y) {
-        const float src_y = (static_cast<float>(y) + 0.5F) * scale_y - 0.5F;
-        for (int32_t x = 0; x < dst_w; ++x) {
-            const float src_x = (static_cast<float>(x) + 0.5F) * scale_x - 0.5F;
-            resized[static_cast<std::size_t>(y) * static_cast<std::size_t>(dst_w) +
-                    static_cast<std::size_t>(x)] =
-                sample_mask_bilinear(mask, src_w, src_h, src_x, src_y);
-        }
+    if (mask.empty()) {
+        return resized;
     }
+    sam_bilinear_resize_plane(mask.data(), src_w, make_sam_mask_resize_axis(src_w, dst_w, dst_w),
+                              make_sam_mask_resize_axis(src_h, dst_h, dst_h), resized.data(),
+                              static_cast<std::size_t>(dst_w));
     return resized;
 }
 
 inline bool has_valid_sam_postprocess_request(const SamResult& result, int32_t image_size,
                                               int32_t rescaled_w, int32_t rescaled_h,
                                               int32_t original_w, int32_t original_h) {
+    // The rescaled image lies inside the image_size x image_size square the
+    // decoder masks cover.
     return result.num_masks > 0 && result.mask_width > 0 && result.mask_height > 0 &&
-           image_size > 0 && rescaled_w > 0 && rescaled_h > 0 && original_w > 0 && original_h > 0;
+           image_size > 0 && rescaled_w > 0 && rescaled_h > 0 && rescaled_w <= image_size &&
+           rescaled_h <= image_size && original_w > 0 && original_h > 0;
 }
 
 inline bool has_complete_sam_mask_payload(const SamResult& result) {
@@ -80,40 +92,11 @@ inline bool has_complete_sam_mask_payload(const SamResult& result) {
     return result.masks.size() >= static_cast<std::size_t>(result.num_masks) * mask_size;
 }
 
-inline std::vector<float> extract_sam_mask(const SamResult& result, int32_t mask_index) {
-    const auto mask_size =
-        static_cast<std::size_t>(result.mask_width) * static_cast<std::size_t>(result.mask_height);
-    const auto begin = result.masks.begin() + static_cast<std::ptrdiff_t>(mask_index) *
-                                                  static_cast<std::ptrdiff_t>(mask_size);
-    return std::vector<float>(begin, begin + static_cast<std::ptrdiff_t>(mask_size));
-}
-
-inline std::vector<float> crop_rescaled_sam_mask(const std::vector<float>& upsampled,
-                                                 int32_t image_size, int32_t rescaled_w,
-                                                 int32_t rescaled_h) {
-    std::vector<float> cropped(
-        static_cast<std::size_t>(rescaled_w) * static_cast<std::size_t>(rescaled_h), 0.0F);
-    for (int32_t y = 0; y < rescaled_h; ++y) {
-        const auto* src_row =
-            upsampled.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(image_size);
-        auto* dst_row =
-            cropped.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(rescaled_w);
-        std::copy_n(src_row, rescaled_w, dst_row);
-    }
-    return cropped;
-}
-
-inline std::vector<float> postprocess_single_sam_mask(const SamResult& result, int32_t mask_index,
-                                                      int32_t image_size, int32_t rescaled_w,
-                                                      int32_t rescaled_h, int32_t original_w,
-                                                      int32_t original_h) {
-    auto upsampled = resize_mask_bilinear(extract_sam_mask(result, mask_index), result.mask_width,
-                                          result.mask_height, image_size, image_size);
-    return resize_mask_bilinear(
-        crop_rescaled_sam_mask(upsampled, image_size, rescaled_w, rescaled_h), rescaled_w,
-        rescaled_h, original_w, original_h);
-}
-
+// Restores each mask to the original image: the image_size x image_size
+// upsample of the decoder mask, cropped to the rescaled image's top-left
+// rescaled_w x rescaled_h region, then resized to original_w x original_h.
+// Only the upsampled rows and columns the crop keeps are computed, and each
+// mask is written straight into the result.
 inline SamResult postprocess_sam_result(SamResult result, int32_t image_size, int32_t rescaled_w,
                                         int32_t rescaled_h, int32_t original_w,
                                         int32_t original_h) {
@@ -125,14 +108,48 @@ inline SamResult postprocess_sam_result(SamResult result, int32_t image_size, in
         return result;
     }
 
-    std::vector<float> processed;
-    processed.reserve(static_cast<std::size_t>(result.num_masks) *
-                      static_cast<std::size_t>(original_w) * static_cast<std::size_t>(original_h));
+    const int32_t mask_w = result.mask_width;
+    const int32_t mask_h = result.mask_height;
+    const auto mask_area = static_cast<std::size_t>(mask_w) * static_cast<std::size_t>(mask_h);
+    const auto crop_w = static_cast<std::size_t>(rescaled_w);
+    const auto crop_area = crop_w * static_cast<std::size_t>(rescaled_h);
+    const auto original_area =
+        static_cast<std::size_t>(original_w) * static_cast<std::size_t>(original_h);
 
+    // resize_mask_bilinear returns its input when the size does not change.
+    const bool upsample_is_copy = mask_w == image_size && mask_h == image_size;
+    const bool restore_is_copy = rescaled_w == original_w && rescaled_h == original_h;
+    SamBilinearAxis upsample_x;
+    SamBilinearAxis upsample_y;
+    if (!upsample_is_copy) {
+        upsample_x = make_sam_mask_resize_axis(mask_w, image_size, rescaled_w);
+        upsample_y = make_sam_mask_resize_axis(mask_h, image_size, rescaled_h);
+    }
+    SamBilinearAxis restore_x;
+    SamBilinearAxis restore_y;
+    if (!restore_is_copy) {
+        restore_x = make_sam_mask_resize_axis(rescaled_w, original_w, original_w);
+        restore_y = make_sam_mask_resize_axis(rescaled_h, original_h, original_h);
+    }
+
+    std::vector<float> processed(static_cast<std::size_t>(result.num_masks) * original_area);
+    std::vector<float> cropped(restore_is_copy ? 0 : crop_area);
     for (int32_t mask_index = 0; mask_index < result.num_masks; ++mask_index) {
-        auto restored = postprocess_single_sam_mask(result, mask_index, image_size, rescaled_w,
-                                                    rescaled_h, original_w, original_h);
-        processed.insert(processed.end(), restored.begin(), restored.end());
+        const float* mask = result.masks.data() + static_cast<std::size_t>(mask_index) * mask_area;
+        float* restored = processed.data() + static_cast<std::size_t>(mask_index) * original_area;
+        float* crop = restore_is_copy ? restored : cropped.data();
+        if (upsample_is_copy) {
+            for (int32_t y = 0; y < rescaled_h; ++y) {
+                std::copy_n(mask + static_cast<std::size_t>(y) * static_cast<std::size_t>(mask_w),
+                            crop_w, crop + static_cast<std::size_t>(y) * crop_w);
+            }
+        } else {
+            sam_bilinear_resize_plane(mask, mask_w, upsample_x, upsample_y, crop, crop_w);
+        }
+        if (!restore_is_copy) {
+            sam_bilinear_resize_plane(cropped.data(), rescaled_w, restore_x, restore_y, restored,
+                                      static_cast<std::size_t>(original_w));
+        }
     }
 
     result.masks = std::move(processed);
