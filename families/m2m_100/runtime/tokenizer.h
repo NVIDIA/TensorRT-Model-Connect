@@ -17,6 +17,8 @@ class ITokenizer {
   public:
     virtual ~ITokenizer() = default;
     virtual std::vector<std::int32_t> encode(const std::string& text) const = 0;
+    virtual std::vector<std::int32_t> encode(const std::string& text,
+                                             bool add_special_tokens) const = 0;
     virtual std::string decode(const std::vector<std::int32_t>& ids) const = 0;
     virtual std::int32_t id_for_token(std::string_view token) const = 0;
     virtual std::string token_for_id(std::int32_t id) const = 0;

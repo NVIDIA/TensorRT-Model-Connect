@@ -6,6 +6,13 @@ one-token decoder step with a static KV cache. The manifest builds
 `facebook/nllb-200-distilled-600M` in fp16 with `max_sequence_length` 256.
 Batch size is 1.
 
+Source-language overrides use the checkpoint tokenizer's framing: NLLB defaults
+to `src_lang text </s>`, while an explicit `legacy_behaviour=true` in
+`tokenizer_config.json` selects `text </s> src_lang`. M2M-100 uses a language
+prefix. The runtime tokenizes content without its serialized special-token
+template before applying this frame, so the bundled NLLB template's unknown
+language placeholder is not retained. Target-language forcing is unchanged.
+
 ## FP8 quantization study (not shipped)
 
 FP8 self-quantization of the encoder and decoder projections was built and
