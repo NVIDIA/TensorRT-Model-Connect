@@ -8,6 +8,7 @@
 #include "families/glmasr/runtime/glmasr_mel_spectrogram.h"
 #include "families/glmasr/runtime/glmasr_prompt_plan.h"
 #include "families/glmasr/runtime/kv_cache.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -353,7 +354,7 @@ TextResult GlmAsrPipeline::transcribe(const float* audio_samples, int32_t num_sa
     const int32_t new_tokens = max_new_tokens > 0 ? max_new_tokens : 224;
     if (config_.max_cache_length > 0 &&
         stats_.prompt_tokens + new_tokens > config_.max_cache_length) {
-        throw std::invalid_argument(
+        throw internal::ConfigError(
             "GLM-ASR audio needs a " + std::to_string(stats_.prompt_tokens) +
             "-token prompt plus up to " + std::to_string(new_tokens) +
             " generated tokens, which exceeds the bundle's KV cache length of " +
