@@ -31,7 +31,7 @@ def test_testcase_option_selects_exact_cases_only(monkeypatch):
     assert not e2e._selected(_Options(e2e_testcase=[e2e._FAMILY]), CASE)
     assert e2e._selected(_Options(e2e_testcase=[CASE]), CASE)
     assert e2e._selected(_Options(e2e_model=[e2e._FAMILY]), CASE)
-    assert e2e._selected(_Options(e2e_model=[e2e.MANIFEST["name"]]), CASE)
+    assert e2e._selected(_Options(e2e_model=[e2e.CASES[CASE][0]["name"]]), CASE)
     assert not e2e._selected(_Options(e2e_model=["another_family"]), CASE)
     assert not e2e._selected(_Options(e2e_model=[e2e._FAMILY], e2e_testcase=["another_case"]), CASE)
     assert not e2e._selected(_Options(), CASE)
@@ -91,3 +91,40 @@ def test_gap_evidence_follows_the_per_token_rule():
                                      0, 0.85)
     assert all(check["passed"] for check in passing)
     assert not all(check["passed"] for check in failing)
+
+
+def test_model_selection_does_not_cross_checkpoint_variants():
+    dense = "minicpm-v-4.7-1b-car-color"
+    moe = "minicpm-v-4.7-car-color"
+    assert e2e._selected(_Options(e2e_model=["minicpm-v-4.7-1b"]), dense)
+    assert not e2e._selected(_Options(e2e_model=["minicpm-v-4.7-1b"]), moe)
+    assert e2e._selected(_Options(e2e_model=["minicpm-v-4.7-35b-a3b"]), moe)
+    assert not e2e._selected(_Options(e2e_model=["minicpm-v-4.7-35b-a3b"]), dense)
+    assert e2e._selected(_Options(e2e_model=[e2e._FAMILY]), dense)
+    assert e2e._thresholds(dense)["near_tie_logit"] == 0.0
+    assert e2e._thresholds(moe)["near_tie_logit"] == 0.85
+
+
+def test_bundle_cache_is_separate_for_each_checkpoint(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import huggingface_hub
+
+    calls = []
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda **kwargs: tmp_path / kwargs["repo_id"].split("/")[-1])
+    monkeypatch.setattr(e2e, "build", lambda request: calls.append(request))
+
+    def mktemp(name):
+        directory = tmp_path / name
+        directory.mkdir()
+        return directory
+
+    get_bundle = e2e.built.__wrapped__(SimpleNamespace(mktemp=mktemp))
+    dense = e2e.MANIFESTS["minicpm-v-4.7-1b"]
+    moe = e2e.MANIFESTS["minicpm-v-4.7-35b-a3b"]
+    first = get_bundle(dense)
+    assert get_bundle(dense) == first
+    second = get_bundle(moe)
+    assert get_bundle(moe) == second and second != first
+    assert len(calls) == 2
+    assert calls[0].precision == "fp32" and calls[1].precision == "bf16"

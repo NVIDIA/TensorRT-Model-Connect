@@ -31,10 +31,7 @@ namespace trtmc::minicpmv4_7 {
 namespace {
 
 constexpr std::int32_t kBaseVocabSize = 248044;
-constexpr std::int32_t kFullVocabSize = 248144;
 constexpr std::size_t kMergeCount = 247587;
-constexpr std::size_t kAddedTokenCount = 100;
-constexpr std::size_t kSpecialTokenCount = 88;
 
 // The Split pattern exactly as tokenizer.json declares it.
 constexpr std::string_view kPretokenizerPattern =
@@ -43,6 +40,10 @@ constexpr std::string_view kPretokenizerPattern =
 // Unicode White_Space property; ICU's \s omits U+000B and U+0085, so spell the property out.
 constexpr std::string_view kIcuPattern =
     R"regex((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\p{White_Space}\p{L}\p{N}]+[\r\n]*|\p{White_Space}*[\r\n]+|\p{White_Space}+(?!\P{White_Space})|\p{White_Space}+)regex";
+constexpr std::string_view kDensePretokenizerPattern =
+    R"regex((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)regex";
+constexpr std::string_view kDenseIcuPattern =
+    R"regex((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\p{White_Space}\p{L}\p{M}\p{N}]+[\r\n]*|\p{White_Space}*[\r\n]+|\p{White_Space}+(?!\P{White_Space})|\p{White_Space}+)regex";
 
 [[noreturn]] void schema_error(const std::string& detail) {
     throw std::runtime_error("MiniCPM-V 4.7 tokenizer.json " + detail);
@@ -243,19 +244,25 @@ icu::UnicodeString normalize(std::string_view text) {
 }
 
 // One non-added-token segment: NFC, then the Split pattern with Isolated behavior.
-std::vector<std::string> pre_tokenize(std::string_view text) {
+std::vector<std::string> pre_tokenize(std::string_view text, bool dense) {
     const icu::UnicodeString normalized = normalize(text);
     UErrorCode status = U_ZERO_ERROR;
-    static const auto pattern = [] {
-        UErrorCode code = U_ZERO_ERROR;
-        std::unique_ptr<icu::RegexPattern> value(icu::RegexPattern::compile(
-            icu::UnicodeString::fromUTF8(icu::StringPiece(kIcuPattern.data(), kIcuPattern.size())),
-            0, code));
-        if (U_FAILURE(code))
-            throw std::runtime_error("MiniCPM-V 4.7 cannot compile the Split pattern");
-        return value;
+    static const auto patterns = [] {
+        std::array<std::unique_ptr<icu::RegexPattern>, 2> values;
+        const std::array<std::string_view, 2> sources{kIcuPattern, kDenseIcuPattern};
+        for (std::size_t index = 0; index < sources.size(); ++index) {
+            UErrorCode code = U_ZERO_ERROR;
+            values[index].reset(
+                icu::RegexPattern::compile(icu::UnicodeString::fromUTF8(icu::StringPiece(
+                                               sources[index].data(), sources[index].size())),
+                                           0, code));
+            if (U_FAILURE(code))
+                throw std::runtime_error("MiniCPM-V 4.7 cannot compile the Split pattern");
+        }
+        return values;
     }();
-    std::unique_ptr<icu::RegexMatcher> matcher(pattern->matcher(normalized, status));
+    std::unique_ptr<icu::RegexMatcher> matcher(
+        patterns[dense ? 1 : 0]->matcher(normalized, status));
     std::vector<std::string> result;
     // Isolated: every match is a piece, and so is any unmatched text between matches.
     int32_t previous = 0;
@@ -342,7 +349,7 @@ class BpeTokenizer final : public ITokenizer {
 
     BpeTokenizer() = default;
 
-    static void validate_schema(const nlohmann::json& root) {
+    static void validate_schema(const nlohmann::json& root, bool dense) {
         require_schema(root.is_object() && root.size() == 9, "has an unexpected top-level shape");
         require_schema(root.at("version") == "1.0" && root.at("truncation").is_null() &&
                            root.at("padding").is_null(),
@@ -361,13 +368,14 @@ class BpeTokenizer final : public ITokenizer {
         require_schema(split.is_object() && split.size() == 4 && split.at("type") == "Split" &&
                            split.at("behavior") == "Isolated" && split.at("invert") == false &&
                            split.at("pattern").is_object() && split.at("pattern").size() == 1 &&
-                           split.at("pattern").at("Regex") == kPretokenizerPattern,
+                           split.at("pattern").at("Regex") ==
+                               (dense ? kDensePretokenizerPattern : kPretokenizerPattern),
                        "does not match the Split pattern this runtime implements");
         const auto& byte_level = stages.at(1);
         require_schema(byte_level.is_object() && byte_level.size() == 4 &&
                            byte_level.at("type") == "ByteLevel" &&
                            byte_level.at("add_prefix_space") == false &&
-                           byte_level.at("trim_offsets") == true &&
+                           byte_level.at("trim_offsets") == !dense &&
                            byte_level.at("use_regex") == false,
                        "does not match the ByteLevel pre-tokenizer contract");
         const auto& post = root.at("post_processor");
@@ -376,11 +384,11 @@ class BpeTokenizer final : public ITokenizer {
                            post.at("trim_offsets") == false && post.at("use_regex") == false,
                        "must use the ByteLevel post-processor (no added ids)");
         const auto& decoder = root.at("decoder");
-        require_schema(decoder.is_object() && decoder.size() == 4 &&
-                           decoder.at("type") == "ByteLevel" &&
-                           decoder.at("add_prefix_space") == true &&
-                           decoder.at("trim_offsets") == true && decoder.at("use_regex") == true,
-                       "must use the ByteLevel decoder");
+        require_schema(
+            decoder.is_object() && decoder.size() == 4 && decoder.at("type") == "ByteLevel" &&
+                decoder.at("add_prefix_space") == !dense && decoder.at("trim_offsets") == !dense &&
+                decoder.at("use_regex") == !dense,
+            "must use the ByteLevel decoder");
         const auto& model = root.at("model");
         require_schema(model.is_object() && model.size() == 10 && model.at("type") == "BPE" &&
                            model.at("dropout").is_null() && model.at("unk_token").is_null() &&
@@ -398,7 +406,11 @@ class BpeTokenizer final : public ITokenizer {
     void parse(const char* data, std::size_t size) {
         try {
             const auto root = nlohmann::json::parse(data, data + size);
-            validate_schema(root);
+            const auto& added = root.at("added_tokens");
+            require_schema(added.is_array() && (added.size() == 50 || added.size() == 100),
+                           "has an unexpected added-token count");
+            dense_ = added.size() == 50;
+            validate_schema(root, dense_);
             parse_vocabulary(root.at("model").at("vocab"));
             parse_added_tokens(root.at("added_tokens"));
             parse_merges(root.at("model").at("merges"));
@@ -409,8 +421,8 @@ class BpeTokenizer final : public ITokenizer {
     }
 
     void parse_vocabulary(const nlohmann::json& values) {
-        vocabulary_.resize(kFullVocabSize);
-        token_to_id_.reserve(kFullVocabSize);
+        vocabulary_.resize(kBaseVocabSize);
+        token_to_id_.reserve(kBaseVocabSize + 100);
         std::vector<bool> seen(kBaseVocabSize);
         for (const auto& [token, value] : values.items()) {
             const auto parsed = tokenizer_json_id(value, kBaseVocabSize);
@@ -434,14 +446,16 @@ class BpeTokenizer final : public ITokenizer {
     }
 
     void parse_added_tokens(const nlohmann::json& values) {
-        require_schema(values.is_array() && values.size() == kAddedTokenCount,
+        require_schema(values.is_array() && (values.size() == 50 || values.size() == 100),
                        "has an unexpected added-token count");
+        vocabulary_.resize(kBaseVocabSize + values.size());
         std::size_t special_count = 0;
         for (std::size_t index = 0; index < values.size(); ++index) {
             const auto& value = values.at(index);
             require_schema(value.is_object() && value.size() == 7,
                            "contains an invalid added-token entry");
-            const auto parsed = tokenizer_json_id(value.at("id"), kFullVocabSize);
+            const auto parsed =
+                tokenizer_json_id(value.at("id"), static_cast<std::int32_t>(vocabulary_.size()));
             const std::string content = value.at("content").get<std::string>();
             require_schema(parsed == kBaseVocabSize + static_cast<std::int32_t>(index) &&
                                !content.empty() && value.at("single_word") == false &&
@@ -461,7 +475,7 @@ class BpeTokenizer final : public ITokenizer {
             }
             added_tokens_.emplace_back(content, id);
         }
-        require_schema(special_count == kSpecialTokenCount,
+        require_schema(special_count == (values.size() == 50 ? 38 : 88),
                        "has an unexpected special-token count");
         // Leftmost-longest matching, as the added vocabulary's Aho-Corasick matcher does.
         std::stable_sort(added_tokens_.begin(), added_tokens_.end(),
@@ -540,7 +554,7 @@ class BpeTokenizer final : public ITokenizer {
             const auto found = merges_.find(pair_key(left, right));
             return found == merges_.end() ? nullptr : &found->second;
         };
-        for (const auto& word : pre_tokenize(text)) {
+        for (const auto& word : pre_tokenize(text, dense_)) {
             std::vector<std::int32_t> ids;
             ids.reserve(word.size());
             for (const unsigned char byte : word)
@@ -551,6 +565,7 @@ class BpeTokenizer final : public ITokenizer {
     }
 
     std::vector<std::string> vocabulary_;
+    bool dense_ = false;
     std::unordered_map<std::string, std::int32_t> token_to_id_;
     std::array<std::int32_t, 256> byte_ids_{};
     std::unordered_map<std::uint64_t, BpeMergeRule> merges_;
