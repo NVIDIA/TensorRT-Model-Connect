@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+find_package(ICU 74 REQUIRED COMPONENTS uc)
+
 add_library(trtmc_model_deberta_v2 SHARED
   unigram_tokenizer.cpp
   pipeline.cpp
@@ -18,6 +20,7 @@ target_include_directories(trtmc_model_deberta_v2 SYSTEM PRIVATE
 target_link_libraries(trtmc_model_deberta_v2 PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
+  ICU::uc
   ${TRTMC_CUDART_LIBRARY}
 )
 target_compile_options(trtmc_model_deberta_v2 PRIVATE

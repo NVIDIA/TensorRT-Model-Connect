@@ -3,18 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/*
- * The three normalizer steps this checkpoint declares, and the one it cannot
- * do.
- *
- * DeBERTa's converted tokenizer.json asks for Replace(\s{2,}|[\n\r\t] -> " "),
- * then NFC, then a right-only Strip. The first and third are implemented
- * exactly. NFC is not: composing Unicode in full is a large table, and
- * getting it subtly wrong would move tokenization silently, so input that
- * NFC would actually have changed is refused instead. These are the checks
- * for all three.
- */
-
 #include "families/deberta_v2/runtime/tokenizer.h"
 
 #include <cstdint>
@@ -60,7 +48,10 @@ int main() {
         "vocab": [
           ["<unk>", 0.0], ["▁the", -1.0], ["▁capital", -1.0],
           ["▁of", -1.0], ["▁france", -1.0], ["▁is", -1.0],
-          ["▁paris", -1.0], [".", -1.0], ["▁a", -1.0], ["▁b", -1.0]
+          ["▁paris", -1.0], [".", -1.0], ["▁a", -1.0], ["▁b", -1.0],
+          ["▁é", -1.0], ["▁가", -1.0], ["▁각", -1.0], ["▁Å", -1.0],
+          ["▁Ǻ", -1.0], ["▁ộ", -1.0], ["▁क़", -1.0], ["▁Ώ", -1.0],
+          ["▁①", -1.0], ["▁ﬀ", -1.0], ["▁é̀", -1.0]
         ]
       },
       "normalizer": {"type": "Sequence", "normalizers": [
@@ -101,16 +92,51 @@ int main() {
     check(tokenizer->encode("the capital of france is paris.   "), plain,
           "trailing whitespace is stripped");
 
-    // NFC: composed text passes through untouched...
-    check(tokenizer->encode("é a"), tokenizer->encode("é a"), "composed text is stable");
-    // ...and decomposed text is refused rather than silently mis-tokenised.
-    bool refused = false;
-    try {
-        tokenizer->encode("é a");
-    } catch (const std::exception&) {
-        refused = true;
+    const auto check_input = [&](const std::string& text, const std::vector<std::int32_t>& expected,
+                                 const char* name) {
+        try {
+            check(tokenizer->encode(text), expected, name);
+        } catch (const std::exception& error) {
+            std::cerr << "FAIL: " << name << ": " << error.what() << '\n';
+            ++failures;
+        }
+    };
+    check_input("é a", {10, 8}, "composed accent");
+    check_input("é a", {10, 8}, "decomposed accent");
+    check_input("가 a", {11, 8}, "Hangul LV composition");
+    check_input("각 a", {12, 8}, "Hangul LVT composition");
+    check_input("Å a", {13, 8}, "canonical singleton");
+    check_input("Å a", {13, 8}, "ring composition");
+    check_input("Ǻ a", {14, 8}, "recursive composition");
+    check_input("ộ a", {15, 8}, "canonical mark reordering");
+    check_input("ộ a", {15, 8}, "ordered canonical marks");
+    check_input("क़ a", {16, 8}, "composition exclusion");
+    check_input("Ώ a", {17, 8}, "Greek composition");
+    check_input("① a", {18, 8}, "circled digit remains compatible-only");
+    check_input("ﬀ a", {19, 8}, "ligature remains compatible-only");
+    check_input("é̀ a", {20, 8}, "uncomposed trailing mark is retained");
+
+    for (const std::string& text :
+         {std::string("\xc3"), std::string("\xc0\xaf"), std::string("\xed\xa0\x80"),
+          std::string("\u0378"), std::string("\U00011380")}) {
+        bool refused = false;
+        try {
+            tokenizer->encode(text);
+        } catch (const std::exception&) {
+            refused = true;
+        }
+        expect(refused, "invalid UTF-8 or out-of-profile scalar is refused");
     }
-    expect(refused, "decomposed text is refused rather than passed through");
+
+    const std::string close_scores = R"({
+      "model": {"type": "Unigram", "unk_id": 0, "vocab": [
+        ["<unk>", 0.0], ["▁", 0.0], ["a", -0.1], ["aa", -0.200000001]
+      ]},
+      "pre_tokenizer": {"type": "Metaspace", "replacement": "▁",
+                        "prepend_scheme": "always", "split": true}
+    })";
+    const auto precise = trtmc::CreateDebertaTokenizer(close_scores.data(), close_scores.size());
+    check(precise->encode("aa"), {1, 2, 2}, "nearby Unigram scores retain their ordering");
 
     return failures == 0 ? 0 : 1;
 }

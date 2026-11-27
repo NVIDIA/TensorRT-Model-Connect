@@ -14,6 +14,9 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <unicode/normalizer2.h>
+#include <unicode/uchar.h>
+#include <unicode/utf16.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -272,34 +275,38 @@ std::string collapse_whitespace_runs(std::string text) {
     return out;
 }
 
-// NFC, as far as this tokenizer can honestly go.
-//
-// Implementing Unicode canonical composition in full is a large table, and
-// getting it subtly wrong would change tokenization silently. What is done
-// instead is to refuse the input that NFC would actually have changed in
-// practice: text carrying combining marks, which is what decomposed accents
-// look like. Text without them is already composed, and NFC is the identity
-// on it, so passing it through unchanged is exact rather than approximate.
-//
-// The residual is narrow and real: a few singletons that NFC rewrites on
-// their own, such as U+212B ANGSTROM SIGN, carry no combining mark and are
-// passed through here where the reference would have replaced them.
-bool is_combining_mark(char32_t code) {
-    return (code >= 0x0300 && code <= 0x036F) || (code >= 0x1AB0 && code <= 0x1AFF) ||
-           (code >= 0x1DC0 && code <= 0x1DFF) || (code >= 0x20D0 && code <= 0x20FF) ||
-           (code >= 0xFE20 && code <= 0xFE2F);
-}
+std::string normalize_nfc(std::string text) {
+    if (text.size() > static_cast<std::size_t>(std::numeric_limits<int32_t>::max()))
+        throw std::runtime_error("deberta_v2 tokenizer: NFC input is too long");
+    const auto input = icu::UnicodeString::fromUTF8(text);
+    std::string result;
+    input.toUTF8String(result);
+    if (result != text)
+        throw std::runtime_error("deberta_v2 tokenizer: NFC requires valid UTF-8");
 
-std::string require_composed(std::string text) {
-    std::size_t pos = 0;
-    while (pos < text.size()) {
-        const char32_t code = utf8_to_char32(text, pos);
-        if (is_combining_mark(code))
+    // Note (Jiaxin Deng): A fixed repertoire keeps NFC stable across ICU data upgrades.
+    for (int32_t index = 0; index < input.length();) {
+        const auto code = input.char32At(index);
+        index += U16_LENGTH(code);
+        UVersionInfo age{};
+        u_charAge(code, age);
+        if (age[0] == 0 || age[0] > 15 || (age[0] == 15 && age[1] > 1))
             throw std::runtime_error(
-                "deberta_v2 tokenizer: input carries combining marks, which this tokenizer "
-                "cannot compose; supply NFC-normalised text");
+                "deberta_v2 tokenizer: NFC requires code points available in Unicode 15.1");
     }
-    return text;
+    UErrorCode status = U_ZERO_ERROR;
+    const auto* nfc = icu::Normalizer2::getNFCInstance(status);
+    if (U_FAILURE(status))
+        throw std::runtime_error(std::string("deberta_v2 tokenizer: NFC unavailable: ") +
+                                 u_errorName(status));
+    icu::UnicodeString normalized;
+    nfc->normalize(input, normalized, status);
+    if (U_FAILURE(status))
+        throw std::runtime_error(std::string("deberta_v2 tokenizer: NFC failed: ") +
+                                 u_errorName(status));
+    result.clear();
+    normalized.toUTF8String(result);
+    return result;
 }
 
 std::string strip_trailing_whitespace(std::string text) {
@@ -363,14 +370,14 @@ std::vector<std::string> whitespace_split(const std::string& text) {
 struct TrieNode {
     std::unordered_map<char, int> children;
     int token_id = -1; // -1 = not a token end
-    float score = 0.0f;
+    double score = 0.0;
 };
 
 class Trie {
   public:
     Trie() { mNodes.emplace_back(); } // root node
 
-    void insert(const std::string& token, int id, float score) {
+    void insert(const std::string& token, int id, double score) {
         int node = 0;
         for (char c : token) {
             auto it = mNodes[node].children.find(c);
@@ -392,7 +399,7 @@ class Trie {
     struct Match {
         int token_id;
         size_t length;
-        float score;
+        double score;
     };
 
     void find_prefixes(const std::string& text, size_t offset, std::vector<Match>& out) const {
@@ -417,32 +424,32 @@ class Trie {
 // ─── Viterbi algorithm for Unigram tokenization ───
 
 struct ViterbiNode {
-    float score;
+    double score;
     int token_id;
     size_t prev_pos; // byte position of previous node
 };
 
 std::vector<int32_t> viterbi_encode(const std::string& text, const Trie& trie, int32_t unk_id,
-                                    float unk_score) {
+                                    double unk_score) {
     if (text.empty())
         return {};
 
     size_t n = text.size();
     // best[i] = best path score to reach byte position i
-    std::vector<ViterbiNode> best(n + 1, {-std::numeric_limits<float>::infinity(), -1, 0});
-    best[0].score = 0.0f;
+    std::vector<ViterbiNode> best(n + 1, {-std::numeric_limits<double>::infinity(), -1, 0});
+    best[0].score = 0.0;
 
     std::vector<Trie::Match> matches;
 
     for (size_t i = 0; i < n; ++i) {
-        if (best[i].score == -std::numeric_limits<float>::infinity())
+        if (best[i].score == -std::numeric_limits<double>::infinity())
             continue;
 
         trie.find_prefixes(text, i, matches);
 
         for (const auto& m : matches) {
             size_t end = i + m.length;
-            float new_score = best[i].score + m.score;
+            double new_score = best[i].score + m.score;
             if (new_score > best[end].score) {
                 best[end].score = new_score;
                 best[end].token_id = m.token_id;
@@ -454,7 +461,7 @@ std::vector<int32_t> viterbi_encode(const std::string& text, const Trie& trie, i
         size_t char_len = utf8_char_len(text, i);
         size_t end = i + char_len;
         if (end <= n) {
-            float new_score = best[i].score + unk_score;
+            double new_score = best[i].score + unk_score;
             if (new_score > best[end].score) {
                 best[end].score = new_score;
                 best[end].token_id = unk_id;
@@ -607,7 +614,7 @@ class UnigramTokenizer final : public ITokenizer {
         for (size_t i = 0; i < vocab.size(); ++i) {
             auto& entry = vocab[i];
             std::string token = entry[0].get<std::string>();
-            float score = entry[1].get<float>();
+            double score = entry[1].get<double>();
 
             mIdToToken[i] = token;
             mTokenToId[token] = static_cast<int32_t>(i);
@@ -615,12 +622,12 @@ class UnigramTokenizer final : public ITokenizer {
         }
 
         // UNK score: must be worse than ANY real vocab token for Viterbi
-        float min_score = 0.0f;
-        for (float s : mScores) {
+        double min_score = 0.0;
+        for (double s : mScores) {
             if (s < min_score)
                 min_score = s;
         }
-        mUnkScore = min_score - 10.0f;
+        mUnkScore = min_score - 10.0;
     }
 
     void build_trie() {
@@ -736,7 +743,7 @@ class UnigramTokenizer final : public ITokenizer {
                 value = collapse_whitespace_runs(std::move(value));
                 break;
             case NormalizerStep::Kind::Nfc:
-                value = require_composed(std::move(value));
+                value = normalize_nfc(std::move(value));
                 break;
             case NormalizerStep::Kind::Strip:
                 value = strip_outer_whitespace(std::move(value));
@@ -779,7 +786,7 @@ class UnigramTokenizer final : public ITokenizer {
             if (tok_id >= 0 && !content.empty()) {
                 if (static_cast<size_t>(tok_id) >= mIdToToken.size()) {
                     mIdToToken.resize(static_cast<size_t>(tok_id) + 1);
-                    mScores.resize(static_cast<size_t>(tok_id) + 1, 0.0f);
+                    mScores.resize(static_cast<size_t>(tok_id) + 1, 0.0);
                 }
                 mIdToToken[tok_id] = content;
                 mTokenToId[content] = tok_id;
@@ -857,13 +864,13 @@ class UnigramTokenizer final : public ITokenizer {
     // ─── Data members ───
 
     std::vector<std::string> mIdToToken;
-    std::vector<float> mScores;
+    std::vector<double> mScores;
     std::unordered_map<std::string, int32_t> mTokenToId;
     std::unordered_set<int32_t> mDecodeSkipIds;
     Trie mTrie;
 
     int32_t mUnkId = 0;
-    float mUnkScore = -100.0f;
+    double mUnkScore = -100.0;
     bool mAddSpecialTokens = true;
     std::vector<NormalizerStep> mSteps;
     bool mAddPrefixSpace = true;
