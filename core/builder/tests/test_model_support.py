@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -81,7 +82,10 @@ def test_load_model_metadata_keeps_exact_snapshot_files_without_root_json(
     assert metadata.files == ("checkpoint/manifest.ocdbt",)
 
 
-def test_load_model_metadata_discovers_a_modular_pipeline(tmp_path: Path) -> None:
+@pytest.mark.parametrize("config", [None, {}, {"output_dim": 256}])
+def test_load_model_metadata_discovers_a_modular_pipeline(tmp_path: Path, config) -> None:
+    if config is not None:
+        (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
     (tmp_path / "modular_model_index.json").write_text(
         '{"_class_name":"ExampleModularPipeline"}', encoding="utf-8"
     )
@@ -89,7 +93,30 @@ def test_load_model_metadata_discovers_a_modular_pipeline(tmp_path: Path) -> Non
     metadata = load_model_metadata(tmp_path)
 
     assert metadata.pipeline_class == "ExampleModularPipeline"
-    assert metadata.files == ("modular_model_index.json",)
+    expected_files = ["modular_model_index.json"]
+    if config is not None:
+        expected_files.insert(0, "config.json")
+    assert metadata.files == tuple(expected_files)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"model_type": "existing_model"},
+        {"architectures": ["ExistingArchitecture"]},
+        {"architecture": "ExistingArchitecture"},
+    ],
+)
+@pytest.mark.parametrize("modular", ["{", '{"_class_name":"OtherPipeline"}'])
+def test_modular_index_preserves_existing_config_identity(tmp_path: Path, config, modular) -> None:
+    (tmp_path / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    (tmp_path / "modular_model_index.json").write_text(modular, encoding="utf-8")
+
+    metadata = load_model_metadata(tmp_path)
+
+    assert metadata.config == config
+    assert metadata.model_index == {}
+    assert metadata.files == ("config.json", "modular_model_index.json")
 
 
 def test_standard_pipeline_index_takes_precedence_over_modular_index(tmp_path: Path) -> None:

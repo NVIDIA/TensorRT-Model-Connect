@@ -26,6 +26,42 @@ class _Builder:
         self.calls.append((network, config))
         return b"engine"
 
+    def build_serialized_network_to_stream(self, network, config, stream):
+        self.calls.append((network, config))
+        stream.append(b"engine")
+        return True
+
+
+def test_transform_indexes_cover_streaming_and_buffer_serialization(monkeypatch):
+    _Builder.calls = []
+    fake_trt = SimpleNamespace(Builder=_Builder)
+    monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
+    events, stream = [], []
+    with graph_transform(lambda network, index: events.append((network, index))):
+        builder = fake_trt.Builder("logger")
+        assert builder.build_serialized_network_to_stream("streamed", "config", stream)
+        assert builder.build_serialized_network("buffered", "config") == b"engine"
+    assert events == [("streamed", 0), ("buffered", 1)]
+    assert stream == [b"engine"]
+
+
+def test_streaming_transform_failure_prevents_serialization(monkeypatch):
+    _Builder.calls = []
+    fake_trt = SimpleNamespace(Builder=_Builder)
+    monkeypatch.setitem(sys.modules, "tensorrt", fake_trt)
+    stream = []
+
+    def reject(network, index):
+        assert index == 0
+        raise ValueError("reject streamed network")
+
+    with pytest.raises(ValueError, match="reject streamed network"):
+        with graph_transform(reject):
+            fake_trt.Builder("logger").build_serialized_network_to_stream("network", None, stream)
+    assert stream == []
+    assert _Builder.calls == []
+    assert fake_trt.Builder is _Builder
+
 
 def test_transform_runs_before_each_serialization_and_builder_still_delegates(
     monkeypatch,
