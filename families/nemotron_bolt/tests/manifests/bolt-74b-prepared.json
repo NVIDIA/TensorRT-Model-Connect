@@ -1,0 +1,101 @@
+{
+  "name": "nemotron-bolt-74b-prepared",
+  "family": "nemotron_bolt",
+  "hf_id": "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB",
+  "hf_revision": "e0590ed2f3a564fd99725d9d891cb09deb7cc201",
+  "bundle": "bolt.bundle",
+  "task": "vision_language_generation",
+  "precision": "bf16",
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 8192,
+  "external_files": [
+    {
+      "path": "giant_panda.jpeg",
+      "url": "https://raw.githubusercontent.com/NVIDIA/TensorRT-Edge-LLM/513dcd18291e587c80928911a480761352f3c2d8/examples/multimodal/pics/giant_panda.jpeg"
+    },
+    {
+      "path": "red_panda.jpeg",
+      "url": "https://raw.githubusercontent.com/NVIDIA/TensorRT-Edge-LLM/513dcd18291e587c80928911a480761352f3c2d8/examples/multimodal/pics/red_panda.jpeg"
+    }
+  ],
+  "testcases": [
+    {
+      "name": "nemotron-bolt-74b-primes",
+      "premerge": true,
+      "requests": [
+        {
+          "id": "primes",
+          "prompt": "List the first ten prime numbers, separated by commas.",
+          "max_new_tokens": 96,
+          "expected": "2, 3, 5, 7, 11, 13, 17, 19, 23, 29"
+        }
+      ]
+    },
+    {
+      "name": "nemotron-bolt-74b-media",
+      "premerge": false,
+      "requests": [
+        {
+          "id": "species",
+          "prompt": "What species of bear is in this image? Give the common name only.",
+          "max_new_tokens": 96,
+          "expected": "giant panda"
+        },
+        {
+          "id": "video-order",
+          "prompt": "The first and last frames show two different animals. Name them in order.",
+          "max_new_tokens": 96,
+          "expected": "red panda, giant panda"
+        }
+      ]
+    },
+    {
+      "name": "nemotron-bolt-74b-lilicorr",
+      "premerge": false,
+      "requests": [
+        {
+          "id": "primes",
+          "prompt": "List the first ten prime numbers, separated by commas.",
+          "max_new_tokens": 96,
+          "expected": "2, 3, 5, 7, 11, 13, 17, 19, 23, 29"
+        },
+        {
+          "id": "species",
+          "prompt": "What species of bear is in this image? Give the common name only.",
+          "max_new_tokens": 96,
+          "expected": "giant panda"
+        },
+        {
+          "id": "video-order",
+          "prompt": "The first and last frames show two different animals. Name them in order.",
+          "max_new_tokens": 96,
+          "expected": "red panda, giant panda"
+        },
+        {
+          "id": "seeded-primes-a",
+          "prompt": "List the first ten prime numbers, separated by commas.",
+          "max_new_tokens": 96,
+          "temperature": 0.7,
+          "top_k": 20,
+          "top_p": 0.9,
+          "seed": 3105,
+          "expected": "2, 3, 5, 7, 11, 13, 17, 19, 23, 29"
+        },
+        {
+          "id": "seeded-primes-b",
+          "prompt": "List the first ten prime numbers, separated by commas.",
+          "max_new_tokens": 96,
+          "temperature": 0.7,
+          "top_k": 20,
+          "top_p": 0.9,
+          "seed": 3105,
+          "expected": "2, 3, 5, 7, 11, 13, 17, 19, 23, 29"
+        }
+      ],
+      "companion": {
+        "hf_id": "nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr",
+        "hf_revision": "449d24140160b8e51871bfc0f0a7338abf640aa1"
+      }
+    }
+  ]
+}

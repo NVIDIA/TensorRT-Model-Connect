@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "help": "Build an ordinary Nemotron Bolt-74B bundle or its exact LiLiCorr pair",
+      "executor": "python",
+      "handler": "cli:build",
+      "arguments": [
+        {
+          "name": "model",
+          "type": "string",
+          "help": "Hugging Face model ID or local snapshot"
+        },
+        {
+          "name": "output",
+          "flags": [
+            "-o",
+            "--output"
+          ],
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "flags": [
+            "--revision"
+          ],
+          "type": "string"
+        },
+        {
+          "name": "task",
+          "flags": [
+            "--task"
+          ],
+          "type": "string",
+          "choices": [
+            "text_generation",
+            "vision_language_generation"
+          ],
+          "default": "vision_language_generation"
+        },
+        {
+          "name": "precision",
+          "flags": [
+            "--precision"
+          ],
+          "type": "string",
+          "choices": [
+            "bf16"
+          ],
+          "default": "bf16"
+        },
+        {
+          "name": "backend",
+          "flags": [
+            "--backend"
+          ],
+          "type": "string",
+          "choices": [
+            "trt"
+          ],
+          "default": "trt"
+        },
+        {
+          "name": "max_sequence_length",
+          "flags": [
+            "--max-sequence-length"
+          ],
+          "type": "int"
+        },
+        {
+          "name": "verbose",
+          "flags": [
+            "--verbose"
+          ],
+          "type": "bool",
+          "action": "store_true",
+          "default": false
+        },
+        {
+          "name": "execution_variant",
+          "flags": [
+            "--execution-variant"
+          ],
+          "type": "string",
+          "choices": [
+            "lilicorr"
+          ],
+          "help": "Explicit family-owned speculative recipe"
+        },
+        {
+          "name": "companion",
+          "flags": [
+            "--companion"
+          ],
+          "type": "string",
+          "action": "append",
+          "help": "Matched local draft checkpoint as draft=LOCAL_DIR"
+        },
+        {
+          "name": "edge_builder_python",
+          "flags": [
+            "--edge-builder-python"
+          ],
+          "type": "path",
+          "help": "Absolute Python interpreter for the optional Edge builder"
+        }
+      ]
+    }
+  ]
+}
