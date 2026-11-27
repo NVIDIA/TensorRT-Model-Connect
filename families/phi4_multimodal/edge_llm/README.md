@@ -7,10 +7,10 @@ Model Connect wheel built for it, or use a matching standalone Model Connect
 builder and runner in an environment without the wheel. For standalone
 installations, `CMAKE_PREFIX_PATH` selects the SDK as usual.
 
-## Opt-in Edge 0.12: original checkpoint
+## Edge 0.12: original checkpoint
 
 Use an MC installation built with `TRTMC_ENABLE_EDGELLM=ON` and
-`TRTMC_EDGELLM_RELEASE=0.12.0`. The repository default remains 0.11.
+`TRTMC_EDGELLM_RELEASE=0.12.0`. 0.12.0 is the default when Edge is enabled.
 The native C++ SDK must match the worker's GPU architecture, CUDA and TensorRT.
 The Python builder can come from the official wheel or a source installation.
 When it lives outside MC's environment, pass its interpreter explicitly:

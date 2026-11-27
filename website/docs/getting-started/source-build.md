@@ -107,11 +107,11 @@ CLI/backend-only build avoid unselected families' optional native prerequisites.
 Unknown family names fail configuration. Omitting the option or setting it to
 `*` preserves the default of configuring every family.
 
-## Optional Edge-LLM 0.12.0 migration build
+## Optional Edge-LLM SDK
 
-The default Edge-enabled source build still uses 0.11.0. To build against the
-0.12.0 C++ SDK, set both `-DTRTMC_ENABLE_EDGELLM=ON` and
-`-DTRTMC_EDGELLM_RELEASE=0.12.0` at configure time. Keep the 0.12 Python
+Edge is off by default. Set `-DTRTMC_ENABLE_EDGELLM=ON` to select the
+0.12.0 C++ SDK. To build against 0.11.0 instead, also pass
+`-DTRTMC_EDGELLM_RELEASE=0.11.0` in a separate build directory. Keep the 0.12 Python
 builder in a separate environment: its Transformers requirement is different
 from Model Connect's shared pin. This option provisions the native SDK; it
 does not port any family adapter. See the [native SDK setup](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/cmake/edge_llm/README.md)
@@ -131,32 +131,28 @@ This compiler selection does not qualify a model on that GPU.
 
 ## Optional Edge-LLM Python tools
 
-After preparing the source-build prerequisites below, use CPython 3.12 to
-install this checkout with the pinned Edge-LLM builder and Python runtime
-from PyPI through the normal package extra:
+The `edgellm` extra installs the 0.12.0 **base** package in the Model Connect
+environment. It does not install the builder dependencies or C++ SDK and does
+not select a family backend. After preparing the native build prerequisites:
 
 ```bash
 python -m pip install -e '.[edgellm]'
-python -c 'import tensorrt; from tensorrt_edgellm import runtime; runtime.load()'
+python -c 'from importlib.metadata import version; print(version("tensorrt-edgellm"))'
 ```
 
-This editable source installation still builds Model Connect's native targets;
-the extra does not provide a Python-only build mode.
+Install the builder in a separate environment. Match its TensorRT Python
+version to the native SDK; for example:
 
-The Edge wheel does not install the platform CUDA or TensorRT libraries. Its native
-payload must match the executing platform, GPU, and CUDA/TensorRT stack; see
-the [Edge-LLM 0.11.0 installation guide](https://nvidia.github.io/TensorRT-Edge-LLM/0.11.0/user_guide/getting_started/installation.html).
-A successful package installation alone is not a model qualification result.
+```bash
+python3 -m venv "$HOME/.venvs/edge012"
+"$HOME/.venvs/edge012/bin/python" -m pip install 'tensorrt==11.4.0.106' 'tensorrt-edgellm[builder]==0.12.0'
+```
 
-This extra provides Python tools, not the C++ SDK linked by the existing native
-family adapters. Those adapters still use the separately pinned
-[optional CMake SDK dependency](https://github.com/NVIDIA/TensorRT-Model-Connect/tree/main/cmake/edge_llm).
-Installing this extra does not switch a family's builder or runtime.
-
-The base wheel includes the direct builder. Use a separate environment for
-Edge-LLM's optional `export` or `tools` extras: their Transformers pin differs
-from Model Connect's pin. Do not override either project's requirements to
-force the environments together.
+Alternatively, install `.[builder]` from the official 0.12.0 source checkout
+in that environment. The builder requires Transformers 5.17.0; Model Connect
+uses 5.2.0. Do not override either pin. Select the builder using the owning
+family's documented option. The wheel does not replace the native CUDA,
+TensorRT, or Edge SDK requirements.
 
 ## 1. Select the GPU and start the container
 

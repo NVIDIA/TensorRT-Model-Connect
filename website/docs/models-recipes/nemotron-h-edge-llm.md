@@ -15,8 +15,8 @@ trtmc nemotron_h build /models/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4 \
   --output lightning-dspark.bundle
 ```
 
-To opt in to Edge-LLM 0.12.0, configure the native SDK with
-`-DTRTMC_EDGELLM_RELEASE=0.12.0`. If the matching builder is in a separate
+To enable the Edge SDK, configure with `-DTRTMC_ENABLE_EDGELLM=ON`.
+This selects 0.12.0 by default. If the matching builder is in a separate
 wheel or source environment, add `--edge-builder-python /absolute/path/to/python`
 to the family build command. This selects the Python tools, not a different
 C++ runtime. Model Connect keeps its existing Transformers pin. An installed MC wheel

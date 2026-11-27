@@ -242,15 +242,13 @@ family's options. `trtmc internvl build --help` works offline without
 a checkpoint or GPU imports. This uses the existing
 [family CLI protocol](../extend/family-cli.md), not an extension to the shared parser.
 
-The InternVL family can offload the recorded original-source InternVL3
-1B/2B/8B HF configurations on native x86 SM80 and 14B on native x86 SM120 to the
-pinned Edge-LLM 0.10.1 SDK. These FP16, batch-one, TP-one profiles have historical
-local public/direct/HF qualification; this is not catalog-wide or fresh-head CI
-qualification. The existing 2B/8B image-health test reads actual Edge visual
-features through a small family-owned test helper without changing its gates.
-Quantized sources, InternVL3.5, and multi-image public requests are excluded.
-See the [family recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/internvl/edge_llm/README.md)
-for exact source revisions, evidence boundaries, and replay requirements.
+With Edge 0.12, InternVL3 uses the direct builder. InternVL3.5 uses the
+official ONNX exporter and native ONNX builders to preserve the decoder's
+query/key normalization. The prepared InternVL3 AWQ route requires the
+complete kernel set. These validations used a single vehicle image; they do
+not qualify arbitrary image prompts, multiple images, or every GPU. See the
+[InternVL recipe](../models-recipes/internvl-edge-llm.md) for the build flags,
+per-checkpoint results, memory limits, and native fallback.
 
 ### Optional Qwen3.5 Edge execution
 
@@ -259,7 +257,7 @@ family's options. `trtmc qwen3_5 build --help` works offline without
 a checkpoint or GPU imports. This uses the existing
 [family CLI protocol](../extend/family-cli.md), not an extension to the shared parser.
 
-The default Edge SDK remains 0.11.0. To opt in to 0.12.0, configure
+Edge-enabled builds default to 0.12.0. To pin that SDK, configure
 `-DTRTMC_EDGELLM_RELEASE=0.12.0`, build with `--precision fp16`, and, if
 needed, supply `--edge-builder-python /absolute/path/to/python` to select
 a matching wheel or source installation. This does not replace the native SDK.
@@ -279,9 +277,9 @@ where both Edge runners failed in prefill and MC selects native TensorRT.
 Use `--task images_text_to_text` for ordered images; the legacy single-image
 task is `vision_language_generation`.
 
-The Qwen3.5 family maps the recorded original-source dense 0.8B/2B/4B/9B
+On an explicit 0.11.0 build, Qwen3.5 maps the recorded original-source dense 0.8B/2B/4B/9B
 configurations (Instruct and Base), embedded MTP, and explicit 4B/9B DFlash
-pairs to the pinned Edge-LLM 0.11.0 SDK on native x86 SM80/SM120, FP16 compute,
+pairs to Edge on native x86 SM80/SM120, FP16 compute,
 batch one. Dense 27B uses TP2 for its LLM and TP1 for its visual component.
 The SM120 route preserves admitted ModelOpt weight formats; the recorded 2B
 FP8-KV and NVFP4 LM-head component flows are checkpoint-driven.
@@ -328,7 +326,7 @@ DFlash companions, greedy DDTree, or the documented embedded NVFP4 MTP recipe.
 Visual bundles map the existing image and video Task interfaces directly to
 Edge preprocessing and runtime APIs. Shared model selection remains unchanged.
 
-Edge-LLM 0.11.0 is the default. To use 0.12.0, build with
+To explicitly select the default Edge SDK, 0.12.0, configure
 `-DTRTMC_EDGELLM_RELEASE=0.12.0` on the target and install matching Python
 tools from PyPI or source. With 0.12.0, a documented JetSpec pair uses
 `--execution-variant jetspec --companion draft=PATH`; a DFlash draft is not
@@ -378,14 +376,10 @@ family's options. `trtmc llama build --help` works offline without
 a checkpoint or GPU imports. This uses the existing
 [family CLI protocol](../extend/family-cli.md), not an extension to the shared parser.
 
-The Llama family owns an optional native Edge-LLM 0.10.1 route for original
-unquantized sources with FP16 compute. Recorded ordinary Llama 3.1 8B and
-3.2 1B/3B profiles use SM80; the explicit Llama 3.1 8B + EAGLE3 pair uses SM120.
-Other requests retain native behavior, and a failed explicit pair never silently
-becomes base-only decoding. Quantized Llama routes are outside this publication.
-
-These are bounded historical build/inference results, not catalog-wide support
-or an assertion that every profile is registered in CI. Passing engine payloads
-were retired; publication checks are reported separately. See the
-[family-owned recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/llama/edge_llm/README.md)
-for exact revisions, capacities, controls and validation boundaries.
+With Edge 0.12, Llama supports ordinary FP16 and prepared FP8/NVFP4 routes
+for the checkpoints listed in the [Llama recipe](../models-recipes/llama-edge-llm.md).
+The measured Llama 3.1 8B EAGLE3 pair keeps its draft on native fallback; an
+explicit speculative request never silently becomes base-only decoding.
+The original Llama 3.2 1B and its prepared static FP8 checkpoint run but
+miss the arithmetic gate. See the recipe for the exact capacities,
+hardware, validation prompts, and separate historical results.

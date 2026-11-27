@@ -34,20 +34,24 @@ See [Configuration and Backends](../features/config-and-backends.md),
 
 ## Optional native Edge-LLM SDK
 
-Provision Edge-LLM explicitly when building Model Connect, not during model
-builds or inference. `TRTMC_ENABLE_EDGELLM=ON` selects the public Edge-LLM
-0.10.1 snapshot at `e8b29522938901f6df19ebeedd4b69bc8edbcd97`. The default is
-`OFF`. Configure and build on the inference GPU host; cross compilation is
-rejected. The package must match the native CPU/GPU and CUDA/TensorRT stack.
-Runtime compilation must also use the exact pinned JSON dependency headers;
-the SDK rejects same-version development headers with an incompatible C++ ABI.
+Edge offload is disabled by default. Configure Model Connect with
+`-DTRTMC_ENABLE_EDGELLM=ON` to use the default Edge-LLM 0.12.0 SDK.
+To build against 0.11.0 instead, also set `-DTRTMC_EDGELLM_RELEASE=0.11.0`.
+Build on the inference GPU host with the matching CUDA and TensorRT stack;
+cross-compilation is not supported. When reusing an installed SDK, Model Connect
+checks the actual JSON headers for C++ ABI compatibility, not just their version.
 
-- `TRTMC_EDGELLM_ALL_KERNELS=ON` requests all upstream operator groups supported
-  by the local GPU.
-- `TRTMC_EDGELLM_ONNX=ON` also installs the original Python exporter and native
-  C++ ONNX engine builder. It does not select a model's build flow.
-- `CMAKE_PREFIX_PATH` points builders and runtime compilation to the installed
-  SDK. Reuse fails explicitly if a requested capability is absent.
+- `CMAKE_PREFIX_PATH` selects an existing matching native SDK. Alternatively,
+  provision the pinned source during the Model Connect build. An installed
+  Model Connect wheel uses the native SDK it was built with.
+- `TRTMC_EDGELLM_ALL_KERNELS=ON` requests all operator groups supported by
+  the local GPU when provisioning from source.
+- `TRTMC_EDGELLM_ONNX=ON` requests the native ONNX builder executables.
+  Install matching Python tools separately in the builder interpreter, from
+  PyPI or source. A Python installation does not replace the C++ SDK, and this
+  option does not select a family's build flow.
+- `TRTMC_EDGELLM_POLICY_SDK=ON` requests the optional 0.12 GR00T and Pi0.5
+  policy libraries and headers. It does not enable a model by itself.
 
 Follow the repository's [pinned SDK installation instructions](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/cmake/edge_llm/README.md)
 for dependencies, native architecture selection and offline provisioning.

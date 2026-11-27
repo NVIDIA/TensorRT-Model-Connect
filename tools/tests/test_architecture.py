@@ -1066,7 +1066,7 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
         "serve",
         "test",
     }
-    assert 'edgellm = ["tensorrt-edgellm==0.11.0"]' in optional
+    assert 'edgellm = ["tensorrt-edgellm==0.12.0"]' in optional
 
     requirements = sorted(FAMILIES.glob("*/requirements.txt")) + sorted(
         FAMILIES.glob("*/tests/requirements.txt")

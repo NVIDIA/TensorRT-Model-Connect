@@ -34,9 +34,9 @@ python -m tensorrt_model_connect build /path/to/Cosmos3-Edge \
   --precision fp16 --max-sequence-length 1024 -o cosmos3-edge.bundle
 ```
 
-The family selects the optional native Edge SDK at MC build time. The default
-remains 0.11; to use the official 0.12 SDK, configure MC with
-`TRTMC_ENABLE_EDGELLM=ON` and `TRTMC_EDGELLM_RELEASE=0.12.0`. Use a local SDK
+The family selects the optional native Edge SDK at MC build time. Configure MC
+with `TRTMC_ENABLE_EDGELLM=ON` to use the default 0.12 SDK. For the older
+release, also set `TRTMC_EDGELLM_RELEASE=0.11.0`. Use a local SDK
 built for the worker's GPU, CUDA and TensorRT. Compatible Python tools can
 come from the official wheel or source. To name an isolated interpreter:
 
@@ -97,7 +97,7 @@ The independent oracle is Transformers FP32 with eager attention and TF32
 disabled, using the same checkpoint, prompt, pixels, frame selection and timestamps.
 The unchanged normalized text edit-distance limit is **0.15**.
 
-### 0.12 opt-in results
+### 0.12 results
 
 The original checkpoint, batch 1, TP1 and capacity 1024 were tested with
 TensorRT 11.4 on SM80. Both routes built and ran all five requests.

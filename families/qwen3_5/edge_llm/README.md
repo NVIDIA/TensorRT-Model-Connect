@@ -3,7 +3,7 @@
 This family owns Edge selection, checkpoint admission, build arguments, bundles,
 runtime orchestration and validation. Model-specific dispatch does not change
 shared Model Connect code.
-The default SDK is 0.11.0. To use the official 0.12.0 release, configure
+Edge-enabled builds default to 0.12.0. To pin that release explicitly, configure
 `-DTRTMC_EDGELLM_RELEASE=0.12.0` and select its matching wheel- or source-installed
 builder with the family option `--edge-builder-python /absolute/path/to/python`.
 The option selects builder tools, not a different C++ runtime.
@@ -103,7 +103,7 @@ standalone runner first reported the Edge paged FMHA-v2 kernel (head width
 family selects native before building. This is an Edge runtime failure on
 the measured pair, not a general TP2 failure or proof of a faulty interconnect.
 
-## Default 0.11 execution
+## Legacy 0.11 execution
 
 The native SDK is pinned to the official public Edge-LLM **0.11.0** revision
 `95515c2f87fba8982db5a519f9022277667b3cc9`. Build on the executing GPU; there is
@@ -111,7 +111,7 @@ no cross-compilation or alternate vendor checkout.
 
 ## Installation and ownership
 
-Enable `TRTMC_ENABLE_EDGELLM=ON` during native CMake provisioning and expose the
+Set `TRTMC_ENABLE_EDGELLM=ON` and `TRTMC_EDGELLM_RELEASE=0.11.0` during native CMake provisioning and expose the
 installed SDK through `CMAKE_PREFIX_PATH`. The adapter verifies the release,
 architecture, GPU target, CUDA and TensorRT identities before offloading.
 
@@ -144,7 +144,7 @@ use SM120. Checkpoint-driven weight precision is separate from compute precision
 | 2B NVFP4 weights with NVFP4 LM head | Standalone text, checkpoint-driven component precision |
 
 This table describes execution admission, **not universal quality qualification**.
-In the default 0.11 Edge route, NVFP4 MTP uses the same four topology admissions as original-weight MTP. Edge
+In the legacy 0.11 Edge route, NVFP4 MTP uses the same four topology admissions as original-weight MTP. Edge
 offload model-engine evidence covers the 4B NVFP4 profile; the native fallback
 also has the 2B NVFP4 execution and accuracy limitations detailed below. The
 other NVFP4 sizes are command mappings, not locally executed or qualified results.
