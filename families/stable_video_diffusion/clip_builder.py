@@ -31,10 +31,13 @@ def _attention(network, tensor, weights, prefix: str, heads: int, work):
                    weights[f"{prefix}.k_proj.bias"], work)
     value = g.linear(network, tensor, weights[f"{prefix}.v_proj.weight"],
                      weights[f"{prefix}.v_proj.bias"], work)
-    # One 257-token image: the attention itself runs in FP32 at negligible cost.
-    query, key, value = (g.cast(network, tensor, trt.float32) for tensor in (query, key, value))
-    attended = g.attention(network, g.split_heads(network, query, heads),
-                           g.split_heads(network, key, heads), g.split_heads(network, value, heads))
+    # One 257-token image: in an FP16 network the attention runs as explicit FP32 matrix
+    # multiplies around an FP32 softmax at negligible cost, whichever kernel TensorRT would pick
+    # for an attention layer; an FP32 network keeps the attention layer, which TensorRT computes
+    # in FP32 there.
+    attend = g.fp32_attention if work == trt.float16 else g.attention
+    attended = attend(network, g.split_heads(network, query, heads),
+                      g.split_heads(network, key, heads), g.split_heads(network, value, heads))
     attended = g.cast(network, attended, work)
     return g.linear(network, g.merge_heads(network, attended),
                     weights[f"{prefix}.out_proj.weight"], weights[f"{prefix}.out_proj.bias"], work)
