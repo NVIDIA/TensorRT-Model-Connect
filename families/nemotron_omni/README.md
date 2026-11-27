@@ -22,8 +22,7 @@ when available; otherwise the installed SDK's Python tools are used. The C++
 SDK and plugin must match the executing TensorRT/CUDA installation. A Python
 wheel alone does not replace the native SDK.
 
-The default SDK during migration remains 0.11.0. For a Model Connect
-installation built with `TRTMC_EDGELLM_RELEASE=0.12.0`, choose the
+Edge-enabled Model Connect builds default to the 0.12.0 SDK. Choose the matching
 0.12 builder environment on the family command:
 
 ```sh
@@ -63,7 +62,7 @@ RAM-backed `/tmp`.
 
 - Native: text, image, audio, real timestamped video, image/audio and audio/video
   inputs through the corresponding public Model Connect task interfaces.
-- Edge 0.11.0 offloads text and image only. With the opt-in 0.12.0 SDK,
+- Edge 0.11.0 offloads text and image only. With the 0.12.0 SDK,
   text and image use the direct builder. For `audio_text_to_text` or
   `image_audio_text_to_text`, an ONNX-enabled SDK and matching Edge exporter
   add an acoustic engine: only audio goes through the official ONNX export
@@ -140,7 +139,7 @@ The interpolation semantics and numerical gates remain unchanged pending
 model-owner confirmation of the authoritative contract. Original free-form
 outputs and their failures remain recorded alongside the revised factual tests.
 
-On the opt-in 0.12 SDK, a public FP16/B1/TP1 build of the pinned NVFP4
+On the 0.12 SDK, a public FP16/B1/TP1 build of the pinned NVFP4
 checkpoint at context 4096 produced language, visual and audio engines. On
 Blackwell SM103, text and the factual image prompt both matched the independent
 reference token for token. In the same run, the audio encoder failed to enqueue
