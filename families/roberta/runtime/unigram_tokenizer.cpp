@@ -243,14 +243,14 @@ std::string metaspace_pre_tokenize(const std::string& text, bool add_prefix_spac
 struct TrieNode {
     std::unordered_map<char, int> children;
     int token_id = -1; // -1 = not a token end
-    float score = 0.0f;
+    double score = 0.0;
 };
 
 class Trie {
   public:
     Trie() { mNodes.emplace_back(); } // root node
 
-    void insert(const std::string& token, int id, float score) {
+    void insert(const std::string& token, int id, double score) {
         int node = 0;
         for (char c : token) {
             auto it = mNodes[node].children.find(c);
@@ -272,7 +272,7 @@ class Trie {
     struct Match {
         int token_id;
         size_t length;
-        float score;
+        double score;
     };
 
     void find_prefixes(const std::string& text, size_t offset, std::vector<Match>& out) const {
@@ -297,32 +297,32 @@ class Trie {
 // ─── Viterbi algorithm for Unigram tokenization ───
 
 struct ViterbiNode {
-    float score;
+    double score;
     int token_id;
     size_t prev_pos; // byte position of previous node
 };
 
 std::vector<int32_t> viterbi_encode(const std::string& text, const Trie& trie, int32_t unk_id,
-                                    float unk_score) {
+                                    double unk_score) {
     if (text.empty())
         return {};
 
     size_t n = text.size();
     // best[i] = best path score to reach byte position i
-    std::vector<ViterbiNode> best(n + 1, {-std::numeric_limits<float>::infinity(), -1, 0});
-    best[0].score = 0.0f;
+    std::vector<ViterbiNode> best(n + 1, {-std::numeric_limits<double>::infinity(), -1, 0});
+    best[0].score = 0.0;
 
     std::vector<Trie::Match> matches;
 
     for (size_t i = 0; i < n; ++i) {
-        if (best[i].score == -std::numeric_limits<float>::infinity())
+        if (best[i].score == -std::numeric_limits<double>::infinity())
             continue;
 
         trie.find_prefixes(text, i, matches);
 
         for (const auto& m : matches) {
             size_t end = i + m.length;
-            float new_score = best[i].score + m.score;
+            double new_score = best[i].score + m.score;
             if (new_score > best[end].score) {
                 best[end].score = new_score;
                 best[end].token_id = m.token_id;
@@ -334,7 +334,7 @@ std::vector<int32_t> viterbi_encode(const std::string& text, const Trie& trie, i
         size_t char_len = utf8_char_len(text, i);
         size_t end = i + char_len;
         if (end <= n) {
-            float new_score = best[i].score + unk_score;
+            double new_score = best[i].score + unk_score;
             if (new_score > best[end].score) {
                 best[end].score = new_score;
                 best[end].token_id = unk_id;
@@ -590,7 +590,7 @@ class UnigramTokenizer final : public ITokenizer {
         for (size_t i = 0; i < vocab.size(); ++i) {
             auto& entry = vocab[i];
             std::string token = entry[0].get<std::string>();
-            float score = entry[1].get<float>();
+            double score = entry[1].get<double>();
 
             mIdToToken[i] = token;
             mTokenToId[token] = static_cast<int32_t>(i);
@@ -598,12 +598,12 @@ class UnigramTokenizer final : public ITokenizer {
         }
 
         // UNK score: must be worse than ANY real vocab token for Viterbi
-        float min_score = 0.0f;
-        for (float s : mScores) {
+        double min_score = 0.0;
+        for (double s : mScores) {
             if (s < min_score)
                 min_score = s;
         }
-        mUnkScore = min_score - 10.0f;
+        mUnkScore = min_score - 10.0;
     }
 
     void build_trie() {
@@ -702,7 +702,7 @@ class UnigramTokenizer final : public ITokenizer {
                                         tok.value("lstrip", false), tok.value("rstrip", false)});
                 if (static_cast<size_t>(tok_id) >= mIdToToken.size()) {
                     mIdToToken.resize(static_cast<size_t>(tok_id) + 1);
-                    mScores.resize(static_cast<size_t>(tok_id) + 1, 0.0f);
+                    mScores.resize(static_cast<size_t>(tok_id) + 1, 0.0);
                 }
                 mIdToToken[tok_id] = content;
                 mTokenToId[content] = tok_id;
@@ -780,14 +780,14 @@ class UnigramTokenizer final : public ITokenizer {
     // ─── Data members ───
 
     std::vector<std::string> mIdToToken;
-    std::vector<float> mScores;
+    std::vector<double> mScores;
     std::unordered_map<std::string, int32_t> mTokenToId;
     std::unordered_set<int32_t> mDecodeSkipIds;
     std::vector<AddedToken> mAddedTokens;
     Trie mTrie;
 
     int32_t mUnkId = 0;
-    float mUnkScore = -100.0f;
+    double mUnkScore = -100.0;
     bool mAddSpecialTokens = true;
     std::vector<NormalizerStep> mNormalizerSteps;
     bool mAddPrefixSpace = true;

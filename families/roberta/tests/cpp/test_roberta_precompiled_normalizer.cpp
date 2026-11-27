@@ -101,6 +101,18 @@ int main(int argc, char** argv) {
     check(*framed, u8"ＡＢ", {1, 3, 0, 2});
     check(*framed, "", {1, 2});
     check(*create(identity), "AB", {3, 4, 5});
+    auto close_scores = identity;
+    close_scores["model"]["vocab"] = nlohmann::json::array({
+        {"<unk>", -10.0},
+        {"<s>", 0.0},
+        {"</s>", 0.0},
+        {u8"▁", 0.0},
+        {"a", -0.1},
+        {"aa", -0.200000001},
+    });
+    check(*create(close_scores), "aa", {3, 4, 4});
+    close_scores["model"]["vocab"][5][1] = -0.2;
+    check(*create(close_scores), "aa", {3, 5});
     auto split_identity = identity;
     split_identity["pre_tokenizer"] = whitespace["pre_tokenizer"];
     check(*create(split_identity), u8"A\u0085B", {3, 4, 3, 5});
