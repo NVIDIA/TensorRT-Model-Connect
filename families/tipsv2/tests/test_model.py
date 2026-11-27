@@ -1403,6 +1403,36 @@ def test_the_e2e_comparison_record_earns_the_reference_badge(tmp_path: Path) -> 
     assert verdict({**data, "reference_comparison": same}) == "unverified"
 
 
+def test_the_record_builder_refuses_what_voids_the_badge(tmp_path: Path) -> None:
+    """The test above can only speak for the arguments **it** passes.
+
+    `test_e2e.py` builds the production record at one call site. A change there - both fields
+    pointing at `native_file`, or a check name repeated - would void the record in the real
+    report while every test here still passed, because they supply their own fixtures. So the
+    builder refuses both, and that call site cannot produce a voided record at all.
+    """
+    from families.tipsv2.tests.test_e2e import reference_checks, reference_comparison_record
+
+    checks = reference_checks(image_delta=1.1e-07, image_cosine=1.0, text_delta=6.0e-08,
+                              logit_delta=6.2e-06, agrees=True, embedding_tolerance=1e-05,
+                              logit_tolerance=1e-03, cosine_floor=0.999)
+    native = tmp_path / "native_image_embedding.npy"
+    reference = tmp_path / "reference_image_embedding.npy"
+
+    # The paths the E2E passes, and the dicts the recorder turns them into.
+    with pytest.raises(ValueError, match="two different artifacts"):
+        reference_comparison_record("tipsv2-so400m14", native, native, checks)
+    with pytest.raises(ValueError, match="two different artifacts"):
+        reference_comparison_record("tipsv2-so400m14", {"artifact": "artifacts/native.npy"},
+                                    {"artifact": "artifacts/native.npy"}, checks)
+    with pytest.raises(ValueError, match="one name per check"):
+        reference_comparison_record("tipsv2-so400m14", native, reference,
+                                    [{**check, "name": "relative_l2"} for check in checks])
+
+    record = reference_comparison_record("tipsv2-so400m14", native, reference, checks)
+    assert record["native"] != record["reference"]
+
+
 def _tiny_text_cfg(window: int) -> dict:
     return {"hidden_size": 8, "max_text_len": window, "num_layers": 2, "num_heads": 2,
             "head_dim": 4, "vocab_size": 11, "pad_token_id": 0, "eps": 1e-5,
@@ -1448,9 +1478,11 @@ def test_the_text_embedding_does_not_depend_on_the_padding_behind_it() -> None:
     """The property the padding mask exists for, run rather than asserted in prose.
 
     The padding mask is used in the attention keys, in both MLP maskings and in the pooled
-    average. Because of all three, a prompt that fits gives the same embedding at any window at
-    least as long as it - and dropping any one of them breaks that, silently, in a way no
-    comparison against a single reference run would show.
+    average. **Two** of those three carry this property - the keys and the pooled average - and
+    because of them a prompt that fits gives the same embedding at any window at least as long
+    as it; dropping either breaks that, silently, in a way no comparison against a single
+    reference run would show. The MLP maskings are reference fidelity and do not carry it: the
+    two tests below measure that and hold them in place by what they actually do.
 
     Two windows, the same four real tokens. The production builder runs in NumPy through the
     recorder, so a mask deleted from `text_builder.py` fails this.
@@ -1486,12 +1518,6 @@ def test_dropping_either_masking_that_carries_it_breaks_that(monkeypatch, mask_u
         monkeypatch.setattr(
             text_builder.g, "add_attention",
             lambda *args, additive_mask=None, **kwargs: original(*args, **kwargs))
-    elif mask_use == "mlp":
-        # Only the two MLP selections, which is why they are their own function: `keep_rows`
-        # also drives the pooled average, so replacing that tensor would disable both uses and
-        # the number below would belong to neither.
-        monkeypatch.setattr(text_builder, "_masked_rows",
-                            lambda _network, tensor, _keep, _zero: tensor)
     else:
         monkeypatch.setattr(text_builder, "_masks", _masks_without_pooling())
 
@@ -1524,6 +1550,36 @@ def test_the_mlp_masking_is_reference_fidelity_and_not_what_carries_the_property
 
     assert float(np.abs(after[0] - after[1]).max()) < 1e-5     # invariance survives without them
     assert float(np.abs(before[0] - after[0]).max()) == 0.0    # and the embedding is unchanged
+
+
+def test_the_mlp_masking_zeroes_the_padded_rows_at_both_selections(monkeypatch) -> None:
+    """What holds the two MLP selections in place, now that the embedding cannot.
+
+    The test above measures what they do **not** do, and every test that reads only the pooled
+    embedding - that one and the invariance pair - passes with `_masked_rows` replaced by the
+    identity, because nothing downstream reads a padded row. The selections are still the
+    reference's `x * mlp_mask`, so they are checked where they act rather than where they do
+    not: each one leaves every padded row zero and no real row touched.
+    """
+    ids, window = [5, 7, 3, 9], 24
+    calls = []
+    original = text_builder._masked_rows
+
+    def spy(network, tensor, keep_rows, zero):
+        out = original(network, tensor, keep_rows, zero)
+        calls.append((np.asarray(tensor.values).copy(), np.asarray(out.values).copy()))
+        return out
+
+    monkeypatch.setattr(text_builder, "_masked_rows", spy)
+    _text_embedding(ids, window)
+
+    assert len(calls) == 2 * _tiny_text_cfg(window)["num_layers"], "two selections per block"
+    # Without this the loop below would hold for a tower whose padded rows were zero already.
+    assert any(np.count_nonzero(before[len(ids):]) for before, _ in calls)
+    for before, after in calls:
+        assert after.shape == before.shape
+        np.testing.assert_array_equal(after[:len(ids)], before[:len(ids)])
+        assert np.count_nonzero(after[len(ids):]) == 0, after[len(ids):]
 
 
 def _masks_without_pooling():

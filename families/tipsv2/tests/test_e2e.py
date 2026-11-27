@@ -350,13 +350,38 @@ def _check(name: str, label: str, actual: float, operator: str, expected: float)
             "operator": operator, "expected": expected, "passed": passed}
 
 
+def _one_artifact_twice(native, reference) -> bool:
+    """True when both fields name one artifact, however the caller spells it.
+
+    The E2E passes two paths and the recorder stores two `{"artifact": ...}` dicts, so both
+    forms are compared rather than the one a given caller happens to use.
+    """
+    if isinstance(native, dict) and isinstance(reference, dict):
+        return native.get("artifact") == reference.get("artifact")
+    if isinstance(native, (str, os.PathLike)) and isinstance(reference, (str, os.PathLike)):
+        return os.path.realpath(native) == os.path.realpath(reference)
+    return bool(native == reference)
+
+
 def reference_comparison_record(name: str, native, reference, checks: list) -> dict:
     """The whole `reference_comparison` record, in one place.
 
     `tests/test_model.py` renders what this builds and asserts the badge it earns, so the fields
     `tools.e2e_report` validates - two **different** retained artifacts, one name per check -
     cannot regress here while a test that rebuilt them separately still passed.
+
+    The two ways that record is voided are refused here rather than only measured there. A
+    malformed record is not an error anywhere: the badge simply stops counting it. A test can
+    only show that *its own* arguments earn the badge, so passing one artifact twice at the call
+    site below would lose it in the report with every test still green. Refusing it makes the
+    E2E fail loudly instead, whatever the call site passes.
     """
+    if _one_artifact_twice(native, reference):
+        raise ValueError(f"a reference comparison needs two different artifacts, not {native!r} "
+                         "twice")
+    names = [check["name"] for check in checks]
+    if len(set(names)) != len(names):
+        raise ValueError(f"a reference comparison needs one name per check, got {names}")
     return {"label": f"{name} against the checkpoint's own Transformers code",
             "scope": "independent_reference", "enforced": True,
             "native": native, "reference": reference, "checks": checks}
