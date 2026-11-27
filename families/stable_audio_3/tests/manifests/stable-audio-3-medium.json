@@ -1,0 +1,27 @@
+{
+  "name": "stable-audio-3-medium",
+  "hf_id": "stabilityai/stable-audio-3-medium",
+  "hf_revision": "d4d3579395a8ac0df4ab13b5b1d7138ce7290f81",
+  "bundle": "stable-audio-3-medium-fp16.bundle",
+  "family": "stable_audio_3",
+  "task": "text_to_audio",
+  "precision": "fp16",
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "stable-audio-3-medium-rain-10s",
+      "premerge": true,
+      "prompt": "Gentle rain on a tin roof with distant rolling thunder",
+      "duration": 10.0,
+      "steps": 8,
+      "seed": 42
+    },
+    {
+      "name": "stable-audio-3-medium-house-30s",
+      "prompt": "House music that encapsulates the feeling of being at a festival in the sunny weather with all your friends 124 BPM",
+      "duration": 30.0,
+      "steps": 8,
+      "seed": 7
+    }
+  ]
+}
