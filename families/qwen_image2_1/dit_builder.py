@@ -225,6 +225,7 @@ def _block(
     key_mask: trt.ITensor,
     text_tokens: int,
     image_tokens: int,
+    quantized: dict,
 ) -> trt.ITensor:
     hidden = config.hidden
     heads = config.num_heads
@@ -232,26 +233,27 @@ def _block(
     sequence = text_tokens + image_tokens
     prefix = f"transformer_blocks.{index}"
     scale_attention, gate_attention, scale_mlp, gate_mlp = modulation
+    # Projections that read one tensor share its activation quantization.
+    shared: dict = {}
 
     def weight(name: str, shape: tuple[int, ...]) -> np.ndarray:
         return take(weights, f"{prefix}.{name}", shape)
+
+    def project(tensor: trt.ITensor, name: str, shape: tuple[int, int]) -> trt.ITensor:
+        spec = quantized.get(f"{prefix}.{name}")
+        if spec is None:
+            return trt_ops.linear(graph, tensor, weight(f"{name}.weight", shape))
+        from .quantization import quantized_linear
+
+        return quantized_linear(graph, tensor, weight(f"{name}.weight", shape), *spec, cache=shared)
 
     # Attention on the modulated, normalised sequence.
     normed = trt_ops.mul(
         graph, trt_ops.layer_norm(graph, hidden_states, config.eps), scale_attention
     )
-    query = _heads(
-        graph, trt_ops.linear(graph, normed, weight("attn.to_q.weight", (hidden, hidden))),
-        heads, head_dim,
-    )
-    key = _heads(
-        graph, trt_ops.linear(graph, normed, weight("attn.to_k.weight", (hidden, hidden))),
-        heads, head_dim,
-    )
-    value = _heads(
-        graph, trt_ops.linear(graph, normed, weight("attn.to_v.weight", (hidden, hidden))),
-        heads, head_dim,
-    )
+    query = _heads(graph, project(normed, "attn.to_q", (hidden, hidden)), heads, head_dim)
+    key = _heads(graph, project(normed, "attn.to_k", (hidden, hidden)), heads, head_dim)
+    value = _heads(graph, project(normed, "attn.to_v", (hidden, hidden)), heads, head_dim)
     query = trt_ops.rms_norm(graph, query, weight("attn.norm_q.weight", (head_dim,)), config.eps)
     key = trt_ops.rms_norm(graph, key, weight("attn.norm_k.weight", (head_dim,)), config.eps)
     query = trt_ops.transpose(graph, _rotate(graph, query, cos, sin), (0, 2, 1, 3))
@@ -282,13 +284,9 @@ def _block(
     # SwiGLU feed-forward.
     inner = hidden * config.mlp_ratio
     normed = trt_ops.mul(graph, trt_ops.layer_norm(graph, hidden_states, config.eps), scale_mlp)
-    gate = trt_ops.silu(
-        graph, trt_ops.linear(graph, normed, weight("img_mlp.gate_layer.weight", (inner, hidden)))
-    )
-    projected = trt_ops.linear(graph, normed, weight("img_mlp.proj.weight", (inner, hidden)))
-    feed_forward = trt_ops.linear(
-        graph, trt_ops.mul(graph, gate, projected), weight("img_mlp.out.weight", (hidden, inner))
-    )
+    gate = trt_ops.silu(graph, project(normed, "img_mlp.gate_layer", (inner, hidden)))
+    projected = project(normed, "img_mlp.proj", (inner, hidden))
+    feed_forward = project(trt_ops.mul(graph, gate, projected), "img_mlp.out", (hidden, inner))
     return trt_ops.add(graph, hidden_states, trt_ops.mul(graph, gate_mlp, feed_forward))
 
 
@@ -302,14 +300,19 @@ def build_denoiser_plan(
     text_tokens: int,
     verbose: bool,
     compute: trt.DataType = BF16,
+    quantized: dict | None = None,
 ) -> None:
     """Build the denoiser engine for one static geometry and write its plan to ``output``.
 
     ``compute`` is BF16 for bundles; the parity tests pass FP32 to build the same graph without
-    BF16 rounding.
+    BF16 rounding. ``quantized`` maps block projection names to ``(format, activation scale)``
+    (``quantization.quantized_projections``); projections not in it stay in ``compute``.
     """
     if latent_height < 1 or latent_width < 1 or text_tokens < 1:
         raise ValueError("denoiser geometry must be positive")
+    quantized = quantized or {}
+    if quantized and compute != BF16:
+        raise ValueError("quantized denoiser projections need a BF16 build")
     hidden = config.hidden
     image_tokens = latent_height * latent_width
     graph = trt_ops.create_graph(
@@ -318,6 +321,10 @@ def build_denoiser_plan(
         optimization_level=_OPTIMIZATION_LEVEL,
         compute=compute,
     )
+    if quantized:
+        from .quantization import configure_build
+
+        configure_build(graph)
     network = graph.network
     latents = network.add_input("latents", FP32, (1, image_tokens, config.in_channels))
     timestep = network.add_input("timestep", FP32, (1,))
@@ -380,6 +387,7 @@ def build_denoiser_plan(
             key_mask=key_mask,
             text_tokens=text_tokens,
             image_tokens=image_tokens,
+            quantized=quantized,
         )
 
     # Output head on the image rows only: scale-only adaptive LayerNorm, then the projection.

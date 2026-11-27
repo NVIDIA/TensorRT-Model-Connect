@@ -1,0 +1,7 @@
+{
+  "threshold_overrides": {
+    "min_psnr_db": 16.0,
+    "min_ssim": 0.85,
+    "min_layout_correlation": 0.85
+  }
+}

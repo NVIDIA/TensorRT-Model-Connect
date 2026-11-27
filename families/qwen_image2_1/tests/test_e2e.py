@@ -55,6 +55,11 @@ SDK_LANGUAGES = ("c", "cpp")
 # official BF16 and FP32 runs agree to at least 32 dB, which keeps the native image well inside
 # the limits; the family README lists the values measured per case.
 #
+# The FP8 and NVFP4 cases (``quantization`` in the manifest; only the denoiser is quantized) make
+# the same comparison against the official BF16 pipeline, NVFP4 with lower limits from its
+# thresholds file. Their seed is one on which both quantized images stay close to the reference
+# on B200 and B300; a build with every activation scale x0.1 fails both cases.
+#
 # Every comparison is made at the 8 bits per channel of the PNG the CLI writes. The SDK images and
 # the reference are float pixels and are rounded the same way first (png_levels), so the CLI, C
 # and C++ comparisons measure the same quantity, and the PNGs recorded as evidence hold exactly
@@ -192,6 +197,7 @@ def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
             image_height=manifest.get("image_height"),
             image_width=manifest.get("image_width"),
             tensor_parallel_size=int(manifest["tensor_parallel_size"]),
+            quantization=manifest.get("quantization"),
         )
     )
 
