@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+COPY requirements.txt /opt/trtmc-ci/family-requirements.txt
+RUN python -m pip install --disable-pip-version-check --no-cache-dir \
+        --no-build-isolation -r /opt/trtmc-ci/family-requirements.txt \
+    && python -m pip check
+
+# Stage the official MLPerf dense checkpoint before network-isolated tests.
+RUN python -c 'from hashlib import sha256; from pathlib import Path; from urllib.request import Request, urlopen; request = Request("https://inference.mlcommons-storage.org/dlrmv3_trained_checkpoint/non_sparse.ckpt", headers={"User-Agent": "TRTMC-CI"}); data = urlopen(request, timeout=600).read(); assert sha256(data).hexdigest() == "cdb249443cdd9277418962317639204567967b5af3bb41db1fbe5fdbd8f57949"; root = Path("/opt/trtmc-ci/hstu"); root.mkdir(parents=True); (root / "non_sparse.ckpt").write_bytes(data)'
+ENV TRTMC_HSTU_MODEL_DIR=/opt/trtmc-ci/hstu

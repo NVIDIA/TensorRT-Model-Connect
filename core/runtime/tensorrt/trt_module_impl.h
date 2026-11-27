@@ -111,6 +111,8 @@ class TrtModuleImpl final : public ITrtModule {
 
     void allocate_buffers(nvinfer1::ICudaEngine* engine);
     void discover_tensor_aliases(nvinfer1::ICudaEngine* engine);
+    nvinfer1::Dims initial_external_binding_dims(nvinfer1::ICudaEngine* engine,
+                                                 const std::string& name) const;
     void
     validate_initial_external_bindings(nvinfer1::ICudaEngine* engine,
                                        const std::vector<ModuleExternalBinding>& external_bindings);

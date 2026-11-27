@@ -1,0 +1,44 @@
+{
+  "name": "dlrmv3-bf16",
+  "family": "hstu",
+  "task": "structured_ranking",
+  "precision": "bf16",
+  "bundle": "dlrmv3-bf16.bundle",
+  "checkpoint": {
+    "url": "https://inference.mlcommons-storage.org/dlrmv3_trained_checkpoint/non_sparse.ckpt",
+    "pretrained": true
+  },
+  "max_batch_size": 4,
+  "tensor_parallel_size": 1,
+  "context_parallel_size": 1,
+  "max_sequence_length": 512,
+  "testcases": [
+    {
+      "name": "dlrmv3-bf16-default-b1",
+      "batch": 1,
+      "profile": "default",
+      "reference_precision": "fp64",
+      "premerge": true
+    },
+    {
+      "name": "dlrmv3-bf16-default-b4",
+      "batch": 4,
+      "profile": "default",
+      "reference_precision": "fp64",
+      "premerge": true
+    },
+    {
+      "name": "dlrmv3-bf16-short-b4",
+      "batch": 4,
+      "profile": "short",
+      "reference_precision": "fp64",
+      "premerge": true
+    }
+  ],
+  "external_files": [
+    {
+      "path": "non_sparse.ckpt",
+      "url": "https://inference.mlcommons-storage.org/dlrmv3_trained_checkpoint/non_sparse.ckpt"
+    }
+  ]
+}

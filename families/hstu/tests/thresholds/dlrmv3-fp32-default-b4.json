@@ -1,0 +1,8 @@
+{
+  "threshold_overrides": {
+    "score_atol": 0.002,
+    "score_rtol": 0.001,
+    "top1_agreement": 1.0,
+    "top10_overlap": 1.0
+  }
+}

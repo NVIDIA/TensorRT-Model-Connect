@@ -23,6 +23,7 @@ enum class DType {
     kInt32,
     kInt8,
     kFloat8E4M3,
+    kInt64,
 };
 
 inline std::size_t dtype_size(DType dt) {
@@ -35,6 +36,8 @@ inline std::size_t dtype_size(DType dt) {
         return 2;
     case DType::kInt32:
         return 4;
+    case DType::kInt64:
+        return 8;
     case DType::kInt8:
     case DType::kFloat8E4M3:
         return 1;

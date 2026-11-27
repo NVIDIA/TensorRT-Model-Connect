@@ -100,6 +100,27 @@ Always check status, even when the returned error handle is null: an allocation
 failure can prevent error-detail allocation. C++ wrappers turn failures into
 `trtmc::Error`, retaining the C status, and release handles through RAII.
 
+## Structured ranking
+
+`StructuredRanking` (`structured_ranking`, version 1.0) consumes named contiguous
+host tensors with FP32, INT32 or INT64 elements. Each feature supplies its name,
+shape and byte span. Core checks storage, unique names and overflow; the family
+owns tensor names, axes, valid shapes/values, batching and padding. One `run`
+performs one native scoring operation and returns an owned FP32 matrix indexed
+by input row and candidate, plus its score kind. Core preserves order and padding
+and validates finite scores (probabilities also lie in [0,1]). No sorting or
+candidate selection occurs in the shared contract.
+
+C callers use `trtmc_structured_ranking_api_v1` from `trtmc/ranking.h`.
+`configure_cache(bytes, memory_ratio)` and `cache_stats()` expose optional cache
+controls/statistics through the same Task table; unsupported families report
+`supported=0` and reject configuration. Exactly one cap is positive, or both are
+zero for the family default. Accounting, accepted ranges and valid lifecycle
+states remain family-owned. Calls serialize with `run` on the same model.
+Input views borrow through synchronous execution; nested output views borrow
+the result lifetime. See the [DLRMv3 family](https://github.com/NVIDIA/TensorRT-Model-Connect/tree/main/families/hstu)
+for a concrete mixed-tensor schema and C/C++ consumers.
+
 ## Config and ownership
 
 `text.config_fields()` returns the family-declared fields for that loaded Task.

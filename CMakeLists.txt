@@ -154,6 +154,7 @@ add_library(trtmc_c SHARED
   core/api/runtime/action.cpp
   core/api/runtime/recurrent.cpp
   core/api/runtime/structure.cpp
+  core/api/runtime/ranking.cpp
 )
 add_library(trtmc::c ALIAS trtmc_c)
 target_include_directories(trtmc_c
@@ -753,7 +754,7 @@ if(TRTMC_BUILD_TESTS)
   add_test(NAME sdk_cli_e2e COMMAND test_sdk_cli "${_trtmc_api_test_runtime_root}")
   set_tests_properties(sdk_cli_e2e PROPERTIES LABELS "cpu;e2e")
 
-  foreach(_trtmc_fixture IN ITEMS text image image_boxes audio features numeric stream video perception language tracking speech action recurrent structure point_cloud)
+  foreach(_trtmc_fixture IN ITEMS text image image_boxes audio features numeric stream video perception language tracking speech action recurrent structure point_cloud ranking)
     add_library(trtmc_api_test_${_trtmc_fixture}_family SHARED
       core/api/tests/${_trtmc_fixture}_family.cpp
     )
@@ -889,7 +890,7 @@ if(TRTMC_BUILD_TESTS)
   add_test(NAME sdk_language_cli_e2e COMMAND test_sdk_language_cli "${_trtmc_api_test_runtime_root}")
   set_tests_properties(sdk_language_cli_e2e PROPERTIES LABELS "cpu;e2e")
 
-  foreach(_trtmc_group IN ITEMS image_boxes audio features numeric stream video perception language tracking speech action recurrent structure point_cloud)
+  foreach(_trtmc_group IN ITEMS image_boxes audio features numeric stream video perception language tracking speech action recurrent structure point_cloud ranking)
     add_executable(test_${_trtmc_group}_c_api core/api/tests/${_trtmc_group}_c_test.c)
     add_executable(test_${_trtmc_group}_cpp_api core/api/tests/${_trtmc_group}_test.cpp)
     foreach(_trtmc_language IN ITEMS c cpp)
