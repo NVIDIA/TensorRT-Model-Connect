@@ -8,6 +8,25 @@ manifests) and returns the final hidden rows. Batch size is 1. The build accepts
 precision fp32 (default) and fp16; the manifests build both. The family has no
 quantized build.
 
+## Native tokenizer normalization and scores
+
+The native tokenizer applies the converted checkpoint's whitespace replacement,
+NFC and right-strip stages in order. NFC handles canonical composition, including
+decomposed accents, Hangul and singleton equivalents such as the Angstrom sign.
+Compatibility-only characters such as ligatures are preserved.
+
+The family runtime now requires ICU 74 or newer (`uc`). NFC accepts valid UTF-8
+whose code points have a nonzero Unicode Age no later than 15.1. Unassigned or
+newer code points fail explicitly. This fixed repertoire uses the
+[Unicode normalization stability policy](https://www.unicode.org/reports/tr15/)
+to keep results stable across ICU data upgrades. Rebuild the family runtime; the
+public API, bundle schema, engine graphs and checkpoint weights do not change.
+Unigram vocabulary and accumulated path scores retain double precision, matching
+the reference instead of collapsing nearby path scores to a float tie. Score
+storage grows from 32 to 64 bits per value; process memory and latency have not
+been measured. CPU token-ID comparisons do not qualify GPU inference, model
+quality or performance.
+
 ## FP8 quantization study (not shipped)
 
 FP8 self-quantization of the encoder projections, on top of the fp16 engine, was
