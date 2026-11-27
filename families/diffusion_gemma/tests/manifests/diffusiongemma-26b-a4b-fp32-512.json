@@ -1,0 +1,21 @@
+{
+  "name": "diffusiongemma-26b-a4b-fp32-512",
+  "hf_id": "google/diffusiongemma-26B-A4B-it",
+  "hf_revision": "f7f5b7f5fa82ffc52addd066915886d497f5517b",
+  "bundle": "diffusiongemma-26b-a4b-fp32-512.bundle",
+  "family": "diffusion_gemma",
+  "task": "text_continuation",
+  "precision": "fp32",
+  "max_sequence_length": 512,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "diffusiongemma-26b-a4b-fp32-512",
+      "premerge": true,
+      "prompt": "What is the capital of France? Answer with the city name only.",
+      "expected_answer": "Paris",
+      "max_new_tokens": 256,
+      "seed": 19
+    }
+  ]
+}
