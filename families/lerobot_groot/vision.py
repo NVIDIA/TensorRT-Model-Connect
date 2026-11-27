@@ -103,6 +103,19 @@ def _merger(network, h, weights, prefix, *, postshuffle, dtype):
     return graph.linear(network, x, weights[prefix + "linear_fc2.weight"], weights[prefix + "linear_fc2.bias"], dtype=dtype)
 
 
+def _vision_projection(network, x, weight, bias, dtype):
+    """Keep FP16 operands and output; accumulate the dot product and bias before rounding."""
+    if dtype != trt.float16:
+        return graph.linear(network, x, weight, bias, dtype=dtype)
+    x = graph.f32(network, graph.cast(network, x, dtype))
+    # PyTorch's biased visual projections round the FP16 result after adding bias.
+    kernel = graph.f32(network, graph.const(network, weight[None], dtype))
+    total = network.add_matrix_multiply(
+        x, trt.MatrixOperation.NONE, kernel, trt.MatrixOperation.TRANSPOSE).get_output(0)
+    offset = graph.f32(network, graph.const(network, bias.reshape(1, 1, -1), dtype))
+    return graph.cast(network, graph.add(network, total, offset), dtype)
+
+
 def build_vision(network, pixel_values, weights, *, images, grid_h, grid_w, dtype):
     """Image tokens ``[images * tokens, OUT]`` and the DeepStack features, all in ``dtype``.
 
@@ -140,7 +153,7 @@ def build_vision(network, pixel_values, weights, *, images, grid_h, grid_w, dtyp
     for index in range(DEPTH):
         p = f"{_ROOT}blocks.{index}."
         norm = graph.layer_norm(network, h, LN_EPS, weights[p + "norm1.weight"], weights[p + "norm1.bias"])
-        qkv = graph.linear(network, norm, weights[p + "attn.qkv.weight"], weights[p + "attn.qkv.bias"], dtype=dtype)
+        qkv = _vision_projection(network, norm, weights[p + "attn.qkv.weight"], weights[p + "attn.qkv.bias"], dtype=dtype)
         parts = [graph.slice_static(network, qkv, (0, 0, i * WIDTH), (images, patches, WIDTH)) for i in range(3)]
         q, k = (
             graph.shuffle(network, graph.rotate(
@@ -149,12 +162,12 @@ def build_vision(network, pixel_values, weights, *, images, grid_h, grid_w, dtyp
             for t in parts[:2]
         )
         context = graph.batched_attention(network, q, k, parts[2], heads=HEADS, head_dim=HEAD_DIM, dtype=dtype)
-        h = graph.add(network, h, graph.f32(network, graph.linear(
+        h = graph.add(network, h, graph.f32(network, _vision_projection(
             network, context, weights[p + "attn.proj.weight"], weights[p + "attn.proj.bias"], dtype=dtype)))
         norm = graph.layer_norm(network, h, LN_EPS, weights[p + "norm2.weight"], weights[p + "norm2.bias"])
         hidden = graph.gelu_tanh(network, graph.linear(
             network, norm, weights[p + "mlp.linear_fc1.weight"], weights[p + "mlp.linear_fc1.bias"], dtype=dtype))
-        h = graph.add(network, h, graph.f32(network, graph.linear(
+        h = graph.add(network, h, graph.f32(network, _vision_projection(
             network, hidden, weights[p + "mlp.linear_fc2.weight"], weights[p + "mlp.linear_fc2.bias"], dtype=dtype)))
         if index in DEEPSTACK_LAYERS:
             slot = DEEPSTACK_LAYERS.index(index)
