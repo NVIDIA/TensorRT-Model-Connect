@@ -51,7 +51,19 @@ WhisperPipeline::WhisperPipeline(
     if (!state_ || !state_->ok())
         throw std::runtime_error("WhisperPipeline: invalid inference state");
 
-    // Allocate cross-attention K/V device buffers
+    // A single-GPU bundle's encoder engine outputs each decoder layer's
+    // projected cross-attention K/V, which the decoder reads in place.
+    cross_kv_projected_ = decoder_->input_rank("cross_k_0") == whisper_cross_input_rank(1);
+    if (cross_kv_projected_) {
+        const std::string mismatch = whisper_projected_cross_kv_mismatch(
+            *encoder_, *decoder_, num_decoder_layers_, kWhisperEncoderPaddedRows);
+        if (!mismatch.empty())
+            throw std::runtime_error("WhisperPipeline: " + mismatch);
+        return;
+    }
+
+    // Tensor-parallel bundle: allocate a device copy of the raw encoder states
+    // per layer K and V
     cross_kv_bytes_ = static_cast<std::size_t>(whisper_config_.max_source_positions) *
                       static_cast<std::size_t>(hidden_size_) * sizeof(float);
 
@@ -126,7 +138,7 @@ TextResult WhisperPipeline::transcribe(const float* audio_data, int32_t num_samp
     }
 
     // Step 3: Set up cross-attention K/V
-    std::cerr << "[whisper] Computing cross-attention K/V ..." << std::endl;
+    std::cerr << "[whisper] Setting up cross-attention K/V ..." << std::endl;
     setup_cross_attention(actual_enc_seq_len);
 
     // Step 4: Run decoder
@@ -181,12 +193,34 @@ void WhisperPipeline::run_encoder(const float* mel_data, int32_t mel_bins, int32
         inputs["encoder_mask"] = mask_tensor;
     }
 
+    // An encoder that projects the cross-attention K/V zeroes the states past
+    // a short request's valid length itself, from this input
+    std::vector<float> padded_rows;
+    if (encoder_->has_input(kWhisperEncoderPaddedRows)) {
+        padded_rows = build_whisper_encoder_padded_rows(
+            enc_seq, compute_whisper_actual_encoder_length(mel_length, expected_length, enc_seq));
+
+        Tensor padded_tensor;
+        padded_tensor.data = padded_rows.data();
+        padded_tensor.shape = {static_cast<int64_t>(padded_rows.size()), 1};
+        padded_tensor.dtype = DType::kFloat32;
+        inputs[kWhisperEncoderPaddedRows] = padded_tensor;
+    }
+
     // Run encoder (we need the output to stay on device, so use forward_async + sync)
     encoder_->forward_async(inputs);
     encoder_->sync();
 }
 
 void WhisperPipeline::setup_cross_attention(int32_t actual_enc_seq_len) {
+    if (cross_kv_projected_) {
+        // The encoder engine projected every layer's K and V for this request
+        // (and zeroed the states past a short request, run_encoder): the
+        // decoder reads its output buffers in place.
+        bind_whisper_projected_cross_kv(*encoder_, *decoder_, num_decoder_layers_);
+        return;
+    }
+
     // Get encoder output device pointer
     void* enc_output_device = encoder_->device_ptr("encoder_output");
 
