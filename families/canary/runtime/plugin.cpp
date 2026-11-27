@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/canary/runtime/canary_cross_kv_heads.h"
 #include "families/canary/runtime/distributed_runtime.h"
 #include "families/canary/runtime/pipeline.h"
 #include "families/canary/runtime/plugin_helpers.h"
@@ -54,6 +55,12 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     }
     auto decoder = load_trt_module_from_plan(&context.backend, &decoder_plan,
                                              decoder_section.c_str(), decoder_options);
+    if (decoder.module->input_rank("cross_k_0") != canary_cross_input_rank(tp_size)) {
+        throw std::runtime_error(
+            "Canary bundle predates its runtime's cross-attention contract (single-GPU decoders "
+            "read the encoder's projected K/V, tensor-parallel decoders the raw encoder output): "
+            "rebuild the bundle");
+    }
 
     CanaryConfig model;
     model.num_mel_bins = config.at("num_mel_bins").get<std::int32_t>();

@@ -307,15 +307,19 @@ def test_quantized_engines_build(tiny) -> None:
     ctx = calibrate_canary(weights, graph_ops, "fp8")
 
     plain_decoder = canary.build_engine(config, weights, 8, precision="fp16")
-    plain_encoder = canary.build_vision_engine("", config, weights, precision="fp16")
+    plain_encoder = canary.build_vision_engine(
+        "", config, weights, precision="fp16", project_cross_kv=True
+    )
     fp8_decoder = canary.build_engine(config, weights, 8, precision="fp16", quant_ctx=ctx)
-    fp8_encoder = canary.build_vision_engine("", config, weights, precision="fp16", quant_ctx=ctx)
+    fp8_encoder = canary.build_vision_engine(
+        "", config, weights, precision="fp16", quant_ctx=ctx, project_cross_kv=True
+    )
 
     runtime = trt.Runtime(trt.Logger(trt.Logger.ERROR))
     decoder = runtime.deserialize_cuda_engine(fp8_decoder)
     names = {decoder.get_tensor_name(i) for i in range(decoder.num_io_tensors)}
     assert {"token_id", "logits", "present_k_0", "cross_k_0"} <= names
     encoder = runtime.deserialize_cuda_engine(fp8_encoder)
-    assert "encoder_output" in {encoder.get_tensor_name(i) for i in range(encoder.num_io_tensors)}
+    assert "cross_k_0" in {encoder.get_tensor_name(i) for i in range(encoder.num_io_tensors)}
     assert len(fp8_decoder) < len(plain_decoder)
     assert len(fp8_encoder) < len(plain_encoder)
