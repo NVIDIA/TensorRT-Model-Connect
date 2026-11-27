@@ -712,3 +712,21 @@ def test_family_build_preserves_native_and_isaac_inputs(tmp_path, monkeypatch):
     (native / "config.json").write_text(json.dumps({"model_type": "not_groot"}))
     with pytest.raises(ValueError, match="does not support this model"):
         cli.build(model="example-org/other-model", output=output)
+
+    # The named Isaac snapshot remains usable offline, without the Hub tree cache.
+    named = stage.rename(tmp_path / "libero_10")
+    named_calls = []
+
+    def named_download(repo_id, **options):
+        named_calls.append((repo_id, options))
+        return str(tmp_path)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", named_download)
+    for offline in (False, True):
+        monkeypatch.setattr("huggingface_hub.constants.HF_HUB_OFFLINE", offline)
+        assert cli.build(model=cli._MODEL, output=output) == 0
+        repo, options = named_calls[-1]
+        assert repo == cli._MODEL and options["revision"] == cli._REVISION
+        assert options["local_files_only"] is offline
+        assert "libero_10/model-*.safetensors" in options["allow_patterns"]
+        assert requests[-1].model_dir == named

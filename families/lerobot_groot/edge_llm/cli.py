@@ -50,10 +50,10 @@ def build(*, model: str, output: Path, source_revision: str | None = None,
     if checkpoint_subdir not in (None, "isaac-libero10"):
         raise ValueError("Only the staged Isaac LIBERO-10 subdirectory is supported")
     if model == _MODEL and not Path(model).is_dir():
-        from huggingface_hub import snapshot_download
+        from huggingface_hub import constants, snapshot_download
 
         directory = Path(snapshot_download(
-            _MODEL, revision=source_revision or _REVISION,
+            _MODEL, revision=source_revision or _REVISION, local_files_only=constants.HF_HUB_OFFLINE,
             allow_patterns=["libero_10/" + name for name in (
                 "config.json", "embodiment_id.json", "statistics.json", "processor_config.json",
                 "model.safetensors.index.json", "model-*.safetensors")],
