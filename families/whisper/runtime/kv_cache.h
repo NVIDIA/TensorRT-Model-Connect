@@ -47,6 +47,7 @@ class WhisperKvCache : public WhisperInferenceState {
     void bind_to(ITrtModule& module) override;
     void prepare_step(TensorMap& inputs, int32_t seq_len = 1) override;
     void advance(int32_t n_tokens = 1) override;
+    bool advance_queues_on(cudaStream_t stream) const override { return stream == stream_; }
     int32_t position() const override { return position_; }
     int32_t max_length() const override { return max_length_; }
     int32_t num_layers() const override { return num_layers_; }

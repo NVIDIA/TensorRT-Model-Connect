@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -19,12 +20,24 @@ struct WhisperDecodeLoopResult {
     std::string error;
 };
 
-template <typename StepFn, typename SelectFn>
+// One step's logits where the step left them, for a step that does not copy
+// them into a vector.
+struct WhisperLogitsView {
+    const float* data{nullptr};
+    std::size_t size{0};
+
+    bool empty() const { return size == 0; }
+};
+
+// The decode loop over the step's own holder of its logits: run_step fills a
+// Logits, select_next_token reads it.
+template <typename Logits, typename StepFn, typename SelectFn>
 inline WhisperDecodeLoopResult
-run_whisper_decode_loop(const std::vector<int32_t>& initial_tokens, int32_t max_new_tokens,
-                        int32_t eot_token_id, StepFn&& run_step, SelectFn&& select_next_token) {
+run_whisper_decode_loop_over(const std::vector<int32_t>& initial_tokens, int32_t max_new_tokens,
+                             int32_t eot_token_id, StepFn&& run_step,
+                             SelectFn&& select_next_token) {
     WhisperDecodeLoopResult result;
-    std::vector<float> logits;
+    Logits logits{};
 
     for (const int32_t token : initial_tokens) {
         if (!run_step(token, logits, result.error)) {
@@ -57,6 +70,15 @@ run_whisper_decode_loop(const std::vector<int32_t>& initial_tokens, int32_t max_
     }
 
     return result;
+}
+
+template <typename StepFn, typename SelectFn>
+inline WhisperDecodeLoopResult
+run_whisper_decode_loop(const std::vector<int32_t>& initial_tokens, int32_t max_new_tokens,
+                        int32_t eot_token_id, StepFn&& run_step, SelectFn&& select_next_token) {
+    return run_whisper_decode_loop_over<std::vector<float>>(
+        initial_tokens, max_new_tokens, eot_token_id, std::forward<StepFn>(run_step),
+        std::forward<SelectFn>(select_next_token));
 }
 
 } // namespace trtmc
