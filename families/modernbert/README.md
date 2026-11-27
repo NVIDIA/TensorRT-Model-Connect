@@ -28,6 +28,62 @@ invalid inputs and engine failures; CPU results do not establish GPU model parit
 Set `TRTMC_NATIVE_BUILD_DIR` to the CMake build root containing both SDK consumers,
 including when `TRTMC_BINARY` points to a CLI installed from a wheel.
 
+## Unicode tokenization
+
+The native tokenizer applies the top-level NFC normalizer used by ModernBERT
+and Granite embedding r2 before byte-level pre-tokenization. Canonically
+equivalent text such as `café` and `cafe\u0301`, including Hangul Jamo sequences,
+receives the same normalization. Compatibility characters are preserved.
+
+Family-owned decomposition, combining-order and composition tables are derived
+from `tokenizers==0.23.3`, whose normalization dependency uses Unicode 9.0 data.
+Hangul decomposition and composition are algorithmic. Unicode data attribution
+is retained in [UNICODE_LICENSE.txt](UNICODE_LICENSE.txt). Regenerate with:
+
+```bash
+python -m pip install tokenizers==0.23.3
+python families/modernbert/tests/generate_nfc.py
+```
+
+Byte-level regex classification uses the complete Unicode 16.0 letter (`L*`),
+number (`N*`) and `White_Space` ranges. These match the pinned tokenizer's regex
+engine, independently of its Unicode 9 normalization tables. ASCII keeps direct
+classification. Arabic punctuation and combining marks are not classified as
+letters; non-ASCII numbers include decimal digits, letter numbers and other
+numbers. Supplementary-plane letters and all Unicode whitespace are included.
+
+Regenerate the classification header from the official
+[UnicodeData.txt](https://www.unicode.org/Public/16.0.0/ucd/UnicodeData.txt) and
+[PropList.txt](https://www.unicode.org/Public/16.0.0/ucd/PropList.txt):
+
+```bash
+python families/modernbert/tests/generate_categories.py UnicodeData.txt PropList.txt
+```
+
+The official input SHA-256 values are
+`ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f` and
+`53d614508e2a0b2305a8aa21cd60d993de9326cdf65993660dfcce4503548583`, respectively.
+Both generated headers retain Unicode attribution in the family license file.
+
+There is no new runtime dependency. This covers the checkpoint's top-level NFC
+configuration, not arbitrary normalizer sequences, newer Unicode normalization
+versions, invalid UTF-8, or all tokenizer behavior. Rebuild the ModernBERT runtime
+library to apply the correction to existing bundles; engine formats are unchanged.
+The pinned Granite revision `2ab6fa8ea2d674564defd37171ae19079b864b33`
+passed five FP32 TP1 checkpoint E2Es at `442afa78`: the original short input,
+local-window input, NFC/NFD pair and Arabic punctuation with non-ASCII numbers.
+The tests build real engines, compare the CLI CLS vector to the official FP32
+reference, and compare both public C/C++ SDK consumers to the CLI. All retained
+the 0.995 cosine gate; observed maximum absolute error was at most 2.87e-6.
+The paired NFC/NFD native vectors were identical.
+
+Validation used one H200, driver 595.71.05, CUDA 13.4.3, TensorRT 11.4.0.106,
+PyTorch 2.12.0+cu130, Transformers 5.2.0 and Tokenizers 0.22.2 on Linux x86_64.
+Run `families/modernbert/tests/test_e2e.py` with `--e2e-model modernbert` and
+explicit `--e2e-testcase` selectors for these five Granite cases, plus the
+runtime paths described above. Other checkpoints, precisions, TP4, platforms,
+longer inputs, concurrency and performance remain unqualified by this run.
+
 ## FP8 (`quantization=fp8`)
 
 FP8 self-quantizes the original checkpoint at build time (TP1, `precision=fp16`

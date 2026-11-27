@@ -3,13 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/modernbert/runtime/nfc_data.h"
 #include "families/modernbert/runtime/tokenizer.h"
+#include "families/modernbert/runtime/unicode_categories.h"
 
 #include <algorithm>
 #include <cassert>
 #include <climits>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <list>
 #include <nlohmann/json.hpp>
 #include <queue>
@@ -111,6 +114,100 @@ inline char32_t read_utf8(const char*& p, const char* end) {
     return 0xFFFD;
 }
 
+std::uint8_t combining_order(char32_t point) {
+    using namespace modernbert_unicode;
+    const auto* found = std::lower_bound(
+        std::begin(kCombiningOrders), std::end(kCombiningOrders), point,
+        [](const CombiningOrder& entry, char32_t value) { return entry.point < value; });
+    return found != std::end(kCombiningOrders) && found->point == point ? found->rank : 0;
+}
+
+char32_t compose_pair(char32_t left, char32_t right) {
+    if (left >= 0x1100 && left < 0x1113 && right >= 0x1161 && right < 0x1176)
+        return 0xAC00 + (left - 0x1100) * 588 + (right - 0x1161) * 28;
+    if (left >= 0xAC00 && left <= 0xD7A3 && (left - 0xAC00) % 28 == 0 && right > 0x11A7 &&
+        right < 0x11C3)
+        return left + right - 0x11A7;
+    using namespace modernbert_unicode;
+    const auto key = (static_cast<std::uint64_t>(left) << 21) | right;
+    const auto* found = std::lower_bound(
+        std::begin(kCompositions), std::end(kCompositions), key,
+        [](const Composition& entry, std::uint64_t value) { return entry.pair < value; });
+    return found != std::end(kCompositions) && found->pair == key ? found->point : 0;
+}
+
+std::string normalize_nfc(const std::string& text) {
+    if (std::all_of(text.begin(), text.end(), [](unsigned char byte) { return byte < 0x80; }))
+        return text;
+
+    struct OrderedPoint {
+        char32_t point;
+        std::uint8_t order;
+    };
+    using namespace modernbert_unicode;
+    std::vector<OrderedPoint> decomposed;
+    decomposed.reserve(text.size());
+    const auto append = [&](char32_t point) {
+        decomposed.push_back({point, combining_order(point)});
+    };
+    std::size_t position = 0;
+    while (position < text.size()) {
+        const auto point = utf8_to_char32(text, position);
+        if (point >= 0xAC00 && point <= 0xD7A3) {
+            const auto index = point - 0xAC00;
+            append(0x1100 + index / 588);
+            append(0x1161 + index % 588 / 28);
+            if (index % 28)
+                append(0x11A7 + index % 28);
+            continue;
+        }
+        const auto* found = std::lower_bound(
+            std::begin(kDecompositions), std::end(kDecompositions), point,
+            [](const Decomposition& entry, char32_t value) { return entry.point < value; });
+        if (found != std::end(kDecompositions) && found->point == point) {
+            for (std::size_t i = 0; i < found->size; ++i)
+                append(kDecomposedValues[found->offset + i]);
+        } else {
+            append(point);
+        }
+    }
+
+    std::size_t run = 0;
+    for (std::size_t i = 0; i <= decomposed.size(); ++i) {
+        if (i == decomposed.size() || decomposed[i].order == 0) {
+            if (i - run > 1)
+                std::stable_sort(decomposed.begin() + run, decomposed.begin() + i,
+                                 [](const OrderedPoint& left, const OrderedPoint& right) {
+                                     return left.order < right.order;
+                                 });
+            run = i + 1;
+        }
+    }
+
+    std::vector<char32_t> composed;
+    composed.reserve(decomposed.size());
+    std::size_t starter = decomposed.size();
+    std::uint8_t previous_order = 0;
+    for (const auto& item : decomposed) {
+        if (starter < composed.size() && (previous_order == 0 || previous_order < item.order)) {
+            const auto replacement = compose_pair(composed[starter], item.point);
+            if (replacement) {
+                composed[starter] = replacement;
+                continue;
+            }
+        }
+        if (item.order == 0)
+            starter = composed.size();
+        composed.push_back(item.point);
+        previous_order = item.order;
+    }
+    std::string result;
+    result.reserve(text.size());
+    for (const auto point : composed)
+        result += utf32_to_utf8(point);
+    return result;
+}
+
 // ─── GPT-2 byte encoder: byte value <-> Unicode codepoint ───
 
 struct ByteEncoderTables {
@@ -164,54 +261,30 @@ enum class Variant { kGpt2, kQwen3, kBloom, kDeepSeek, kClip };
 
 // ── Character classification ──
 
-struct UnicodeRange {
-    char32_t lo, hi;
-};
-
-constexpr UnicodeRange kLetterRanges[] = {
-    {'A', 'Z'},         {'a', 'z'},       {0xB5, 0xB5},   // µ (micro sign, treated as letter)
-    {0xC0, 0xD6},       {0xD8, 0xF6},     {0xF8, 0x1BA},  // Latin-1 + Extended A/B
-    {0x1BC, 0x1BF},     {0x1C4, 0x293},   {0x295, 0x2AF}, // Latin Extended B cont.
-    {0x370, 0x373},     {0x376, 0x377},   {0x37B, 0x37D},   {0x37F, 0x37F}, // Greek
-    {0x386, 0x386},     {0x388, 0x38A},   {0x38C, 0x38C},   {0x38E, 0x3A1},
-    {0x3A3, 0x3F5},     {0x3F7, 0x481},   {0x48A, 0x52F},   // Greek + Cyrillic
-    {0x531, 0x556},     {0x559, 0x559},                     // Armenian
-    {0x560, 0x588},                                         // Armenian lowercase
-    {0x600, 0x6FF},                                         // Arabic
-    {0x900, 0x97F},                                         // Devanagari
-    {0xE00, 0xE7F},                                         // Thai
-    {0x10A0, 0x10C5},                                       // Georgian
-    {0x13A0, 0x13F5},                                       // Cherokee
-    {0x1C90, 0x1CBA},   {0x1CBD, 0x1CBF},                   // Georgian Extended
-    {0x1D00, 0x1D2B},   {0x1D6B, 0x1D77}, {0x1D79, 0x1D9A}, // Phonetic Extensions
-    {0x1E00, 0x1F15},   {0x1F18, 0x1F1D}, {0x1F20, 0x1F45}, // Latin Ext. Additional + Greek Ext.
-    {0x2C00, 0x2C5F},                                       // Glagolitic
-    {0x3040, 0x309F},                                       // Hiragana
-    {0x30A0, 0x30FF},                                       // Katakana
-    {0x3400, 0x4DBF},                                       // CJK Extension A
-    {0x4E00, 0x9FFF},                                       // CJK Unified Ideographs
-    {0xAC00, 0xD7AF},                                       // Hangul Syllables
-    {0xFB00, 0xFDFF},   // Alphabetic Presentation Forms + Arabic Forms
-    {0x10000, 0x1007F}, // Linear B Syllabary
-};
+template <std::size_t N>
+inline bool in_category(char32_t point, const modernbert_unicode::CategoryRange (&ranges)[N]) {
+    const auto* found = std::lower_bound(std::begin(ranges), std::end(ranges), point,
+                                         [](const modernbert_unicode::CategoryRange& entry,
+                                            char32_t value) { return entry.last < value; });
+    return found != std::end(ranges) && found->first <= point;
+}
 
 inline bool is_letter(char32_t cp) {
-    for (const auto& r : kLetterRanges) {
-        if (cp >= r.lo && cp <= r.hi)
-            return true;
-    }
-    return false;
+    if (cp < 0x80)
+        return (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z');
+    return in_category(cp, modernbert_unicode::kLetters);
 }
 
 inline bool is_digit(char32_t cp) {
-    return (cp >= '0' && cp <= '9');
+    if (cp < 0x80)
+        return cp >= '0' && cp <= '9';
+    return in_category(cp, modernbert_unicode::kNumbers);
 }
 
 inline bool is_whitespace(char32_t cp) {
-    return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == 0x0B || cp == 0x0C // VT, FF
-           || cp == 0xA0                   // non-breaking space
-           || cp == 0x2000 || cp == 0x200A // en space through hair space
-           || cp == 0x3000;                // ideographic space
+    if (cp < 0x80)
+        return cp == ' ' || (cp >= 0x09 && cp <= 0x0D);
+    return in_category(cp, modernbert_unicode::kWhitespace);
 }
 
 // BLOOM punctuation set: .,!?...
@@ -674,6 +747,8 @@ class BpeTokenizer final : public ITokenizer {
     enum class DecoderType { kByteLevel, kMetaspace, kSequence };
 
     std::string normalize_text(const std::string& text) const {
+        if (mNormalizeNfc)
+            return normalize_nfc(text);
         if (!mNormalizeLowercase && !mNormalizeWhitespace) {
             return text;
         }
@@ -1399,6 +1474,7 @@ class BpeTokenizer final : public ITokenizer {
             return;
         auto& norm = j["normalizer"];
         std::string norm_type = norm.value("type", "");
+        mNormalizeNfc = norm_type == "NFC";
         detect_text_normalizers(norm);
         if (normalizer_sequence_prepends(norm, norm_type)) {
             mSentencePiecePrependAlways = true;
@@ -1532,6 +1608,7 @@ class BpeTokenizer final : public ITokenizer {
     bool mSentencePiecePrependIfMissing = true;
     bool mByteFallback = false;
     bool mNormalizeLowercase = false;
+    bool mNormalizeNfc = false;
     bool mNormalizeWhitespace = false;
     std::string mEndOfWordSuffix;
 
