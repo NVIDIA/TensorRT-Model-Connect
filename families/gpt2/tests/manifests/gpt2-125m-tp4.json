@@ -4,7 +4,7 @@
   "hf_revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e",
   "bundle": "gpt2-125m-tp4.bundle",
   "family": "gpt2",
-  "task": "text_generation",
+  "task": "text_continuation",
   "trust_remote_code": false,
   "testcases": [
     {
