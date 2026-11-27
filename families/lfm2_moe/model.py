@@ -92,7 +92,8 @@ def load_weights(directory, cfg):
     return weights
 
 
-def build_engine(weights, cfg, length, stream, verbose=False):
+def build_engine(weights, cfg, length, stream, verbose=False, quant=None):
+    """Build the decode engine; ``quant`` is the FP8 expert context of a quantized build."""
     import torch
     from transformers import Lfm2MoeConfig
     from transformers.models.lfm2_moe.modeling_lfm2_moe import Lfm2MoeRotaryEmbedding
@@ -103,6 +104,9 @@ def build_engine(weights, cfg, length, stream, verbose=False):
     options = builder.create_builder_config()
     options.builder_optimization_level = 3
     options.clear_flag(trt.BuilderFlag.TF32)
+    if quant is not None:
+        # Keeps per-layer tactic names in the plan so the FP8 GEMMs can be inspected.
+        options.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
     width, heads, kv, dim = (
         cfg[k] for k in ("hidden_size", "num_attention_heads", "num_key_value_heads", "head_dim")
     )
@@ -276,22 +280,38 @@ def build_engine(weights, cfg, length, stream, verbose=False):
             ),
             (top, 1, 1),
         )
-        up = net.add_gather(
-            const(weights[prefix + ".feed_forward.experts.gate_up"]), expert_ids, 0
-        ).get_output(0)
-        down = net.add_gather(
-            const(weights[prefix + ".feed_forward.experts.down"]), expert_ids, 0
-        ).get_output(0)
+        fp8 = None if quant is None else quant.experts.get(layer)
+        if fp8 is None:
+            up = net.add_gather(
+                const(weights[prefix + ".feed_forward.experts.gate_up"]), expert_ids, 0
+            ).get_output(0)
+            down = net.add_gather(
+                const(weights[prefix + ".feed_forward.experts.down"]), expert_ids, 0
+            ).get_output(0)
+            inner_input = reshape(normal, (1, 1, width))
+        else:
+            up = quant.selected_weight(net, fp8["gate_up"], expert_ids, top)
+            inner_input = quant.activation(
+                net, reshape(normal, (1, 1, width)), fp8["gate_up"].input_scale
+            )
+            if fp8["down"] is None:
+                stack = const(weights[prefix + ".feed_forward.experts.down"])
+                down = quant.selected(net, stack, expert_ids, top)
+            else:
+                down = quant.selected_weight(net, fp8["down"], expert_ids, top)
         projected = net.add_matrix_multiply(
-            reshape(normal, (1, 1, width)),
+            inner_input,
             trt.MatrixOperation.NONE,
             up,
             trt.MatrixOperation.TRANSPOSE,
         ).get_output(0)
         gate = net.add_slice(projected, (0, 0, 0), (top, 1, middle), (1, 1, 1)).get_output(0)
         value = net.add_slice(projected, (0, 0, middle), (top, 1, middle), (1, 1, 1)).get_output(0)
+        inner = mul(silu(gate), value)
+        if fp8 is not None and fp8["down"] is not None:
+            inner = quant.activation(net, inner, fp8["down"].input_scale)
         result = net.add_matrix_multiply(
-            mul(silu(gate), value), trt.MatrixOperation.NONE, down, trt.MatrixOperation.TRANSPOSE
+            inner, trt.MatrixOperation.NONE, down, trt.MatrixOperation.TRANSPOSE
         ).get_output(0)
         merged = net.add_reduce(mul(result, scores), trt.ReduceOperation.SUM, 1, False).get_output(
             0
@@ -314,7 +334,6 @@ def build(request, writer):
         or request.tensor_parallel_size != 1
         or request.context_parallel_size != 1
         or request.max_batch_size != 1
-        or request.quantization not in (None, "none")
         or request.fp32_layers
         or request.image_height is not None
         or request.image_width is not None
@@ -322,6 +341,11 @@ def build(request, writer):
         or request.mtp_seq_len is not None
     ):
         raise NotImplementedError("Lfm2Moe supports one fp32 sequence with a fixed KV profile")
+    quantization = request.quantization or "none"
+    if quantization not in ("none", "fp8"):
+        raise NotImplementedError(
+            f"Lfm2Moe supports quantization none or fp8, not {quantization!r}"
+        )
     directory = Path(request.model_dir)
     from transformers import Lfm2MoeConfig
 
@@ -365,7 +389,13 @@ def build(request, writer):
         raise ValueError("LFM2 MoE repetition penalty must be finite and positive")
     writer.set_header(family="lfm2_moe", task=request.task, backend=request.backend)
     with writer.open_section("model.plan") as section:
-        build_engine(load_weights(directory, cfg), cfg, length, section, request.verbose)
+        weights = load_weights(directory, cfg)
+        quant = None
+        if quantization == "fp8":
+            from .quantization import calibrate_lfm2_moe_fp8
+
+            quant = calibrate_lfm2_moe_fp8(cfg, weights)
+        build_engine(weights, cfg, length, section, request.verbose, quant)
     writer.add_bytes("tokenizer.json", tokenizer.backend_tokenizer.to_str().encode())
     writer.add_json(
         "runtime.json",
