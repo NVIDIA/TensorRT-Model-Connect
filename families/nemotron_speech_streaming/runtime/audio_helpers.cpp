@@ -14,6 +14,7 @@
 #include <cstring>
 #include <memory>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace trtmc {
@@ -73,41 +74,81 @@ bool is_power_of_two(int32_t value) {
     return value > 0 && (value & (value - 1)) == 0;
 }
 
-void rfft_power_radix2(const float* x, int32_t n, int32_t n_out, float* power_out,
-                       std::vector<std::complex<double>>& workspace) {
-    workspace.resize(static_cast<std::size_t>(n));
-    for (int32_t i = 0; i < n; ++i) {
-        workspace[static_cast<std::size_t>(i)] =
-            std::complex<double>(static_cast<double>(x[i]), 0.0);
-    }
+// The bit-reversed order and the twiddle factors of the radix-2 transform of
+// one power-of-two length n.
+struct Radix2Tables {
+    // Where natural-order sample i sits in bit-reversed order.
+    std::vector<int32_t> bit_reversed;
+    // Stage after stage (length 2, 4, ..., n), length / 2 factors each. The
+    // real and the imaginary parts are two arrays, and the butterfly puts the
+    // factor on the left of its product. Where the compiler fuses
+    // multiply-adds, which terms of a complex product it fuses followed these
+    // two choices: with them GCC 13.3 on aarch64 fuses, at -O2 and at -O3, the
+    // terms it fused in the out-of-line copy of a loop that updated the
+    // factor inline, the copy the mel paths called; with either one changed
+    // it fused others, and a power could differ in its last bits.
+    std::vector<double> twiddle_real;
+    std::vector<double> twiddle_imag;
+};
 
+// Stage `length` gets w_i = step^i (i < length / 2) from the recurrence
+// w_0 = 1, w_{i+1} = w_i * step: the complex operations, in the order, of a
+// butterfly loop that updates its twiddle factor after every butterfly. The
+// tables are built whole in a local and returned: a caller holds all of them
+// or, if an allocation fails, none.
+Radix2Tables make_radix2_tables(int32_t n) {
+    Radix2Tables tables;
+    const auto size = static_cast<std::size_t>(n);
+    tables.bit_reversed.resize(size, 0);
     for (int32_t i = 1, j = 0; i < n; ++i) {
         int32_t bit = n >> 1;
         for (; (j & bit) != 0; bit >>= 1) {
             j ^= bit;
         }
         j ^= bit;
-        if (i < j) {
-            std::swap(workspace[static_cast<std::size_t>(i)],
-                      workspace[static_cast<std::size_t>(j)]);
-        }
+        tables.bit_reversed[static_cast<std::size_t>(i)] = j;
     }
-
+    tables.twiddle_real.reserve(size - 1);
+    tables.twiddle_imag.reserve(size - 1);
     const double pi2 = 2.0 * 3.14159265358979323846;
-    for (int32_t length = 2; length <= n; length <<= 1) {
+    for (std::size_t length = 2; length <= size; length <<= 1) {
         const double angle = -pi2 / static_cast<double>(length);
         const std::complex<double> step(std::cos(angle), std::sin(angle));
+        std::complex<double> twiddle(1.0, 0.0);
+        for (std::size_t i = 0; i < length / 2; ++i) {
+            tables.twiddle_real.push_back(twiddle.real());
+            tables.twiddle_imag.push_back(twiddle.imag());
+            twiddle *= step;
+        }
+    }
+    return tables;
+}
+
+void rfft_power_radix2(const float* x, int32_t n, int32_t n_out, float* power_out,
+                       std::vector<std::complex<double>>& workspace, const Radix2Tables& tables) {
+    // Written in bit-reversed order, the frame needs the butterfly stages
+    // alone. Every value of the workspace is written here.
+    workspace.resize(static_cast<std::size_t>(n));
+    for (int32_t i = 0; i < n; ++i) {
+        workspace[static_cast<std::size_t>(tables.bit_reversed[static_cast<std::size_t>(i)])] =
+            std::complex<double>(static_cast<double>(x[i]), 0.0);
+    }
+
+    const double* stage_real = tables.twiddle_real.data();
+    const double* stage_imag = tables.twiddle_imag.data();
+    for (int32_t length = 2; length <= n; length <<= 1) {
         const int32_t half = length / 2;
         for (int32_t offset = 0; offset < n; offset += length) {
-            std::complex<double> twiddle(1.0, 0.0);
             for (int32_t i = 0; i < half; ++i) {
+                const std::complex<double> twiddle(stage_real[i], stage_imag[i]);
                 const auto even = workspace[static_cast<std::size_t>(offset + i)];
-                const auto odd = workspace[static_cast<std::size_t>(offset + i + half)] * twiddle;
+                const auto odd = twiddle * workspace[static_cast<std::size_t>(offset + i + half)];
                 workspace[static_cast<std::size_t>(offset + i)] = even + odd;
                 workspace[static_cast<std::size_t>(offset + i + half)] = even - odd;
-                twiddle *= step;
             }
         }
+        stage_real += half;
+        stage_imag += half;
     }
 
     const int32_t bins = std::min(n_out, n / 2 + 1);
@@ -119,11 +160,17 @@ void rfft_power_radix2(const float* x, int32_t n, int32_t n_out, float* power_ou
 
 class RfftPowerPlan {
   public:
-    explicit RfftPowerPlan(int32_t n) : n_(n) {}
+    explicit RfftPowerPlan(int32_t n)
+        : n_(n), tables_(is_power_of_two(n) ? make_radix2_tables(n) : Radix2Tables{}) {}
+
+    // A plan is used where it was built. A moved-from plan would keep its
+    // length and lose its tables, so it can be neither copied nor moved.
+    RfftPowerPlan(const RfftPowerPlan&) = delete;
+    RfftPowerPlan& operator=(const RfftPowerPlan&) = delete;
 
     void execute(const float* input, int32_t n_out, float* power_out) {
         if (is_power_of_two(n_)) {
-            rfft_power_radix2(input, n_, n_out, power_out, workspace_);
+            rfft_power_radix2(input, n_, n_out, power_out, workspace_, tables_);
             return;
         }
         rfft_power_direct(input, n_, n_out, power_out);
@@ -131,8 +178,39 @@ class RfftPowerPlan {
 
   private:
     int32_t n_{0};
+    Radix2Tables tables_;
     std::vector<std::complex<double>> workspace_;
 };
+
+// The half-open column span [first, last) of one filterbank row outside which
+// every coefficient is zero (an all-zero row is an empty span).
+std::pair<int32_t, int32_t> nonzero_filter_columns(const float* row, int32_t n_mel_bins) {
+    int32_t first = 0;
+    while (first < n_mel_bins && row[first] == 0.0F) {
+        ++first;
+    }
+    int32_t last = n_mel_bins;
+    while (last > first && row[last - 1] == 0.0F) {
+        --last;
+    }
+    return {first, last};
+}
+
+// frame_mel += power * filter_row, the row given with its nonzero column
+// span. Through a zero coefficient a finite power adds a zero, which can
+// change nothing but the sign of a sum that is zero. Every reader of these
+// sums adds a positive guard to them, or takes their maximum with a positive
+// floor, before it takes the logarithm, so no feature changes when only the
+// span is added. A power that is not finite keeps the full row, where
+// inf * 0 is NaN.
+void add_filter_row(float power, const float* filter_row, int32_t n_mel_bins,
+                    const std::pair<int32_t, int32_t>& columns, float* frame_mel) {
+    const bool finite = std::isfinite(power);
+    const int32_t column_end = finite ? columns.second : n_mel_bins;
+    for (int32_t m = finite ? columns.first : 0; m < column_end; ++m) {
+        frame_mel[m] += power * filter_row[m];
+    }
+}
 
 std::vector<float> build_center_padded_audio(const float* samples, int32_t n_samples,
                                              int32_t chunk_length_s, int32_t sample_rate,
@@ -182,6 +260,10 @@ std::vector<float> compute_mel_spectrogram(const std::vector<float>& padded,
     std::vector<float> frame_power(n_freq_bins);
     std::vector<float> frame_mel(n_mel_bins);
     RfftPowerPlan fft_plan(n_fft);
+    // Each row's nonzero column span, found when a frame first needs the row
+    // (first == -1 until then): a row no nonzero power needs is never read.
+    std::vector<std::pair<int32_t, int32_t>> filter_columns(static_cast<std::size_t>(n_freq_bins),
+                                                            {-1, -1});
 
     const int32_t computed_frames = std::clamp(frames_to_compute, 0, n_frames_raw);
     for (int32_t t = 0; t < computed_frames; ++t) {
@@ -200,10 +282,11 @@ std::vector<float> compute_mel_spectrogram(const std::vector<float>& padded,
                 continue;
             }
             const float* filter_row = mel_filters + static_cast<std::size_t>(f) * n_mel_bins;
-            for (int32_t m = 0; m < n_mel_bins; ++m) {
-                frame_mel[static_cast<std::size_t>(m)] +=
-                    p * filter_row[static_cast<std::size_t>(m)];
+            auto& columns = filter_columns[static_cast<std::size_t>(f)];
+            if (columns.first < 0) {
+                columns = nonzero_filter_columns(filter_row, n_mel_bins);
             }
+            add_filter_row(p, filter_row, n_mel_bins, columns, frame_mel.data());
         }
         for (int32_t m = 0; m < n_mel_bins; ++m) {
             mel_spec[static_cast<std::size_t>(m) * n_frames_raw + t] =
@@ -331,7 +414,8 @@ class IncrementalMelSpectrogram::Impl {
          MelSpectrogramOptions options, int32_t input_sample_rate)
         : options_(std::move(options)), input_sample_rate_(input_sample_rate),
           n_freq_bins_(n_freq_bins), n_mel_bins_(n_mel_bins), window_(make_stft_window(options_)),
-          fft_plan_(options_.n_fft), windowed_(static_cast<std::size_t>(options_.n_fft)),
+          fft_plan_(options_.n_fft), resampler_(input_sample_rate, options_.sample_rate),
+          windowed_(static_cast<std::size_t>(options_.n_fft)),
           frame_power_(static_cast<std::size_t>(n_freq_bins)),
           frame_mel_(static_cast<std::size_t>(n_mel_bins)) {
         if (mel_filters == nullptr || n_freq_bins != options_.n_fft / 2 + 1 || n_mel_bins <= 0) {
@@ -347,6 +431,11 @@ class IncrementalMelSpectrogram::Impl {
         }
         mel_filters_.assign(mel_filters,
                             mel_filters + static_cast<std::size_t>(n_freq_bins_) * n_mel_bins_);
+        filter_columns_.reserve(static_cast<std::size_t>(n_freq_bins_));
+        for (int32_t f = 0; f < n_freq_bins_; ++f) {
+            filter_columns_.push_back(nonzero_filter_columns(
+                mel_filters_.data() + static_cast<std::size_t>(f) * n_mel_bins_, n_mel_bins_));
+        }
     }
 
     void accept_audio(const float* samples, int32_t n_samples) {
@@ -390,9 +479,10 @@ class IncrementalMelSpectrogram::Impl {
         if (bounded_required <= start) {
             return;
         }
-        auto next = resample_linear_range(
-            raw_audio_.data(), static_cast<int32_t>(raw_audio_.size()), input_sample_rate_,
-            options_.sample_rate, start, bounded_required - start);
+        // The resampler keeps its phase table from call to call, and reset()
+        // leaves it alone: the table depends on the two rates only.
+        auto next = resampler_.range(raw_audio_.data(), static_cast<int32_t>(raw_audio_.size()),
+                                     start, bounded_required - start);
         resampled_audio_.insert(resampled_audio_.end(), next.begin(), next.end());
     }
 
@@ -422,10 +512,8 @@ class IncrementalMelSpectrogram::Impl {
             const float power = frame_power_[static_cast<std::size_t>(f)];
             const float* filter_row =
                 mel_filters_.data() + static_cast<std::size_t>(f) * n_mel_bins_;
-            for (int32_t m = 0; m < n_mel_bins_; ++m) {
-                frame_mel_[static_cast<std::size_t>(m)] +=
-                    power * filter_row[static_cast<std::size_t>(m)];
-            }
+            add_filter_row(power, filter_row, n_mel_bins_,
+                           filter_columns_[static_cast<std::size_t>(f)], frame_mel_.data());
         }
         constexpr float kLogGuard = 5.960464477539063e-08F;
         for (float value : frame_mel_) {
@@ -479,8 +567,11 @@ class IncrementalMelSpectrogram::Impl {
     int32_t n_freq_bins_{0};
     int32_t n_mel_bins_{0};
     std::vector<float> mel_filters_;
+    // Each filterbank row's nonzero column span.
+    std::vector<std::pair<int32_t, int32_t>> filter_columns_;
     std::vector<float> window_;
     RfftPowerPlan fft_plan_;
+    LinearResampler resampler_;
     std::vector<float> raw_audio_;
     std::vector<float> resampled_audio_;
     std::vector<float> frames_;
