@@ -37,6 +37,8 @@ See [Configuration and Backends](../features/config-and-backends.md),
 Edge offload is disabled by default. Configure Model Connect with
 `-DTRTMC_ENABLE_EDGELLM=ON` to use the default Edge-LLM 0.12.0 SDK.
 To build against 0.11.0 instead, also set `-DTRTMC_EDGELLM_RELEASE=0.11.0`.
+An existing build directory retains its cached release, even if 0.11.0 was
+the old default. To upgrade, configure a fresh Edge-enabled directory and rebuild.
 Build on the inference GPU host with the matching CUDA and TensorRT stack;
 cross-compilation is not supported. When reusing an installed SDK, Model Connect
 checks the actual JSON headers for C++ ABI compatibility, not just their version.

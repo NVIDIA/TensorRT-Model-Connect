@@ -7,9 +7,13 @@ Cross compilation is rejected. Configure and build on the inference GPU host.
 
 ## Default SDK for Edge-enabled builds: 0.12.0
 
-Enabling Edge selects **0.12.0** unless a release is explicitly requested.
+In a fresh build directory, enabling Edge selects **0.12.0** unless a release is explicitly requested.
 A build links **one** release; an engine from a different release
 is not interchangeable. Native-only builds do not provision either SDK.
+
+An existing build directory keeps its cached SDK release, including an old
+0.11.0 default. To upgrade, configure a new Edge-enabled build directory and
+rebuild Model Connect there. This leaves intentional 0.11.0 builds unchanged.
 
 For 0.12, point CMake at a native installation exporting
 `TensorRTEdgeLLMConfig.cmake`, or let CMake build the official pinned GitHub

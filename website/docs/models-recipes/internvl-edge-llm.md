@@ -60,12 +60,16 @@ build-memory limit, not a minimum-memory guarantee or an SM restriction.
 
 ### Explicit Edge 0.11.0 build
 
+Before building a bundle, configure Model Connect in a separate build directory
+with `-DTRTMC_ENABLE_EDGELLM=ON -DTRTMC_EDGELLM_RELEASE=0.11.0`. Build and
+install that runtime on the execution GPU, then use its matching builder tools:
+
 ```sh
 trtmc internvl build /path/to/InternVL3-2B-hf --precision fp16 \
   --max-sequence-length 384 -o internvl.bundle
 ```
 
-Provision the native Edge SDK on the execution GPU. InternVL3.5 and AWQ require
+InternVL3.5 and AWQ require
 ONNX tools; AWQ additionally requires all native kernels. A compatible installed
 Python wheel can supply builder tools, but does not replace that native SDK.
 The family-only `--int4-gemm-plugin-version` option preserves the recorded INT4

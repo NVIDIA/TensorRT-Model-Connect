@@ -133,12 +133,17 @@ This compiler selection does not qualify a model on that GPU.
 
 The `edgellm` extra installs the 0.12.0 **base** package in the Model Connect
 environment. It does not install the builder dependencies or C++ SDK and does
-not select a family backend. After preparing the native build prerequisites:
+not select a family backend. If you have already installed Model Connect, add
+the base tools without rebuilding its native runtime:
 
 ```bash
-python -m pip install -e '.[edgellm]'
+python -m pip install 'tensorrt-edgellm==0.12.0'
 python -c 'from importlib.metadata import version; print(version("tensorrt-edgellm"))'
 ```
+
+For an editable source installation, `python -m pip install -e '.[edgellm]'`
+also builds Model Connect's native targets. Prepare the native build prerequisites
+for the selected families first (all families by default).
 
 Install the builder in a separate environment. Match its TensorRT Python
 version to the native SDK; for example:

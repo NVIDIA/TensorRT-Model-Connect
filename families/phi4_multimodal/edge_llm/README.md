@@ -53,8 +53,9 @@ The integration targets the official public Edge revision
 
 ## Installation
 
-Provision the optional native Edge SDK through Model Connect's CMake dependency
-and expose its install prefix through `CMAKE_PREFIX_PATH`. A compatible
+For these 0.11 profiles, configure a separate Model Connect build directory with
+`-DTRTMC_ENABLE_EDGELLM=ON -DTRTMC_EDGELLM_RELEASE=0.11.0` and build there.
+Expose the matching SDK install prefix through `CMAKE_PREFIX_PATH`. A compatible
 `tensorrt-edgellm==0.11.0` Python wheel in the active interpreter is preferred
 for Python builder/export commands. Otherwise, the source-provisioned SDK
 interpreter is used. The wheel does not replace the native SDK.
