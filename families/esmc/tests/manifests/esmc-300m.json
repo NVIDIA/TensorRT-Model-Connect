@@ -1,0 +1,18 @@
+{
+  "name": "esmc-300m",
+  "hf_id": "biohub/ESMC-300M",
+  "hf_revision": "96a2d8d61654ac0c08881be44da6c867686449b9",
+  "bundle": "esmc-300m.bundle",
+  "family": "esmc",
+  "task": "masked_text_to_token_scores",
+  "precision": "fp32",
+  "max_sequence_length": 256,
+  "testcases": [
+    {
+      "name": "esmc-300m",
+      "premerge": true,
+      "prompt": "MQIFVKTLTGKTITLEVEPSDTIENVKAK<mask>QDKEGIPPDQQRLIFAGKQLEDGRTLSDYNIQKESTLHLVLRLRGG"
+    }
+  ],
+  "tensor_parallel_size": 1
+}
