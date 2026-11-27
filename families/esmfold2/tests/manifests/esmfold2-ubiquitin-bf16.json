@@ -1,0 +1,20 @@
+{
+  "name": "esmfold2-ubiquitin-bf16",
+  "hf_id": "biohub/ESMFold2",
+  "hf_revision": "69869f737beffec5294845ede23db5fc0b4f509e",
+  "bundle": "esmfold2-ubiquitin-bf16.bundle",
+  "family": "esmfold2",
+  "task": "structure_prediction",
+  "precision": "bf16",
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 128,
+  "testcases": [
+    {
+      "name": "esmfold2-ubiquitin-bf16",
+      "premerge": true,
+      "request": "data/ubiquitin.txt",
+      "seed": 0,
+      "reference_precision": "fp32"
+    }
+  ]
+}

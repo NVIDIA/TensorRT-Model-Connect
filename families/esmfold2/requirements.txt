@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The reference the E2E and host tests compare with: the transformers ESMFold2 port, first released in 5.16.
+transformers==5.24.1
+# Pinned where resolving this file alone would leave the CI image's versions: transformers 5.24.1 needs
+# huggingface-hub >= 1.31 (the image has 1.21; 2.x would break packages that require < 2), tokenizers 0.23 and
+# safetensors >= 0.8.
+huggingface-hub==1.33.0
+tokenizers==0.23.3
+safetensors==0.8.0
