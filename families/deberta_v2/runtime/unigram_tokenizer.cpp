@@ -277,12 +277,12 @@ std::string collapse_whitespace_runs(std::string text) {
 
 std::string normalize_nfc(std::string text) {
     if (text.size() > static_cast<std::size_t>(std::numeric_limits<int32_t>::max()))
-        throw std::runtime_error("deberta_v2 tokenizer: NFC input is too long");
+        throw std::invalid_argument("deberta_v2 tokenizer: NFC input is too long");
     const auto input = icu::UnicodeString::fromUTF8(text);
     std::string result;
     input.toUTF8String(result);
     if (result != text)
-        throw std::runtime_error("deberta_v2 tokenizer: NFC requires valid UTF-8");
+        throw std::invalid_argument("deberta_v2 tokenizer: NFC requires valid UTF-8");
 
     // Note (Jiaxin Deng): A fixed repertoire keeps NFC stable across ICU data upgrades.
     for (int32_t index = 0; index < input.length();) {
@@ -291,7 +291,7 @@ std::string normalize_nfc(std::string text) {
         UVersionInfo age{};
         u_charAge(code, age);
         if (age[0] == 0 || age[0] > 15 || (age[0] == 15 && age[1] > 1))
-            throw std::runtime_error(
+            throw std::invalid_argument(
                 "deberta_v2 tokenizer: NFC requires code points available in Unicode 15.1");
     }
     UErrorCode status = U_ZERO_ERROR;

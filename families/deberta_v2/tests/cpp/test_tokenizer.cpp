@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -122,8 +123,10 @@ int main() {
         bool refused = false;
         try {
             tokenizer->encode(text);
-        } catch (const std::exception&) {
+        } catch (const std::invalid_argument&) {
             refused = true;
+        } catch (const std::exception& error) {
+            std::cerr << "unexpected exception type: " << error.what() << '\n';
         }
         expect(refused, "invalid UTF-8 or out-of-profile scalar is refused");
     }
