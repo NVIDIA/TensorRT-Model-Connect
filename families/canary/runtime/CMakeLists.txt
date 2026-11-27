@@ -6,6 +6,7 @@ add_library(trtmc_model_canary SHARED
   unigram_tokenizer.cpp
   resampler.cpp
   canary_mel_spectrogram.cpp
+  canary_parallel.cpp
   decode_runtime.cpp
   kv_cache.cpp
   pipeline.cpp
@@ -24,6 +25,7 @@ target_include_directories(trtmc_model_canary SYSTEM PRIVATE
 target_link_libraries(trtmc_model_canary PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
+  Threads::Threads
   ${TRTMC_CUDART_LIBRARY}
   ${CMAKE_DL_LIBS}
 )
@@ -45,6 +47,8 @@ if(TRTMC_BUILD_TESTS)
       test_canary_decode_policy
       test_canary_host_plan
       test_canary_mel_spectrogram
+      test_canary_parallel
+      test_canary_resampler
   )
     add_executable(${test_name}
       ${PROJECT_SOURCE_DIR}/families/canary/tests/cpp/${test_name}.cpp
@@ -56,7 +60,7 @@ if(TRTMC_BUILD_TESTS)
     target_include_directories(${test_name} SYSTEM PRIVATE
       ${TRTMC_CUDA_INCLUDE_DIR}
     )
-    target_link_libraries(${test_name} PRIVATE trtmc_model_canary)
+    target_link_libraries(${test_name} PRIVATE trtmc_model_canary Threads::Threads)
     target_compile_options(${test_name} PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()

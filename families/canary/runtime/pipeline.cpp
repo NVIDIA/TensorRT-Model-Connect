@@ -10,6 +10,7 @@
 #include "families/canary/runtime/canary_decode_policy.h"
 #include "families/canary/runtime/canary_host_plan.h"
 #include "families/canary/runtime/canary_mel_spectrogram.h"
+#include "families/canary/runtime/canary_parallel.h"
 #include "families/canary/runtime/canary_request.h"
 #include "families/canary/runtime/canary_segment_utils.h"
 #include "families/canary/runtime/decode_runtime.h"
@@ -279,17 +280,21 @@ group_canary_batch_work(const std::vector<CanaryBatchSegment>& work) {
     return groups;
 }
 
+// `runner` shares this segment's resampling and mel passes among its threads
+// (canary_parallel.h); the prepared features do not depend on it.
 CanaryPreparedSegment
 prepare_canary_batch_segment(const CanaryBatchSegment& item, const TranscriptionRequest& request,
                              const MelFilterbank* mel_filterbank, int32_t mel_n_fft,
                              int32_t mel_win_length, int32_t mel_hop_length,
                              int32_t mel_chunk_length, int32_t mel_sampling_rate, float mel_preemph,
-                             bool mel_normalize_per_feature, const CanaryConfig& canary_config) {
+                             bool mel_normalize_per_feature, const CanaryConfig& canary_config,
+                             canary::RangeRunner* runner) {
     const float* samples = request.audio_samples.data() + item.offset;
     int32_t sample_count = item.count;
     std::vector<float> resampled;
     if (item.sample_rate != mel_sampling_rate) {
-        resampled = resample_linear(samples, sample_count, item.sample_rate, mel_sampling_rate);
+        resampled =
+            resample_linear(samples, sample_count, item.sample_rate, mel_sampling_rate, runner);
         quantize_canary_pcm16_inplace(resampled);
         samples = resampled.data();
         sample_count = static_cast<int32_t>(resampled.size());
@@ -300,7 +305,7 @@ prepare_canary_batch_segment(const CanaryBatchSegment& item, const Transcription
         prepared.mel = canary::extract_mel_spectrogram(
             samples, sample_count, mel_filterbank->data.data(), mel_filterbank->n_freq_bins,
             mel_filterbank->n_mel_bins, mel_n_fft, mel_win_length, mel_hop_length, mel_chunk_length,
-            mel_sampling_rate, mel_preemph, mel_normalize_per_feature);
+            mel_sampling_rate, mel_preemph, mel_normalize_per_feature, runner);
     }
     if (!prepared.mel.data.empty()) {
         const int32_t valid_frames =
@@ -317,20 +322,24 @@ std::vector<std::future<CanaryPreparedSegment>> launch_canary_batch_preparation(
     const std::vector<CanaryBatchSegment>& work, const std::vector<TranscriptionRequest>& requests,
     const MelFilterbank* mel_filterbank, int32_t mel_n_fft, int32_t mel_win_length,
     int32_t mel_hop_length, int32_t mel_chunk_length, int32_t mel_sampling_rate, float mel_preemph,
-    bool mel_normalize_per_feature, const CanaryConfig& canary_config) {
+    bool mel_normalize_per_feature, const CanaryConfig& canary_config,
+    canary::RangeRunner* runner) {
     std::vector<std::future<CanaryPreparedSegment>> futures;
     futures.reserve(chunk_end - chunk_start);
+    // The chunk's segments are prepared at the same time, one task each:
+    // only a segment alone shares its passes with the runner's helpers.
+    runner = canary::runner_for_segments(runner, chunk_end - chunk_start);
     for (std::size_t cursor = chunk_start; cursor < chunk_end; ++cursor) {
         const std::size_t index = indices[cursor];
         futures.push_back(std::async(
             std::launch::async, [&requests, &work, index, mel_filterbank, mel_n_fft, mel_win_length,
                                  mel_hop_length, mel_chunk_length, mel_sampling_rate, mel_preemph,
-                                 mel_normalize_per_feature, &canary_config] {
+                                 mel_normalize_per_feature, &canary_config, runner] {
                 const auto& item = work[index];
                 return prepare_canary_batch_segment(
                     item, requests[item.request_index], mel_filterbank, mel_n_fft, mel_win_length,
                     mel_hop_length, mel_chunk_length, mel_sampling_rate, mel_preemph,
-                    mel_normalize_per_feature, canary_config);
+                    mel_normalize_per_feature, canary_config, runner);
             }));
     }
     return futures;
@@ -674,8 +683,9 @@ CanaryPipeline::CanaryPipeline(
     : encoder_(std::move(encoder)), decoder_(std::move(decoder)), state_(std::move(state)),
       canary_config_(std::move(canary_config)), hidden_size_(hidden_size),
       num_decoder_layers_(num_decoder_layers),
-      mel_fb_(std::make_unique<MelFilterbank>(std::move(mel_fb))), mel_n_fft_(mel_n_fft),
-      mel_win_length_(mel_win_length), mel_hop_length_(mel_hop_length),
+      mel_fb_(std::make_unique<MelFilterbank>(std::move(mel_fb))),
+      host_workers_(std::make_unique<canary::HostWorkers>(canary::host_worker_count())),
+      mel_n_fft_(mel_n_fft), mel_win_length_(mel_win_length), mel_hop_length_(mel_hop_length),
       mel_chunk_length_(mel_chunk_length), mel_sampling_rate_(mel_sampling_rate),
       mel_preemph_(mel_preemph), mel_normalize_per_feature_(mel_normalize_per_feature),
       stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)) {
@@ -773,7 +783,7 @@ void CanaryPipeline::transcribe_batch_group(const CanaryBatchWorkGroup& group,
         auto futures = launch_canary_batch_preparation(
             indices, chunk_start, chunk_end, work, requests, mel_fb_.get(), mel_n_fft_,
             mel_win_length_, mel_hop_length_, mel_chunk_length_, mel_sampling_rate_, mel_preemph_,
-            mel_normalize_per_feature_, canary_config_);
+            mel_normalize_per_feature_, canary_config_, host_workers_.get());
         auto chunk = collect_canary_prepared_batch_chunk(futures, indices, chunk_start, work,
                                                          segment_results);
         if (chunk.valid_indices.empty())
