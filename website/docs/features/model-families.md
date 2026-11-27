@@ -97,9 +97,8 @@ and do not imply that CI executes the paired cases.
 
 ### Qwen3.6 / Qwen3.8 Edge-LLM execution
 
-Use `trtmc qwen3_8 build MODEL -o model.bundle`. The default Edge SDK
-remains 0.11.0; a runtime compiled against 0.12.0 adds opt-in routes for
-dense 27B original and prepared checkpoints. Use the
+Use `trtmc qwen3_8 build MODEL -o model.bundle`. Edge-enabled builds use the 0.12.0 SDK by default. Its family-owned
+routes include original and prepared dense 27B checkpoints. Use the
 [family CLI](../extend/family-cli.md) to select a companion explicitly:
 `--execution-variant dspark|dflash|dflash_tree|domino|domino_tree` and
 `--companion draft=/path/to/draft`. DFlash2 tree and Domino are 0.12 Edge routes;

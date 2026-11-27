@@ -2,8 +2,9 @@
 
 This family owns checkpoint admission, build options, command mapping, bundle
 assets, runtime orchestration, and validation. Shared code contains no Edge
-selection. The default SDK remains Edge-LLM **0.11.0**; **0.12.0** is a
-build-time opt-in. An installed runtime links one release, not both.
+selection. Edge-enabled builds use the **0.12.0** SDK by default. To build against
+**0.11.0** instead, set `TRTMC_EDGELLM_RELEASE=0.11.0` in a separate build
+directory. An installed runtime links one release, not both.
 
 A compatible installed Python wheel is preferred. Discovery checks the actual
 builder or ONNX exporter needed by the request, rather than accepting a version
@@ -14,7 +15,7 @@ native; cross compilation is not supported.
 ## Opt in to Edge-LLM 0.12
 
 Follow the [SDK provisioning guide](../../../cmake/edge_llm/README.md) with
-`TRTMC_ENABLE_EDGELLM=ON` and `TRTMC_EDGELLM_RELEASE=0.12.0`. Paired
+`TRTMC_ENABLE_EDGELLM=ON`. Paired
 builds need `TRTMC_EDGELLM_ONNX=ON`. If the exporter uses its own Python
 environment, pass its absolute interpreter path with `--edge-builder-python`;
 this does not replace the linked SDK or change Model Connect's Transformers pin.
