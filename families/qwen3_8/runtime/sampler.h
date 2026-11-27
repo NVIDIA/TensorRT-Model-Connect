@@ -54,6 +54,7 @@ void qwen38_apply_repetition_penalty(std::vector<float>& logits, float penalty,
                                      const std::vector<int32_t>& token_history);
 
 // The exact existing target filters, exposed for family-owned rejection sampling.
+bool qwen38_greedy_distribution(const Qwen38SamplingParams& params);
 std::vector<float> qwen38_probabilities(const float* logits, int32_t vocab_size,
                                         const Qwen38SamplingParams& params);
 double qwen38_uniform(uint64_t& rng);

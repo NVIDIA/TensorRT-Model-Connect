@@ -137,51 +137,69 @@ def rotary_tables(raw, head_dim, capacity):
     )
 
 
-def load_draft_weights(model_dir: Path, config: DraftConfig):
-    """Read dense draft tensors once, preserving the upstream FP16 export rounding."""
-    readers = _open_safetensors(model_dir)
-    weights = {}
-
-    def load(name, shape, projection=False):
-        value = _load_tensor(readers, name)
-        if value.shape != shape:
-            raise ValueError(f"{name}: expected {shape}, got {value.shape}")
-        weights[name] = np.ascontiguousarray(value.T if projection else value, dtype=np.float16)
-
-    h, v, d = config.hidden, config.vocab, config.head_dim
-    load("fc.weight", (h, len(config.feature_layers) * h), True)
-    load("hidden_norm.weight", (h,))
-    load("norm.weight", (h,))
+def block_weight_shapes(config):
+    """Dense DFlash backbone used by this family's DSpark and Domino drafts."""
+    h, d = config.hidden, config.head_dim
+    yield "fc.weight", (h, len(config.feature_layers) * h), True
+    yield "hidden_norm.weight", (h,), False
+    yield "norm.weight", (h,), False
     for i in range(config.layers):
         prefix = f"layers.{i}"
         for norm in ("input_layernorm", "post_attention_layernorm"):
-            load(f"{prefix}.{norm}.weight", (h,))
-        for projection, out_size, in_size in (
+            yield f"{prefix}.{norm}.weight", (h,), False
+        for proj, out_size, in_size in (
             ("q_proj", config.heads * d, h), ("k_proj", config.kv_heads * d, h),
             ("v_proj", config.kv_heads * d, h), ("o_proj", h, config.heads * d),
         ):
-            load(f"{prefix}.self_attn.{projection}.weight", (out_size, in_size), True)
+            yield f"{prefix}.self_attn.{proj}.weight", (out_size, in_size), True
         for norm in ("q_norm", "k_norm"):
-            load(f"{prefix}.self_attn.{norm}.weight", (d,))
-        for projection, out_size, in_size in (
+            yield f"{prefix}.self_attn.{norm}.weight", (d,), False
+        for proj, out_size, in_size in (
             ("gate_proj", config.intermediate, h), ("up_proj", config.intermediate, h),
             ("down_proj", h, config.intermediate),
         ):
-            load(f"{prefix}.mlp.{projection}.weight", (out_size, in_size), True)
-    load("markov_head.markov_w1.weight", (v, config.markov_rank))
-    load("markov_head.markov_w2.weight", (v, config.markov_rank), True)
-    if config.confidence:
-        width = h + (config.markov_rank if config.confidence_with_markov else 0)
-        load("confidence_head.proj.weight", (1, width), True)
-        load("confidence_head.proj.bias", (1,))
+            yield f"{prefix}.mlp.{proj}.weight", (out_size, in_size), True
+
+
+def load_block_weights(model_dir, specs):
+    """Read each named draft tensor once, rounding to the released export precision."""
+    readers = _open_safetensors(model_dir)
     if _has_tensor(readers, "lm_head.weight") or _has_tensor(readers, "embed_tokens.weight"):
-        raise ValueError("Qwen3.8 DSpark requires the inherited target head and embeddings")
+        raise ValueError("Qwen block draft requires the inherited target head and embeddings")
+    weights = {}
+    for name, shape, transpose in specs:
+        value = _load_tensor(readers, name)
+        if value.shape != shape:
+            raise ValueError(f"{name}: expected {shape}, got {value.shape}")
+        weights[name] = np.ascontiguousarray(value.T if transpose else value, dtype=np.float16)
     return weights
+
+
+def load_draft_weights(model_dir: Path, config: DraftConfig):
+    specs = list(block_weight_shapes(config))
+    shape = (config.vocab, config.markov_rank)
+    specs.extend([("markov_head.markov_w1.weight", shape, False),
+                  ("markov_head.markov_w2.weight", shape, True)])
+    if config.confidence:
+        width = config.hidden + (config.markov_rank if config.confidence_with_markov else 0)
+        specs.extend([("confidence_head.proj.weight", (1, width), True),
+                      ("confidence_head.proj.bias", (1,), False)])
+    return load_block_weights(model_dir, specs)
 
 
 def build_draft_engine(
     config, weights, target_lm_head, max_cache_length, *, quant_ctx=None, verbose=False, debug_layer_outputs=False
 ):
+    def outputs(network, hidden):
+        head = graph_blocks.make_matmul_fn(network, np.float16, quant_ctx)
+        logits = head(hidden, config.hidden, config.vocab, target_lm_head, "w_lm_head")
+        return {"draft_hidden": hidden, "draft_logits": network.add_cast(logits, trt.float32).get_output(0)}
+
+    return build_block_engine(config, weights, max_cache_length, outputs, verbose=verbose,
+                              debug_layer_outputs=debug_layer_outputs)
+
+
+def build_block_engine(config, weights, max_cache_length, outputs, *, verbose=False, debug_layer_outputs=False):
     """Build the real block draft, with no plugins, ONNX or target substitution."""
     if max_cache_length < config.query_rows:
         raise ValueError("Native Qwen3.8 draft context is smaller than its proposal block")
@@ -364,12 +382,9 @@ def build_draft_engine(
         hidden = binary(hidden, down, trt.ElementWiseOperation.SUM)
         debug(hidden, f"layer_{i}")
     hidden = norm(hidden, weights["norm.weight"], h)
-    hidden.name = "draft_hidden"
-    network.mark_output(hidden)
-    head = graph_blocks.make_matmul_fn(network, np.float16, quant_ctx)
-    logits = cast(head(hidden, h, config.vocab, target_lm_head, "w_lm_head"), trt.float32)
-    logits.name = "draft_logits"
-    network.mark_output(logits)
+    for name, tensor in outputs(network, hidden).items():
+        tensor.name = name
+        network.mark_output(tensor)
     plan = builder.build_serialized_network(network, build_config)
     if plan is None:
         raise RuntimeError("Native Qwen3.8 draft engine build failed")

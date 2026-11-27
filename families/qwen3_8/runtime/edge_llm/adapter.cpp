@@ -5,16 +5,24 @@
 #include "families/qwen3_8/runtime/edge_llm/adapter.h"
 
 #include "families/qwen3_8/runtime/edge_llm/media.h"
+#include "families/qwen3_8/runtime/sampler.h"
 
 #include <NvInferRuntime.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <dlfcn.h>
+#ifdef TRTMC_QWEN38_EDGE_012
+#include <tensorrt_edgellm/common/trtInterop.h>
+#include <tensorrt_edgellm/runtime/llmInferenceRuntime.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#else
 #include <edgellm/cpp/common/logger.h>
 #include <edgellm/cpp/runtime/llmInferenceRuntime.h>
 #include <edgellm/cpp/runtime/streaming.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -175,7 +183,12 @@ std::unique_ptr<void, CloseLibrary> load_plugin() {
                                  std::string(dlerror()));
     using Initialize = bool (*)(void*, const char*);
     auto initialize = reinterpret_cast<Initialize>(dlsym(plugin.get(), "initEdgellmPlugins"));
-    if (!initialize || !initialize(static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger), ""))
+#ifdef TRTMC_QWEN38_EDGE_012
+    auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::TrtLogger::instance());
+#else
+    auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger);
+#endif
+    if (!initialize || !initialize(logger, ""))
         throw std::runtime_error("Cannot initialize Qwen3.8 Edge plugin");
     return plugin;
 }
@@ -198,7 +211,11 @@ std::unique_ptr<trt_edgellm::rt::LLMInferenceRuntime>
 make_runtime(const Artifacts& artifacts, const nlohmann::json& marker, cudaStream_t stream) {
     if (marker.value("tensor_parallel_size", 1) == 2) {
         using Runtime = trt_edgellm::rt::LLMInferenceRuntime;
+#ifdef TRTMC_QWEN38_EDGE_012
+        trt_edgellm::rt::DeploymentOptions config{};
+#else
         Runtime::ParallelExecutionConfig config{};
+#endif
         config.parallelConfig.tensorParallelSize = 2;
         config.parallelConfig.launchMode = trt_edgellm::rt::ParallelLaunchMode::kThread;
         config.checkpointDir = artifacts.checkpoint();
@@ -206,9 +223,15 @@ make_runtime(const Artifacts& artifacts, const nlohmann::json& marker, cudaStrea
             marker.value("task", "text_generation") == "vision_language_generation"
                 ? artifacts.engine()
                 : "";
+#ifdef TRTMC_QWEN38_EDGE_012
+        config.engineDir = artifacts.engine();
+        config.multimodalEngineDir = multimodal;
+        return std::make_unique<Runtime>(std::move(config));
+#else
         return std::make_unique<Runtime>(artifacts.engine(), multimodal,
                                          std::unordered_map<std::string, std::string>{},
                                          std::move(config));
+#endif
     }
     if (marker.value("execution_variant", "") == "autoregressive") {
         const auto multimodal =
@@ -220,11 +243,30 @@ make_runtime(const Artifacts& artifacts, const nlohmann::json& marker, cudaStrea
             trt_edgellm::rt::ContextCacheConfig{}, artifacts.checkpoint());
     }
     trt_edgellm::rt::SpecDecodeDraftingConfig drafting{};
-    drafting.draftingTopK = 1;
     const bool mtp = marker.value("execution_variant", "") == "mtp";
     drafting.draftingStep = mtp ? 3 : 1;
+#ifdef TRTMC_QWEN38_EDGE_012
+    const bool domino = marker.value("execution_variant", "") == "domino" ||
+                        marker.value("execution_variant", "") == "domino_tree";
+    drafting.draftTopK = 1;
+    drafting.verifyTokens = mtp ? 4 : 8;
+    if (marker.value("execution_variant", "") == "dflash_tree") {
+        drafting.draftTopK = marker.at("dflash_top_k").get<int>();
+        drafting.verifyTokens = marker.at("dflash_verify").get<int>();
+    }
+    if (domino) {
+        drafting.draftTopK = marker.at("domino_top_k").get<int>();
+        drafting.proposalTokens = 15;
+        drafting.verifyTokens = marker.at("domino_verify").get<int>();
+    }
+    // DFlash2 takes its fixed proposal block from its checkpoint, not an override.
+    if (marker.value("execution_variant", "") == "dspark")
+        drafting.proposalTokens = 7;
+#else
+    drafting.draftingTopK = 1;
     drafting.verifySize = mtp ? 4 : 8;
     drafting.dflashBlockSize = marker.value("execution_variant", "") == "dflash" ? 8 : 0;
+#endif
     drafting.dsparkSchedulerMode = trt_edgellm::rt::DSparkSchedulerMode::kOff;
     drafting.dsparkConfidenceThreshold = 0.0F;
     drafting.dsparkMinProposalLen = 1;
@@ -255,7 +297,13 @@ class EdgeTask final : public ITextGeneration,
           visual_(marker.value("task", "text_generation") == "vision_language_generation"),
           parallel_(marker.value("tensor_parallel_size", 1) == 2),
           paired_(marker.value("execution_variant", "") == "dspark" ||
-                  marker.value("execution_variant", "") == "dflash") {
+                  marker.value("execution_variant", "") == "dflash_tree" ||
+                  marker.value("execution_variant", "") == "dflash" ||
+                  marker.value("execution_variant", "") == "domino" ||
+                  marker.value("execution_variant", "") == "domino_tree"),
+          domino_(marker.value("execution_variant", "") == "domino" ||
+                  marker.value("execution_variant", "") == "domino_tree"),
+          dflash_tree_(marker.value("execution_variant", "") == "dflash_tree") {
         if (!paired_)
             return;
         std::ifstream input(fs::path(artifacts_.engine()) / "trtmc_single_user_prompts.json");
@@ -328,6 +376,19 @@ class EdgeTask final : public ITextGeneration,
         auto bytes = image_bytes(pixels, height, width);
         if (!bytes.empty() && !visual_)
             throw std::invalid_argument("Qwen3.8 text bundle does not contain a visual engine");
+        if (domino_ || dflash_tree_) {
+            validate_generation(config);
+            // Do not silently switch these explicitly greedy profiles to vanilla decoding.
+            const bool edge_samples =
+                config.temperature >= 1e-3F && config.top_k != 1 &&
+                (config.top_k > 1 || config.top_p < 1.0F - 1e-6F ||
+                 (config.temperature > 1e-3F && std::fabs(config.temperature - 1.0F) > 1e-3F));
+            if (edge_samples ||
+                !qwen38_greedy_distribution(qwen38_sampling_params_from_config(config, {})))
+                throw std::invalid_argument(
+                    domino_ ? "Qwen3.6 Domino supports greedy decoding only"
+                            : "Qwen3.8 DFlash2 DDTree supports greedy decoding only");
+        }
         auto effective = config;
         std::string source_prompt = prompt;
         if (config.use_chat_template && paired_) {
@@ -340,7 +401,7 @@ class EdgeTask final : public ITextGeneration,
             make_request(source_prompt, effective, default_max_new_tokens(), !bytes.empty());
         if (!bytes.empty()) {
             trt_edgellm::rt::Tensor tensor({1, height, width, 3}, trt_edgellm::rt::DeviceType::kCPU,
-                                           nvinfer1::DataType::kUINT8);
+                                           EdgeDataType::kUINT8);
             std::memcpy(tensor.rawPointer(), bytes.data(), bytes.size());
             request.requests.front().imageBuffers.emplace_back(std::move(tensor));
         }
@@ -395,6 +456,8 @@ class EdgeTask final : public ITextGeneration,
     bool visual_;
     bool parallel_;
     bool paired_;
+    bool domino_;
+    bool dflash_tree_;
     nlohmann::json source_prompts_;
     std::mutex mutex_;
 };
@@ -403,7 +466,14 @@ class EdgeTask final : public ITextGeneration,
 ITask* create(const BundleReader& bundle) {
     const auto bytes = bundle.read_section("edge_llm.json");
     const auto marker = nlohmann::json::parse(bytes.begin(), bytes.end());
-    if (marker.at("version") != 1 || marker.at("edge_revision") != kRevision ||
+    const auto& revision = marker.at("edge_revision");
+#ifdef TRTMC_QWEN38_EDGE_012
+    const bool compatible =
+        marker.at("edge_release") == "0.12.0" && (revision.is_null() || revision == kRevision);
+#else
+    const bool compatible = revision == kRevision;
+#endif
+    if (marker.at("version") != 1 || !compatible ||
         marker.at("max_sequence_length").get<int>() <= 1 ||
         marker.at("max_input_length").get<int>() <= 0 ||
         marker.at("max_input_length").get<int>() > marker.at("max_sequence_length").get<int>() ||
@@ -428,19 +498,53 @@ ITask* create(const BundleReader& bundle) {
         throw std::runtime_error("Unsupported Qwen3.8 Edge task contract");
     const auto quantization = marker.value("checkpoint_quantization", "");
     const auto sm = marker.at("target").at("sm").get<int>();
-    const bool ordinary = variant == "autoregressive" &&
-                          marker.value("builder_flow", "") == "experimental" &&
-                          marker.at("max_input_length").get<int>() <= 2048 &&
-                          marker.at("target").at("arch") == "x86_64" &&
-                          ((parallel == 2 && quantization == "none" && sm == 80) ||
-                           (parallel == 1 && quantization == "nvfp4" && sm == 120));
+    bool valid_ordinary_input = marker.at("max_input_length").get<int>() <= 2048;
+#ifdef TRTMC_QWEN38_EDGE_012
+    valid_ordinary_input =
+        valid_ordinary_input || (task == "vision_language_generation" && parallel == 1);
+#endif
+    const bool ordinary =
+        variant == "autoregressive" && marker.value("builder_flow", "") == "experimental" &&
+        valid_ordinary_input &&
+        (parallel == 2
+             ? (marker.at("target").at("arch") == "x86_64" && quantization == "none" && sm == 80)
+#ifdef TRTMC_QWEN38_EDGE_012
+             : (parallel == 1 && (quantization == "nvfp4" || quantization == "none")));
+#else
+             : (parallel == 1 && marker.at("target").at("arch") == "x86_64" &&
+                quantization == "nvfp4" && sm == 120));
+#endif
+    bool paired_format =
+        quantization == "nvfp4" || (variant == "dflash" && quantization == "int4_awq");
+#ifdef TRTMC_QWEN38_EDGE_012
+    paired_format = paired_format || (variant == "dflash" &&
+                                      (quantization == "none" || quantization == "int4_gptq"));
+#else
+    paired_format = paired_format && marker.at("target").at("arch") == "x86_64" && sm == 120;
+#endif
+    bool domino = false, dflash_tree = false;
+#ifdef TRTMC_QWEN38_EDGE_012
+    dflash_tree = variant == "dflash_tree" && marker.value("dflash_block_size", 0) == 8 &&
+                  marker.value("dflash_top_k", 0) == 4 && marker.value("dflash_verify", 0) == 32 &&
+                  (quantization == "none" || quantization == "nvfp4" ||
+                   quantization == "int4_awq" || quantization == "int4_gptq");
+    paired_format = paired_format || dflash_tree;
+    const bool tree = variant == "domino_tree";
+    domino = (tree || variant == "domino") && quantization == "none" &&
+             marker.value("domino_block_size", 0) == 16 &&
+             marker.value("domino_top_k", 0) == (tree ? 4 : 1) &&
+             marker.value("domino_verify", 0) == (tree ? 60 : 16) &&
+             marker.at("max_sequence_length").get<int>() >= 16 &&
+             marker.at("max_input_length").get<int>() <= 1024;
+    paired_format = paired_format || domino;
+#endif
     const bool paired =
-        valid_execution_variant(variant, marker.value(variant + "_block_size", 0)) &&
-        parallel == 1 && marker.value("builder_flow", "") == "onnx" &&
-        (quantization == "nvfp4" || (variant == "dflash" && quantization == "int4_awq")) &&
+        (domino || dflash_tree ||
+         valid_execution_variant(variant, marker.value(variant + "_block_size", 0))) &&
+        parallel == 1 && marker.value("builder_flow", "") == "onnx" && paired_format &&
         marker.at("max_sequence_length").get<int>() > 8 &&
-        marker.at("max_sequence_length").get<int>() <= (variant == "dspark" ? 1024 : 4096) &&
-        marker.at("target").at("arch") == "x86_64" && marker.at("target").at("sm") == 120;
+        marker.at("max_sequence_length").get<int>() <=
+            (domino ? 2048 : (variant == "dspark" ? 1024 : 4096));
     const bool mtp = variant == "mtp" && parallel == 1 &&
                      (quantization == "nvfp4" || quantization == "int4_awq") && sm == 120 &&
                      marker.at("target").at("arch") == "x86_64" &&

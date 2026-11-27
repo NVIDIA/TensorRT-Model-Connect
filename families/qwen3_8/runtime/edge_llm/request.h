@@ -6,7 +6,11 @@
 
 #include "families/qwen3_8/runtime/edge_llm/contract.h"
 
+#ifdef TRTMC_QWEN38_EDGE_012
+#include <tensorrt_edgellm/runtime/llmRuntimeUtils.h>
+#else
 #include <edgellm/cpp/runtime/llmRuntimeUtils.h>
+#endif
 
 namespace trtmc::qwen3_8::edge_llm {
 

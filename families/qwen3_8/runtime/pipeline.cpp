@@ -485,6 +485,7 @@ std::vector<int32_t>
 RecurrentPipeline::generate_external_draft(const std::vector<int32_t>& input_ids,
                                            int32_t max_new_tokens,
                                            const Qwen38SamplingParams& params) {
+    external_draft_->validate_sampling(params);
     external_draft_->reset(*decoder_, input_ids.size(), max_new_tokens);
     state_->reset();
     state_->bind_to(*decoder_);
@@ -510,8 +511,31 @@ RecurrentPipeline::generate_external_draft(const std::vector<int32_t>& input_ids
     while (!ended()) {
         const int32_t remaining =
             max_new_tokens - static_cast<int32_t>(output.size() - input_ids.size());
-        auto proposals = external_draft_->propose(output.back(), params, output, remaining, rng);
+        auto round = external_draft_->propose(output.back(), params, output, remaining, rng);
         ++rounds;
+        if (const auto* tree = std::get_if<Qwen38VerifyTree>(&round)) {
+            if (tree->empty() || tree->front().parent != -1 || tree->front().token != output.back())
+                throw std::runtime_error(
+                    "Qwen3.8 speculative tree does not begin at the confirmed anchor");
+            proposed += static_cast<int32_t>(tree->size()) - 1;
+            int32_t parent = 0;
+            while (!ended()) {
+                run_step(output.back(), logits);
+                external_draft_->observe(*decoder_);
+                const int32_t token = qwen38_draw_probabilities(distribution(), rng);
+                output.push_back(token);
+                const auto child =
+                    std::find_if(tree->begin() + 1, tree->end(), [&](const auto& node) {
+                        return node.parent == parent && node.token == token;
+                    });
+                if (child == tree->end())
+                    break;
+                ++accepted_count;
+                parent = static_cast<int32_t>(child - tree->begin());
+            }
+            continue;
+        }
+        const auto& proposals = std::get<std::vector<Qwen38DraftProposal>>(round);
         proposed += static_cast<int32_t>(proposals.size());
         bool rejected = false;
         for (const auto& proposal : proposals) {

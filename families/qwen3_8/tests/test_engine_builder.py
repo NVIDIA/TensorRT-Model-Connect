@@ -391,6 +391,8 @@ def test_load_weights_without_quant_ctx_loads_everything(monkeypatch) -> None:
     # layers/projections lacking a scale tensor.
     config.raw["quantization_config"] = {"kv_cache_quant_algo": "FP8"}
     assert not engine_builder.Qwen38Model().load_weights("unused", config)["_fp8_kv_cache"]
+    paired = engine_builder._load_fp8_kv_scales([], ["linear", "attention"], paired_fp8_kv=True)
+    assert paired["_fp8_kv_cache"] and paired["layer.1.kv_scales"] == (1.0, 1.0, 1.0)
     key = "model.language_model.layers.1.self_attn.k_proj.k_scale"
     _catalog[key] = np.array([0.125], dtype=np.float32)
     _catalog[key.replace("k_proj.k_scale", "v_proj.v_scale")] = np.array([0.25])
@@ -399,6 +401,16 @@ def test_load_weights_without_quant_ctx_loads_everything(monkeypatch) -> None:
     assert loaded_weights["layer.1.kv_scales"] == (1.0, 0.125, 0.25)
     assert loaded_weights["mtp_layer.kv_scales"] == (1.0, 1.0, 1.0)
     import pytest
+    # Compressed-tensors stores the calibrated K/V scalars on the attention
+    # module rather than on its K and V projections; never replace them by 1.
+    short = "model.language_model.layers.1.self_attn."
+    _catalog[short + "k_scale"] = np.array([0.5])
+    _catalog[short + "v_scale"] = np.array([0.75])
+    compressed = engine_builder._load_fp8_kv_scales([], ["linear", "attention"], compressed=True)
+    assert compressed["_fp8_kv_cache"] and compressed["layer.1.kv_scales"] == (1.0, 0.5, 0.75)
+    del _catalog[short + "k_scale"]
+    with pytest.raises(ValueError, match="Missing compressed FP8 attention scale"):
+        engine_builder._load_fp8_kv_scales([], ["linear", "attention"], compressed=True)
     for invalid in (np.array([0.0]), np.array([float("nan")]), np.array([1.0, 2.0])):
         _catalog[key] = invalid
         with pytest.raises(ValueError, match="FP8 attention scale"):

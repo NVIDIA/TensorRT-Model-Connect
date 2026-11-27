@@ -8,7 +8,9 @@ add_library(trtmc_model_qwen3_8 SHARED
   kv_cache.cpp
   mtp_scheduler.cpp
   dspark.cpp
+  domino.cpp
   dflash2.cpp
+  dflash2_tree.cpp
   pipeline.cpp
   native_visual.cpp
   native_media.cpp
@@ -68,7 +70,9 @@ if(TRTMC_BUILD_TESTS)
     kv_cache.cpp
     mtp_scheduler.cpp
     dspark.cpp
+    domino.cpp
     dflash2.cpp
+    dflash2_tree.cpp
     pipeline.cpp
     prefill_runner.cpp
     native_visual.cpp

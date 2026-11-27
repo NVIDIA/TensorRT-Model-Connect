@@ -267,6 +267,13 @@ void qwen38_apply_repetition_penalty(std::vector<float>& logits, float penalty,
     }
 }
 
+bool qwen38_greedy_distribution(const Qwen38SamplingParams& params) {
+    const float top_p = sanitized_top_p(params.top_p);
+    return greedy_equivalent(params) || (params.top_k == 1 && !top_p_enabled(top_p)) ||
+           (params.top_k <= 1 && top_p >= 1.0F - kSamplingEpsilon &&
+            sanitized_min_p(params.min_p) <= 0.0F && params.seed < 0);
+}
+
 std::vector<float> qwen38_probabilities(const float* logits, int32_t vocab_size,
                                         const Qwen38SamplingParams& params) {
     if (vocab_size <= 0 || !logits)

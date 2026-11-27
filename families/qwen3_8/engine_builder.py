@@ -94,7 +94,7 @@ from typing import BinaryIO
 import numpy as np
 import tensorrt as trt
 
-from .config import ModelConfig
+from .config import ModelConfig, compressed_int4_fp8_kv
 from .checkpoint_mapper import (
     WeightDict,
     _open_safetensors,
@@ -155,14 +155,14 @@ def _prepare_runtime_inputs(
     )
 
 
-def _load_fp8_kv_scales(readers, layer_types: list[str]) -> dict:
+def _load_fp8_kv_scales(readers, layer_types: list[str], *, compressed=False, paired_fp8_kv=False) -> dict:
     """Match Edge detection from exported LLM scale tensors, not quant metadata."""
     prefixes = {
         f"layer.{i}": f"model.language_model.layers.{i}.self_attn"
         for i, kind in enumerate(layer_types) if kind == "attention"
     }
     prefixes["mtp_layer"] = "mtp.layers.0.self_attn"
-    if not any(_has_tensor(readers, f"{prefix}.k_proj.k_scale")
+    if not compressed and not paired_fp8_kv and not any(_has_tensor(readers, f"{prefix}.k_proj.k_scale")
                for prefix in prefixes.values()):
         return {"_fp8_kv_cache": False}
     result = {"_fp8_kv_cache": True}
@@ -172,6 +172,10 @@ def _load_fp8_kv_scales(readers, layer_types: list[str]) -> dict:
         # enabled globally. Preserve actual exported scalars without calibration.
         for projection in ("q", "k", "v"):
             key = f"{prefix}.{projection}_proj.{projection}_scale"
+            if compressed and projection in ("k", "v") and name != "mtp_layer":
+                key = f"{prefix}.{projection}_scale"
+                if not _has_tensor(readers, key):
+                    raise ValueError(f"Missing compressed FP8 attention scale: {key}")
             value = np.asarray(_load_tensor(readers, key)) if _has_tensor(readers, key) else np.array(1.0)
             if value.size != 1 or not np.isfinite(value).all() or (value <= 0).any():
                 raise ValueError(f"Invalid Qwen3.8 FP8 attention scale: {key}")
@@ -218,7 +222,7 @@ def _owned(quant_ctx, name: str) -> bool:
 class Qwen38Model:
     def load_weights(
         self, model_dir: str, config: ModelConfig, *, precision: str = "fp32",
-        quant_ctx=None, readers=None,
+        quant_ctx=None, readers=None, paired_fp8_kv: bool = False,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         if readers is None:
@@ -269,7 +273,8 @@ class Qwen38Model:
             text_cfg.get("rope_theta", config.rope_theta))
 
         weights = WeightDict()
-        weights.update(_load_fp8_kv_scales(readers, layer_types))
+        weights.update(_load_fp8_kv_scales(
+            readers, layer_types, compressed=compressed_int4_fp8_kv(config.raw), paired_fp8_kv=paired_fp8_kv))
 
         # Embedding
         embed_key = "model.language_model.embed_tokens.weight"

@@ -15,6 +15,7 @@
 namespace trtmc::qwen3_8::edge_llm {
 namespace api = trtmc::internal;
 namespace edge = trt_edgellm::rt;
+using EdgeDataType = decltype(edge::Tensor{}.getDataType());
 
 /// These defaults match the legacy text API; media requires the provider template.
 inline Span<const api::ConfigField> fields(bool media) {
@@ -78,7 +79,7 @@ inline edge::imageUtils::ImageData image_buffer(const api::ImageView& image) {
         throw std::invalid_argument("Qwen3.8 RGB storage does not match its dimensions");
     const auto count = static_cast<std::size_t>(pixels * 3);
     edge::Tensor tensor({1, image.height, image.width, 3}, edge::DeviceType::kCPU,
-                        nvinfer1::DataType::kUINT8);
+                        EdgeDataType::kUINT8);
     auto* out = tensor.dataPointer<std::uint8_t>();
     if (image.format == api::ImageFormat::UInt8) {
         std::memcpy(out, image.data, count);
@@ -110,7 +111,7 @@ inline edge::imageUtils::ImageData video_buffer(const api::VideoView& video) {
     if (count > static_cast<std::size_t>(INT64_MAX) / stride)
         throw std::invalid_argument("Qwen3.8 video dimensions overflow");
     edge::Tensor tensor({static_cast<int64_t>(count), first.height, first.width, 3},
-                        edge::DeviceType::kCPU, nvinfer1::DataType::kUINT8);
+                        edge::DeviceType::kCPU, EdgeDataType::kUINT8);
     auto* output = tensor.dataPointer<std::uint8_t>();
     std::memcpy(output, first.data(), stride);
     for (std::size_t i = 1; i < count; ++i) {

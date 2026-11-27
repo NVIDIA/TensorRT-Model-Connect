@@ -148,7 +148,7 @@ class _FP8Weight:
 
 
 @dataclass(frozen=True)
-class _AWQWeight:
+class _GroupInt4Weight:
     """Signed INT4 codes, repacked losslessly along contiguous input channels."""
 
     packed: np.ndarray  # [out, in // 2], low nibble first
@@ -161,7 +161,7 @@ class _AWQWeight:
 @dataclass(frozen=True)
 class _LayerScales:
     input_scale: float | None
-    weight: _NVFP4Weight | _FP8Weight | _AWQWeight
+    weight: _NVFP4Weight | _FP8Weight | _GroupInt4Weight
 
 
 class _NVFP4Format:
@@ -285,8 +285,8 @@ class _FP8Format:
         )
 
 
-class _AWQFormat:
-    name = "int4_awq"
+class _GroupInt4Format:
+    name = "group_int4"
 
     @staticmethod
     def wrap_matmul(network, activation, scales, *, dtype, graph_ops, keep_alive):
@@ -323,8 +323,8 @@ def _wrap_matmul(network, activation, scales: _LayerScales, *, dtype, graph_ops,
         fmt = _NVFP4Format
     elif isinstance(scales.weight, _FP8Weight):
         fmt = _FP8Format
-    elif isinstance(scales.weight, _AWQWeight):
-        fmt = _AWQFormat
+    elif isinstance(scales.weight, _GroupInt4Weight):
+        fmt = _GroupInt4Format
     else:
         raise TypeError(f"Unsupported quantized weight type: {type(scales.weight)!r}")
     return fmt.wrap_matmul(
@@ -444,7 +444,7 @@ def _read_fp8_weight(readers, hf_prefix: str) -> _FP8Weight | None:
         out_features=out_features, in_features=in_features)
 
 
-def _read_awq_weight(readers, hf_prefix: str) -> _AWQWeight | None:
+def _read_awq_weight(readers, hf_prefix: str) -> _GroupInt4Weight | None:
     """Read ModelOpt W4A16_AWQ, not the unrelated GPTQ/AutoAWQ layouts."""
     key = hf_prefix + ".weight"
     if not _has_tensor(readers, key):
@@ -475,7 +475,31 @@ def _read_awq_weight(readers, hf_prefix: str) -> _AWQWeight | None:
     codes[0::2] = packed & 15
     codes[1::2] = packed >> 4
     contiguous = np.ascontiguousarray(codes[:, 0::2] | (codes[:, 1::2] << 4))
-    return _AWQWeight(contiguous, np.ascontiguousarray(scale), smooth, n, k)
+    return _GroupInt4Weight(contiguous, np.ascontiguousarray(scale), smooth, n, k)
+
+
+def _read_compressed_int4(readers, prefix: str):
+    """Repack compressed-tensors offset-binary nibbles as TRT signed INT4; never recalibrate."""
+    key = prefix + ".weight_packed"
+    if not _has_tensor(readers, key):
+        return None
+    if any(_has_tensor(readers, prefix + suffix) for suffix in (
+            ".weight_g_idx", ".weight_zero_point", ".pre_quant_scale", ".weight")):
+        raise ValueError(f"{prefix}: expected symmetric contiguous INT4 groups without a permutation")
+    raw = _get_raw_tensor(readers, key)
+    shape = _get_raw_tensor(readers, prefix + ".weight_shape")
+    if raw.dtype != torch.int32 or raw.ndim != 2 or shape.dtype != torch.int64 or shape.shape != (2,):
+        raise ValueError(f"{prefix}: invalid compressed INT4 container or logical shape")
+    n, k = map(int, shape.tolist())
+    scale = _to_numpy_fp32(_get_raw_tensor(readers, prefix + ".weight_scale"))
+    if (min(n, k) <= 0 or k % 128 or tuple(raw.shape) != (n, k // 8)
+            or scale.shape != (n, k // 128) or not np.isfinite(scale).all() or np.any(scale <= 0)):
+        raise ValueError(f"{prefix}: expected group-128 INT4 packed weights and positive scales")
+    # Each little-endian word contains eight input-channel codes: 0..15 means
+    # -8..7. Flip the sign bit of each nibble, retaining order for TRT INT4.
+    words = raw.contiguous().numpy().astype("<i4", copy=False)
+    packed = np.bitwise_xor(words.view(np.uint8).reshape(n, k // 2), np.uint8(0x88))
+    return _GroupInt4Weight(packed, np.ascontiguousarray(scale), None, n, k)
 
 
 def _read_prepared_weight(readers, hf_prefix: str) -> _NVFP4Weight | _FP8Weight | None:
@@ -489,10 +513,10 @@ def _read_prepared_weight(readers, hf_prefix: str) -> _NVFP4Weight | _FP8Weight 
 
 
 def _read_prepared_weight_split_q(
-    readers, hf_prefix: str, num_heads: int, head_dim: int, *, awq: bool = False,
+    readers, hf_prefix: str, num_heads: int, head_dim: int, *, read_weight=_read_prepared_weight,
 ):
     """Split Q and gate rows without decoding/requantizing either packed format."""
-    weight = (_read_awq_weight if awq else _read_prepared_weight)(readers, hf_prefix)
+    weight = read_weight(readers, hf_prefix)
     if weight is None:
         return None, None
     attn_size = num_heads * head_dim
@@ -509,7 +533,7 @@ def _read_prepared_weight_split_q(
         fields = {"packed": split(weight.packed, gate), "out_features": attn_size}
         if isinstance(weight, _NVFP4Weight):
             fields["block_scale_f8"] = split(weight.block_scale_f8, gate)
-        elif isinstance(weight, _AWQWeight):
+        elif isinstance(weight, _GroupInt4Weight):
             fields["block_scale"] = split(weight.block_scale, gate)
         return replace(weight, **fields)
 
@@ -868,8 +892,10 @@ def calibrate_qwen3_8_nvfp4(
     )
 
 
-def load_qwen3_8_awq(model_dir: Path, config, graph_ops, *, readers=None) -> Qwen38QuantContext:
-    """Reuse prepared target and embedded-draft AWQ tensors without calibration."""
+def load_qwen3_8_group_int4(model_dir: Path, config, graph_ops, *, readers=None, compressed=False) -> Qwen38QuantContext:
+    """Map each prepared projection once; preserve unquantized exclusions and original scales."""
+    read_weight = _read_compressed_int4 if compressed else _read_awq_weight
+    consumed = set()
     if readers is None:
         readers = _open_safetensors(Path(model_dir))
     scales = {}
@@ -879,17 +905,19 @@ def load_qwen3_8_awq(model_dir: Path, config, graph_ops, *, readers=None) -> Qwe
               ("linear_attn.in_proj_b", "deltanet_b_proj"))
 
     def add(hf_prefix, name):
-        weight = _read_awq_weight(readers, hf_prefix)
+        weight = read_weight(readers, hf_prefix)
         if weight is not None:
             scales[name] = _LayerScales(None, weight)
+            consumed.add(hf_prefix)
 
     def layer(hf_prefix, name):
         for source, target in simple:
             add(f"{hf_prefix}.{source}", f"{name}.{target}")
         query, gate = _read_prepared_weight_split_q(
             readers, f"{hf_prefix}.self_attn.q_proj", config.num_attention_heads,
-            config.head_dim, awq=True)
+            config.head_dim, read_weight=read_weight)
         if query is not None:
+            consumed.add(f"{hf_prefix}.self_attn.q_proj")
             scales[f"{name}.w_q"] = _LayerScales(None, query)
             scales[f"{name}.w_gate_attn"] = _LayerScales(None, gate)
 
@@ -898,6 +926,10 @@ def load_qwen3_8_awq(model_dir: Path, config, graph_ops, *, readers=None) -> Qwe
     add("lm_head", "w_lm_head")
     add("mtp.fc", "mtp_layer.fc")
     layer("mtp.layers.0", "mtp_layer")
+    if compressed:
+        source = {key.removesuffix(".weight_packed") for key in readers.tensor_map if key.endswith(".weight_packed")}
+        if source != consumed:
+            raise ValueError("Native compressed INT4 contains unmapped packed projections")
     if not scales:
-        raise ValueError("Native INT4-AWQ requires a prepared ModelOpt W4A16_AWQ checkpoint")
+        raise ValueError("Native grouped INT4 requires prepared projection weights")
     return Qwen38QuantContext(profile=_Profile(scales), graph_ops=graph_ops)

@@ -97,12 +97,15 @@ and do not imply that CI executes the paired cases.
 
 ### Qwen3.6 / Qwen3.8 Edge-LLM execution
 
-The family owns ordinary original-weight FP16 TP2, ordinary mixed-NVFP4 TP1,
-and explicit DSpark/DFlash2 ONNX execution through the optional Edge-LLM 0.11.0
-SDK. Use `trtmc qwen3_8 build MODEL -o model.bundle`; offline help and options
-use the existing [family CLI protocol](../extend/family-cli.md), not shared
-parser extensions. For a pair, add `--execution-variant dspark` or `dflash` and
-`--companion draft=/path/to/draft`.
+Use `trtmc qwen3_8 build MODEL -o model.bundle`. The default Edge SDK
+remains 0.11.0; a runtime compiled against 0.12.0 adds opt-in routes for
+dense 27B original and prepared checkpoints. Use the
+[family CLI](../extend/family-cli.md) to select a companion explicitly:
+`--execution-variant dspark|dflash|dflash_tree|domino|domino_tree` and
+`--companion draft=/path/to/draft`. DFlash2 tree and Domino are 0.12 Edge routes;
+Domino and DFlash2 tree support greedy decoding only. See the
+[0.12 recipe and validation scope](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/qwen3_8/edge_llm/README.md#opt-in-to-edge-llm-012).
+A mapped route is not an accuracy qualification.
 
 An ordinary build (no `--execution-variant`) of a checkpoint that carries MTP
 weights builds only the base engine. Add `--mtp-seq-len N` (N >= 2: one real
@@ -117,13 +120,13 @@ or accuracy qualification. For MTP, use `--execution-variant mtp` without an
 external companion. Prepared checkpoint metadata must match the owning recipe;
 Model Connect does not calibrate or quantize weights during this integration.
 
-Local text requests include exact independent FP32 matches, with separate
-quality failures retained. Qwen3.8 original single-image passed; ordered-image
+For the earlier **0.11** runs, local text requests included exact independent FP32
+matches, with separate quality failures retained. Qwen3.8 original single-image passed; ordered-image
 and video accuracy failed. Mixed-NVFP4
 ordinary and both paired raw-text profiles build and run, matching direct Edge
 exactly, but fail the independent FP32 NED gate. Accuracy failures remain
 executable and are not described as fully qualified. Original-weight speculative
-execution and batch-8 MTP remain outside this adapter's mapped scope.
+execution and batch-8 MTP were not validated by those 0.11 results.
 
 Provision the [native SDK](../user-guides/configure-runtime.md#optional-native-edge-llm-sdk).
 See the [owning recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/qwen3_8/edge_llm/README.md)
@@ -136,8 +139,8 @@ profile results do not imply registered CI or catalog-wide qualification.
 Without compatible Edge offload, the owner constructs TensorRT graphs directly
 and runs them through the Model Connect C++ runtime, without native ONNX export.
 Prepared source quantization and exported FP8 KV scales are preserved. Native
-paths cover ordinary text/media, embedded MTP, complete DSpark/DFlash2 companions,
-and original FP16 TP2; they do not silently substitute target-only decoding.
+paths cover ordinary text/media, embedded MTP, DSpark, DFlash2 chain/tree,
+Domino chain/tree, and original FP16 TP2. Paired builds do not substitute target-only decoding.
 
 Exact full-checkpoint and small integration results are distinguished in the
 [family recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/qwen3_8/edge_llm/README.md#native-fallback).
@@ -168,12 +171,12 @@ its own copy of the weights, so it adds to the bundle size and build time.
 Bundles built before this engine existed still load and prefill token by token.
 
 When the decode and prefill engines' weights do not both fit in 80% of the GPU
-memory (a 27B FP16 checkpoint on a 128 GB unified-memory GPU), a bundle without
-MTP ships only `prefill_engine.plan` (`decoder_engine_layout: "chunked"`). It
-also decodes, one row per call. A prompt must fit the KV cache
-(`--max-sequence-length`), and generation stops when the cache is full; a
-bundle with the decode engine instead shifts the cache. Older runtimes reject
-these bundles.
+memory (a 27B FP16 checkpoint on a 128 GB unified-memory GPU), an ordinary
+TP1 text bundle with chunked prefill and no MTP ships only `prefill_engine.plan`
+(`decoder_engine_layout: "chunked"`). It also decodes, one row per call.
+Older runtimes reject this layout. For ordinary native text decoding with either
+layout, the prompt must fit the KV cache (`--max-sequence-length`).
+Generation stops when the cache is full; neither layout discards prompt rows.
 
 ### Nemotron-H Edge-LLM execution
 

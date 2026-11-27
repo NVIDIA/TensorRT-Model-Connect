@@ -10,6 +10,28 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def compressed_int4_fp8_kv(raw: dict) -> bool:
+    """Recognize the weight-only, symmetric group-128 recipe with static FP8 cache."""
+    qc = raw.get("quantization_config")
+    if not isinstance(qc, dict) or qc.get("quant_method") != "compressed-tensors":
+        return False
+    groups, kv = qc.get("config_groups"), qc.get("kv_cache_scheme")
+    if (qc.get("format") != "pack-quantized" or qc.get("quantization_status") != "compressed"
+            or not isinstance(groups, dict) or len(groups) != 1 or not isinstance(kv, dict)):
+        return False
+    group = next(iter(groups.values()))
+    if (not isinstance(group, dict) or group.get("targets") != ["Linear"]
+            or group.get("input_activations") is not None or group.get("output_activations") is not None):
+        return False
+    weights = group.get("weights")
+    return (isinstance(weights, dict) and weights.get("type") == "int" and weights.get("num_bits") == 4
+            and weights.get("symmetric") is True and weights.get("dynamic") is False
+            and weights.get("strategy") == "group" and weights.get("group_size") == 128
+            and weights.get("actorder") in (None, "static")
+            and kv.get("type") == "float" and kv.get("num_bits") == 8 and kv.get("strategy") == "tensor"
+            and kv.get("symmetric") is True and kv.get("dynamic") is False)
+
+
 def _token_id(value: object) -> int:
     """Normalize a config token id to an int, using -1 for "unset".
 

@@ -91,10 +91,9 @@ void Qwen38DSpark::observe(ITrtModule& target) {
     ++seen_;
 }
 
-std::vector<Qwen38DSparkProposal> Qwen38DSpark::propose(int32_t anchor,
-                                                        const Qwen38SamplingParams& sampling,
-                                                        const std::vector<int32_t>& history,
-                                                        int32_t budget, uint64_t& rng) {
+Qwen38DraftRound Qwen38DSpark::propose(int32_t anchor, const Qwen38SamplingParams& sampling,
+                                       const std::vector<int32_t>& history, int32_t budget,
+                                       uint64_t& rng) {
     if (anchor < 0 || anchor >= config_.vocab || seen_ <= 0 || seen_ >= config_.capacity ||
         budget <= 0)
         throw std::invalid_argument("Qwen3.8 DSpark invalid proposal state");
