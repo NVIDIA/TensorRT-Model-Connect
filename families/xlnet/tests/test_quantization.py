@@ -266,6 +266,21 @@ def test_calibration_tool_cli_parses_both_commands(monkeypatch, tmp_path: Path) 
     assert calls == [(tmp_path / "t.json", 10, 5), (tmp_path, tmp_path, 800)]
 
 
+def _fp8_gemm_tactics(plan: bytes) -> list[str]:
+    """Return the tactic names of the plan's FP8 GEMMs; the plan needs DETAILED profiling."""
+    engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
+    assert engine is not None
+    info = json.loads(
+        engine.create_engine_inspector().get_engine_information(trt.LayerInformationFormat.JSON)
+    )
+    tactics = [
+        str(layer.get("TacticName") or "").lower()
+        for layer in info["Layers"]
+        if isinstance(layer, dict)
+    ]
+    return [tactic for tactic in tactics if "gemm" in tactic and "e4m3" in tactic]
+
+
 def _run(plan: bytes, torch, ids, mask):
     engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
     assert engine is not None
@@ -282,7 +297,7 @@ def _run(plan: bytes, torch, ids, mask):
 @pytest.mark.gpu
 @pytest.mark.trt
 def test_quantized_engine_builds_and_tracks_the_unquantized_one(tiny) -> None:
-    """The FP8 engine builds, is smaller, is finite and tracks the unquantized engine."""
+    """The FP8 engine runs its feed-forward GEMMs in FP8, is finite and tracks the plain one."""
     torch = pytest.importorskip("torch")
     weights, config, _ = tiny
     ctx = create_quant_context(weights, config, "fp8")
@@ -293,7 +308,10 @@ def test_quantized_engine_builds_and_tracks_the_unquantized_one(tiny) -> None:
     builder = model._XLNetModel()
     plain = builder.build_engine(config, weights, SEQ, precision="fp16")
     quant = builder.build_engine(config, weights, SEQ, precision="fp16", quant_ctx=ctx)
-    assert len(quant) < len(plain)
+    # Plan size proves nothing here: for this model's FP16 GEMMs, which both plans hold, TensorRT
+    # picks between kernels whose code differs by about 40 KB, more than FP8 saves on the weights.
+    fp8_gemms = _fp8_gemm_tactics(quant)
+    assert len(fp8_gemms) == len(ctx.projections), fp8_gemms
 
     reference = _run(plain, torch, ids, mask)[:real].reshape(-1)
     actual = _run(quant, torch, ids, mask)[:real].reshape(-1)
