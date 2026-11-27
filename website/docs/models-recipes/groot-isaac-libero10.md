@@ -1,0 +1,38 @@
+---
+title: GR00T N1.7 on Isaac LIBERO-10
+---
+
+Use the `lerobot_groot` family command to build the FP16 Isaac policy. It selects
+the `libero_10` subdirectory of the [release checkpoint](https://huggingface.co/nvidia/GR00T-N1.7-LIBERO/tree/658540327860f93dd2cb9c1ed3e3b10fb792a0eb/libero_10),
+not the sibling policies. Build on the machine where the bundle will run:
+
+```sh
+trtmc lerobot_groot build nvidia/GR00T-N1.7-LIBERO \
+  --revision 658540327860f93dd2cb9c1ed3e3b10fb792a0eb \
+  --precision fp16 -o isaac-libero10.bundle
+```
+
+This command builds the native FP16 policy even with a complete Edge SDK
+installed. To opt in to the experimental Edge route, add
+`--edge-builder-python /absolute/path/to/python`. The Edge route requires **both** a Model Connect runtime
+built with the matching Edge 0.12.0 GR00T C++ archive and headers **and** the
+matching Edge Python builder. The base 0.12.0 SDK omits that archive and those
+headers; installing the Python wheel alone does not enable offload. For a
+[Model Connect source build](../getting-started/source-build.md), configure
+`-DTRTMC_ENABLE_EDGELLM=ON -DTRTMC_EDGELLM_RELEASE=0.12.0 -DTRTMC_EDGELLM_POLICY_SDK=ON`.
+This provisions the pinned policy components or checks that the external SDK
+you selected already contains them.
+If Edge preparation fails, the builder warns and retries the same FP16 policy
+through native TensorRT.
+
+The C++ task is `ImagesStateTextToActionChunk`: pass two named 256 × 256 RGB
+cameras (`image` and `wrist_image`), an eight-value robot state, and an
+instruction. The result is 16 actions with seven values each.
+
+**Validation boundary:** For episode 1272, frame 0 with fixed noise, the corrected
+native FP16 policy passed the independent Isaac FP32 action comparison on A30 and
+GB300. Mean absolute error was 0.001810 on A30 and 0.000857 on GB300 (limit 0.0026);
+both also passed the maximum-error and cosine limits. Earlier native builds missed
+this gate. Edge completed inference but missed the maximum error limit (0.2722 vs
+0.03); the released runner returned the same actions on the same engines. Neither
+route has been qualified here for closed-loop task success or other embodiments.

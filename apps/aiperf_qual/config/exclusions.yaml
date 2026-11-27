@@ -9,6 +9,8 @@
 exclude:
   - profile: deberta-v3-base*
     reason: TRTMC frames the text with [CLS] and [SEP]; the checkpoint's tokenizer.json adds neither, so the generic encode reference returns two rows fewer
+  - profile: groot-n17-isaac-libero10-fp16
+    reason: the live GR00T reference serves LeRobot's LIBERO-spatial policy, not Isaac's LIBERO-10 checkpoint and processors; the family E2E compares actions against a recorded Isaac FP32 reference
   - profile: gte-base-en-v1_5*
     reason: the generic embed reference mean-pools and L2-normalizes; GTE pools the CLS token without normalizing, and its catalog testcase has no prompt
   - profile: nomic-embed-text-v1_5*

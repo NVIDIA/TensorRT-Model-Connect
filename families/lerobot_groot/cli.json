@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "help": "Build a GR00T N1.7 action policy",
+      "executor": "python",
+      "handler": "edge_llm.cli:build",
+      "arguments": [
+        {
+          "name": "model",
+          "type": "string",
+          "help": "Hugging Face model ID or local snapshot"
+        },
+        {
+          "name": "output",
+          "flags": [
+            "-o",
+            "--output"
+          ],
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "source_revision",
+          "flags": [
+            "--revision"
+          ],
+          "type": "string"
+        },
+        {
+          "name": "precision",
+          "flags": [
+            "--precision"
+          ],
+          "type": "string",
+          "choices": [
+            "fp16",
+            "bf16",
+            "fp32"
+          ],
+          "help": "Compute precision: FP16 for Isaac, BF16 or FP32 for LeRobot"
+        },
+        {
+          "name": "verbose",
+          "flags": [
+            "--verbose"
+          ],
+          "type": "bool",
+          "action": "store_true",
+          "default": false
+        },
+        {
+          "name": "edge_builder_python",
+          "flags": [
+            "--edge-builder-python"
+          ],
+          "type": "path",
+          "help": "Opt in to the experimental Isaac LIBERO-10 Edge route using this absolute Python interpreter; omit for native FP16"
+        },
+        {
+          "name": "checkpoint_subdir",
+          "flags": [
+            "--checkpoint-subdir"
+          ],
+          "type": "string",
+          "choices": [
+            "isaac-libero10"
+          ],
+          "help": "Select the staged Isaac LIBERO-10 directory under a local asset root"
+        },
+        {
+          "name": "quantization",
+          "flags": [
+            "--quantization"
+          ],
+          "type": "string",
+          "choices": [
+            "none",
+            "fp8"
+          ],
+          "help": "Optional native LeRobot weight quantization"
+        }
+      ]
+    }
+  ]
+}

@@ -543,7 +543,26 @@ def test_manifests_declare_the_public_tokenizer_copy() -> None:
     assert manifests
     for path in manifests:
         manifest = json.loads(path.read_text(encoding="utf-8"))
-        assert manifest["external_files"] == expected, path.name
+        if path.name == "groot-n17-isaac-libero10-fp16.json":
+            assert manifest["name"] == path.stem
+            assert manifest["checkpoint_subdir"] == "isaac-libero10"
+            revision = "658540327860f93dd2cb9c1ed3e3b10fb792a0eb"
+            assert manifest["source_revision"] == revision
+            # This HF repository has no root policy. Stage precisely the identified LIBERO-10
+            # shards and metadata, and use only the pinned public tokenizer/processor copy.
+            names = ("config.json", "embodiment_id.json", "model.safetensors.index.json",
+                     "processor_config.json", "statistics.json", "model-00001-of-00002.safetensors",
+                     "model-00002-of-00002.safetensors")
+            policy = f"https://huggingface.co/nvidia/GR00T-N1.7-LIBERO/resolve/{revision}/libero_10"
+            public = f"https://huggingface.co/{PUBLIC_COPY}/resolve/{PUBLIC_REVISION}"
+            files = {f"isaac-libero10/{n}": f"{policy}/{n}" for n in names}
+            for n in ("tokenizer.json", "tokenizer_config.json", "preprocessor_config.json"):
+                files[f"isaac-libero10/tokenizer/{n}"] = f"{public}/{n}"
+            expected_files = [{"path": key, "url": value} for key, value in sorted(files.items())]
+            assert sorted(manifest["external_files"], key=lambda entry: entry["path"]) == expected_files, path.name
+        else:
+            assert "checkpoint_subdir" not in manifest, path.name
+            assert manifest["external_files"] == expected, path.name
         assert "hf_dependencies" not in manifest, path.name
 
 
@@ -602,3 +621,112 @@ def test_time_embedding_frequencies_match_the_reference_formulas() -> None:
     half = action_head.TIME_CHANNELS // 2
     np.testing.assert_allclose(action_head.dit_time_frequencies(),
                                np.exp(-math.log(10000.0) * np.arange(half) / (half - 1)), rtol=1e-6)
+
+
+def test_packaged_runner_without_edge_receipt_stays_native(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from families.lerobot_groot.edge_llm import builder
+
+    package = tmp_path / "wheel/tensorrt_model_connect"
+    runner = package / "bin/trtmc"
+    runner.parent.mkdir(parents=True)
+    runner.touch()
+    external = tmp_path / "external"
+    receipt = external / "share/trtmc/edge-llm.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text("{}")
+    monkeypatch.setattr(builder, "distribution", lambda _: SimpleNamespace(locate_file=lambda _: package))
+    monkeypatch.setattr(builder, "cmake_prefixes", lambda: [external])
+    assert builder._sdk_prefix() == package
+    # A standalone/source installation without a packaged runner may use its own prefix.
+    runner.unlink()
+    assert builder._sdk_prefix() == external
+
+
+def test_edge_builder_can_find_complete_relative_checkpoint_from_staging(tmp_path, monkeypatch):
+    from pathlib import Path
+    from families.lerobot_groot.edge_llm.builder import _checkpoint
+
+    monkeypatch.chdir(tmp_path)
+    source = Path("checkpoints/libero_10")
+    (source / "tokenizer").mkdir(parents=True)
+    for name in ("tokenizer.json", "tokenizer_config.json", "preprocessor_config.json"):
+        (source / "tokenizer" / name).write_text("{}")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    model_dir = _checkpoint(source, staging)
+    monkeypatch.chdir(staging)
+    assert model_dir.samefile(tmp_path / source)
+
+
+def test_family_build_preserves_native_and_isaac_inputs(tmp_path, monkeypatch):
+    from families.lerobot_groot.edge_llm import cli
+
+    requests = []
+    monkeypatch.setattr(cli, "publish", requests.append)
+    native = tmp_path / "lerobot"
+    native.mkdir()
+    (native / "config.json").write_text(json.dumps({"type": "groot"}))
+    output = tmp_path / "action.bundle"
+    for precision, quantization in ((None, None), ("fp32", None), ("bf16", "fp8")):
+        assert cli.build(model=str(native), output=output, precision=precision, quantization=quantization) == 0
+        request = requests[-1]
+        assert (request.model_dir, request.precision, request.quantization) == (
+            native, precision or "bf16", quantization)
+
+    stage = tmp_path / "isaac-libero10"
+    stage.mkdir()
+    (stage / "config.json").write_text(json.dumps({
+        "model_type": "Gr00tN1d7", "architectures": ["Gr00tN1d7"], "model_name": "nvidia/Cosmos-Reason2-2B",
+    }))
+    for name in ("processor_config.json", "embodiment_id.json", "statistics.json"):
+        (stage / name).write_text("{}")
+    assert cli.build(model=str(tmp_path), output=output, checkpoint_subdir=stage.name) == 0
+    assert (requests[-1].model_dir, requests[-1].precision) == (stage, "fp16")
+    with pytest.raises(ValueError, match="unquantized"):
+        cli.build(model=str(stage), output=output, quantization="fp8")
+    with pytest.raises(ValueError, match="only to LIBERO-10"):
+        cli.build(model=str(native), output=output, edge_builder_python=tmp_path / "interpreter")
+    # Even a valid Isaac root is not a substitute for an explicitly named child.
+    for root in (native, stage):
+        with pytest.raises(FileNotFoundError, match="No staged Isaac checkpoint"):
+            cli.build(model=str(root), output=output, checkpoint_subdir=stage.name)
+    assert len(requests) == 4
+
+    downloads = []
+
+    def download(repo_id, *, revision, **_):
+        downloads.append((repo_id, revision))
+        return str(native)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", download)
+    for model, revision, expected_revision in (
+        ("example-org/renamed-groot", "my-revision", "my-revision"),
+        ("example-org/renamed-groot", None, None),
+        (cli._LEROBOT, None, cli._LEROBOT_REVISION),
+    ):
+        assert cli.build(model=model, source_revision=revision, output=output) == 0
+        assert downloads[-1] == (model, expected_revision)
+        assert (requests[-1].model_dir, requests[-1].precision) == (native, "bf16")
+
+    (native / "config.json").write_text(json.dumps({"model_type": "not_groot"}))
+    with pytest.raises(ValueError, match="does not support this model"):
+        cli.build(model="example-org/other-model", output=output)
+
+    # The named Isaac snapshot remains usable offline, without the Hub tree cache.
+    named = stage.rename(tmp_path / "libero_10")
+    named_calls = []
+
+    def named_download(repo_id, **options):
+        named_calls.append((repo_id, options))
+        return str(tmp_path)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", named_download)
+    for offline in (False, True):
+        monkeypatch.setattr("huggingface_hub.constants.HF_HUB_OFFLINE", offline)
+        assert cli.build(model=cli._MODEL, output=output) == 0
+        repo, options = named_calls[-1]
+        assert repo == cli._MODEL and options["revision"] == cli._REVISION
+        assert options["local_files_only"] is offline
+        assert "libero_10/model-*.safetensors" in options["allow_patterns"]
+        assert requests[-1].model_dir == named

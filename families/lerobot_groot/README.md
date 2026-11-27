@@ -18,7 +18,43 @@ trtmc build nvidia/gr00t17-lerobot-libero_spatial-640 -o groot-fp8.bundle --prec
 The family is recognised from `type: "groot"` in `config.json`, never from a
 checkpoint name. LeRobot 0.6 saves only GR00T N1.7 policies under that type.
 
-## Supported boundary
+## Isaac LIBERO-10 (FP16)
+
+The Isaac checkpoint layout differs from a LeRobot save. Use the family command to fetch only
+the documented `libero_10` policy from `nvidia/GR00T-N1.7-LIBERO`, not its sibling checkpoints.
+A local policy directory can be passed instead. The bundle accepts named cameras `image` and
+`wrist_image` (256 × 256 RGB), an eight-value state and an instruction; it returns sixteen
+seven-coordinate actions in the robot's units. It does not binarize the gripper.
+
+```bash
+trtmc lerobot_groot build nvidia/GR00T-N1.7-LIBERO --precision fp16 -o isaac-libero10.bundle
+```
+
+The command above always builds the native FP16 Isaac policy, including when
+the matching Edge SDK is installed. To try the unqualified Edge route, add
+`--edge-builder-python /absolute/path/to/python`. That interpreter must have
+the Edge 0.12.0 builder, and Model Connect must have its matching GR00T C++
+archive and headers. The base Edge 0.12.0 SDK does not install these policy
+components. If Edge preparation fails, MC warns and retries the same native policy.
+
+**Accuracy status:** Two independently built native FP16 engines passed the existing
+Isaac FP32 action comparison for episode 1272, frame 0 with fixed noise:
+
+| GPU | Mean absolute error (limit 0.0026) | Maximum error (limit 0.03) | Cosine (minimum 0.999) |
+| --- | ---: | ---: | ---: |
+| A30 | 0.001810 | 0.016063 | 0.999952 |
+| GB300 | 0.000857 | 0.006586 | 0.999990 |
+
+Earlier native engines missed this gate. The conditioner preserves the visual patch
+projection's rounding before bias and accumulates biased visual attention and MLP output
+projections before rounding to FP16. The denoiser and the acceptance limits did not change.
+
+These are results for one recorded observation, not closed-loop success or a guarantee
+across all engine builds. The released Edge runner completed inference but missed the
+maximum error limit (0.2722 vs 0.03). Edge remains executable but unqualified. No other
+Isaac embodiment or LIBERO checkpoint is claimed here.
+
+## LeRobot supported boundary
 
 Anything outside this list fails at build time with the offending field named.
 
@@ -114,7 +150,8 @@ The manifests declare the commit-pinned public tokenizer copy in `external_files
 Internal CI downloads it into the directory `TRTMC_LEROBOT_GROOT_MODEL_DIR` names, and
 the Community GPU image (`ci/Dockerfile.dependencies`) carries it under `/opt/trtmc-ci`.
 The E2E test overlays it on the unchanged checkpoint directory: the Hugging Face cache
-at the manifest's revision, or `TRTMC_LEROBOT_GROOT_CHECKPOINT_DIR` if set.
+at the manifest's revision, or `TRTMC_LEROBOT_GROOT_CHECKPOINT_DIR` for the LeRobot cases.
+The Isaac case uses its own staged `isaac-libero10` directory even when that override is set.
 `test_e2e.py` first checks that both are staged locally, then builds the pinned
 checkpoint, runs each observation through the SDK and compares all 16x7 actions,
 checks the preprocessing against LeRobot's, and checks that the native runtime links
