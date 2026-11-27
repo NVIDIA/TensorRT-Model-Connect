@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cstring>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -70,30 +71,35 @@ Pipeline::Pipeline(std::unique_ptr<ITrtModule> engine, RuntimeConfig config)
         throw std::runtime_error("PatchTSMixer engine input contract does not match");
 }
 
-ForecastResult Pipeline::forecast(const ForecastRequest& request) {
+internal::PointForecastResult Pipeline::run(const internal::SeriesToPointForecastRequest& request,
+                                            internal::ConfigView config) {
     const auto channels = static_cast<std::size_t>(config_.num_input_channels);
-    if (request.past_values.empty())
+    const auto& history = request.history;
+    const auto past_values = history.past_values.values;
+    if (past_values.empty())
         throw std::invalid_argument("PatchTSMixer requires at least one past timestep");
-    if (request.frequency != 0)
-        throw std::invalid_argument("PatchTSMixer does not accept a frequency category");
-    if (request.past_values.size() % channels != 0) {
+    if (internal::config_get<std::int64_t>(config, fields_, "frequency").value() != 0)
+        throw internal::ConfigError("PatchTSMixer does not accept a frequency category");
+    if (past_values.size() % channels != 0) {
         throw std::invalid_argument("PatchTSMixer past values must be divisible by input channels");
     }
-    if (!request.observed_mask.empty() &&
-        request.observed_mask.size() != request.past_values.size())
+    if ((history.past_values.rows != 0 || history.past_values.columns != 0) &&
+        (history.past_values.columns != channels ||
+         history.past_values.rows != past_values.size() / channels))
+        throw std::invalid_argument("PatchTSMixer history shape does not match its channels");
+    if (!history.observed.empty() && history.observed.size() != past_values.size())
         throw std::invalid_argument("PatchTSMixer observed mask must match past values");
     const auto expected = static_cast<std::size_t>(config_.context_length) * channels;
     std::vector<float> padded_values(expected, 0.0F);
     std::vector<float> padded_mask(expected, 0.0F);
-    const auto copied = std::min(expected, request.past_values.size());
-    const auto source = request.past_values.size() - copied;
+    const auto copied = std::min(expected, past_values.size());
+    const auto source = past_values.size() - copied;
     const auto destination = expected - copied;
-    std::copy_n(request.past_values.data() + source, copied, padded_values.data() + destination);
-    if (request.observed_mask.empty())
+    std::copy_n(past_values.data() + source, copied, padded_values.data() + destination);
+    if (history.observed.empty())
         std::fill_n(padded_mask.data() + destination, copied, 1.0F);
     else
-        std::copy_n(request.observed_mask.data() + source, copied,
-                    padded_mask.data() + destination);
+        std::copy_n(history.observed.data() + source, copied, padded_mask.data() + destination);
 
     TensorMap inputs;
     Tensor values;
@@ -118,10 +124,13 @@ ForecastResult Pipeline::forecast(const ForecastRequest& request) {
     if (output->second.numel() != count)
         throw std::runtime_error("PatchTSMixer output dimensions do not match runtime.json");
 
-    ForecastResult result;
-    result.values.resize(count);
-    std::memcpy(result.values.data(), output->second.data, count * sizeof(float));
-    result.shape = {1, config_.prediction_length, config_.num_input_channels};
+    internal::PointForecastResult result;
+    result.values.values.resize(count);
+    std::memcpy(result.values.values.data(), output->second.data, count * sizeof(float));
+    result.values.rows = config_.prediction_length;
+    result.values.columns = config_.num_input_channels;
+    result.axes.horizon_steps.resize(config_.prediction_length);
+    std::iota(result.axes.horizon_steps.begin(), result.axes.horizon_steps.end(), std::int64_t{1});
     return result;
 }
 
