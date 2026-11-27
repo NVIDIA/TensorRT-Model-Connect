@@ -30,7 +30,7 @@ def _load_cases() -> dict[str, tuple[dict, dict]]:
     for path in sorted((_TEST_DIR / "manifests").glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == _FAMILY, path
-        assert manifest["task"] == "text_generation", path
+        assert manifest["task"] == "text_continuation", path
         assert isinstance(manifest["precision"], str), path
         assert isinstance(manifest["max_sequence_length"], int), path
         assert isinstance(manifest["tensor_parallel_size"], int), path
@@ -76,13 +76,17 @@ def _require_selected(case_name: str, manifest: dict, config) -> None:
 def _required_environment(tp_size: int):
     binary_value = os.environ.get("TRTMC_BINARY")
     runtime_value = os.environ.get("TRTMC_RUNTIME_ROOT")
+    native_build_value = os.environ.get("TRTMC_NATIVE_BUILD_DIR")
     assert binary_value, "selected E2E requires TRTMC_BINARY"
     assert runtime_value, "selected E2E requires TRTMC_RUNTIME_ROOT"
+    assert native_build_value, "selected E2E requires TRTMC_NATIVE_BUILD_DIR"
 
     binary = Path(binary_value)
     runtime_root = Path(runtime_value)
+    native_build = Path(native_build_value)
     assert binary.is_file() and os.access(binary, os.X_OK), binary
     assert runtime_root.is_dir(), runtime_root
+    assert native_build.is_dir(), native_build
     assert (runtime_root / "libtrtmc_backend_trt.so").is_file(), runtime_root
     assert (runtime_root / f"libtrtmc_model_{_FAMILY}.so").is_file(), runtime_root
 
@@ -142,7 +146,7 @@ def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
             model_dir=model_dir,
             output_path=bundle,
             family=_FAMILY,
-            task="text_generation",
+            task="text_continuation",
             precision=manifest["precision"],
             max_sequence_length=manifest["max_sequence_length"],
             tensor_parallel_size=manifest["tensor_parallel_size"],
@@ -165,7 +169,7 @@ def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int) -> None:
     record_evidence("native", {"stdout": getattr(inspected, "stdout", None), "stderr": getattr(inspected, "stderr", None)})
     payload = json.loads(inspected.stdout)
     assert payload["family"] == _FAMILY
-    assert payload["task"] == "text_generation"
+    assert payload["task"] == "text_continuation"
     if tp_size > 1:
         rank_sections = {
             name
@@ -538,3 +542,8 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
         _record_text_diagnostics(payload["token_ids"], reference[0])
     with evidence_stage("compare"):
         _assert_correctness(payload, case, record_evidence("thresholds", _thresholds(case_name)), *reference)
+    if tp_size == 1:
+        from families.bloom.tests.sdk import check_consumers
+
+        with evidence_stage("sdk"):
+            check_consumers(bundle, runtime_root, prompt, case, payload, model_dir, tmp_path)
