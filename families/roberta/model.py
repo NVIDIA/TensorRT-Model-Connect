@@ -40,14 +40,10 @@ from .encoder_builder import build_encoder_engine
 
 
 def _detect_prefix(readers) -> str:
-    """Detect the weight prefix used in the checkpoint.
-
-    Returns "roberta" or "model.roberta" depending on which prefix is found.
-    XLM-RoBERTa checkpoints sometimes nest under "model.roberta.*".
-    """
-    if _has_tensor(readers, "model.roberta.embeddings.word_embeddings.weight"):
-        return "model.roberta"
-    return "roberta"
+    for prefix in ("model.roberta.", "roberta.", ""):
+        if _has_tensor(readers, f"{prefix}embeddings.word_embeddings.weight"):
+            return prefix
+    raise KeyError("RoBERTa checkpoint has no word embedding tensor")
 
 
 def _load_ln(readers, prefix):
@@ -87,7 +83,7 @@ class _RobertaModel:
         weights = WeightDict()
 
         # Word embedding
-        embedding = _load_tensor(readers, f"{hf_root}.embeddings.word_embeddings.weight")
+        embedding = _load_tensor(readers, f"{hf_root}embeddings.word_embeddings.weight")
         assert embedding.shape == (vocab, hidden), (
             f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
         )
@@ -98,7 +94,7 @@ class _RobertaModel:
         # The position embedding table has (max_pos, hidden) rows where
         # rows 0 and 1 are padding-related. Slice starting at offset 2
         # so the encoder builder can use positions [0, 1, ..., N-1].
-        pos_embed_raw = _load_tensor(readers, f"{hf_root}.embeddings.position_embeddings.weight")
+        pos_embed_raw = _load_tensor(readers, f"{hf_root}embeddings.position_embeddings.weight")
         pad_idx = config.raw.get("pad_token_id", 1)
         pos_offset = pad_idx + 1  # RoBERTa positions start at padding_idx + 1
         pos_embed = pos_embed_raw[pos_offset:].astype(np.float32)
@@ -106,7 +102,7 @@ class _RobertaModel:
 
         # Token type embedding — present but unused (all zeros at inference).
         # Load if available; otherwise synthesize zeros.
-        tt_key = f"{hf_root}.embeddings.token_type_embeddings.weight"
+        tt_key = f"{hf_root}embeddings.token_type_embeddings.weight"
         if _has_tensor(readers, tt_key):
             tt_embed = _load_tensor(readers, tt_key)
             assert tt_embed.shape == (type_vocab_size, hidden), (
@@ -117,13 +113,13 @@ class _RobertaModel:
             weights["token_type_embedding"] = np.zeros((type_vocab_size, hidden), dtype=np.float32)
 
         # Embedding LayerNorm
-        embed_ln_w, embed_ln_b = _load_ln(readers, f"{hf_root}.embeddings.LayerNorm")
+        embed_ln_w, embed_ln_b = _load_ln(readers, f"{hf_root}embeddings.LayerNorm")
         weights["embed_norm"] = embed_ln_w
         weights["embed_norm_beta"] = embed_ln_b
 
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
-            hf_prefix = f"{hf_root}.encoder.layer.{layer_idx}"
+            hf_prefix = f"{hf_root}encoder.layer.{layer_idx}"
 
             # Q, K, V projections — HF stores [out, in], transpose to [in, out]
             q_w = _load_tensor(readers, f"{hf_prefix}.attention.self.query.weight")
@@ -178,10 +174,10 @@ class _RobertaModel:
             weights[f"{prefix}.output_norm_beta"] = out_ln_b
 
         # Pooler (optional — used for [CLS] representation)
-        pooler_key = f"{hf_root}.pooler.dense.weight"
+        pooler_key = f"{hf_root}pooler.dense.weight"
         if _has_tensor(readers, pooler_key):
             pooler_w = _load_tensor(readers, pooler_key)
-            pooler_b = _load_tensor(readers, f"{hf_root}.pooler.dense.bias")
+            pooler_b = _load_tensor(readers, f"{hf_root}pooler.dense.bias")
             weights["pooler_w"] = np.ascontiguousarray(pooler_w.T.astype(np.float32))
             weights["pooler_bias"] = pooler_b.astype(np.float32)
 
