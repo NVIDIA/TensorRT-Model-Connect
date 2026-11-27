@@ -7,6 +7,7 @@
 #include "trtmc/runtime/trt_backend.h"
 
 #include <stdexcept>
+#include <string>
 
 namespace {
 
@@ -98,6 +99,18 @@ class FakeAudioGeneration final : public trtmc::IAudioGeneration {
     }
 };
 
+class FakeTranscription final : public trtmc::ITranscription {
+  public:
+    trtmc::TextResult transcribe(const float*, std::int32_t num_samples,
+                                 const trtmc::TranscriptionConfig& config) override {
+        trtmc::TextResult result{"samples:" + std::to_string(num_samples), {num_samples}};
+        result.setup_ms = 1.5;
+        result.prefill_ms = static_cast<double>(config.input_sample_rate) / 1000.0;
+        result.decode_ms = 4.25;
+        return result;
+    }
+};
+
 class FakeSegmentation final : public trtmc::ISegmentation {
   public:
     trtmc::SegmentResult segment(const float*, std::int32_t height, std::int32_t width) override {
@@ -174,6 +187,8 @@ trtmc::ITask* create_fake_task(const trtmc::FamilyContext& context) {
         return new FakeImageGeneration();
     if (context.reader.info().task == trtmc::IAudioGeneration::kTask)
         return new FakeAudioGeneration();
+    if (context.reader.info().task == trtmc::ITranscription::kTask)
+        return new FakeTranscription();
     if (context.reader.info().task == trtmc::ITimeSeriesForecast::kTask)
         return new FakeForecast(context.backend, context.kv_cache_size_bytes);
     if (context.reader.info().task == trtmc::ITextGeneration::kTask) {

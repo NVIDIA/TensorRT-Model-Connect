@@ -148,6 +148,13 @@ def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
     )
 
 
+_STAGE_TIME_FIELDS = ("setup_ms", "prefill_ms", "decode_ms")
+
+
+def _without_stage_times(payload: dict) -> dict:
+    return {key: value for key, value in payload.items() if key not in _STAGE_TIME_FIELDS}
+
+
 def _run_json(
     binary: Path,
     runtime_root: Path,
@@ -203,7 +210,9 @@ def _run_json(
             except json.JSONDecodeError:
                 pass
     assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
-    assert all((payload == payloads[0] for payload in payloads))
+    # Every rank returns the same transcript; each rank times its own stages.
+    assert all((_without_stage_times(payload) == _without_stage_times(payloads[0]) for payload in payloads))
+    assert all((payload[field] > 0.0 for payload in payloads for field in _STAGE_TIME_FIELDS))
     return payloads[0]
 
 
