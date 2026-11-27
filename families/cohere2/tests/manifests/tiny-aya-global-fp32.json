@@ -1,0 +1,31 @@
+{
+  "name": "tiny-aya-global-fp32",
+  "bundle": "tiny-aya-global-fp32.bundle",
+  "hf_id": "CohereLabs/tiny-aya-global",
+  "hf_revision": "af89d219b53ed9b13b8a4645f9c8028973510324",
+  "family": "cohere2",
+  "task": "text_continuation",
+  "precision": "fp32",
+  "max_sequence_length": 128,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "tiny-aya-global-english",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 12,
+      "premerge": true
+    },
+    {
+      "name": "tiny-aya-global-multilingual",
+      "prompt": "La capital de España es",
+      "max_new_tokens": 12,
+      "premerge": true
+    },
+    {
+      "name": "tiny-aya-global-arabic",
+      "prompt": "عاصمة مصر هي",
+      "max_new_tokens": 12,
+      "premerge": true
+    }
+  ]
+}
