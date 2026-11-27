@@ -54,7 +54,7 @@ from .checkpoint_mapper import (
     _has_tensor,
     _transpose_2d,
 )
-from . import graph_ops
+from . import graph_ops, rel_pos
 from .parallel import normalize_parallel_config
 
 
@@ -1442,10 +1442,36 @@ class _SamModel:
         v_h.reshape_dims = (batch_size, seq_len, num_heads, head_dim)
         v_h.second_transpose = trt.Permutation([0, 2, 1, 3])
 
+        score_q = q_h.get_output(0)
+        score_k = k_h.get_output(0)
+        value = v_h.get_output(0)
+        # HF SAM's decomposed relative-position bias depends on each query.
+        has_rel_pos = f"{w_prefix}.attn.rel_pos_h" in weights
+        # In FP16 the bias rides in the fused attention's Q.K^T product
+        # (rel_pos.py) instead of a materialized [batch, heads, seq, seq]
+        # tensor that the attention reads back. In FP32 the folded form
+        # measured slower, so the bias add below stays.
+        fold_rel_pos = has_rel_pos and np.dtype(dtype) == np.float16
+        if fold_rel_pos:
+            score_q, score_k, value = _SamModel._append_decomposed_rel_pos(
+                network,
+                score_q,
+                score_k,
+                value,
+                weights,
+                w_prefix,
+                batch_size=batch_size,
+                spatial_size=spatial_size,
+                num_heads=num_heads,
+                head_dim=head_dim,
+                attn_scale=attn_scale,
+                dtype=dtype,
+            )
+
         score = network.add_matrix_multiply(
-            q_h.get_output(0),
+            score_q,
             trt.MatrixOperation.NONE,
-            k_h.get_output(0),
+            score_k,
             trt.MatrixOperation.TRANSPOSE,
         )
         scale_c = graph_ops.add_constant(
@@ -1455,8 +1481,7 @@ class _SamModel:
             score.get_output(0), scale_c, trt.ElementWiseOperation.PROD
         )
 
-        # HF SAM's decomposed relative-position bias depends on each query.
-        if f"{w_prefix}.attn.rel_pos_h" in weights:
+        if has_rel_pos and not fold_rel_pos:
             rel_pos_h = weights[f"{w_prefix}.attn.rel_pos_h"]
             rel_pos_w = weights[f"{w_prefix}.attn.rel_pos_w"]
             rp_h = _SamModel._get_rel_pos(spatial_size, spatial_size, rel_pos_h)
@@ -1548,11 +1573,19 @@ class _SamModel:
         ctx = network.add_matrix_multiply(
             softmax.get_output(0),
             trt.MatrixOperation.NONE,
-            v_h.get_output(0),
+            value,
             trt.MatrixOperation.NONE,
-        )
+        ).get_output(0)
+        if fold_rel_pos:
+            # Drop the zero columns V was padded with.
+            ctx = network.add_slice(
+                ctx,
+                start=(0, 0, 0, 0),
+                shape=(batch_size, num_heads, seq_len, head_dim),
+                stride=(1, 1, 1, 1),
+            ).get_output(0)
 
-        ctx_flat = network.add_shuffle(ctx.get_output(0))
+        ctx_flat = network.add_shuffle(ctx)
         ctx_flat.first_transpose = trt.Permutation([0, 2, 1, 3])
         ctx_flat.reshape_dims = (batch_size * seq_len, hidden)
 
@@ -1564,6 +1597,90 @@ class _SamModel:
         out_4d = network.add_shuffle(out)
         out_4d.reshape_dims = (batch_size, spatial_size, spatial_size, hidden)
         return out_4d.get_output(0)
+
+    @staticmethod
+    def _append_decomposed_rel_pos(
+        network,
+        q_heads,
+        k_heads,
+        v_heads,
+        weights,
+        w_prefix,
+        *,
+        batch_size,
+        spatial_size,
+        num_heads,
+        head_dim,
+        attn_scale,
+        dtype=np.float32,
+    ):
+        """Append HF SAM's decomposed relative-position terms to Q and K.
+
+        Each query row of ``q_heads`` ``[batch, heads, size^2, head_dim]`` gains
+        its row and column terms (divided by ``attn_scale``), each key row of
+        ``k_heads`` the one-hot of its row and column (``rel_pos.py``). Scaling
+        the augmented Q.K^T by ``attn_scale`` gives HF's scaled logits plus its
+        decomposed bias. ``v_heads`` is padded with zero columns to the same
+        width: TensorRT fuses the attention only when Q, K and V share one head
+        dimension, and the caller drops those columns from the context.
+        """
+        seq_len = spatial_size * spatial_size
+        width = rel_pos.rel_pos_block_width(spatial_size)
+
+        q_5d = network.add_shuffle(q_heads)
+        q_5d.reshape_dims = (batch_size, num_heads, spatial_size, spatial_size, head_dim)
+
+        def query_terms(table_name, axis_first, rows_last):
+            # Gather the query rows sharing one grid row (or column) into a
+            # batch, project them by that row's table, and lay the terms back
+            # out as [batch, heads, size^2, width].
+            table = rel_pos.rel_pos_query_table(
+                _SamModel._get_rel_pos(spatial_size, spatial_size, weights[table_name]),
+                attn_scale,
+            )
+            grouped = network.add_shuffle(q_5d.get_output(0))
+            grouped.first_transpose = trt.Permutation(axis_first)
+            grouped.reshape_dims = (spatial_size, batch_size * num_heads * spatial_size, head_dim)
+            projected = network.add_matrix_multiply(
+                grouped.get_output(0),
+                trt.MatrixOperation.NONE,
+                graph_ops.add_constant(network, table.shape, table, dtype=dtype),
+                trt.MatrixOperation.NONE,
+            )
+            terms = network.add_shuffle(projected.get_output(0))
+            terms.reshape_dims = (spatial_size, batch_size, num_heads, spatial_size, width)
+            terms.second_transpose = trt.Permutation(rows_last)
+            rows = network.add_shuffle(terms.get_output(0))
+            rows.reshape_dims = (batch_size, num_heads, seq_len, width)
+            return rows.get_output(0)
+
+        row_terms = query_terms(f"{w_prefix}.attn.rel_pos_h", [2, 0, 1, 3, 4], [1, 2, 0, 3, 4])
+        col_terms = query_terms(f"{w_prefix}.attn.rel_pos_w", [3, 0, 1, 2, 4], [1, 2, 3, 0, 4])
+        q_aug = network.add_concatenation([q_heads, row_terms, col_terms])
+        q_aug.axis = 3
+
+        key_table = rel_pos.rel_pos_key_table(spatial_size)
+        key_rows = graph_ops.add_constant(
+            network, (1, 1) + key_table.shape, key_table, dtype=dtype
+        )
+        key_rows = network.add_slice(
+            key_rows,
+            start=(0, 0, 0, 0),
+            shape=(batch_size, num_heads, seq_len, 2 * width),
+            stride=(1, 1, 1, 1),
+        )
+        key_rows.mode = trt.SampleMode.WRAP
+        k_aug = network.add_concatenation([k_heads, key_rows.get_output(0)])
+        k_aug.axis = 3
+
+        v_aug = network.add_slice(
+            v_heads,
+            start=(0, 0, 0, 0),
+            shape=(batch_size, num_heads, seq_len, head_dim + 2 * width),
+            stride=(1, 1, 1, 1),
+        )
+        v_aug.mode = trt.SampleMode.FILL
+        return q_aug.get_output(0), k_aug.get_output(0), v_aug.get_output(0)
 
     @staticmethod
     def _build_global_attention(
