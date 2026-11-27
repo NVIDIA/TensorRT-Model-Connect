@@ -14,6 +14,7 @@
 #include <cstring>
 #include <memory>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace trtmc {
@@ -134,6 +135,36 @@ class RfftPowerPlan {
     std::vector<std::complex<double>> workspace_;
 };
 
+// The half-open column span [first, last) of one filterbank row outside which
+// every coefficient is zero (an all-zero row is an empty span).
+std::pair<int32_t, int32_t> nonzero_filter_columns(const float* row, int32_t n_mel_bins) {
+    int32_t first = 0;
+    while (first < n_mel_bins && row[first] == 0.0F) {
+        ++first;
+    }
+    int32_t last = n_mel_bins;
+    while (last > first && row[last - 1] == 0.0F) {
+        --last;
+    }
+    return {first, last};
+}
+
+// frame_mel += power * filter_row, the row given with its nonzero column
+// span. Through a zero coefficient a finite power adds a zero, which can
+// change nothing but the sign of a sum that is zero. Every reader of these
+// sums adds a positive guard to them, or takes their maximum with a positive
+// floor, before it takes the logarithm, so no feature changes when only the
+// span is added. A power that is not finite keeps the full row, where
+// inf * 0 is NaN.
+void add_filter_row(float power, const float* filter_row, int32_t n_mel_bins,
+                    const std::pair<int32_t, int32_t>& columns, float* frame_mel) {
+    const bool finite = std::isfinite(power);
+    const int32_t column_end = finite ? columns.second : n_mel_bins;
+    for (int32_t m = finite ? columns.first : 0; m < column_end; ++m) {
+        frame_mel[m] += power * filter_row[m];
+    }
+}
+
 std::vector<float> build_center_padded_audio(const float* samples, int32_t n_samples,
                                              int32_t chunk_length_s, int32_t sample_rate,
                                              int32_t n_fft, float preemphasis) {
@@ -182,6 +213,10 @@ std::vector<float> compute_mel_spectrogram(const std::vector<float>& padded,
     std::vector<float> frame_power(n_freq_bins);
     std::vector<float> frame_mel(n_mel_bins);
     RfftPowerPlan fft_plan(n_fft);
+    // Each row's nonzero column span, found when a frame first needs the row
+    // (first == -1 until then): a row no nonzero power needs is never read.
+    std::vector<std::pair<int32_t, int32_t>> filter_columns(static_cast<std::size_t>(n_freq_bins),
+                                                            {-1, -1});
 
     const int32_t computed_frames = std::clamp(frames_to_compute, 0, n_frames_raw);
     for (int32_t t = 0; t < computed_frames; ++t) {
@@ -200,10 +235,11 @@ std::vector<float> compute_mel_spectrogram(const std::vector<float>& padded,
                 continue;
             }
             const float* filter_row = mel_filters + static_cast<std::size_t>(f) * n_mel_bins;
-            for (int32_t m = 0; m < n_mel_bins; ++m) {
-                frame_mel[static_cast<std::size_t>(m)] +=
-                    p * filter_row[static_cast<std::size_t>(m)];
+            auto& columns = filter_columns[static_cast<std::size_t>(f)];
+            if (columns.first < 0) {
+                columns = nonzero_filter_columns(filter_row, n_mel_bins);
             }
+            add_filter_row(p, filter_row, n_mel_bins, columns, frame_mel.data());
         }
         for (int32_t m = 0; m < n_mel_bins; ++m) {
             mel_spec[static_cast<std::size_t>(m) * n_frames_raw + t] =
@@ -331,7 +367,8 @@ class IncrementalMelSpectrogram::Impl {
          MelSpectrogramOptions options, int32_t input_sample_rate)
         : options_(std::move(options)), input_sample_rate_(input_sample_rate),
           n_freq_bins_(n_freq_bins), n_mel_bins_(n_mel_bins), window_(make_stft_window(options_)),
-          fft_plan_(options_.n_fft), windowed_(static_cast<std::size_t>(options_.n_fft)),
+          fft_plan_(options_.n_fft), resampler_(input_sample_rate, options_.sample_rate),
+          windowed_(static_cast<std::size_t>(options_.n_fft)),
           frame_power_(static_cast<std::size_t>(n_freq_bins)),
           frame_mel_(static_cast<std::size_t>(n_mel_bins)) {
         if (mel_filters == nullptr || n_freq_bins != options_.n_fft / 2 + 1 || n_mel_bins <= 0) {
@@ -347,6 +384,11 @@ class IncrementalMelSpectrogram::Impl {
         }
         mel_filters_.assign(mel_filters,
                             mel_filters + static_cast<std::size_t>(n_freq_bins_) * n_mel_bins_);
+        filter_columns_.reserve(static_cast<std::size_t>(n_freq_bins_));
+        for (int32_t f = 0; f < n_freq_bins_; ++f) {
+            filter_columns_.push_back(nonzero_filter_columns(
+                mel_filters_.data() + static_cast<std::size_t>(f) * n_mel_bins_, n_mel_bins_));
+        }
     }
 
     void accept_audio(const float* samples, int32_t n_samples) {
@@ -390,9 +432,10 @@ class IncrementalMelSpectrogram::Impl {
         if (bounded_required <= start) {
             return;
         }
-        auto next = resample_linear_range(
-            raw_audio_.data(), static_cast<int32_t>(raw_audio_.size()), input_sample_rate_,
-            options_.sample_rate, start, bounded_required - start);
+        // The resampler keeps its phase table from call to call, and reset()
+        // leaves it alone: the table depends on the two rates only.
+        auto next = resampler_.range(raw_audio_.data(), static_cast<int32_t>(raw_audio_.size()),
+                                     start, bounded_required - start);
         resampled_audio_.insert(resampled_audio_.end(), next.begin(), next.end());
     }
 
@@ -422,10 +465,8 @@ class IncrementalMelSpectrogram::Impl {
             const float power = frame_power_[static_cast<std::size_t>(f)];
             const float* filter_row =
                 mel_filters_.data() + static_cast<std::size_t>(f) * n_mel_bins_;
-            for (int32_t m = 0; m < n_mel_bins_; ++m) {
-                frame_mel_[static_cast<std::size_t>(m)] +=
-                    power * filter_row[static_cast<std::size_t>(m)];
-            }
+            add_filter_row(power, filter_row, n_mel_bins_,
+                           filter_columns_[static_cast<std::size_t>(f)], frame_mel_.data());
         }
         constexpr float kLogGuard = 5.960464477539063e-08F;
         for (float value : frame_mel_) {
@@ -479,8 +520,11 @@ class IncrementalMelSpectrogram::Impl {
     int32_t n_freq_bins_{0};
     int32_t n_mel_bins_{0};
     std::vector<float> mel_filters_;
+    // Each filterbank row's nonzero column span.
+    std::vector<std::pair<int32_t, int32_t>> filter_columns_;
     std::vector<float> window_;
     RfftPowerPlan fft_plan_;
+    LinearResampler resampler_;
     std::vector<float> raw_audio_;
     std::vector<float> resampled_audio_;
     std::vector<float> frames_;
