@@ -69,12 +69,9 @@ struct Run {
     std::vector<Json> messages;
 };
 
-Run invoke(const std::filesystem::path& bundle, const trtmc::LoadOptions& options,
-           const std::vector<Json>& requests, bool direct_model = false) {
-    std::ostringstream encoded;
-    for (const auto& request : requests)
-        encoded << request.dump() << '\n';
-    std::istringstream input(encoded.str());
+Run invoke_encoded(const std::filesystem::path& bundle, const trtmc::LoadOptions& options,
+                   const std::string& requests, bool direct_model = false) {
+    std::istringstream input(requests);
     std::ostringstream output;
     int status;
     if (direct_model) {
@@ -84,6 +81,39 @@ Run invoke(const std::filesystem::path& bundle, const trtmc::LoadOptions& option
         status = trtmc::server::run_bundle_worker(bundle.string(), options, input, output);
     }
     return {status, records(output.str())};
+}
+
+Run invoke(const std::filesystem::path& bundle, const trtmc::LoadOptions& options,
+           const std::vector<Json>& requests, bool direct_model = false) {
+    std::ostringstream encoded;
+    for (const auto& request : requests)
+        encoded << request.dump() << '\n';
+    return invoke_encoded(bundle, options, encoded.str(), direct_model);
+}
+
+void test_json_number_overflow_is_nonfatal(const std::filesystem::path& root,
+                                           const trtmc::LoadOptions& options) {
+    const auto bundle = write_bundle(root, "text_continuation");
+    for (const auto& number :
+         {std::string("1e1000"), std::string("-1e1000"), std::string(400, '9')}) {
+        const auto input = "{\"id\":\"overflow\",\"op\":\"generate\",\"prompt\":\"x\","
+                           "\"config\":{\"temperature\":" +
+                           number + "}}\n" + generate("after-overflow").dump() + "\n" +
+                           Json({{"id", "stop"}, {"op", "shutdown"}}).dump() + "\n";
+        for (bool direct_model : {false, true}) {
+            const auto run = invoke_encoded(bundle, options, input, direct_model);
+            require(run.status == 0 && run.messages.size() == 4,
+                    "SDK worker survives parse-time numeric overflow");
+            require(run.messages[1].at("id").is_null() &&
+                        run.messages[1].at("error").at("type") == "invalid_request_error",
+                    "parse-time overflow has no recoverable request ID");
+            require(run.messages[2].at("id") == "after-overflow" &&
+                        run.messages[2].at("result").at("text") == "hello!|eos",
+                    "valid SDK generation succeeds after numeric overflow");
+            require(run.messages[3].at("result").at("status") == "shutting_down",
+                    "SDK worker acknowledges shutdown after numeric overflow");
+        }
+    }
 }
 
 void test_defaults_and_config(const std::filesystem::path& root,
@@ -454,6 +484,7 @@ int main(int argc, char** argv) {
         const std::filesystem::path root(argv[1]);
         trtmc::LoadOptions options;
         options.runtime_root = root.string();
+        test_json_number_overflow_is_nonfatal(root, options);
         test_defaults_and_config(root, options);
         test_invalid_config_is_nonfatal(root, options);
         test_task_selection_and_failures(root, options);
