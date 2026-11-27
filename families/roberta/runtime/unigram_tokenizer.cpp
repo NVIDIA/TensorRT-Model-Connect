@@ -399,7 +399,9 @@ class UnigramTokenizer final : public ITokenizer {
                             transformed.compare(pos, kMetaspaceChar.size(), kMetaspaceChar) == 0
                                 ? kMetaspaceChar.size()
                                 : 0;
-                        const auto end = transformed.find(kMetaspaceChar, pos + prefix);
+                        const auto end = mMetaspaceSplit
+                                             ? transformed.find(kMetaspaceChar, pos + prefix)
+                                             : std::string::npos;
                         const auto piece = transformed.substr(pos, end - pos);
                         auto word_ids = viterbi_encode(piece, mTrie, mUnkId, mUnkScore);
                         ids.insert(ids.end(), word_ids.begin(), word_ids.end());
@@ -453,9 +455,10 @@ class UnigramTokenizer final : public ITokenizer {
     };
 
     struct NormalizerStep {
-        enum class Type { Precompiled, Lowercase };
+        enum class Type { Precompiled, Lowercase, Prepend };
         Type type;
         std::unique_ptr<PrecompiledNormalizer> precompiled;
+        std::string prepend;
     };
 
     std::string normalize_text(const std::string& text) const {
@@ -463,8 +466,10 @@ class UnigramTokenizer final : public ITokenizer {
         for (const auto& step : mNormalizerSteps) {
             if (step.type == NormalizerStep::Type::Precompiled)
                 normalized = step.precompiled->normalize(normalized);
-            else
+            else if (step.type == NormalizerStep::Type::Lowercase)
                 normalized = lowercase_ascii(std::move(normalized));
+            else if (!normalized.empty())
+                normalized.insert(0, step.prepend);
         }
         return normalized;
     }
@@ -628,16 +633,17 @@ class UnigramTokenizer final : public ITokenizer {
                 throw std::runtime_error("Precompiled normalizer requires precompiled_charsmap");
             mNormalizerSteps.push_back(
                 {NormalizerStep::Type::Precompiled,
-                 std::make_unique<PrecompiledNormalizer>(norm.at("precompiled_charsmap"))});
+                 std::make_unique<PrecompiledNormalizer>(norm.at("precompiled_charsmap")),
+                 {}});
             return;
         }
         if (ntype == "Lowercase") {
-            mNormalizerSteps.push_back({NormalizerStep::Type::Lowercase, nullptr});
+            mNormalizerSteps.push_back({NormalizerStep::Type::Lowercase, nullptr, {}});
             return;
         }
         if (ntype == "Prepend") {
-            // Marian-style: prepend a string (e.g., "▁") to input
-            mAddPrefixSpace = true;
+            mNormalizerSteps.push_back(
+                {NormalizerStep::Type::Prepend, nullptr, norm.at("prepend").get<std::string>()});
         }
     }
 
@@ -661,6 +667,7 @@ class UnigramTokenizer final : public ITokenizer {
 
         if (ptype == "Metaspace") {
             mAddPrefixSpace = pt.value("add_prefix_space", true);
+            mMetaspaceSplit = pt.value("split", true);
         } else if (ptype == "Sequence") {
             bool metaspace = false;
             if (!pt.contains("pretokenizers") || !pt["pretokenizers"].is_array())
@@ -674,6 +681,7 @@ class UnigramTokenizer final : public ITokenizer {
                 } else if (type == "Metaspace") {
                     metaspace = true;
                     mAddPrefixSpace = sub.value("add_prefix_space", true);
+                    mMetaspaceSplit = sub.value("split", true);
                 } else {
                     throw std::runtime_error("Unsupported Unigram pre-tokenizer in sequence");
                 }
@@ -791,6 +799,7 @@ class UnigramTokenizer final : public ITokenizer {
     bool mAddSpecialTokens = true;
     std::vector<NormalizerStep> mNormalizerSteps;
     bool mAddPrefixSpace = true;
+    bool mMetaspaceSplit = true;
     bool mWhitespaceSplit = false;
 
     int32_t mBosId = -1;

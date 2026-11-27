@@ -101,6 +101,31 @@ int main(int argc, char** argv) {
     check(*framed, u8"ＡＢ", {1, 3, 0, 2});
     check(*framed, "", {1, 2});
     check(*create(identity), "AB", {3, 4, 5});
+    auto prepend = identity;
+    prepend["normalizer"] = {{"type", "Prepend"}, {"prepend", u8"▁"}};
+    prepend["pre_tokenizer"]["add_prefix_space"] = false;
+    prepend["pre_tokenizer"]["prepend_scheme"] = "never";
+    check(*create(prepend), "AB", {3, 4, 5});
+    prepend["normalizer"] = {
+        {"type", "Sequence"},
+        {"normalizers", {{{"type", "Prepend"}, {"prepend", u8"Ａ"}}, fixture["normalizer"]}}};
+    check(*create(prepend), "B", {4, 5});
+    prepend["normalizer"]["normalizers"] = {fixture["normalizer"],
+                                            {{"type", "Prepend"}, {"prepend", u8"Ａ"}}};
+    check(*create(prepend), "B", {0, 5});
+    check(*create(prepend), u8"\u00ad", {});
+    auto unsplit = identity;
+    unsplit["model"]["vocab"].push_back({u8"▁A▁B", 100.0});
+    unsplit["pre_tokenizer"]["split"] = false;
+    check(*create(unsplit), u8"A▁B", {12});
+    unsplit["pre_tokenizer"]["split"] = true;
+    check(*create(unsplit), u8"A▁B", {3, 4, 3, 5});
+    unsplit["pre_tokenizer"]["split"] = false;
+    unsplit["pre_tokenizer"] = {
+        {"type", "Sequence"},
+        {"pretokenizers", {{{"type", "WhitespaceSplit"}}, unsplit["pre_tokenizer"]}}};
+    check(*create(unsplit), u8"A▁B", {12});
+    check(*create(unsplit), "A B", {3, 4, 3, 5});
     auto close_scores = identity;
     close_scores["model"]["vocab"] = nlohmann::json::array({
         {"<unk>", -10.0},

@@ -20,6 +20,10 @@ double precision, matching the reference tokenizer. Rounding these values to
 float can select different token IDs when competing paths have close scores.
 Exact ties retain the existing strict winner comparison.
 
+Configured `Prepend` normalizers execute in order, independently of Metaspace
+prefix insertion. Metaspace `split=false` keeps transformed pieces together;
+an earlier configured WhitespaceSplit still separates words.
+
 Rebuild the family runtime after this change. Host score elements grow from
 32 to 64 bits; process memory and latency have not been measured. This does
 not qualify checkpoint inference, model quality or performance.
