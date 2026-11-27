@@ -53,4 +53,28 @@ if(TRTMC_BUILD_TESTS)
     NAME esmc_tokenizer
     COMMAND test_esmc_tokenizer
   )
+
+  add_executable(test_esmc_pipeline
+    ${PROJECT_SOURCE_DIR}/families/esmc/tests/cpp/test_pipeline.cpp
+  )
+  target_include_directories(test_esmc_pipeline PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_esmc_pipeline SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(test_esmc_pipeline PRIVATE
+    trtmc_model_esmc
+    trtmc_core
+    nlohmann_json::nlohmann_json
+    ${TRTMC_CUDART_LIBRARY}
+  )
+  target_compile_options(test_esmc_pipeline PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(
+    NAME esmc_pipeline
+    COMMAND test_esmc_pipeline
+  )
 endif()

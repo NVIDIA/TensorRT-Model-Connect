@@ -61,6 +61,14 @@ MANIFEST_ROOT = TEST_ROOT / "manifests"
 # what the family reads, and this constant only describes the case prompts.
 _MASK_ID = 32
 
+# The two supported checkpoint variants have distinct published geometry.
+# Check explicit local overrides too: using one directory for both sides of
+# parity otherwise lets a 300M model pass a case advertised as 600M.
+_CHECKPOINT_GEOMETRY = {
+    "biohub/ESMC-300M": (30, 960, 15, 2560),
+    "biohub/ESMC-600M": (36, 1152, 18, 3072),
+}
+
 
 def _case_index() -> dict[str, tuple[Path, dict, dict]]:
     result = {}
@@ -142,7 +150,22 @@ def _required_path(value: str | None, label: str) -> Path:
 def _model_dir(manifest: dict) -> Path:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
-        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+        path = _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+        config = json.loads((path / "config.json").read_text(encoding="utf-8"))
+        geometry = tuple(
+            config.get(key)
+            for key in (
+                "num_hidden_layers",
+                "hidden_size",
+                "num_attention_heads",
+                "intermediate_size",
+            )
+        )
+        assert (
+            config.get("model_type") == FAMILY
+            and geometry == _CHECKPOINT_GEOMETRY[manifest["hf_id"]]
+        ), f"local ESMC checkpoint does not match selected {manifest['hf_id']}"
+        return path
     from huggingface_hub import snapshot_download
 
     try:
@@ -388,14 +411,15 @@ def test_fp32_gate_rejects_unscaled_residuals(fp32_case_name: str) -> None:
     must be the 30-layer checkpoint: at 36 layers the residual scale is exactly
     1.0, so dropping it changes nothing and there is nothing to discriminate.
     """
+    _, manifest, case = CASES[fp32_case_name]
+    assert manifest["precision"] == "fp32"
+    model_dir = _model_dir(manifest)
+
     import tensorrt as trt
     import torch
 
     from .. import config as config_module, model
 
-    _, manifest, case = CASES[fp32_case_name]
-    assert manifest["precision"] == "fp32"
-    model_dir = _model_dir(manifest)
     assert torch.cuda.is_available(), f"selected {FAMILY} E2E requires CUDA"
     window = int(manifest["max_sequence_length"])
     ids = _reference_ids(model_dir, str(case["prompt"]))
@@ -405,6 +429,7 @@ def test_fp32_gate_rejects_unscaled_residuals(fp32_case_name: str) -> None:
     weights = model._open_checkpoint(model_dir)
     cfg = config_module.resolve(model_dir, weights, model._prefix(weights))
     if cfg["residual_scale"] == 1.0:
+        assert manifest["hf_id"] == "biohub/ESMC-600M", "300M must exercise the residual scale"
         pytest.skip("this checkpoint's residual scale is 1.0, so the break is invisible")
 
     input_ids = torch.ones(window, dtype=torch.int32, device="cuda")

@@ -55,6 +55,9 @@ std::vector<std::int32_t> EsmcPipeline::token_ids(const internal::TextSource& so
     if (const auto* ids = std::get_if<Span<const std::int32_t>>(&source)) {
         if (ids->size() == 0)
             throw std::invalid_argument("esmc was given no token ids");
+        for (const auto id : *ids)
+            if (id < 0 || id >= config_.vocab_size)
+                throw std::invalid_argument("esmc token id is outside the vocabulary");
         return std::vector<std::int32_t>(ids->begin(), ids->end());
     }
     const auto text = std::get<std::string_view>(source);

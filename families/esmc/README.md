@@ -58,6 +58,11 @@ in id order, then `<esmc_unused_33>` ... `<esmc_unused_63>` for the columns the
 checkpoint's head has but the tokenizer does not name. No residue string
 reaches those ids; they exist so the file's width matches the engine's.
 
+The builder rejects special-token IDs whose vocabulary rows name a different
+token or lie outside the vocabulary. Callers supplying token IDs directly
+must use IDs in `[0, vocab_size)`; the pipeline rejects invalid IDs, including
+ones beyond the truncation window, before executing the encoder.
+
 ## Validation
 
 Measured on the three cases with the reference being `transformers==5.24.0`'s
@@ -89,6 +94,13 @@ separate the weakest break (a dropped residual scale, 1.5e-01 in fp16) from
 fp16 noise. The fp32 case gates that one, and
 `test_fp32_gate_rejects_unscaled_residuals` builds it to keep the claim
 measured rather than argued.
+
+For direct E2E runs, `TRTMC_ESMC_MODEL_DIR` may select a local checkpoint.
+Its model type and published layer count, hidden width, head count, and MLP
+width must match the selected manifest's 300M or 600M variant. This check
+does not attest a copied directory's revision; the default Hugging Face cache
+path resolves the manifest's pinned revision. A 600M override cannot qualify
+300M or skip its residual-scale regression gate.
 
 An offline fp64 NumPy transcription of the graph in this family agrees with the
 same reference to 1.6e-04 on every row of the 300M case, which is the fp32

@@ -456,6 +456,20 @@ def test_a_tokenizer_wider_than_the_head_is_refused(tmp_path: Path) -> None:
         model_module._vocabulary(config_dir, cfg)
 
 
+@pytest.mark.parametrize("token", ["<cls>", "<pad>", "<eos>", "<mask>", "<unk>"])
+@pytest.mark.parametrize("index", [-1, 4, 33, _VOCAB])
+def test_a_special_token_must_match_its_vocabulary_row(tmp_path: Path, token, index) -> None:
+    config_dir = _config(tmp_path)
+    _tokenizer(config_dir)
+    path = config_dir / "tokenizer.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    next(entry for entry in payload["added_tokens"] if entry["content"] == token)["id"] = index
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    cfg = config_module.resolve(config_dir, _weights(), "esmc.")
+    with pytest.raises(ValueError, match="model.vocab does not place it at that id"):
+        model_module._vocabulary(config_dir, cfg)
+
+
 def test_a_tokenizer_whose_mask_disagrees_with_the_config_is_refused(tmp_path: Path) -> None:
     config_dir = _config(tmp_path, mask_token_id=31)
     _tokenizer(config_dir)

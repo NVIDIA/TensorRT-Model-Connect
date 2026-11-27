@@ -419,7 +419,13 @@ def _vocabulary(model_dir: Path, cfg: dict) -> tuple[bytes, dict]:
     ):
         if token not in special:
             raise ValueError(f"esmc tokenizer.json does not declare {token} as a special token")
-        framing[name] = special[token]
+        index = special[token]
+        if not 0 <= index < len(tokens) or tokens[index] != token:
+            raise ValueError(
+                f"esmc tokenizer.json declares {token} at id {index}, "
+                "but model.vocab does not place it at that id"
+            )
+        framing[name] = index
     if framing["mask_token_id"] != cfg["mask_token_id"]:
         raise ValueError(
             f"esmc config says mask_token_id={cfg['mask_token_id']} but tokenizer.json puts "
