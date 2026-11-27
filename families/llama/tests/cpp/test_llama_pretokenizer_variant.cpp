@@ -181,11 +181,59 @@ void check_ambiguous_variants_throw() {
     }
 }
 
+void check_ordered_splits() {
+    const std::string spaces = std::string(R"({"model": {
+      "type": "BPE", "vocab": {"Ġ": 0, "ĠĠ": 1, "0": 2, "a": 3},
+      "merges": ["Ġ Ġ"]},)") + kMiniCPM5PreTokenizer +
+                               "}";
+    const auto tokenizer = trtmc::CreateBpeTokenizer(spaces.data(), spaces.size(), false);
+    check_ids(tokenizer->encode("  0"), {1, 2}, "spaces before isolated number");
+    check_ids(tokenizer->encode("a  0"), {3, 1, 2}, "internal spaces before isolated number");
+
+    const std::string number = std::string(R"({"model": {
+      "type": "BPE", "vocab": {"a": 0, "b": 1, "Ù": 2, "¡": 3,
+      "Ù¡": 4, "aÙ¡": 5, "aÙ¡b": 6},
+      "merges": ["Ù ¡", "a Ù¡", "aÙ¡ b"]},)") +
+                               kMiniCPM5PreTokenizer + "}";
+    const auto unicode = trtmc::CreateBpeTokenizer(number.data(), number.size(), false);
+    check_ids(unicode->encode("a١b"), {0, 4, 1}, "Unicode number creates independent pieces");
+}
+
+void check_invalid_ordered_splits() {
+    const std::string base = std::string(R"({"model": {
+      "type": "BPE", "vocab": {"a": 0}, "merges": []},)") +
+                             kMiniCPM5PreTokenizer + "}";
+    for (const auto& [before, after] : {
+             std::pair{"\"behavior\": \"Isolated\"", "\"behavior\": \"Removed\""},
+             std::pair{"\"invert\": false", "\"invert\": true"},
+             std::pair{"\"use_regex\": false", "\"use_regex\": true"},
+             std::pair{"\"add_prefix_space\": false", "\"add_prefix_space\": true"},
+             std::pair{"\"\\\\p{N}{1,3}\"", "\"[\""},
+             std::pair{"\"\\\\p{N}{1,3}\"", "\"\\\\h+\""},
+             std::pair{"\"add_prefix_space\": false,", ""},
+         }) {
+        std::string invalid = base;
+        invalid.replace(invalid.find(before), std::string(before).size(), after);
+        bool rejected = false;
+        try {
+            trtmc::CreateBpeTokenizer(invalid.data(), invalid.size(), false);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        if (!rejected) {
+            std::cerr << "FAIL: accepted unsupported ordered Split contract: " << after << '\n';
+            ++failures;
+        }
+    }
+}
+
 } // namespace
 
 int main() {
     check_newline_attachment();
     check_digit_grouping();
     check_ambiguous_variants_throw();
+    check_ordered_splits();
+    check_invalid_ordered_splits();
     return failures == 0 ? 0 : 1;
 }

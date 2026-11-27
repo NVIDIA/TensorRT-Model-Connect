@@ -1,0 +1,117 @@
+# Ordered tokenizer splits
+
+MiniCPM5 checkpoints use a sequence of isolated regular-expression splits before
+ByteLevel conversion. Each step operates on the pieces from the preceding step.
+For example, isolating a number makes the spaces before it trailing whitespace
+for the next split. Combining the regexes into one scanner changes BPE boundaries.
+
+The native tokenizer recognizes the published MiniCPM5 two-regex profile,
+compiles it once at load and applies its steps in order. Existing variant
+ambiguity checks remain in force. This path requires isolated, non-inverted
+regex steps followed by ByteLevel with explicit `use_regex: false` and
+`add_prefix_space: false`. Other multi-Split profiles are rejected.
+
+ICU supplies regex execution. The letter and number sets are pinned to Unicode
+16.0.0 rather than the installed ICU version, matching the Tokenizers 0.23.3
+reference. Restricting the profile avoids silently accepting incompatible ICU
+and Oniguruma regex dialects. The offline regeneration procedure below verifies the SHA256 of
+[UnicodeData.txt](https://www.unicode.org/Public/16.0.0/ucd/UnicodeData.txt):
+`ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f`.
+The Unicode license is installed with the family notice.
+
+Rebuild the family runtime to obtain corrected token IDs. ICU `uc` and `i18n`
+are required. The bundle schema and public API are unchanged. Native token-ID
+comparisons do not establish GPU generation, model quality or performance.
+
+## Native E2E regressions
+
+The existing MiniCPM5-1B checkpoint manifest pins revision
+`87179e5c1f455ef22e6223592d2d61351b525bfc`. Two optional cases exercise spaces
+before grouped ASCII digits and a Unicode number. They use the existing native
+prefill-ID receipt and HF input check, so a changed tokenizer cannot be hidden
+by matching generated text. Existing precision and comparison criteria apply.
+
+```sh
+PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \
+  families/llama/tests/test_e2e.py \
+  --e2e-testcase=minicpm5-1b-ordered-splits \
+  --e2e-testcase=minicpm5-1b-ordered-splits-unicode-number -vv
+```
+
+Set the native CLI/runtime paths as required by the family E2E harness.
+These cases require an authorized GPU; adding them does not establish GPU
+qualification or change the premerge selection.
+
+## Regenerate the Unicode ranges
+
+Run from the repository root. This offline maintenance step does not run during
+model loading or bundle creation. Verify the Unicode source before regeneration.
+
+```sh
+python - <<'PY'
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import urllib.request
+
+URL = "https://www.unicode.org/Public/16.0.0/ucd/UnicodeData.txt"
+SHA256 = "ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f"
+
+
+def generate(data: bytes) -> str:
+    if hashlib.sha256(data).hexdigest() != SHA256:
+        raise ValueError("Expected the pinned Unicode 16.0.0 UnicodeData.txt")
+    groups = {"L": [], "N": []}
+    first = 0
+    for line in data.decode("utf-8").splitlines():
+        fields = line.split(";")
+        code = int(fields[0], 16)
+        if fields[1].endswith(", First>"):
+            first = code
+            continue
+        start = first if fields[1].endswith(", Last>") else code
+        category = fields[2][0]
+        if category in groups:
+            groups[category].extend(range(start, code + 1))
+    output = [
+        "/*",
+        " * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.",
+        " * SPDX-License-Identifier: Apache-2.0",
+        " */",
+        "",
+        "// Generated from Unicode 16.0.0 UnicodeData.txt; see the family README.",
+        "// Note (Jiaxin Deng): Reference properties must not vary with the host ICU version.",
+        "// clang-format off",
+        "#pragma once",
+        "namespace trtmc::llama::split_unicode {",
+    ]
+    for category, values in groups.items():
+        ranges = []
+        for value in values:
+            if ranges and value == ranges[-1][1] + 1:
+                ranges[-1][1] = value
+            else:
+                ranges.append([value, value])
+        pattern = "[" + "".join(
+            f"\\x{{{lo:x}}}" + (f"-\\x{{{hi:x}}}" if hi != lo else "") for lo, hi in ranges
+        ) + "]"
+        output.append(f"inline constexpr char k{category}[] =")
+        output.extend("    " + json.dumps(pattern[i:i + 64]) for i in range(0, len(pattern), 64))
+        output[-1] += ";"
+    output += ["} // namespace trtmc::llama::split_unicode", "// clang-format on", ""]
+    return "\n".join(output)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--unicode-data", type=Path)
+    parser.add_argument("--output", type=Path, default=Path("families/llama/runtime/split_unicode.h"))
+    args = parser.parse_args()
+    content = args.unicode_data.read_bytes() if args.unicode_data else urllib.request.urlopen(URL).read()
+    args.output.write_text(generate(content), encoding="utf-8")
+PY
+```

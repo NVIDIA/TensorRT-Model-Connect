@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/llama/runtime/split_unicode.h"
 #include "families/llama/runtime/tokenizer.h"
 
 #include <algorithm>
@@ -16,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unicode/regex.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -888,7 +890,9 @@ class BpeTokenizer final : public ITokenizer {
 
     void encode_bytelevel(const std::string& text, std::vector<int32_t>& result) const {
         std::vector<std::string> words;
-        if (!mUsePreTokenizer) {
+        if (!mOrderedSplits.empty()) {
+            words = ordered_pre_tokenize(text);
+        } else if (!mUsePreTokenizer) {
             words = fallback_pre_tokenize(text);
         } else if (mPreTokenizerVariant == pretok::Variant::kBloom) {
             words = pretok::bloom_pre_tokenize(text);
@@ -1272,6 +1276,96 @@ class BpeTokenizer final : public ITokenizer {
         return pretok::Variant::kLlama;
     }
 
+    static std::string pinned_properties(std::string pattern) {
+        for (const auto& [name, value] : {std::pair{"\\p{L}", llama::split_unicode::kL},
+                                          std::pair{"\\p{N}", llama::split_unicode::kN}}) {
+            size_t offset = 0;
+            while (offset < pattern.size()) {
+                if (pattern[offset] == '\\' && offset + 1 < pattern.size() &&
+                    pattern[offset + 1] == '\\') {
+                    offset += 2;
+                } else if (pattern.compare(offset, std::strlen(name), name) == 0) {
+                    pattern.replace(offset, std::strlen(name), value);
+                    offset += std::strlen(value);
+                } else {
+                    ++offset;
+                }
+            }
+        }
+        return pattern;
+    }
+
+    void parse_ordered_splits(const nlohmann::json& pt) {
+        const auto& steps = pt.at("pretokenizers");
+        const auto count = std::count_if(steps.begin(), steps.end(), [](const auto& step) {
+            return step.value("type", "") == "Split";
+        });
+        if (count < 2)
+            return;
+        constexpr auto second =
+            R"PATTERN((?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}+| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+)PATTERN";
+        if (steps.size() != 3 || steps[0].at("pattern").value("Regex", "") != R"(\p{N}{1,3})" ||
+            steps[1].at("pattern").value("Regex", "") != second)
+            throw std::runtime_error("Unsupported ordered Split regex profile");
+        const auto& bytelevel = steps.back();
+        if (bytelevel.value("type", "") != "ByteLevel" || bytelevel.value("use_regex", true) ||
+            bytelevel.value("add_prefix_space", true))
+            throw std::runtime_error(
+                "Ordered Split requires final ByteLevel without regex or prefix space");
+        for (size_t i = 0; i + 1 < steps.size(); ++i) {
+            const auto& step = steps[i];
+            if (step.value("type", "") != "Split" || step.value("behavior", "") != "Isolated" ||
+                step.value("invert", false) || !step.contains("pattern") ||
+                !step["pattern"].contains("Regex"))
+                throw std::runtime_error(
+                    "Ordered Split requires isolated non-inverted regex steps");
+            UErrorCode status = U_ZERO_ERROR;
+            const auto pattern = pinned_properties(step["pattern"]["Regex"].get<std::string>());
+            std::unique_ptr<icu::RegexPattern> compiled(
+                icu::RegexPattern::compile(icu::UnicodeString::fromUTF8(pattern), 0, status));
+            if (U_FAILURE(status))
+                throw std::runtime_error(std::string("Invalid ordered Split regex: ") +
+                                         u_errorName(status));
+            mOrderedSplits.push_back(std::move(compiled));
+        }
+    }
+
+    std::vector<std::string> ordered_pre_tokenize(const std::string& text) const {
+        std::vector<std::string> pieces{text};
+        for (const auto& pattern : mOrderedSplits) {
+            std::vector<std::string> next;
+            for (const auto& piece : pieces) {
+                const auto input = icu::UnicodeString::fromUTF8(piece);
+                UErrorCode status = U_ZERO_ERROR;
+                std::unique_ptr<icu::RegexMatcher> matcher(pattern->matcher(input, status));
+                if (U_FAILURE(status))
+                    throw std::runtime_error(std::string("Ordered Split matcher failed: ") +
+                                             u_errorName(status));
+                int32_t offset = 0;
+                const auto append = [&](int32_t begin, int32_t end) {
+                    if (begin < end) {
+                        std::string token;
+                        input.tempSubStringBetween(begin, end).toUTF8String(token);
+                        next.push_back(std::move(token));
+                    }
+                };
+                while (matcher->find(status)) {
+                    const auto begin = matcher->start(status);
+                    const auto end = matcher->end(status);
+                    append(offset, begin);
+                    append(begin, end);
+                    offset = end;
+                }
+                if (U_FAILURE(status))
+                    throw std::runtime_error(std::string("Ordered Split failed: ") +
+                                             u_errorName(status));
+                append(offset, input.length());
+            }
+            pieces = std::move(next);
+        }
+        return pieces;
+    }
+
     // Detect variant from the Split step(s) inside a Sequence pre_tokenizer.
     // Some checkpoints isolate digit-grouping (\p{N}{1,3}) as its own Split
     // step, ahead of the step whose regex actually identifies the variant
@@ -1343,6 +1437,7 @@ class BpeTokenizer final : public ITokenizer {
             int digit_group = 0;
             mPreTokenizerVariant = detect_split_variant(pt, digit_group);
             mPreTokenizerDigitGroup = digit_group;
+            parse_ordered_splits(pt);
         } else if (is_space_split_pre_tokenizer(pt, pt_type)) {
             // Gemma SentencePiece-BPE tokenizers use a direct Split(" ")
             // pre-tokenizer with spaces already normalized to U+2581.
@@ -1607,6 +1702,7 @@ class BpeTokenizer final : public ITokenizer {
 
     bool mAddSpecialTokens = false;
     bool mUsePreTokenizer = true;
+    std::vector<std::unique_ptr<icu::RegexPattern>> mOrderedSplits;
     bool mIsMetaspace = false; // Set by detect_pre_tokenizer.
     bool mIsSentencePiece = false;
     bool mSentencePiecePrependAlways =
