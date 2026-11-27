@@ -37,18 +37,22 @@ the Edge 0.12.0 builder, and Model Connect must have its matching GR00T C++
 archive and headers. The base Edge 0.12.0 SDK does not install these policy
 components. If Edge preparation fails, MC warns and retries the same native policy.
 
-**Accuracy status:** On A30, native FP16 built and ran episode 1272 frame 0 with fixed
-noise. Its mean absolute action error against the independent Isaac FP32 reference was
-0.002540 (limit 0.0026); maximum error was 0.02378 (limit 0.03) and cosine was 0.999906
-(minimum 0.999). The conditioner keeps FP16 projections, keys/values and context outputs;
-it preserves FP32 residual normalization and uses FP32 intermediates for attention,
-as in PyTorch math SDPA. The denoiser remains unchanged.
+**Accuracy status:** Two independently built native FP16 engines passed the existing
+Isaac FP32 action comparison for episode 1272, frame 0 with fixed noise:
 
-Earlier native builds on this fixture gave means of 0.003133 on A30 and 0.001853 and
-0.002731 on GB300. The latter miss is not resolved by an A30 pass; accuracy across
-engine builds or GPUs is not established. The released Edge runner missed the maximum
-error limit (0.2722 vs 0.03). Both routes run; Edge remains unqualified.
-No other Isaac embodiment or LIBERO checkpoint is claimed here.
+| GPU | Mean absolute error (limit 0.0026) | Maximum error (limit 0.03) | Cosine (minimum 0.999) |
+| --- | ---: | ---: | ---: |
+| A30 | 0.001810 | 0.016063 | 0.999952 |
+| GB300 | 0.000857 | 0.006586 | 0.999990 |
+
+Earlier native engines missed this gate. The conditioner preserves the visual patch
+projection's rounding before bias and accumulates biased visual attention and MLP output
+projections before rounding to FP16. The denoiser and the acceptance limits did not change.
+
+These are results for one recorded observation, not closed-loop success or a guarantee
+across all engine builds. The released Edge runner completed inference but missed the
+maximum error limit (0.2722 vs 0.03). Edge remains executable but unqualified. No other
+Isaac embodiment or LIBERO checkpoint is claimed here.
 
 ## LeRobot supported boundary
 
