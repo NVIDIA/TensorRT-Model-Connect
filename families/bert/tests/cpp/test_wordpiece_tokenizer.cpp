@@ -46,7 +46,13 @@ int main() {
           "〃": 51, "｡": 52, "hello〆world": 53, "hello々world": 54,
           "hello﹢world": 55, "hello＋world": 56, "hello＄world": 57,
           "hello｀world": 58, "hello〱world": 59, "hello⁄world": 60,
-          "hello〿world": 61, ";": 62, "·": 63, ";": 64, "·": 65
+          "hello〿world": 61, ";": 62, "·": 63, ";": 64, "·": 65,
+          "helloworld": 66, "hello\u0903world": 67, "hello\u20ddworld": 68,
+          "가나다": 69, "tieng": 70, "viet": 71,
+          "hello\u1abfworld": 72, "a\ud83a\udd4a\ud83a\udd44": 73,
+          "a\u1df6\ud838\udc16": 74, "a\ud838\udc0a\u07fd": 75,
+          "ɑ": 76, "ɐ": 77, "ʌ": 78, "աբգ": 79, "TIENG": 80, "VIET": 81,
+          "tiếng": 82, "việt": 83, "α": 84, "ᾀ": 85
         }
       },
       "normalizer": {"type": "BertNormalizer", "clean_text": true,
@@ -116,6 +122,27 @@ int main() {
         check("hello⁄world", {60}, "fraction slash symbol remains inside a word");
         check("hello〿world", {61}, "CJK symbol remains inside a word");
         check("hello$world", {5, 1, 6}, "ASCII currency retains reference punctuation behavior");
+        for (const std::string& mark : {std::string("\u05b0"), std::string("\u064e"),
+                                        std::string("\u093c"), std::string("\u0e48")})
+            check("hello" + mark + "world", {66}, "strip non-Latin nonspacing marks");
+        check("hello\u0903world", {67}, "preserve spacing marks");
+        check("hello\u20ddworld", {68}, "preserve enclosing marks");
+        check("hello\u1abfworld", {72}, "preserve marks outside reference category data");
+        check("Tiếng Việt", {70, 71}, "recursive Vietnamese canonical decomposition");
+        check("TIẾNG VIỆT", {70, 71}, "Vietnamese uppercase before accent stripping");
+        check("Ɑ Ɐ Ʌ", {76, 77, 78}, "extended Latin lowercase mappings");
+        check("ԱԲԳ", {79}, "Armenian lowercase mappings");
+        check("ᾈ", {84}, "Greek extended lowercase before decomposition");
+        check("[MASK]TIẾNG[SEP]VIỆT", {4, 70, 3, 71},
+              "Unicode lowercase around raw special tokens");
+        check("가나다", {69}, "Hangul canonical decomposition");
+        check("a\U0001e944\U0001e94a", {73}, "canonical ordering of retained marks");
+        check("a\u1df6\U0001e016", {74}, "later marks retain reference starter boundaries");
+        check("a\U0001e00a\u07fd", {75}, "newer combining classes do not reorder input");
+        std::string long_marks;
+        for (int i = 0; i < 4000; ++i)
+            long_marks += "\u0315\u0321";
+        check("hello" + long_marks + "world", {66}, "long descending combining-class run");
         // Expected token IDs were checked with Hugging Face tokenizers 0.22.2.
         for (const std::string& control :
              {std::string("\xc2\xad"), std::string("\xd8\x80"), std::string("\xe2\x80\x8b"),
@@ -149,6 +176,8 @@ int main() {
                           "\"strip_accents\": false");
     auto accented =
         trtmc::CreateWordPieceTokenizer(accented_json.data(), accented_json.size(), false);
+    check_ids(accented->encode("hello\u05b0world"), {1}, "disabled stripping retains marks");
+    check_ids(accented->encode("가나다"), {1}, "disabled stripping retains Hangul syllables");
     check_ids(accented->encode("İ HĒLLŌ"), {24, 25},
               "lowercase preserves accents when stripping is disabled");
 
@@ -159,6 +188,8 @@ int main() {
               "recursive Greek accents remain when stripping is disabled");
 
     check_ids(accented->encode("ʹ"), {44}, "Greek singleton remains without NFD stripping");
+    check_ids(accented->encode("TIẾNG VIỆT ᾈ"), {82, 83, 85},
+              "complete lowercase preserves accents when stripping is disabled");
     check_ids(accented->encode("; ·"), {64, 65}, "Greek punctuation remains without NFD stripping");
 
     std::string cased_json = tokenizer_json;
@@ -169,6 +200,8 @@ int main() {
     auto cased = trtmc::CreateWordPieceTokenizer(cased_json.data(), cased_json.size(), false);
     check_ids(cased->encode("HĒLLŌ İ"), {26, 27},
               "accent stripping preserves case when lowercasing is disabled");
+    check_ids(cased->encode("TIẾNG VIỆT"), {80, 81},
+              "Vietnamese uppercase survives disabled lowercasing");
 
     check_ids(cased->encode("ΑΘΉΝΑ МОСКВА ЙОГА ЁЛКА"), {35, 36, 37, 38},
               "Greek and Cyrillic accent stripping preserves uppercase");
