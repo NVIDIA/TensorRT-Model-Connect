@@ -1,0 +1,16 @@
+# Reference implementation this family is measured against. The checkpoint ships its own
+# modelling code, so transformers loads it with trust_remote_code and torchvision applies the
+# resize the model card documents.
+transformers==5.2.0
+torch==2.12.0
+torchvision==0.27.0
+# Pinned, not incidental: the family reproduces one resampler coefficient for coefficient, and
+# which axis Pillow resamples first - observable through its 8-bit intermediate - changed in
+# Pillow 13. This matches requirements/community-ci.txt. tests/test_model.py recomputes the
+# recorded values with the installed Pillow, so a drift fails there rather than in an embedding.
+pillow==13.0.0
+numpy==2.3.4
+# The build flattens tokenizer.model, which sentencepiece parses with generated protobuf code.
+sentencepiece==0.2.3
+# sentencepiece 0.2.3 ships protobuf 7.36.1 generated code; an older runtime refuses to load it.
+protobuf>=7.36.1

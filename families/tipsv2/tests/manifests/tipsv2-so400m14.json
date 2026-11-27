@@ -1,0 +1,19 @@
+{
+  "name": "tipsv2-so400m14",
+  "hf_id": "google/tipsv2-so400m14",
+  "hf_revision": "9b102a53330ded7d64a5ba5d743fbf333f23fc95",
+  "bundle": "tipsv2-so400m14.bundle",
+  "family": "tipsv2",
+  "task": "text_image_to_relevance",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "tipsv2-so400m14",
+      "premerge": true,
+      "test_image": "data/test_img.png",
+      "query": "a photo of a car",
+      "negative_query": "a photo of a cat"
+    }
+  ],
+  "tensor_parallel_size": 1
+}
