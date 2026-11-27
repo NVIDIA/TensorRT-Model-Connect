@@ -113,7 +113,12 @@ def build_backbone(network, weights, *, token_ids, image_index, image_mask, posi
             network, context, weights[p + "self_attn.o_proj.weight"], dtype=dtype)))
         norm = graph.rms_norm(network, h, weights[p + "post_attention_layernorm.weight"], RMS_EPS,
                               dtype=residual_norm_dtype)
-        gate = graph.silu(network, graph.linear(network, norm, weights[p + "mlp.gate_proj.weight"], dtype=dtype))
+        gate = graph.linear(network, norm, weights[p + "mlp.gate_proj.weight"], dtype=dtype)
+        # PyTorch SiLU computes sigmoid and the product in one operation, rounding its FP16 result only once.
+        if fp16_condition:
+            gate = graph.cast(network, graph.silu(network, graph.f32(network, gate)), dtype)
+        else:
+            gate = graph.silu(network, gate)
         hidden = graph.mul(network, gate, graph.linear(network, norm, weights[p + "mlp.up_proj.weight"], dtype=dtype))
         h = graph.add(network, h, graph.f32(network, graph.linear(
             network, hidden, weights[p + "mlp.down_proj.weight"], dtype=dtype)))
