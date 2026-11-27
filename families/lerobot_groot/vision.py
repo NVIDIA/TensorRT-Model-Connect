@@ -13,6 +13,7 @@ Patches arrive in the processor's order, where four consecutive patches form one
 from __future__ import annotations
 
 import numpy as np
+import tensorrt as trt
 
 from . import graph
 from .checkpoint import require
@@ -116,7 +117,18 @@ def build_vision(network, pixel_values, weights, *, images, grid_h, grid_w, dtyp
     bias = require(weights, _ROOT + "patch_embed.proj.bias", (WIDTH,))
     x = graph.shuffle(network, pixel_values, reshape=(images, patches, PATCH_VALUES))
     # The Conv3d whose kernel equals its stride is a linear map of each flattened patch.
-    h = graph.f32(network, graph.linear(network, x, kernel.reshape(WIDTH, PATCH_VALUES), bias, dtype=dtype))
+    if dtype == trt.float16:
+        # The reference patch convolution accumulates half operands in float, then
+        # rounds to half before adding its bias. Keep that rounding before position addition.
+        patch = graph.f32(network, graph.cast(network, x, dtype))
+        weight = graph.f32(network, graph.const(network, kernel.reshape(1, WIDTH, PATCH_VALUES), dtype))
+        acc = network.add_matrix_multiply(
+            patch, trt.MatrixOperation.NONE, weight, trt.MatrixOperation.TRANSPOSE).get_output(0)
+        rounded = graph.f32(network, graph.cast(network, acc, dtype))
+        patch_bias = graph.f32(network, graph.const(network, bias.reshape(1, 1, WIDTH), dtype))
+        h = graph.f32(network, graph.cast(network, graph.add(network, rounded, patch_bias), dtype))
+    else:
+        h = graph.f32(network, graph.linear(network, x, kernel.reshape(WIDTH, PATCH_VALUES), bias, dtype=dtype))
     table = require(weights, _ROOT + "pos_embed.weight", (POSITION_GRID * POSITION_GRID, WIDTH))
     h = graph.add(network, h, graph.const(network, position_embeddings(table, grid_h, grid_w)[None]))
 
