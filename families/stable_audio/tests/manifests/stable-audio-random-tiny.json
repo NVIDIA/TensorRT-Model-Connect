@@ -1,0 +1,39 @@
+{
+  "name": "stable-audio-random-tiny",
+  "random_checkpoint": {
+    "size": "tiny",
+    "seed": 0
+  },
+  "hf_dependencies": [
+    {
+      "repo_id": "google-t5/t5-base",
+      "revision": "a9723ea7f1b39c1eae772870f3b547bf6ef7e6c1"
+    }
+  ],
+  "bundle": "stable-audio-random-tiny.bundle",
+  "family": "stable_audio",
+  "task": "text_to_audio",
+  "precision": "fp32",
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "stable-audio-random-tiny-negative",
+      "prompt": "A dog barks twice.",
+      "seed": 4,
+      "config": {
+        "negative_prompt": "A long field recording that starts with soft rain on a tin roof, then distant thunder rolls across the valley while a wooden wind chime rings in irregular bursts; a small dog barks twice from a neighboring yard, a screen door creaks open and slams shut, footsteps cross a gravel path, a kettle begins to whistle in the kitchen, someone sets a ceramic mug on a stone counter, birds start singing as the storm passes, a bicycle bell rings on the road, children laugh far away, a church bell strikes six times, the wind picks up and rustles dry leaves, a car drives slowly through puddles, and finally the rain returns, heavier than before, drumming on the roof until everything else fades into a steady, calm, rhythmic hiss.",
+        "num_inference_steps": 20
+      }
+    },
+    {
+      "name": "stable-audio-random-tiny-window",
+      "prompt": "Wind through pine trees.",
+      "seed": 5,
+      "config": {
+        "audio_start_in_s": 0.001,
+        "audio_end_in_s": 0.005,
+        "num_inference_steps": 12
+      }
+    }
+  ]
+}
