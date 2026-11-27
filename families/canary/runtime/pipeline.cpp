@@ -670,7 +670,7 @@ CanaryPipeline::CanaryPipeline(
     int32_t num_decoder_layers, MelFilterbank mel_fb, int32_t mel_n_fft, int32_t mel_win_length,
     int32_t mel_hop_length, int32_t mel_chunk_length, int32_t mel_sampling_rate, float mel_preemph,
     bool mel_normalize_per_feature, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
-    std::string model_id_str)
+    std::string task, std::string model_id_str)
     : encoder_(std::move(encoder)), decoder_(std::move(decoder)), state_(std::move(state)),
       canary_config_(std::move(canary_config)), hidden_size_(hidden_size),
       num_decoder_layers_(num_decoder_layers),
@@ -678,7 +678,8 @@ CanaryPipeline::CanaryPipeline(
       mel_win_length_(mel_win_length), mel_hop_length_(mel_hop_length),
       mel_chunk_length_(mel_chunk_length), mel_sampling_rate_(mel_sampling_rate),
       mel_preemph_(mel_preemph), mel_normalize_per_feature_(mel_normalize_per_feature),
-      stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)) {
+      stream_(stream), tokenizer_(std::move(tokenizer)), task_(std::move(task)),
+      model_id_(std::move(model_id_str)) {
     validate_canary_pipeline_components(encoder_.get(), decoder_.get(), state_.get());
 
     // Decoder shapes are stable within each dynamic cache-row bucket. Capture
@@ -1254,6 +1255,146 @@ void CanaryPipeline::run_decoder_step_batch(const std::vector<int32_t>& token_id
     logits.resize(static_cast<std::size_t>(num_logits));
     std::memcpy(logits.data(), logits_tensor.data, num_logits * sizeof(float));
     state_->advance();
+}
+
+namespace {
+
+const internal::ConfigField canary_config_fields[] = {
+    {"max_new_tokens", internal::ConfigKind::I64, internal::ConfigValue{int64_t{448}},
+     "Maximum generated tokens"},
+    {"beam_size", internal::ConfigKind::I64, internal::ConfigValue{int64_t{1}},
+     "Beam search width (1 for greedy)"},
+    {"length_penalty", internal::ConfigKind::F64, internal::ConfigValue{double{0.0}},
+     "Length penalty for beam search"},
+    {"pnc", internal::ConfigKind::Bool, internal::ConfigValue{true},
+     "Enable punctuation and capitalization"},
+    {"timestamps", internal::ConfigKind::Bool, internal::ConfigValue{false},
+     "Enable timestamp tokens"},
+};
+
+TranscriptionConfig build_canary_config_from_view(const CanaryConfig& model,
+                                                  internal::ConfigView options,
+                                                  TranscriptionTask task,
+                                                  std::optional<std::string_view> source_lang,
+                                                  std::optional<std::string_view> target_lang,
+                                                  std::optional<uint32_t> sample_rate) {
+    internal::validate_config(canary_config_fields, options);
+    TranscriptionConfig cfg;
+    cfg.task = task;
+    if (source_lang.has_value() && !source_lang->empty()) {
+        cfg.source_language = std::string(*source_lang);
+    } else {
+        cfg.source_language = "en";
+    }
+    if (task == TranscriptionTask::kTranslate) {
+        if (target_lang.has_value() && !target_lang->empty()) {
+            cfg.target_language = std::string(*target_lang);
+        } else {
+            cfg.target_language = "en";
+        }
+    } else {
+        cfg.target_language = cfg.source_language;
+    }
+
+    if (auto max_toks =
+            internal::config_get<int64_t>(options, canary_config_fields, "max_new_tokens")) {
+        cfg.max_output_tokens = static_cast<int32_t>(*max_toks);
+    }
+    if (auto bs = internal::config_get<int64_t>(options, canary_config_fields, "beam_size")) {
+        cfg.beam_size = static_cast<int32_t>(*bs);
+    }
+    if (auto lp = internal::config_get<double>(options, canary_config_fields, "length_penalty")) {
+        cfg.length_penalty = static_cast<float>(*lp);
+    }
+    if (auto pnc = internal::config_get<bool>(options, canary_config_fields, "pnc")) {
+        cfg.punctuation = *pnc;
+    }
+    if (auto ts = internal::config_get<bool>(options, canary_config_fields, "timestamps")) {
+        cfg.timestamps = *ts;
+    }
+    if (sample_rate.has_value()) {
+        cfg.input_sample_rate = static_cast<int32_t>(*sample_rate);
+    }
+    return cfg;
+}
+
+} // namespace
+
+std::vector<internal::TaskInstance> CanaryPipeline::task_bindings() {
+    return {
+        internal::bind<internal::ISpeechTranscription>(*this, canary_config_fields),
+        internal::bind<internal::ISpeechTranslation>(*this, canary_config_fields),
+        internal::bind<internal::IBatchSpeechTranscription>(*this),
+        internal::bind<internal::IBatchSpeechTranslation>(*this),
+    };
+}
+
+TextResult CanaryPipeline::run(const internal::SpeechTranscriptionRequest& request,
+                               internal::ConfigView config) {
+    if (request.audio.samples.data() == nullptr || request.audio.samples.empty()) {
+        throw std::invalid_argument("Canary transcription requires non-empty audio samples");
+    }
+    auto cfg = build_canary_config_from_view(canary_config_, config, TranscriptionTask::kTranscribe,
+                                             request.source_language, request.source_language,
+                                             request.audio.sample_rate);
+    return transcribe(request.audio.samples.data(),
+                      static_cast<int32_t>(request.audio.samples.size()), cfg);
+}
+
+TextResult CanaryPipeline::run(const internal::SpeechTranslationRequest& request,
+                               internal::ConfigView config) {
+    if (request.audio.samples.data() == nullptr || request.audio.samples.empty()) {
+        throw std::invalid_argument("Canary translation requires non-empty audio samples");
+    }
+    auto cfg = build_canary_config_from_view(canary_config_, config, TranscriptionTask::kTranslate,
+                                             request.source_language, request.target_language,
+                                             request.audio.sample_rate);
+    return transcribe(request.audio.samples.data(),
+                      static_cast<int32_t>(request.audio.samples.size()), cfg);
+}
+
+internal::BatchTextResult
+CanaryPipeline::run_batch(const internal::BatchSpeechTranscriptionRequest& request) {
+    if (request.items.empty()) {
+        return {};
+    }
+    std::vector<TranscriptionRequest> requests;
+    requests.reserve(request.items.size());
+    for (const auto& item : request.items) {
+        if (item.input.audio.samples.data() == nullptr || item.input.audio.samples.empty()) {
+            throw std::invalid_argument("Canary transcription requires non-empty audio samples");
+        }
+        TranscriptionRequest req;
+        req.audio_samples.assign(item.input.audio.samples.data(),
+                                 item.input.audio.samples.data() + item.input.audio.samples.size());
+        req.config = build_canary_config_from_view(
+            canary_config_, item.config, TranscriptionTask::kTranscribe, item.input.source_language,
+            item.input.source_language, item.input.audio.sample_rate);
+        requests.push_back(std::move(req));
+    }
+    return transcribe_batch(requests);
+}
+
+internal::BatchTextResult
+CanaryPipeline::run_batch(const internal::BatchSpeechTranslationRequest& request) {
+    if (request.items.empty()) {
+        return {};
+    }
+    std::vector<TranscriptionRequest> requests;
+    requests.reserve(request.items.size());
+    for (const auto& item : request.items) {
+        if (item.input.audio.samples.data() == nullptr || item.input.audio.samples.empty()) {
+            throw std::invalid_argument("Canary translation requires non-empty audio samples");
+        }
+        TranscriptionRequest req;
+        req.audio_samples.assign(item.input.audio.samples.data(),
+                                 item.input.audio.samples.data() + item.input.audio.samples.size());
+        req.config = build_canary_config_from_view(
+            canary_config_, item.config, TranscriptionTask::kTranslate, item.input.source_language,
+            item.input.target_language, item.input.audio.sample_rate);
+        requests.push_back(std::move(req));
+    }
+    return transcribe_batch(requests);
 }
 
 } // namespace trtmc

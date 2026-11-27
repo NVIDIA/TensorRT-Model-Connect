@@ -248,7 +248,7 @@ def test_build_requires_fp16_without_overrides(tmp_path: Path) -> None:
         video_num_frames=None,
         max_batch_size=1,
         context_parallel_size=1,
-        task="transcription",
+        task="speech_transcription",
         model_dir=str(tmp_path),
         quantization="fp8",
         precision="fp16",

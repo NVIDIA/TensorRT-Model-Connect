@@ -12,6 +12,9 @@
 #include "families/canary/runtime/inference_state.h"
 #include "families/canary/runtime/kv_cache.h"
 #include "families/canary/runtime/tokenizer.h"
+#include "trtmc/internal/audio.h"
+#include "trtmc/internal/model.h"
+#include "trtmc/internal/text.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
@@ -27,9 +30,27 @@ struct MelFilterbank;
 struct CanaryBatchSegment;
 struct CanaryBatchWorkGroup;
 
-class CanaryPipeline final : public ITranscription, public IBatchTranscription {
+class CanaryPipeline final : public internal::IModel,
+                             public internal::ISpeechTranscription,
+                             public internal::ISpeechTranslation,
+                             public internal::IBatchSpeechTranscription,
+                             public internal::IBatchSpeechTranslation,
+                             public ITranscription,
+                             public IBatchTranscription {
   public:
-    const char* task() const noexcept override { return ITranscription::kTask; }
+    const char* task() const noexcept override { return task_.c_str(); }
+
+    std::vector<internal::TaskInstance> task_bindings() override;
+
+    TextResult run(const internal::SpeechTranscriptionRequest& request,
+                   internal::ConfigView config) override;
+    TextResult run(const internal::SpeechTranslationRequest& request,
+                   internal::ConfigView config) override;
+
+    internal::BatchTextResult
+    run_batch(const internal::BatchSpeechTranscriptionRequest& request) override;
+    internal::BatchTextResult
+    run_batch(const internal::BatchSpeechTranslationRequest& request) override;
 
     CanaryPipeline(std::unique_ptr<ITrtModule> encoder, std::unique_ptr<ITrtModule> decoder,
                    std::unique_ptr<CanaryInferenceState> state, CanaryConfig canary_config,
@@ -37,7 +58,9 @@ class CanaryPipeline final : public ITranscription, public IBatchTranscription {
                    int32_t mel_n_fft, int32_t mel_win_length, int32_t mel_hop_length,
                    int32_t mel_chunk_length, int32_t mel_sampling_rate, float mel_preemph,
                    bool mel_normalize_per_feature, cudaStream_t stream,
-                   std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "");
+                   std::shared_ptr<ITokenizer> tokenizer = nullptr,
+                   std::string task = std::string(internal::ISpeechTranscription::kTask),
+                   std::string model_id_str = "");
 
     ~CanaryPipeline() override;
 
@@ -106,6 +129,7 @@ class CanaryPipeline final : public ITranscription, public IBatchTranscription {
     bool mel_normalize_per_feature_;
     cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
+    std::string task_;
     std::string model_id_;
 
     void* cross_kv_ptr_{nullptr};

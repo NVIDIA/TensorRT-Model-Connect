@@ -4,7 +4,7 @@
   "hf_revision": "d455706339a6b32e1aa40f82c713a482a0c938e2",
   "bundle": "canary-1b-v2.bundle",
   "family": "canary",
-  "task": "transcription",
+  "task": "speech_transcription",
   "precision": "fp16",
   "testcases": [
     {

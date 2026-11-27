@@ -1785,8 +1785,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task != "transcription":
-        raise ValueError("canary supports only task=transcription")
+    valid_tasks = {"speech_transcription", "speech_translation"}
+    if request.task not in valid_tasks:
+        if request.task == "transcription":
+            raise ValueError(
+                "canary has migrated to the semantic Task SDK; task='transcription' is retired. "
+                "Use task='speech_transcription' or 'speech_translation'"
+            )
+        raise ValueError(
+            f"canary supports only tasks in {sorted(valid_tasks)}, got {request.task!r}"
+        )
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() not in {"canary", "canary_asr", "enc_dec_multi_task"}:

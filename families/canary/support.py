@@ -8,6 +8,6 @@ from tensorrt_model_connect.model_support import family_support
 
 describe = family_support(
     model_types=("canary", "canary_asr", "enc_dec_multi_task"),
-    tasks=("transcription",),
-    default_task="transcription",
+    tasks=("speech_transcription", "speech_translation"),
+    default_task="speech_transcription",
 )
