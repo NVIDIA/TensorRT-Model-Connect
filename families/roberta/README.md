@@ -13,6 +13,21 @@ Implementing a reranker requires its checkpoint's scoring head, query/document
 tokenization and official-reference validation. Loading an encoder backbone
 from a sequence-classification checkpoint does not provide those behaviors.
 
+## Unigram score precision
+
+Vocabulary scores, unknown-token penalties and accumulated path scores use
+double precision, matching the reference tokenizer. Rounding these values to
+float can select different token IDs when competing paths have close scores.
+Exact ties retain the existing strict winner comparison.
+
+Configured `Prepend` normalizers execute in order, independently of Metaspace
+prefix insertion. Metaspace `split=false` keeps transformed pieces together;
+an earlier configured WhitespaceSplit still separates words.
+
+Rebuild the family runtime after this change. Host score elements grow from
+32 to 64 bits; process memory and latency have not been measured. This does
+not qualify checkpoint inference, model quality or performance.
+
 ## Runtime input capacity
 
 A fixed-sequence bundle accepts at most the number of token IDs declared by its
