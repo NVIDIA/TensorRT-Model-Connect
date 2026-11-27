@@ -211,6 +211,9 @@ def build_dual_profile_decoder_engine(
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config
+    if quant_ctx is not None:
+        # Quantized builds set their own build options (plan details, kernel routes).
+        quant_ctx.configure(trt_config)
 
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16

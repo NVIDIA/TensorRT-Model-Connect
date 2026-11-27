@@ -1,7 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Official checkpoint -> public builder -> native Task API -> HF greedy parity."""
+"""Official checkpoint -> public builder -> native Task API -> HF greedy parity.
+
+Each manifest builds one bundle. The FP16 bundle must reproduce the Hugging
+Face FP16 greedy tokens exactly. The FP8 bundle (``quantization`` in the
+manifest) must give the expected word, and the Hugging Face FP16 model, forced
+through the native tokens, must rank each native token within
+``near_tie_logit_tolerance`` (``thresholds/``) of its top logit: FP8 may leave
+the FP16 text after a near tie, but not for a clearly worse token.
+"""
 
 import json
 import os
@@ -17,8 +25,8 @@ from tensorrt_model_connect import BuildRequest, build
 from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 ROOT = Path(__file__).parent
-MANIFEST = json.loads((ROOT / "manifests/llava-1.5-7b.json").read_text())
-CASES = {case["name"]: case for case in MANIFEST["testcases"]}
+MANIFESTS = [json.loads(path.read_text()) for path in sorted((ROOT / "manifests").glob("*.json"))]
+CASES = {case["name"]: (manifest, case) for manifest in MANIFESTS for case in manifest["testcases"]}
 
 
 def pytest_generate_tests(metafunc):
@@ -32,8 +40,8 @@ def pytest_generate_tests(metafunc):
     enabled = bool(models or tests)
     cases = [
         case
-        for case in MANIFEST["testcases"]
-        if (not models or models & {"llava", MANIFEST["name"], case["name"]})
+        for manifest, case in CASES.values()
+        if (not models or models & {"llava", manifest["name"], case["name"]})
         and (not tests or case["name"] in tests)
     ]
     metafunc.parametrize(
@@ -51,10 +59,11 @@ def pytest_generate_tests(metafunc):
 
 @pytest.fixture(scope="module")
 def execution(tmp_path_factory):
-    # Run shared preparation inside the selected test's evidence context.
-    outcome = {"stage": "preparation"}
+    # Run shared preparation (one bundle per manifest) inside the selected test's evidence context.
+    outcomes = {}
 
-    def prepare():
+    def prepare(manifest):
+        outcome = outcomes.setdefault(manifest["name"], {"stage": "preparation"})
         if "error" in outcome:
             for name in ("checkpoint", "bundle_inspection", "reference_process"):
                 if name in outcome:
@@ -65,7 +74,7 @@ def execution(tmp_path_factory):
             try:
                 with evidence_stage("preparation"):
                     output = tmp_path_factory.mktemp("llava-e2e")
-                outcome["result"] = _prepare_execution(output, outcome)
+                outcome["result"] = _prepare_execution(output, outcome, manifest)
             except Exception as error:
                 outcome["error"] = error
                 raise
@@ -74,7 +83,7 @@ def execution(tmp_path_factory):
     return prepare
 
 
-def _prepare_execution(output, outcome):
+def _prepare_execution(output, outcome, manifest):
     outcome["stage"] = "checkpoint"
     with evidence_stage("checkpoint"):
         explicit_model = os.environ.get("TRTMC_LLAVA_MODEL_DIR")
@@ -85,25 +94,25 @@ def _prepare_execution(output, outcome):
 
             model = Path(
                 snapshot_download(
-                    MANIFEST["hf_id"], revision=MANIFEST["hf_revision"], local_files_only=True
+                    manifest["hf_id"], revision=manifest["hf_revision"], local_files_only=True
                 )
             )
         assert (model / "config.json").is_file(), "LLaVA checkpoint requires config.json"
         outcome["checkpoint"] = {
             "resolved_directory": str(model.resolve()),
             "from_override": bool(explicit_model),
-            "resolved_revision": None if explicit_model else MANIFEST["hf_revision"],
+            "resolved_revision": None if explicit_model else manifest["hf_revision"],
         }
         record_evidence("checkpoint", outcome["checkpoint"])
     outcome["stage"] = "preparation"
     with evidence_stage("preparation"):
-        assert MANIFEST["tensor_parallel_size"] == 1
+        assert manifest["tensor_parallel_size"] == 1
         binary = Path(os.environ["TRTMC_BINARY"])
         runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
         reference_cases = []
-        for case in MANIFEST["testcases"]:
+        for case in manifest["testcases"]:
             assert case["reference_backend"] == "hf_transformers"
-            assert case["reference_precision"] == MANIFEST["precision"]
+            assert case["reference_precision"] == manifest["precision"]
             if "solid_color" in case:
                 image_path = output / (case["name"] + ".bmp")
                 Image.new("RGB", tuple(case["image_size"]), case["solid_color"]).save(image_path)
@@ -120,7 +129,7 @@ def _prepare_execution(output, outcome):
             )
         cases_path = output / "reference-cases.json"
         cases_path.write_text(json.dumps(reference_cases))
-        bundle = output / MANIFEST["bundle"]
+        bundle = output / manifest["bundle"]
     started = time.monotonic()
     outcome["stage"] = "build"
     with evidence_stage("build"):
@@ -129,9 +138,10 @@ def _prepare_execution(output, outcome):
                 model_dir=model,
                 output_path=bundle,
                 family="llava",
-                task=MANIFEST["task"],
-                precision=MANIFEST["precision"],
-                max_sequence_length=MANIFEST["max_sequence_length"],
+                task=manifest["task"],
+                precision=manifest["precision"],
+                max_sequence_length=manifest["max_sequence_length"],
+                quantization=manifest.get("quantization"),
             )
         )
     build_seconds = time.monotonic() - started
@@ -199,7 +209,7 @@ def _prepare_execution(output, outcome):
         reference = json.loads((output / "reference.json").read_text())
     preparation = {
         "shared": True,
-        "cases": [case["name"] for case in MANIFEST["testcases"]],
+        "cases": [case["name"] for case in manifest["testcases"]],
         "build_seconds": build_seconds,
         "reference_seconds": time.monotonic() - started,
         "bundle_info": bundle_info,
@@ -212,20 +222,26 @@ def _prepare_execution(output, outcome):
 
 
 def test_official_checkpoint_e2e(case_name, execution, tmp_path):
-    case = CASES[case_name]
-    record_evidence("inputs", {"manifest": MANIFEST, "case": case, "prompt": case["prompt"]})
+    manifest, case = CASES[case_name]
+    quantized = manifest.get("quantization") not in (None, "none")
+    record_evidence("inputs", {"manifest": manifest, "case": case, "prompt": case["prompt"]})
     record_evidence(
         "checkpoint",
         {
-            "requested_repo_id": MANIFEST["hf_id"],
-            "requested_revision": MANIFEST["hf_revision"],
-            "precision": MANIFEST["precision"],
+            "requested_repo_id": manifest["hf_id"],
+            "requested_revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+            "quantization": manifest.get("quantization"),
         },
     )
     record_evidence(
-        "thresholds", {"expected_word": case["expected_word"], "token_ids": "exact equality"}
+        "thresholds",
+        {
+            "expected_word": case["expected_word"],
+            "token_ids": "first token equal" if quantized else "exact equality",
+        },
     )
-    binary, runtime, bundle, reference, preparation = execution()
+    binary, runtime, bundle, reference, preparation = execution(manifest)
     record_evidence("checkpoint", preparation["checkpoint"])
     record_evidence("preparation", preparation)
     record_evidence("bundle_inspection", preparation["bundle_inspection"])
@@ -296,7 +312,66 @@ def test_official_checkpoint_e2e(case_name, execution, tmp_path):
     with evidence_stage("compare"):
         assert word in re.findall(r"[a-z]+", expected["text"].lower()), expected
         assert word in re.findall(r"[a-z]+", native["text"].lower()), native
-        assert native["token_ids"] == expected["token_ids"], {
-            "native": native,
-            "reference": expected,
-        }
+        if quantized:
+            tolerance = json.loads((ROOT / "thresholds" / f"{manifest['name']}.json").read_text())[
+                "threshold_overrides"
+            ]["near_tie_logit_tolerance"]
+            gaps = _native_gaps(case_name, expected, native, preparation, tmp_path)
+            record_evidence(
+                "comparison",
+                {"native_gaps": gaps, "near_tie_logit_tolerance": tolerance},
+            )
+            assert gaps and max(gaps) <= tolerance, {
+                "native_gaps": gaps,
+                "tolerance": tolerance,
+                "native": native,
+                "reference": expected,
+            }
+        else:
+            assert native["token_ids"] == expected["token_ids"], {
+                "native": native,
+                "reference": expected,
+            }
+
+
+def _native_gaps(case_name, expected, native, preparation, tmp_path):
+    """Hugging Face FP16 logit gaps below the top logit of the native tokens, forced in order."""
+    _, case = CASES[case_name]
+    cases = tmp_path / "forced-cases.json"
+    cases.write_text(
+        json.dumps(
+            [
+                {
+                    "name": case_name,
+                    "image": expected["image"],
+                    "prompt": case["prompt"],
+                    "native_token_ids": native["token_ids"],
+                }
+            ]
+        )
+    )
+    output = tmp_path / "forced"
+    environment = os.environ.copy()
+    environment.pop("LD_LIBRARY_PATH", None)
+    with evidence_stage("reference"):
+        subprocess.run(
+            [
+                os.environ.get("TRTMC_REFERENCE_PYTHON", sys.executable),
+                str(ROOT / "reference.py"),
+                "--model-dir",
+                preparation["checkpoint"]["resolved_directory"],
+                "--output",
+                str(output),
+                "--cases",
+                str(cases),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+    gaps = json.loads((output / "reference.json").read_text())[case_name]["native_gaps"]
+    (Path(preparation["output_directory"]) / f"{case_name}-native-gaps.json").write_text(
+        json.dumps({"gaps": gaps, "native": native["token_ids"], "text": native["text"]})
+    )
+    return gaps

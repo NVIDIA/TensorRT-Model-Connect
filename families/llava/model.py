@@ -11,8 +11,11 @@ from .config import ModelConfig
 def build(request, writer):
     if request.task != "vision_language_generation" or request.backend != "trt":
         raise ValueError("LLaVA requires vision_language_generation with the TensorRT backend")
-    if request.precision != "fp16" or request.quantization not in (None, "none"):
-        raise ValueError("LLaVA currently supports unquantized FP16")
+    quantization = request.quantization or "none"
+    if request.precision != "fp16":
+        raise ValueError("LLaVA currently supports FP16")
+    if quantization not in ("none", "fp8"):
+        raise ValueError(f"LLaVA quantization must be none or fp8, not {quantization!r}")
     if request.tensor_parallel_size != 1 or request.context_parallel_size != 1 or request.max_batch_size != 1:
         raise ValueError("LLaVA currently supports one device and one request per call")
     if request.dynamic_kv_cache:
@@ -31,14 +34,23 @@ def build(request, writer):
     if maximum <= image_tokens or maximum > config.max_position_embeddings:
         raise ValueError("LLaVA context must fit image tokens and stay within the checkpoint limit")
     checkpoint = Checkpoint(directory)
+    if quantization != "none" and any(
+            name.endswith((".weight_scale", ".input_scale", ".weight_scale_2")) for name in checkpoint.mapping):
+        raise ValueError("LLaVA checkpoint is already quantized; FP8 self-quantization "
+                         "needs the original checkpoint")
     weights = load_decoder(checkpoint, config)
+    quant_ctx = None
+    if quantization != "none":
+        from .quantization import decoder_quantization
+
+        quant_ctx = decoder_quantization(config, weights, quantization)
     from .default_decoder import build_standard_decoder_engine
     from .default_dual_profile_decoder import build_dual_profile_decoder_engine
     from .vision_builder import build_vision
 
     writer.set_header(family="llava", task=request.task, backend=request.backend)
     prefill = build_dual_profile_decoder_engine(
-        config, weights, maximum, precision="fp16", embed_input=True,
+        config, weights, maximum, precision="fp16", embed_input=True, quant_ctx=quant_ctx,
         opt_prefill_length=min(image_tokens + 64, maximum),
         profile_mode="prefill", verbose=request.verbose,
     )
@@ -46,10 +58,11 @@ def build(request, writer):
     del prefill
     config.raw["_decoder_engine_role"] = "decode"
     decode = build_standard_decoder_engine(
-        config, weights, maximum, precision="fp16", embed_input=True, verbose=request.verbose,
+        config, weights, maximum, precision="fp16", embed_input=True, quant_ctx=quant_ctx,
+        verbose=request.verbose,
     )
     writer.add_bytes("engine.plan", decode)
-    del decode, weights
+    del decode, weights, quant_ctx
     vision = build_vision(checkpoint, config, verbose=request.verbose)
     writer.add_bytes("vision.plan", vision)
     del vision

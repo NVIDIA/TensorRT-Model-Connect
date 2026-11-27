@@ -184,6 +184,9 @@ def build_standard_decoder_engine(
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config
+    if quant_ctx is not None:
+        # Quantized builds set their own build options (plan details, kernel routes).
+        quant_ctx.configure(trt_config)
 
     # Precision configuration
     if precision == "fp16":
