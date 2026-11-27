@@ -1367,6 +1367,92 @@ def test_only_complete_pipeline_publishes_stable_and_dev_results(
         assert int((tmp_path / "counter").read_text()) == (2 if queued_first else 1)
 
 
+@pytest.mark.parametrize("lane,branch", [("stable", "main"), ("dev", "ci/developer")])
+@pytest.mark.parametrize(
+    "responses,success,expected_calls",
+    [
+        (["HTTP 404"], True, 2),
+        (["HTTP 404"] * 3, True, 4),
+        (["HTTP 404"] * 4, False, 4),
+        (["HTTP 403"], False, 1),
+        (["HTTP 500"], False, 1),
+        (["HTTP 404", "HTTP 403"], False, 2),
+        (["queued", "HTTP 404"], False, 2),
+    ],
+)
+def test_complete_pipeline_retries_only_initial_run_visibility(
+    tmp_path, lane, branch, responses, success, expected_calls
+):
+    fake = tmp_path / "gh"
+    fake.write_text(
+        "#!/usr/bin/env python3\nimport json,os,sys\nfrom pathlib import Path\n"
+        "if any(a.startswith('/repos/') and '/actions/runs/' in a for a in sys.argv):\n"
+        " counter=Path(os.environ['COUNTER'])\n"
+        " count=int(counter.read_text())+1 if counter.exists() else 1\n"
+        " counter.write_text(str(count))\n"
+        " responses=json.loads(os.environ['RESPONSES'])\n"
+        " response=responses[count-1] if count<=len(responses) else 'completed'\n"
+        " if response.startswith('HTTP '):\n"
+        "  print('gh: API error ('+response+')',file=sys.stderr);sys.exit(1)\n"
+        " data=json.loads(os.environ['RUN'])\n"
+        " if response=='queued': data.update(status='queued',conclusion=None)\n"
+        " print(json.dumps(data))\n"
+        "else: Path(os.environ['CALLS']).write_text('\\n'.join(sys.argv[1:]))\n"
+    )
+    fake.chmod(0o755)
+    sleep = tmp_path / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
+    head, merge = "a" * 40, "b" * 40
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            _workflow_step_script(
+                "community-ci.yml", "dispatch", "Publish the complete workflow conclusion"
+            ),
+        ],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "PIPELINE_RUN_ID": "42",
+            "CI_BRANCH": branch,
+            "LANE": lane,
+            "PR_NUMBER": "17",
+            "HEAD_SHA": head,
+            "STATUS_CONTEXT": f"{lane.title()} Community CI",
+            "SOURCE_SNAPSHOT": json.dumps({"merge_sha": merge}),
+            "GITHUB_SERVER_URL": "https://github.com",
+            "GITHUB_REPOSITORY": "example/source",
+            "GITHUB_OUTPUT": str(tmp_path / "output"),
+            "CALLS": str(tmp_path / "calls"),
+            "COUNTER": str(tmp_path / "counter"),
+            "RESPONSES": json.dumps(responses),
+            "RUN": json.dumps(
+                {
+                    "path": ".github/workflows/community-ci.yml",
+                    "event": "workflow_dispatch",
+                    "head_branch": branch,
+                    "display_title": f"{lane.title()} Community CI · PR #17 · head {head} · merge {merge}",
+                    "status": "completed",
+                    "conclusion": "success",
+                }
+            ),
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert (result.returncode == 0) is success, result.stderr
+    assert int((tmp_path / "counter").read_text()) == expected_calls
+    if success:
+        assert "state=success" in (tmp_path / "calls").read_text().splitlines()
+        assert (tmp_path / "output").read_text() == "reported=true\n"
+    else:
+        assert not (tmp_path / "calls").exists()
+        assert not (tmp_path / "output").exists()
+
+
 @pytest.mark.parametrize("ready_after", [1, 2, 7])
 def test_pr_trigger_waits_for_github_merge_generation_with_a_bounded_retry(tmp_path, ready_after):
     head, base, merge, tree = (value * 40 for value in "abcd")
