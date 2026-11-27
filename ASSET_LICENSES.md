@@ -194,6 +194,7 @@ terms.
 Byte-identical copies of `probe_02_clean_16k_mono_no_resample.wav` are also
 stored at:
 
+- `families/granite_speech5/tests/data/maintainer-recording-16k-mono.wav`
 - `families/nemotron3_diarization/tests/data/maintainer-recording-16k-mono.wav`
 - `families/voxtral/tests/data/probe_02_clean_16k_mono_no_resample.wav`
 
@@ -233,6 +234,7 @@ distributes as FLAC in SLR12 under the Creative Commons Attribution 4.0
 International license:
 
 - `families/glmasr/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/granite_speech5/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/higgs_audio_v2_tokenizer/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/hubert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/mimi/tests/data/librispeech-test-clean-6930-75918-0003.wav`
