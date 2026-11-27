@@ -5,7 +5,10 @@
 
 #include "families/dinov3/runtime/image_preprocess.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -26,6 +29,87 @@ void check_close(float actual, float expected, float tolerance, const char* name
         std::cerr << "FAIL: " << name << " actual=" << actual << " expected=" << expected << '\n';
         ++g_failures;
     }
+}
+
+// The previous per-element implementation, kept as the oracle for the
+// restructured passes. Both accumulate each output element's taps from 0.0F in
+// span order, so they agree bit for bit unless the compiler fuses the
+// multiply-adds of one and not the other (about one ulp).
+struct ReferenceSpan {
+    int32_t first{0};
+    std::vector<float> weights;
+};
+
+std::vector<ReferenceSpan> reference_spans(int32_t input_size, int32_t output_size) {
+    const double scale = static_cast<double>(input_size) / output_size;
+    const double filter_scale = std::max(scale, 1.0);
+    const double support = filter_scale;
+    const double inverse_filter_scale = 1.0 / filter_scale;
+    std::vector<ReferenceSpan> spans(static_cast<std::size_t>(output_size));
+    for (int32_t output_index = 0; output_index < output_size; ++output_index) {
+        const double center = (static_cast<double>(output_index) + 0.5) * scale;
+        const int32_t first = std::max(0, static_cast<int32_t>(center - support + 0.5));
+        const int32_t end = std::min(input_size, static_cast<int32_t>(center + support + 0.5));
+        auto& span = spans[static_cast<std::size_t>(output_index)];
+        span.first = first;
+        span.weights.resize(static_cast<std::size_t>(end - first));
+        double weight_sum = 0.0;
+        for (int32_t input_index = first; input_index < end; ++input_index) {
+            const double distance =
+                std::abs((static_cast<double>(input_index) - center + 0.5) * inverse_filter_scale);
+            const double weight = distance < 1.0 ? 1.0 - distance : 0.0;
+            span.weights[static_cast<std::size_t>(input_index - first)] =
+                static_cast<float>(weight);
+            weight_sum += weight;
+        }
+        for (float& weight : span.weights)
+            weight = static_cast<float>(static_cast<double>(weight) / weight_sum);
+    }
+    return spans;
+}
+
+float reference_tap_sum(const float* input, int32_t stride, const ReferenceSpan& span) {
+    float result = 0.0F;
+    for (std::size_t i = 0; i < span.weights.size(); ++i)
+        result += input[(span.first + static_cast<int32_t>(i)) * stride] * span.weights[i];
+    return result;
+}
+
+std::vector<float> reference_preprocess(const std::vector<float>& input, int32_t input_h,
+                                        int32_t input_w,
+                                        const trtmc::Dinov3PreprocessConfig& config) {
+    const int32_t output_h = config.input_image_h;
+    const int32_t output_w = config.input_image_w;
+    std::vector<float> horizontal = input;
+    if (input_w != output_w) {
+        const auto spans = reference_spans(input_w, output_w);
+        horizontal.assign(static_cast<std::size_t>(input_h) * output_w * 3U, 0.0F);
+        for (int32_t y = 0; y < input_h; ++y)
+            for (int32_t x = 0; x < output_w; ++x)
+                for (int32_t c = 0; c < 3; ++c)
+                    horizontal[(static_cast<std::size_t>(y) * output_w + x) * 3U + c] =
+                        reference_tap_sum(input.data() +
+                                              static_cast<std::size_t>(y) * input_w * 3U + c,
+                                          3, spans[static_cast<std::size_t>(x)]);
+    }
+    std::vector<float> resized = horizontal;
+    if (input_h != output_h) {
+        const auto spans = reference_spans(input_h, output_h);
+        resized.assign(static_cast<std::size_t>(output_h) * output_w * 3U, 0.0F);
+        for (int32_t y = 0; y < output_h; ++y)
+            for (int32_t x = 0; x < output_w; ++x)
+                for (int32_t c = 0; c < 3; ++c)
+                    resized[(static_cast<std::size_t>(y) * output_w + x) * 3U + c] =
+                        reference_tap_sum(horizontal.data() + static_cast<std::size_t>(x) * 3U + c,
+                                          output_w * 3, spans[static_cast<std::size_t>(y)]);
+    }
+    const auto plane = static_cast<std::size_t>(output_h) * output_w;
+    std::vector<float> pixel_values(3U * plane);
+    for (std::size_t pixel = 0; pixel < plane; ++pixel)
+        for (std::size_t c = 0; c < 3; ++c)
+            pixel_values[c * plane + pixel] =
+                (resized[pixel * 3U + c] - config.image_mean[c]) / config.image_std[c];
+    return pixel_values;
 }
 
 trtmc::Dinov3PreprocessConfig identity_config(int32_t height, int32_t width) {
@@ -105,6 +189,48 @@ void test_imagenet_normalization_is_applied_after_resize() {
         check_close(value, 0.0F, 1e-6F, "DINOv3 ImageNet normalization");
 }
 
+void test_matches_the_per_element_reference() {
+    struct Case {
+        int32_t input_h;
+        int32_t input_w;
+        int32_t output_h;
+        int32_t output_w;
+    };
+    const Case cases[] = {
+        {382, 640, 224, 224}, // both axes downscaled
+        {2, 4, 3, 3},         // height upscaled, width downscaled
+        {5, 7, 11, 13},       // both axes upscaled
+        {224, 224, 224, 224}, // identity
+        {100, 224, 224, 224}, // height only
+        {224, 300, 224, 224}, // width only
+        {17, 33, 7, 5},       // odd sizes
+    };
+    uint32_t state = 12345U;
+    for (const auto& item : cases) {
+        std::vector<float> pixels(static_cast<std::size_t>(item.input_h) * item.input_w * 3U);
+        for (float& value : pixels) {
+            state = state * 1664525U + 1013904223U;
+            value = static_cast<float>(state >> 8) / 16777216.0F;
+        }
+        trtmc::Dinov3PreprocessConfig config;
+        config.input_image_h = item.output_h;
+        config.input_image_w = item.output_w;
+        const auto actual =
+            trtmc::preprocess_dinov3_image(pixels.data(), item.input_h, item.input_w, config);
+        const auto expected = reference_preprocess(pixels, item.input_h, item.input_w, config);
+        check(actual.size() == expected.size(), "DINOv3 reference comparison size");
+        if (actual.size() != expected.size())
+            continue;
+        std::size_t mismatches = 0;
+        for (std::size_t i = 0; i < actual.size(); ++i) {
+            // Written so that a NaN on either side counts as a mismatch.
+            if (!(std::fabs(actual[i] - expected[i]) <= 1e-6F))
+                ++mismatches;
+        }
+        check(mismatches == 0, "DINOv3 preprocessing matches the per-element reference");
+    }
+}
+
 void test_invalid_input_is_rejected() {
     bool threw = false;
     try {
@@ -134,6 +260,7 @@ int main() {
     test_bilinear_resize_blends_center_pixel();
     test_resize_matches_hugging_face_torchvision_golden();
     test_imagenet_normalization_is_applied_after_resize();
+    test_matches_the_per_element_reference();
     test_invalid_input_is_rejected();
 
     if (g_failures != 0) {
