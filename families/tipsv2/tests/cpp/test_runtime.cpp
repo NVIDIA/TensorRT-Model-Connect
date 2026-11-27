@@ -332,27 +332,21 @@ void test_tokenizer() {
                             "a"),
                 "normalize");
 
-    // Without the user-defined type "[sep]" is an ordinary piece: nothing freezes it, and with
-    // no merge path to build it the text falls back to bytes. The vocabulary is the same size in
-    // both fixtures, so only the **ids** can show that the type was read at all.
+    // Without the user-defined type "[sep]" is an ordinary piece: nothing freezes it, and no
+    // merge can build it either, because none of "[s", "[se", "sep" ... is a piece. So "▁a"
+    // merges as always and the rest of the text falls back to one byte piece per character. The
+    // vocabulary is the same size in both fixtures, so only the **ids** can show that the type
+    // was read at all - and they are spelled out rather than counted, because a count is just as
+    // happy with five unknown ids, or with a decomposition that lost the "▁a" merge. The frozen
+    // fixture's ids for this same text are above.
     const trtmc::tipsv2::Tokenizer plain(
         trtmc::tipsv2::parse_tokenizer_asset(miniature_asset(/*with_user_defined=*/false)));
     check_equal<std::size_t>(plain.asset().pieces.size(), tokenizer.asset().pieces.size(),
                              "both miniature assets have the same vocabulary");
-    const auto frozen_ids = tokenizer.encode("a[sep]b");
-    const auto plain_ids = plain.encode("a[sep]b");
-    if (frozen_ids == plain_ids) {
-        std::cerr << "FAIL: the user-defined piece encodes like an ordinary one, so the piece "
-                     "type is not being read\n";
-        ++g_failures;
-    }
-    // The frozen one keeps "[sep]" whole; the ordinary one cannot build it and spells it out.
-    check_equal<std::size_t>(frozen_ids.size(), 3, "a[sep]b is three symbols when frozen");
-    if (plain_ids.size() <= frozen_ids.size()) {
-        std::cerr << "FAIL: without the user-defined type the bracketed text should fall back to "
-                     "bytes, giving more ids than the frozen piece\n";
-        ++g_failures;
-    }
+    check_ids(plain, "a[sep]b",
+              {piece_id::kSpaceA, byte_id('['), byte_id('s'), byte_id('e'), byte_id('p'),
+               byte_id(']'), piece_id::kB},
+              "an ordinary piece of the same text falls back to bytes");
 }
 
 // The same asset with the two cased ranges swapped, so they are no longer in order.
