@@ -193,3 +193,4 @@ timeline.
 - TensorRT-Model-Connect is licensed under the terms in [LICENSE](LICENSE).
 
 <!-- Collaborative review anchor: batch 2. -->
+<!-- Temporary CI acceptance probe: documentation-only routing; do not merge this PR. -->
