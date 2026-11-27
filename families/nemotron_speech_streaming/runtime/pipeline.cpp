@@ -105,13 +105,19 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
           feature_state_(pipeline_.mel_fb_->data.data(), pipeline_.mel_fb_->n_freq_bins,
                          pipeline_.mel_fb_->n_mel_bins, make_rnnt_mel_options(pipeline_.config_),
                          cfg_.input_sample_rate > 0 ? cfg_.input_sample_rate
-                                                    : pipeline_.config_.sample_rate) {
+                                                    : pipeline_.config_.sample_rate),
+          encoder_cache_({pipeline_.config_.encoder_layers, pipeline_.config_.streaming_cache_left,
+                          pipeline_.config_.encoder_hidden_size},
+                         {pipeline_.config_.encoder_layers, pipeline_.config_.encoder_hidden_size,
+                          pipeline_.config_.streaming_time_cache},
+                         pipeline_.device_cache_pool(), pipeline_.stream_,
+                         pipeline_.streaming_encoder_for(cfg_.att_context_right,
+                                                         !cfg_.pad_and_drop_preencoded)) {
         const auto state_elems = static_cast<std::size_t>(pipeline_.config_.pred_num_layers) *
                                  pipeline_.config_.pred_hidden_size;
         state_h_.assign(state_elems, 0.0F);
         state_c_.assign(state_elems, 0.0F);
         pred_output_ = pipeline_.run_predictor(pipeline_.config_.blank_id, state_h_, state_c_);
-        reset_encoder_cache();
     }
 
     TranscriptionStreamResult accept_audio(const float* audio_samples, int32_t num_samples,
@@ -163,8 +169,10 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
         emitted_.clear();
         std::fill(state_h_.begin(), state_h_.end(), 0.0F);
         std::fill(state_c_.begin(), state_c_.end(), 0.0F);
-        pred_output_ = pipeline_.run_predictor(pipeline_.config_.blank_id, state_h_, state_c_);
+        // Before the predictor runs, as in the constructor: its synchronization
+        // also completes the caches' fill.
         reset_encoder_cache();
+        pred_output_ = pipeline_.run_predictor(pipeline_.config_.blank_id, state_h_, state_c_);
     }
 
     TranscriptionStreamConfig config() const override { return cfg_; }
@@ -268,16 +276,13 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
 
         feature_state_.ensure_frames(next_mel_start_ + valid_new_frames, final);
         auto chunk = make_chunk_mel(next_mel_start_, valid_new_frames, first_step);
-        std::vector<float> next_channel;
-        std::vector<float> next_time;
-        auto enc = pipeline_.run_streaming_encoder(
-            cfg_.att_context_right, chunk, cache_last_channel_, cache_last_time_,
-            cache_last_channel_len_, valid_query_frames, first_step, next_channel, next_time);
+        auto enc = pipeline_.run_streaming_encoder(cfg_.att_context_right, chunk, encoder_cache_,
+                                                   cache_last_channel_len_, valid_query_frames,
+                                                   first_step);
         pipeline_.decode_encoder_frames(enc, valid_query_frames, token_limit(), pred_output_,
                                         state_h_, state_c_, emitted_, prompt_onehot_);
 
-        cache_last_channel_ = std::move(next_channel);
-        cache_last_time_ = std::move(next_time);
+        encoder_cache_.advance();
         cache_last_channel_len_ =
             std::min(pipeline_.config_.streaming_cache_left,
                      cache_last_channel_len_ + schedule_.valid_encoder_frames);
@@ -298,15 +303,8 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
     }
 
     void reset_encoder_cache() {
-        const auto channel_count = static_cast<std::size_t>(pipeline_.config_.encoder_layers) *
-                                   pipeline_.config_.streaming_cache_left *
-                                   pipeline_.config_.encoder_hidden_size;
-        const auto time_count = static_cast<std::size_t>(pipeline_.config_.encoder_layers) *
-                                pipeline_.config_.encoder_hidden_size *
-                                pipeline_.config_.streaming_time_cache;
-        cache_last_channel_.assign(channel_count, 0.0F);
-        cache_last_time_.assign(time_count, 0.0F);
         cache_last_channel_len_ = 0;
+        encoder_cache_.reset();
     }
 
     RnntPipeline& pipeline_;
@@ -314,8 +312,7 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
     const std::vector<float> prompt_onehot_;
     RnntStreamingSchedule schedule_;
     rnnt::IncrementalMelSpectrogram feature_state_;
-    std::vector<float> cache_last_channel_;
-    std::vector<float> cache_last_time_;
+    rnnt::StreamingEncoderCache encoder_cache_;
     std::vector<float> pred_output_;
     std::vector<float> state_h_;
     std::vector<float> state_c_;
@@ -570,11 +567,20 @@ ITrtModule& RnntPipeline::streaming_encoder_for(int32_t right_context, bool firs
     return *module;
 }
 
+std::shared_ptr<rnnt::StreamingCacheBufferPool> RnntPipeline::device_cache_pool() const {
+    // Only on the standard TensorRT backend, whose modules this family enqueues
+    // eagerly. A TensorRT-RTX module may run under whole-graph capture, which a
+    // family cannot see, and the captured graph would meet new cache addresses
+    // in every step: there the caches stay host tensors.
+    const char* backend = backend_ != nullptr ? backend_->name() : nullptr;
+    if (backend == nullptr || std::string(backend) != "trt")
+        return nullptr;
+    return streaming_cache_pool_;
+}
+
 std::vector<float> RnntPipeline::run_streaming_encoder(
-    int32_t right_context, const std::vector<float>& mel,
-    const std::vector<float>& cache_last_channel, const std::vector<float>& cache_last_time,
-    int32_t cache_last_channel_len, int32_t valid_query_frames, bool first_step,
-    std::vector<float>& next_channel, std::vector<float>& next_time) {
+    int32_t right_context, const std::vector<float>& mel, rnnt::StreamingEncoderCache& cache,
+    int32_t cache_last_channel_len, int32_t valid_query_frames, bool first_step) {
     ITrtModule& encoder = streaming_encoder_for(right_context, first_step);
 
     const auto schedule = make_nemotron_streaming_schedule(
@@ -600,32 +606,19 @@ std::vector<float> RnntPipeline::run_streaming_encoder(
     TensorMap inputs;
     inputs["mel_features"] = make_tensor(const_cast<float*>(mel.data()),
                                          {config_.num_mel_bins, mel_frames}, DType::kFloat32);
-    inputs["cache_last_channel"] = make_tensor(
-        const_cast<float*>(cache_last_channel.data()),
-        {config_.encoder_layers, cache_frames, config_.encoder_hidden_size}, DType::kFloat32);
-    inputs["cache_last_time"] = make_tensor(
-        const_cast<float*>(cache_last_time.data()),
-        {config_.encoder_layers, config_.encoder_hidden_size, config_.streaming_time_cache},
-        DType::kFloat32);
+    cache.attach(encoder, inputs);
     inputs["encoder_mask"] =
         make_tensor(encoder_mask.data(), {1, query_frames, key_frames}, DType::kFloat32);
 
     auto outputs = encoder.forward(inputs);
     auto enc_it = outputs.find("encoder_output");
-    auto ch_it = outputs.find("cache_last_channel_next");
-    auto tm_it = outputs.find("cache_last_time_next");
-    if (enc_it == outputs.end() || ch_it == outputs.end() || tm_it == outputs.end())
+    if (enc_it == outputs.end())
         throw std::runtime_error("RnntPipeline: streaming encoder missing required outputs");
+    cache.collect(outputs);
 
     const auto* enc_src = static_cast<const float*>(enc_it->second.data);
     const auto enc_count = static_cast<std::size_t>(query_frames) * config_.encoder_hidden_size;
-    std::vector<float> enc(enc_src, enc_src + enc_count);
-
-    const auto* ch_src = static_cast<const float*>(ch_it->second.data);
-    next_channel.assign(ch_src, ch_src + ch_it->second.numel());
-    const auto* tm_src = static_cast<const float*>(tm_it->second.data);
-    next_time.assign(tm_src, tm_src + tm_it->second.numel());
-    return enc;
+    return std::vector<float>(enc_src, enc_src + enc_count);
 }
 
 void RnntPipeline::decode_encoder_frames(const std::vector<float>& encoder_output,
