@@ -205,30 +205,27 @@ bool whitespace_at(const std::string& text, size_t pos) {
            cp == 0x205F || cp == 0x3000;
 }
 
-std::vector<std::string> whitespace_split(const std::string& text, bool unicode_whitespace) {
+std::vector<std::string> whitespace_split(const std::string& text) {
     std::vector<std::string> words;
-    const auto is_space = [&](size_t pos) {
-        return unicode_whitespace ? whitespace_at(text, pos) : text[pos] == ' ';
-    };
     size_t i = 0;
     while (i < text.size()) {
-        while (i < text.size() && is_space(i))
+        while (i < text.size() && whitespace_at(text, i))
             i = bert_unicode::codepoint_end(text, i);
         if (i >= text.size())
             break;
         size_t start = i;
-        while (i < text.size() && !is_space(i))
+        while (i < text.size() && !whitespace_at(text, i))
             i = bert_unicode::codepoint_end(text, i);
         words.push_back(text.substr(start, i - start));
     }
     return words;
 }
 
-[[maybe_unused]] std::string metaspace_pre_tokenize(const std::string& text,
-                                                    bool add_prefix_space) {
+std::string metaspace_pre_tokenize(const std::string& text, bool add_prefix_space) {
     std::string result;
     result.reserve(text.size() + 8);
-    if (add_prefix_space && !text.empty() && text[0] != ' ') {
+    if (add_prefix_space && !text.empty() && text[0] != ' ' &&
+        text.compare(0, kMetaspaceChar.size(), kMetaspaceChar) != 0) {
         result += kMetaspaceChar;
     }
     for (size_t i = 0; i < text.size(); ++i) {
@@ -246,14 +243,14 @@ std::vector<std::string> whitespace_split(const std::string& text, bool unicode_
 struct TrieNode {
     std::unordered_map<char, int> children;
     int token_id = -1; // -1 = not a token end
-    float score = 0.0f;
+    double score = 0.0;
 };
 
 class Trie {
   public:
     Trie() { mNodes.emplace_back(); } // root node
 
-    void insert(const std::string& token, int id, float score) {
+    void insert(const std::string& token, int id, double score) {
         int node = 0;
         for (char c : token) {
             auto it = mNodes[node].children.find(c);
@@ -275,7 +272,7 @@ class Trie {
     struct Match {
         int token_id;
         size_t length;
-        float score;
+        double score;
     };
 
     void find_prefixes(const std::string& text, size_t offset, std::vector<Match>& out) const {
@@ -300,32 +297,32 @@ class Trie {
 // ─── Viterbi algorithm for Unigram tokenization ───
 
 struct ViterbiNode {
-    float score;
+    double score;
     int token_id;
     size_t prev_pos; // byte position of previous node
 };
 
 std::vector<int32_t> viterbi_encode(const std::string& text, const Trie& trie, int32_t unk_id,
-                                    float unk_score) {
+                                    double unk_score) {
     if (text.empty())
         return {};
 
     size_t n = text.size();
     // best[i] = best path score to reach byte position i
-    std::vector<ViterbiNode> best(n + 1, {-std::numeric_limits<float>::infinity(), -1, 0});
-    best[0].score = 0.0f;
+    std::vector<ViterbiNode> best(n + 1, {-std::numeric_limits<double>::infinity(), -1, 0});
+    best[0].score = 0.0;
 
     std::vector<Trie::Match> matches;
 
     for (size_t i = 0; i < n; ++i) {
-        if (best[i].score == -std::numeric_limits<float>::infinity())
+        if (best[i].score == -std::numeric_limits<double>::infinity())
             continue;
 
         trie.find_prefixes(text, i, matches);
 
         for (const auto& m : matches) {
             size_t end = i + m.length;
-            float new_score = best[i].score + m.score;
+            double new_score = best[i].score + m.score;
             if (new_score > best[end].score) {
                 best[end].score = new_score;
                 best[end].token_id = m.token_id;
@@ -337,7 +334,7 @@ std::vector<int32_t> viterbi_encode(const std::string& text, const Trie& trie, i
         size_t char_len = utf8_char_len(text, i);
         size_t end = i + char_len;
         if (end <= n) {
-            float new_score = best[i].score + unk_score;
+            double new_score = best[i].score + unk_score;
             if (new_score > best[end].score) {
                 best[end].score = new_score;
                 best[end].token_id = unk_id;
@@ -392,9 +389,22 @@ class UnigramTokenizer final : public ITokenizer {
                     ids.push_back(segment.id);
                     continue;
                 }
-                for (const auto& word : whitespace_split(segment.text, mWhitespaceSplit)) {
-                    auto word_ids = viterbi_encode(kMetaspaceChar + word, mTrie, mUnkId, mUnkScore);
-                    ids.insert(ids.end(), word_ids.begin(), word_ids.end());
+                const auto words = mWhitespaceSplit ? whitespace_split(segment.text)
+                                                    : std::vector<std::string>{segment.text};
+                for (const auto& word : words) {
+                    const auto transformed = metaspace_pre_tokenize(word, mAddPrefixSpace);
+                    size_t pos = 0;
+                    while (pos < transformed.size()) {
+                        const auto prefix =
+                            transformed.compare(pos, kMetaspaceChar.size(), kMetaspaceChar) == 0
+                                ? kMetaspaceChar.size()
+                                : 0;
+                        const auto end = transformed.find(kMetaspaceChar, pos + prefix);
+                        const auto piece = transformed.substr(pos, end - pos);
+                        auto word_ids = viterbi_encode(piece, mTrie, mUnkId, mUnkScore);
+                        ids.insert(ids.end(), word_ids.begin(), word_ids.end());
+                        pos = end == std::string::npos ? transformed.size() : end;
+                    }
                 }
             }
         }
@@ -580,7 +590,7 @@ class UnigramTokenizer final : public ITokenizer {
         for (size_t i = 0; i < vocab.size(); ++i) {
             auto& entry = vocab[i];
             std::string token = entry[0].get<std::string>();
-            float score = entry[1].get<float>();
+            double score = entry[1].get<double>();
 
             mIdToToken[i] = token;
             mTokenToId[token] = static_cast<int32_t>(i);
@@ -588,12 +598,12 @@ class UnigramTokenizer final : public ITokenizer {
         }
 
         // UNK score: must be worse than ANY real vocab token for Viterbi
-        float min_score = 0.0f;
-        for (float s : mScores) {
+        double min_score = 0.0;
+        for (double s : mScores) {
             if (s < min_score)
                 min_score = s;
         }
-        mUnkScore = min_score - 10.0f;
+        mUnkScore = min_score - 10.0;
     }
 
     void build_trie() {
@@ -649,23 +659,29 @@ class UnigramTokenizer final : public ITokenizer {
         auto& pt = j["pre_tokenizer"];
         std::string ptype = pt.value("type", "");
 
-        if (ptype == "WhitespaceSplit")
-            mWhitespaceSplit = true;
-
         if (ptype == "Metaspace") {
             mAddPrefixSpace = pt.value("add_prefix_space", true);
         } else if (ptype == "Sequence") {
-            // Look for Metaspace inside the sequence
-            if (pt.contains("pretokenizers")) {
-                for (auto& sub : pt["pretokenizers"]) {
-                    if (sub.value("type", "") == "WhitespaceSplit")
-                        mWhitespaceSplit = true;
-                    if (sub.value("type", "") == "Metaspace") {
-                        mAddPrefixSpace = sub.value("add_prefix_space", true);
-                        break;
-                    }
+            bool metaspace = false;
+            if (!pt.contains("pretokenizers") || !pt["pretokenizers"].is_array())
+                throw std::runtime_error("Unigram pre-tokenizer sequence requires pretokenizers");
+            for (const auto& sub : pt["pretokenizers"]) {
+                if (metaspace)
+                    throw std::runtime_error("Unigram Metaspace must be the final pre-tokenizer");
+                const auto type = sub.value("type", "");
+                if (type == "WhitespaceSplit") {
+                    mWhitespaceSplit = true;
+                } else if (type == "Metaspace") {
+                    metaspace = true;
+                    mAddPrefixSpace = sub.value("add_prefix_space", true);
+                } else {
+                    throw std::runtime_error("Unsupported Unigram pre-tokenizer in sequence");
                 }
             }
+            if (!metaspace)
+                throw std::runtime_error("Unigram pre-tokenizer sequence requires Metaspace");
+        } else {
+            throw std::runtime_error("Unsupported Unigram pre-tokenizer");
         }
     }
 
@@ -686,7 +702,7 @@ class UnigramTokenizer final : public ITokenizer {
                                         tok.value("lstrip", false), tok.value("rstrip", false)});
                 if (static_cast<size_t>(tok_id) >= mIdToToken.size()) {
                     mIdToToken.resize(static_cast<size_t>(tok_id) + 1);
-                    mScores.resize(static_cast<size_t>(tok_id) + 1, 0.0f);
+                    mScores.resize(static_cast<size_t>(tok_id) + 1, 0.0);
                 }
                 mIdToToken[tok_id] = content;
                 mTokenToId[content] = tok_id;
@@ -764,14 +780,14 @@ class UnigramTokenizer final : public ITokenizer {
     // ─── Data members ───
 
     std::vector<std::string> mIdToToken;
-    std::vector<float> mScores;
+    std::vector<double> mScores;
     std::unordered_map<std::string, int32_t> mTokenToId;
     std::unordered_set<int32_t> mDecodeSkipIds;
     std::vector<AddedToken> mAddedTokens;
     Trie mTrie;
 
     int32_t mUnkId = 0;
-    float mUnkScore = -100.0f;
+    double mUnkScore = -100.0;
     bool mAddSpecialTokens = true;
     std::vector<NormalizerStep> mNormalizerSteps;
     bool mAddPrefixSpace = true;

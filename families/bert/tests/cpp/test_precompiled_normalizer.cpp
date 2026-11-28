@@ -95,6 +95,18 @@ int main(int argc, char** argv) {
     check(*create(identity), "AA", {3, 4, 4});
     check(*create(identity), u8"ＡＢ ＡＢ", {3, 0, 3, 0});
     check(*create(identity), "AB", {3, 4, 5});
+    auto close_scores = identity;
+    close_scores["model"]["vocab"] = nlohmann::json::array({
+        {"<unk>", -10.0},
+        {"<s>", 0.0},
+        {"</s>", 0.0},
+        {u8"▁", 0.0},
+        {"a", -0.1},
+        {"aa", -0.200000001},
+    });
+    check(*create(close_scores), "aa", {3, 4, 4});
+    close_scores["model"]["vocab"][5][1] = -0.2;
+    check(*create(close_scores), "aa", {3, 5});
 
     auto added = fixture;
     added["pre_tokenizer"] = {
@@ -115,7 +127,55 @@ int main(int argc, char** argv) {
         {{"id", 15}, {"content", "<mask>x"}, {"normalized", false}},
     };
     auto with_added = create(added);
+    auto metaspace_identity = added;
+    metaspace_identity["normalizer"] = nullptr;
+    metaspace_identity["pre_tokenizer"] = fixture["pre_tokenizer"];
+    auto meta = create(metaspace_identity);
+    check(*meta, u8"A<mask>▁B", {3, 4, 12, 3, 5});
+    check(*meta, u8"▁AB", {3, 4, 5});
+    check(*meta, " ", {3});
+    check(*meta, "A ", {3, 4, 3});
+    check(*meta, " A", {3, 4});
+    check(*meta, "A  B", {3, 4, 3, 3, 5});
+    check(*meta, u8"▁ ", {3, 3});
+    check(*meta, u8"<mask>▁ ", {12, 3, 3});
+    auto no_crossing = metaspace_identity;
+    no_crossing["model"]["vocab"].push_back({u8"▁A▁B", 100.0});
+    check(*create(no_crossing), u8"A▁B", {3, 4, 3, 5});
+    const auto framed_added = metaspace_identity.dump();
+    auto metaspace_frame =
+        trtmc::CreateUnigramTokenizer(framed_added.data(), framed_added.size(), true);
+    check(*metaspace_frame, u8"A<mask>▁B", {1, 3, 4, 12, 3, 5, 2});
+    for (const auto& stages :
+         nlohmann::json::array({{fixture["pre_tokenizer"], {{"type", "WhitespaceSplit"}}},
+                                {fixture["pre_tokenizer"], fixture["pre_tokenizer"]},
+                                {{{"type", "WhitespaceSplit"}}},
+                                {{{"type", "Digits"}}, fixture["pre_tokenizer"]}})) {
+        auto unsupported = metaspace_identity;
+        unsupported["pre_tokenizer"] = {{"type", "Sequence"}, {"pretokenizers", stages}};
+        try {
+            create(unsupported);
+            std::cerr << "Accepted unsupported pre-tokenizer composition\n";
+            ++failures;
+        } catch (const std::runtime_error&) {
+        }
+    }
+    for (const auto* type : {"WhitespaceSplit", "Digits", "ByteLevel"}) {
+        auto unsupported = metaspace_identity;
+        unsupported["pre_tokenizer"] = {{"type", type}};
+        try {
+            create(unsupported);
+            std::cerr << "Accepted unsupported top-level pre-tokenizer: " << type << '\n';
+            ++failures;
+        } catch (const std::runtime_error&) {
+        }
+    }
     check(*with_added, "<mask>", {12});
+    auto absent_pretokenizer = metaspace_identity;
+    absent_pretokenizer.erase("pre_tokenizer");
+    create(absent_pretokenizer);
+    absent_pretokenizer["pre_tokenizer"] = nullptr;
+    create(absent_pretokenizer);
     check(*with_added, "A<mask>B", {3, 4, 12, 3, 5});
     check(*with_added, "<s>A</s>", {1, 3, 4, 2});
     check(*with_added, "<unk><unk>", {0, 0});
