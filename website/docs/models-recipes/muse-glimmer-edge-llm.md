@@ -8,8 +8,9 @@ The `muse_glimmer` family owns Edge selection, ONNX commands, paired execution
 and native TensorRT fallback. Build on the target device. Both paths preserve
 the prepared checkpoint's NVFP4/MXFP8 recipe and the requested draft.
 
-Edge 0.11 is the default and its text offload requires a compatible SM120 SDK.
-For 0.12, enable Edge and select `-DTRTMC_EDGELLM_RELEASE=0.12.0`. Also set
+Edge-enabled builds default to 0.12. For the earlier text offload, select
+`-DTRTMC_EDGELLM_RELEASE=0.11.0` and use a compatible SM120 SDK.
+For 0.12, also set
 `-DTRTMC_EDGELLM_ONNX=ON -DTRTMC_EDGELLM_ALL_KERNELS=ON`: ONNX tools alone
 do not satisfy Muse's kernel requirement. Provision the SDK from pinned Edge
 source on the target GPU. A packaged runner uses its own SDK; for a standalone

@@ -2,10 +2,8 @@
 title: InternVL with Edge-LLM
 ---
 
-InternVL selects its own Edge builder and C++ runner. Edge 0.11.0 is the
-default SDK during migration. To opt into 0.12.0, enable the native Edge
-dependency with `TRTMC_ENABLE_EDGELLM=ON` and
-`TRTMC_EDGELLM_RELEASE=0.12.0`. Build on the execution GPU. A Python wheel
+InternVL selects its own Edge builder and C++ runner. To use the default
+Edge 0.12.0 SDK, enable the native dependency with `TRTMC_ENABLE_EDGELLM=ON`. Build on the execution GPU. A Python wheel
 or source installation supplies the builder tools, not the native C++ SDK.
 
 An installed Model Connect wheel uses its own native Edge SDK, not a
@@ -60,14 +58,18 @@ TensorRT builder could not allocate 29,535,502,976 bytes on that GPU; the
 same native request passed on a 48 GiB RTX A6000. This is an observed
 build-memory limit, not a minimum-memory guarantee or an SM restriction.
 
-### Default Edge 0.11.0
+### Explicit Edge 0.11.0 build
+
+Before building a bundle, configure Model Connect in a separate build directory
+with `-DTRTMC_ENABLE_EDGELLM=ON -DTRTMC_EDGELLM_RELEASE=0.11.0`. Build and
+install that runtime on the execution GPU, then use its matching builder tools:
 
 ```sh
 trtmc internvl build /path/to/InternVL3-2B-hf --precision fp16 \
   --max-sequence-length 384 -o internvl.bundle
 ```
 
-Provision the native Edge SDK on the execution GPU. InternVL3.5 and AWQ require
+InternVL3.5 and AWQ require
 ONNX tools; AWQ additionally requires all native kernels. A compatible installed
 Python wheel can supply builder tools, but does not replace that native SDK.
 The family-only `--int4-gemm-plugin-version` option preserves the recorded INT4

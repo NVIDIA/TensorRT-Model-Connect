@@ -22,7 +22,7 @@ python -m tensorrt_model_connect build /path/to/Nemotron-Omni \
   -o nemotron-omni.bundle
 ```
 
-For an installation built with the opt-in 0.12.0 SDK, the family-specific
+For an installation built with the 0.12.0 SDK, the family-specific
 `trtmc nemotron_omni build` command accepts `--edge-builder-python`.
 Use the interpreter containing the matching wheel- or source-installed Edge
 builder; a Python wheel alone does not provide Model Connect's linked C++ SDK.
@@ -43,7 +43,7 @@ The 0.11 public Model Connect Edge build and original text/image executions also
 succeeded: text passed quality, while the free-form image case failed the gate.
 That 0.11 run did not exercise the revised factual image question. Direct
 Edge audio and typed-video execution errors remain separate known limitations.
-With opt-in Edge 0.12, both the text case and the factual image case matched
+With Edge 0.12, both the text case and the factual image case matched
 the independent reference exactly on SM103. The direct acoustic engine failed
 at TensorRT enqueue; a released-runner control changing only the acoustic
 engine to an ONNX-built one matched the audio and image/audio references

@@ -7,7 +7,7 @@ speculative algorithm. Native fallback graphs and orchestration stay in this fam
 
 ## Installation
 
-The default CMake release remains **0.11.0**. To opt into **0.12.0**, build on
+For the default Edge SDK, **0.12.0**, build on
 the executing target with `-DTRTMC_ENABLE_EDGELLM=ON -DTRTMC_EDGELLM_RELEASE=0.12.0`.
 For all native kernel groups, add `-DTRTMC_EDGELLM_ALL_KERNELS=ON` to a pinned
 source build. The official 0.12 revision is `513dcd18291e587c80928911a480761352f3c2d8`.

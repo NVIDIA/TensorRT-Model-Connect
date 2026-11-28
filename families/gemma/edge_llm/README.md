@@ -1,7 +1,7 @@
 # Gemma4 Edge-LLM execution
 
 Gemma owns complete-network offload to the Edge-LLM SDK selected when building
-Model Connect: the default 0.11.0 or the 0.12.0 opt-in. The family maps the upstream
+Model Connect: 0.12.0 by default, or an explicit 0.11.0 build. The family maps the upstream
 ONNX exporter, native component builders and persistent C++ runtime. The 0.12
 Bolt-E4B DFlash pair uses the release's checkpoint-direct builder instead. No shared
 model selection, cross-compilation or model-time installation is introduced.

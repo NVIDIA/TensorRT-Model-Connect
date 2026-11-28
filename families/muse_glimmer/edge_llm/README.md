@@ -1,9 +1,8 @@
 # Muse-Glimmer with Edge-LLM
 
 The `muse_glimmer` family owns complete-network offload, argument mapping,
-engine assets, runtime orchestration, and validation. Edge 0.11 remains the
-default SDK during migration. To select 0.12, configure Model Connect with
-`-DTRTMC_ENABLE_EDGELLM=ON -DTRTMC_EDGELLM_RELEASE=0.12.0`.
+engine assets, runtime orchestration, and validation. Edge-enabled builds use the 0.12 SDK by default.
+To select the earlier SDK, set `-DTRTMC_EDGELLM_RELEASE=0.11.0`.
 
 ## Edge 0.12
 

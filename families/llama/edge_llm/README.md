@@ -14,10 +14,10 @@ the family-owned fallback.
 
 ## Installed Python builder discovery
 
-- **Default 0.11.0** (official revision `95515c2f87fba8982db5a519f9022277667b3cc9`):
+- **Explicit 0.11.0 build** (official revision `95515c2f87fba8982db5a519f9022277667b3cc9`):
   the experimental builder can run in the current Python installation if Edge
   and TensorRT match the SDK; otherwise use the SDK's bundled interpreter.
-- **Opt-in 0.12.0** (official revision `513dcd18291e587c80928911a480761352f3c2d8`):
+- **Default Edge-enabled build: 0.12.0** (official revision `513dcd18291e587c80928911a480761352f3c2d8`):
   configure MC with `TRTMC_ENABLE_EDGELLM=ON` and
   `TRTMC_EDGELLM_RELEASE=0.12.0`. Pass
   `--edge-builder-python /absolute/path/to/python` to `trtmc llama build`.
@@ -173,7 +173,7 @@ oracle with a different chat template.
 These exact local results do not qualify other contexts, source revisions,
 sampling policies, CPU architectures or operating systems.
 
-## Opt-in Edge 0.12.0 validation
+## Edge 0.12.0 validation
 
 With TensorRT 11.4, batch one and FP16 compute, the
 ordinary configurations below were built and run through MC. Each route was

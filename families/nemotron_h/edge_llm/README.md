@@ -3,9 +3,9 @@
 The family owns source-policy admission, command mapping, tokenizer/EOS semantics,
 engine composition and runtime orchestration. TensorRT Edge-LLM owns model graphs,
 lowering and execution. Provision the [optional native SDK](../../../cmake/edge_llm/README.md)
-from the official release selected at configure time. The default is 0.11.0.
-To select 0.12.0 (revision `513dcd18291e587c80928911a480761352f3c2d8`),
-configure with `-DTRTMC_EDGELLM_RELEASE=0.12.0`. Build on the machine
+from the official release selected at configure time. When Edge is enabled,
+the default is 0.12.0 (revision `513dcd18291e587c80928911a480761352f3c2d8`).
+To use the older SDK, select `-DTRTMC_EDGELLM_RELEASE=0.11.0`. Build on the machine
 that will run the model. Do not mix an SDK from one release with another
 release's builder or runtime.
 
