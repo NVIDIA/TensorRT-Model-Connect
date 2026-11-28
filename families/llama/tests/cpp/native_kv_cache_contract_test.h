@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "trtmc/internal/config.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
@@ -543,7 +544,7 @@ int run_native_kv_contract_tests(const char* model) {
         bool overflow = false;
         try {
             (void)pipeline.generate_ids(prompt, make_request(2));
-        } catch (const std::runtime_error&) {
+        } catch (const internal::ConfigError&) {
             overflow = true;
         }
         check(overflow && prefill_trace->calls.empty() && decode_trace->calls.empty() &&

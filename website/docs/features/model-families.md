@@ -97,12 +97,14 @@ and do not imply that CI executes the paired cases.
 
 ### Qwen3.6 / Qwen3.8 Edge-LLM execution
 
-The family owns ordinary original-weight FP16 TP2, ordinary mixed-NVFP4 TP1,
-and explicit DSpark/DFlash2 ONNX execution through the optional Edge-LLM 0.11.0
-SDK. Use `trtmc qwen3_8 build MODEL -o model.bundle`; offline help and options
-use the existing [family CLI protocol](../extend/family-cli.md), not shared
-parser extensions. For a pair, add `--execution-variant dspark` or `dflash` and
-`--companion draft=/path/to/draft`.
+Use `trtmc qwen3_8 build MODEL -o model.bundle`. Edge-enabled builds use the 0.12.0 SDK by default. Its family-owned
+routes include original and prepared dense 27B checkpoints. Use the
+[family CLI](../extend/family-cli.md) to select a companion explicitly:
+`--execution-variant dspark|dflash|dflash_tree|domino|domino_tree` and
+`--companion draft=/path/to/draft`. DFlash2 tree and Domino are 0.12 Edge routes;
+Domino and DFlash2 tree support greedy decoding only. See the
+[0.12 recipe and validation scope](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/qwen3_8/edge_llm/README.md#opt-in-to-edge-llm-012).
+A mapped route is not an accuracy qualification.
 
 An ordinary build (no `--execution-variant`) of a checkpoint that carries MTP
 weights builds only the base engine. Add `--mtp-seq-len N` (N >= 2: one real
@@ -117,13 +119,13 @@ or accuracy qualification. For MTP, use `--execution-variant mtp` without an
 external companion. Prepared checkpoint metadata must match the owning recipe;
 Model Connect does not calibrate or quantize weights during this integration.
 
-Local text requests include exact independent FP32 matches, with separate
-quality failures retained. Qwen3.8 original single-image passed; ordered-image
+For the earlier **0.11** runs, local text requests included exact independent FP32
+matches, with separate quality failures retained. Qwen3.8 original single-image passed; ordered-image
 and video accuracy failed. Mixed-NVFP4
 ordinary and both paired raw-text profiles build and run, matching direct Edge
 exactly, but fail the independent FP32 NED gate. Accuracy failures remain
 executable and are not described as fully qualified. Original-weight speculative
-execution and batch-8 MTP remain outside this adapter's mapped scope.
+execution and batch-8 MTP were not validated by those 0.11 results.
 
 Provision the [native SDK](../user-guides/configure-runtime.md#optional-native-edge-llm-sdk).
 See the [owning recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/qwen3_8/edge_llm/README.md)
@@ -136,8 +138,8 @@ profile results do not imply registered CI or catalog-wide qualification.
 Without compatible Edge offload, the owner constructs TensorRT graphs directly
 and runs them through the Model Connect C++ runtime, without native ONNX export.
 Prepared source quantization and exported FP8 KV scales are preserved. Native
-paths cover ordinary text/media, embedded MTP, complete DSpark/DFlash2 companions,
-and original FP16 TP2; they do not silently substitute target-only decoding.
+paths cover ordinary text/media, embedded MTP, DSpark, DFlash2 chain/tree,
+Domino chain/tree, and original FP16 TP2. Paired builds do not substitute target-only decoding.
 
 Exact full-checkpoint and small integration results are distinguished in the
 [family recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/qwen3_8/edge_llm/README.md#native-fallback).
@@ -166,6 +168,14 @@ warms the MTP cache for a whole chunk in one call.
 are 0, a power of two below 64, or a multiple of 64. Each extra engine carries
 its own copy of the weights, so it adds to the bundle size and build time.
 Bundles built before this engine existed still load and prefill token by token.
+
+When the decode and prefill engines' weights do not both fit in 80% of the GPU
+memory (a 27B FP16 checkpoint on a 128 GB unified-memory GPU), an ordinary
+TP1 text bundle with chunked prefill and no MTP ships only `prefill_engine.plan`
+(`decoder_engine_layout: "chunked"`). It also decodes, one row per call.
+Older runtimes reject this layout. For ordinary native text decoding with either
+layout, the prompt must fit the KV cache (`--max-sequence-length`).
+Generation stops when the cache is full; neither layout discards prompt rows.
 
 ### Nemotron-H Edge-LLM execution
 
@@ -231,15 +241,13 @@ family's options. `trtmc internvl build --help` works offline without
 a checkpoint or GPU imports. This uses the existing
 [family CLI protocol](../extend/family-cli.md), not an extension to the shared parser.
 
-The InternVL family can offload the recorded original-source InternVL3
-1B/2B/8B HF configurations on native x86 SM80 and 14B on native x86 SM120 to the
-pinned Edge-LLM 0.10.1 SDK. These FP16, batch-one, TP-one profiles have historical
-local public/direct/HF qualification; this is not catalog-wide or fresh-head CI
-qualification. The existing 2B/8B image-health test reads actual Edge visual
-features through a small family-owned test helper without changing its gates.
-Quantized sources, InternVL3.5, and multi-image public requests are excluded.
-See the [family recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/internvl/edge_llm/README.md)
-for exact source revisions, evidence boundaries, and replay requirements.
+With Edge 0.12, InternVL3 uses the direct builder. InternVL3.5 uses the
+official ONNX exporter and native ONNX builders to preserve the decoder's
+query/key normalization. The prepared InternVL3 AWQ route requires the
+complete kernel set. These validations used a single vehicle image; they do
+not qualify arbitrary image prompts, multiple images, or every GPU. See the
+[InternVL recipe](../models-recipes/internvl-edge-llm.md) for the build flags,
+per-checkpoint results, memory limits, and native fallback.
 
 ### Optional Qwen3.5 Edge execution
 
@@ -248,7 +256,7 @@ family's options. `trtmc qwen3_5 build --help` works offline without
 a checkpoint or GPU imports. This uses the existing
 [family CLI protocol](../extend/family-cli.md), not an extension to the shared parser.
 
-The default Edge SDK remains 0.11.0. To opt in to 0.12.0, configure
+Edge-enabled builds default to 0.12.0. To pin that SDK, configure
 `-DTRTMC_EDGELLM_RELEASE=0.12.0`, build with `--precision fp16`, and, if
 needed, supply `--edge-builder-python /absolute/path/to/python` to select
 a matching wheel or source installation. This does not replace the native SDK.
@@ -268,9 +276,9 @@ where both Edge runners failed in prefill and MC selects native TensorRT.
 Use `--task images_text_to_text` for ordered images; the legacy single-image
 task is `vision_language_generation`.
 
-The Qwen3.5 family maps the recorded original-source dense 0.8B/2B/4B/9B
+On an explicit 0.11.0 build, Qwen3.5 maps the recorded original-source dense 0.8B/2B/4B/9B
 configurations (Instruct and Base), embedded MTP, and explicit 4B/9B DFlash
-pairs to the pinned Edge-LLM 0.11.0 SDK on native x86 SM80/SM120, FP16 compute,
+pairs to Edge on native x86 SM80/SM120, FP16 compute,
 batch one. Dense 27B uses TP2 for its LLM and TP1 for its visual component.
 The SM120 route preserves admitted ModelOpt weight formats; the recorded 2B
 FP8-KV and NVFP4 LM-head component flows are checkpoint-driven.
@@ -287,6 +295,11 @@ decoded frame order and optional timestamps are preserved. The recorded 2B
 two-frame appearance case passed Model Connect/direct parity and independent
 FP32 NED0.0; it is not a motion-quality or all-configuration qualification.
 The generic image CLI is unchanged. See the owning recipe for API boundaries.
+
+A native single-GPU Qwen3.5 bundle without MTP or a draft ships `prefill.plan`
+next to `engine.plan`. The runtime prefills text and media prompts, NVFP4
+included, up to 64 rows per call and decodes with `engine.plan`. A bundle whose
+two engines need more than 80% of the GPU memory fails to build instead.
 
 When Edge offload is unavailable or fails, this family builds with the TensorRT
 Python API and executes with the Model Connect C++ runtime. Native execution
@@ -312,7 +325,7 @@ DFlash companions, greedy DDTree, or the documented embedded NVFP4 MTP recipe.
 Visual bundles map the existing image and video Task interfaces directly to
 Edge preprocessing and runtime APIs. Shared model selection remains unchanged.
 
-Edge-LLM 0.11.0 is the default. To use 0.12.0, build with
+To explicitly select the default Edge SDK, 0.12.0, configure
 `-DTRTMC_EDGELLM_RELEASE=0.12.0` on the target and install matching Python
 tools from PyPI or source. With 0.12.0, a documented JetSpec pair uses
 `--execution-variant jetspec --companion draft=PATH`; a DFlash draft is not
@@ -362,14 +375,10 @@ family's options. `trtmc llama build --help` works offline without
 a checkpoint or GPU imports. This uses the existing
 [family CLI protocol](../extend/family-cli.md), not an extension to the shared parser.
 
-The Llama family owns an optional native Edge-LLM 0.10.1 route for original
-unquantized sources with FP16 compute. Recorded ordinary Llama 3.1 8B and
-3.2 1B/3B profiles use SM80; the explicit Llama 3.1 8B + EAGLE3 pair uses SM120.
-Other requests retain native behavior, and a failed explicit pair never silently
-becomes base-only decoding. Quantized Llama routes are outside this publication.
-
-These are bounded historical build/inference results, not catalog-wide support
-or an assertion that every profile is registered in CI. Passing engine payloads
-were retired; publication checks are reported separately. See the
-[family-owned recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/llama/edge_llm/README.md)
-for exact revisions, capacities, controls and validation boundaries.
+With Edge 0.12, Llama supports ordinary FP16 and prepared FP8/NVFP4 routes
+for the checkpoints listed in the [Llama recipe](../models-recipes/llama-edge-llm.md).
+The measured Llama 3.1 8B EAGLE3 pair keeps its draft on native fallback; an
+explicit speculative request never silently becomes base-only decoding.
+The original Llama 3.2 1B and its prepared static FP8 checkpoint run but
+miss the arithmetic gate. See the recipe for the exact capacities,
+hardware, validation prompts, and separate historical results.

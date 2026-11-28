@@ -1,0 +1,24 @@
+{
+  "name": "nemotron-3-diarization",
+  "hf_id": "nvidia/Nemotron-3-Diarization",
+  "hf_revision": "52a432672732425e4c19765b9fec9b5810e6f4ba",
+  "bundle": "nemotron-3-diarization.bundle",
+  "family": "nemotron3_diarization",
+  "task": "audio_to_timed_labels",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "nemotron-3-diarization-conversation",
+      "premerge": true,
+      "test_input": "conversation",
+      "logit_tolerance": 0.001
+    },
+    {
+      "name": "nemotron-3-diarization-single-speaker",
+      "premerge": false,
+      "test_input": "single_speaker",
+      "logit_tolerance": 0.001
+    }
+  ],
+  "tensor_parallel_size": 1
+}

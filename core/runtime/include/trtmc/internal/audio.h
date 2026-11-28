@@ -6,6 +6,7 @@
 #pragma once
 
 #include "trtmc/internal/config.h"
+#include "trtmc/internal/matrix.h"
 #include "trtmc/internal/scores.h"
 #include "trtmc/internal/text.h"
 
@@ -30,6 +31,18 @@ struct AudioResult {
 
 struct TextToAudioRequest {
     std::string_view prompt;
+};
+struct SpectrogramToAudioRequest {
+    // [time frame, frequency bin]. The loaded family declares the spectral
+    // convention, normalization and compatible input feature space.
+    FloatMatrixView spectrogram;
+};
+class ISpectrogramToAudio {
+  public:
+    using TaskInterface = ISpectrogramToAudio;
+    static constexpr std::string_view kTask = "spectrogram_to_audio";
+    virtual ~ISpectrogramToAudio() = default;
+    virtual AudioResult run(const SpectrogramToAudioRequest&, ConfigView) = 0;
 };
 
 // Integer token history, not PCM or floating speaker embeddings. The two
@@ -69,6 +82,37 @@ struct AudioLanguageIdentificationRequest {
 };
 struct AudioToClassScoresRequest {
     AudioView audio;
+};
+struct AudioToTimedLabelsRequest {
+    AudioView audio;
+};
+
+// One active interval of one label, [start_seconds, end_seconds) seconds from
+// the first input frame. label indexes TimedLabelsResult::labels.
+struct TimedLabel {
+    double start_seconds{0};
+    double end_seconds{0};
+    std::uint32_t label{0};
+};
+
+struct TimedLabelsResult {
+    // Ordered by start, then label; one label's intervals never overlap.
+    std::vector<TimedLabel> intervals;
+    // One nonempty name per label ordinal. An empty vocabulary_id means the
+    // names have no identity beyond this result (anonymous speakers numbered
+    // by first appearance in each input).
+    std::vector<std::string> labels;
+    std::string vocabulary_id;
+    // Optional raw frame scores, row-major [frame_count, labels.size()]; frame
+    // f covers [f * frame_seconds, (f + 1) * frame_seconds). Every score is
+    // finite, a probability within [0, 1]. Empty with frame_count and
+    // frame_seconds zero when the family has none.
+    std::vector<float> frame_scores;
+    std::uint64_t frame_count{0};
+    double frame_seconds{0};
+    ScoreKind score_kind{ScoreKind::Logit};
+    double setup_ms{0};
+    double inference_ms{0};
 };
 struct SpeechToSpeechResponseRequest {
     AudioView audio;
@@ -146,6 +190,19 @@ class IAudioToClassScores {
     // reordering or invented class metadata. Multi-label families return per-class
     // scores that do not sum to one; the application never renormalizes them.
     virtual LabelScoresResult run(const AudioToClassScoresRequest&, ConfigView) = 0;
+};
+class IAudioToTimedLabels {
+  public:
+    using TaskInterface = IAudioToTimedLabels;
+    static constexpr std::string_view kTask = "audio_to_timed_labels";
+    virtual ~IAudioToTimedLabels() = default;
+    // Who or what is active when over the whole input: speaker diarization,
+    // voice activity or sound-event detection. Intervals are on the input clock,
+    // in seconds, ordered by start then label, and never overlap within one
+    // label. Every label ordinal is named. Frame scores, when the family has
+    // them, are the raw per-frame per-label scores the intervals were derived
+    // from, in the declared ScoreKind; nothing renormalizes across labels.
+    virtual TimedLabelsResult run(const AudioToTimedLabelsRequest&, ConfigView) = 0;
 };
 class ISpeechToSpeechResponse {
   public:

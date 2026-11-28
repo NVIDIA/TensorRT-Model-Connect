@@ -4,6 +4,8 @@
  */
 #include "families/hunyuan/runtime/edge_llm/tokenizer.h"
 
+#include "trtmc/internal/config.h"
+
 #include <algorithm>
 #include <array>
 #ifdef TRTMC_HUNYUAN_EDGE_012
@@ -227,7 +229,7 @@ class Mt2PreTokenizer final : public edge::PreTokenizer {
 
     std::vector<std::string> process(const std::string& text) const override {
         if (text.size() > edge::MAX_TEXT_SIZE_BYTES)
-            throw std::invalid_argument("Hunyuan tokenizer input exceeds Edge size limit");
+            throw internal::ConfigError("Hunyuan tokenizer input exceeds Edge size limit");
         std::vector<std::string> pieces{text};
         for (const auto stage : {Stage::digits, Stage::cjk, Stage::lexical}) {
             std::vector<std::string> next;

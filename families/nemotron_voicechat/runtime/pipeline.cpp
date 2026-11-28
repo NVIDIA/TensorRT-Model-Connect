@@ -12,6 +12,7 @@
 #include "families/nemotron_voicechat/runtime/thinker_hybrid_state.h"
 #include "families/nemotron_voicechat/runtime/thinker_kv_cache.h"
 #include "families/nemotron_voicechat/runtime/thinker_mamba_state.h"
+#include "trtmc/internal/config.h"
 #include "trtmc/runtime/device_tensor.h"
 
 #include <algorithm>
@@ -877,7 +878,7 @@ class NemotronVoiceChatSession final : public ISpeechSession,
     void validate_tool_response_size(std::string_view output) const {
         if (encode_tool_response(output).size() >
             static_cast<std::size_t>(runtime_->config.function_max_response_tokens))
-            throw std::invalid_argument("VoiceChat tool response exceeds its token bound");
+            throw internal::ConfigError("VoiceChat tool response exceeds its token bound");
     }
 
     PendingToolCall& pending_tool_call_locked(std::uint64_t epoch, const std::string& call_id) {
@@ -907,7 +908,7 @@ class NemotronVoiceChatSession final : public ISpeechSession,
         if (tokens.size() >
             static_cast<std::size_t>(runtime_->config.function_max_response_tokens)) {
             submitted.output.reset();
-            throw std::invalid_argument(
+            throw internal::ConfigError(
                 "VoiceChat combined tool responses exceed their token bound");
         }
         return tokens;

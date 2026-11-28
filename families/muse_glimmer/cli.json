@@ -3,7 +3,7 @@
   "commands": [
     {
       "name": "build",
-      "help": "Build one Muse-Glimmer NVFP4 TensorRT Edge-LLM bundle",
+      "help": "Build a Muse-Glimmer TensorRT bundle",
       "executor": "python",
       "handler": "cli:build",
       "arguments": [
@@ -35,7 +35,9 @@
           ],
           "type": "string",
           "choices": [
-            "text_generation"
+            "text_generation",
+            "images_text_to_text",
+            "video_text_to_text"
           ],
           "default": "text_generation"
         },
@@ -75,9 +77,10 @@
           ],
           "type": "string",
           "choices": [
+            "none",
             "nvfp4"
           ],
-          "default": "nvfp4"
+          "help": "Preserve the source checkpoint format; nvfp4 explicitly requires prepared mixed weights"
         },
         {
           "name": "verbose",
@@ -96,7 +99,8 @@
           "type": "string",
           "choices": [
             "autoregressive",
-            "dflash"
+            "dflash",
+            "dflash_tree"
           ],
           "default": "autoregressive"
         },
@@ -107,6 +111,14 @@
           ],
           "type": "string",
           "help": "Matched Muse assistant or DFlash2 checkpoint"
+        },
+        {
+          "name": "edge_builder_python",
+          "flags": [
+            "--edge-builder-python"
+          ],
+          "type": "path",
+          "help": "Python interpreter with the ONNX exporter matching the installed Edge SDK"
         }
       ]
     }

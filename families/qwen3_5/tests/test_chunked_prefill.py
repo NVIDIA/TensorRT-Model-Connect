@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -16,7 +17,7 @@ pytest.importorskip("safetensors.torch")
 
 from .. import deltanet_rows, model  # noqa: E402
 from ..config import ModelConfig  # noqa: E402
-from .test_quantization import _write_checkpoint  # noqa: E402
+from .test_quantization import _calibrate, _write_checkpoint  # noqa: E402
 
 MAX_CACHE = 32
 MASKED = -1.0e4
@@ -33,7 +34,8 @@ class _Stepper:
             assert self.context.set_optimization_profile_async(profile, self.stream)
         self.state = state
 
-    def run(self, tokens: list[int], position: int) -> np.ndarray:
+    def run(self, tokens: list[int], position: int, extra: dict | None = None) -> np.ndarray:
+        """Run ``tokens`` at ``position``; ``extra`` holds further inputs, such as media rows."""
         rows = len(tokens)
         width = MAX_CACHE + rows
         mask = torch.full((rows, width), MASKED)
@@ -44,6 +46,7 @@ class _Stepper:
             "token_id": torch.tensor(tokens, dtype=torch.int32),
             "position_id": torch.arange(position, position + rows, dtype=torch.int32),
             "attention_mask": mask,
+            **(extra or {}),
         }
         bound = {}
         for name, value in inputs.items():
@@ -97,6 +100,46 @@ def _engine(plan: bytes):
     return trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(plan)
 
 
+PROMPT, NEXT_TOKEN = [3, 17, 5, 9, 30, 2, 11, 21, 7, 14, 26], 8
+
+
+def _compare_chunks(single, prefill_engine, row_inputs=None, *, tolerance: float) -> None:
+    """Prefill PROMPT in two chunks, decode NEXT_TOKEN on ``single``, and compare the logits, KV rows and
+    recurrent state with token-by-token steps on ``single``. ``row_inputs(start, rows, one_token)`` gives
+    further inputs of prompt rows ``[start, start + rows)`` in the layout of the one-token or the prefill
+    engine."""
+    def extra(start, rows, one_token):
+        return None if row_inputs is None else row_inputs(start, rows, one_token)
+
+    want_state = _state(single)
+    stepper = _Stepper(single, 0, want_state)
+    want = [stepper.run([token], position, extra(position, 1, True)) for position, token in enumerate(PROMPT)]
+    want.append(stepper.run([NEXT_TOKEN], len(PROMPT), extra(len(PROMPT), 1, True)))
+
+    # Prefill chunks on the prefill engine, then decode on the one-token engine.
+    got_state = _state(single)
+    prefill = _Stepper(prefill_engine, 0, got_state)
+    decode = _Stepper(single, 0, got_state)
+    got = [
+        prefill.run(PROMPT[:7], 0, extra(0, 7, False)),
+        prefill.run(PROMPT[7:], 7, extra(7, len(PROMPT) - 7, False)),
+        decode.run([NEXT_TOKEN], len(PROMPT), extra(len(PROMPT), 1, True)),
+    ]
+
+    # One row and several rows take different kernels, so compare at a fraction of each tensor's scale.
+    errors = {}
+    for step, (logits, reference) in enumerate(zip(got, (want[6], want[10], want[11]))):
+        assert np.argmax(logits) == np.argmax(reference), step
+        errors[f"logits[{step}]"] = np.abs(logits - reference).max() / np.abs(reference).max()
+    for name, reference in want_state.items():
+        reference = reference.float().cpu().numpy()
+        value = got_state[name].float().cpu().numpy()
+        if name.startswith("cache_"):
+            reference, value = reference[: len(PROMPT) + 1], value[: len(PROMPT) + 1]
+        errors[name] = np.abs(value - reference).max() / max(np.abs(reference).max(), 1e-6)
+    assert max(errors.values()) < tolerance, errors
+
+
 @pytest.mark.gpu
 @pytest.mark.trt
 def test_chunked_prefill_matches_one_token_engine(tmp_path: Path) -> None:
@@ -119,47 +162,83 @@ def test_chunked_prefill_matches_one_token_engine(tmp_path: Path) -> None:
         (min(model.PREFILL_OPT_TOKENS, MAX_CACHE),),
         (MAX_CACHE,),
     ]
+    # FP32 engines still run matmuls in TF32.
+    _compare_chunks(single, prefill_engine, tolerance=5e-3)
 
-    prompt, next_token = [3, 17, 5, 9, 30, 2, 11, 21, 7, 14, 26], 8
-    want_state = _state(single)
-    stepper = _Stepper(single, 0, want_state)
-    want = [stepper.run([token], position) for position, token in enumerate(prompt)]
-    want.append(stepper.run([next_token], len(prompt)))
 
-    # Prefill chunks on the prefill engine, then decode on the one-token engine.
-    got_state = _state(single)
-    prefill = _Stepper(prefill_engine, 0, got_state)
-    decode = _Stepper(single, 0, got_state)
-    got = [
-        prefill.run(prompt[:7], 0),
-        prefill.run(prompt[7:], 7),
-        decode.run([next_token], len(prompt)),
-    ]
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_chunked_media_prefill_matches_one_token_engine(tmp_path: Path) -> None:
+    """Media prompt rows (visual rows and MRoPE positions) prefill as token-by-token steps do."""
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    _write_checkpoint(tmp_path, quantized=False)
+    document = json.loads((tmp_path / "config.json").read_text())
+    # Rotary dimension 16 (head 64, partial 0.25): eight frequencies over temporal, height and width.
+    document["text_config"]["rope_parameters"].update(mrope_section=[2, 3, 3], mrope_interleaved=True)
+    (tmp_path / "config.json").write_text(json.dumps(document))
+    config = ModelConfig.from_dir(tmp_path)
+    instance = model._Qwen35Model()
+    weights = instance.load_weights(str(tmp_path), config)
+    single = _engine(instance.build_engine(config, weights, MAX_CACHE, precision="fp32", media_inputs=True))
+    prefill_engine = _engine(instance.build_engine(
+        config, weights, MAX_CACHE, precision="fp32", media_inputs=True, prefill_rows=model.PREFILL_MAX_TOKENS))
 
-    # FP32 engines still run matmuls in TF32, and one row and several rows take
-    # different kernels, so compare at a fraction of each tensor's scale.
-    errors = {}
-    for step, (logits, reference) in enumerate(zip(got, (want[6], want[10], want[11]))):
-        assert np.argmax(logits) == np.argmax(reference), step
-        errors[f"logits[{step}]"] = np.abs(logits - reference).max() / np.abs(reference).max()
-    for name, reference in want_state.items():
-        reference = reference.float().cpu().numpy()
-        value = got_state[name].float().cpu().numpy()
-        if name.startswith("cache_"):
-            reference, value = reference[: len(prompt) + 1], value[: len(prompt) + 1]
-        errors[name] = np.abs(value - reference).max() / max(np.abs(reference).max(), 1e-6)
-    assert max(errors.values()) < 5e-3, errors
+    # Prompt rows 2..7 are a 2x3 image grid at temporal position 2, the text after it continues at 5..7,
+    # and decoding starts at decode_position 8 (rows past the prompt all shift by decode_position - 11).
+    hidden = config.hidden_size
+    features = torch.randn(len(PROMPT), hidden, generator=torch.Generator().manual_seed(1))
+    image = {2 + i: (2, 2 + i // 3, 2 + i % 3) for i in range(6)}
+    positions = [image.get(p, (p - 3, p - 3, p - 3) if p >= 8 else (p, p, p)) for p in range(len(PROMPT))]
+    decode_shift = 8 - len(PROMPT)
+
+    def row_inputs(start, rows, one_token):
+        offsets, use, visual = [], [], torch.zeros(rows, hidden)
+        for row in range(rows):
+            position = start + row
+            if position < len(PROMPT):
+                offsets.append([axis - position for axis in positions[position]])
+            else:
+                offsets.append([decode_shift] * 3)
+            use.append([int(position in image)])
+            if position in image:
+                visual[row] = features[position]
+        offsets = torch.tensor(offsets, dtype=torch.int32)
+        return {
+            "visual_embedding": visual,
+            "use_visual_embedding": torch.tensor(use, dtype=torch.int32),
+            "rotary_position_offsets": offsets[0] if one_token else offsets,
+        }
+
+    _compare_chunks(single, prefill_engine, row_inputs, tolerance=5e-3)
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_chunked_nvfp4_prefill_matches_one_token_engine(tmp_path: Path) -> None:
+    """NVFP4 projections quantize each activation row on its own, so several rows prefill as one row does."""
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 10:
+        pytest.skip("requires a GPU with FP4 tensor cores")
+    _write_checkpoint(tmp_path, quantized=True)
+    config = ModelConfig.from_dir(tmp_path)
+    context = _calibrate(tmp_path)
+    instance = model._Qwen35Model()
+    weights = instance.load_weights(str(tmp_path), config, context)
+    single = _engine(instance.build_engine(config, weights, MAX_CACHE, precision="fp16", quant_ctx=context))
+    prefill_engine = _engine(instance.build_engine(
+        config, weights, MAX_CACHE, precision="fp16", quant_ctx=context, prefill_rows=model.PREFILL_MAX_TOKENS))
+    # FP16 activations, and FP4 rounding of rows whose FP16 values differ in the last bit.
+    _compare_chunks(single, prefill_engine, tolerance=3e-2)
 
 
 @pytest.mark.trt
-def test_prefill_engine_rejects_media_and_speculative_builds(tmp_path: Path) -> None:
-    """Media, MTP hidden-state and draft-feature engines keep one row per launch."""
+def test_prefill_engine_rejects_speculative_builds(tmp_path: Path) -> None:
+    """MTP hidden-state and draft-feature engines keep one row per launch."""
     _write_checkpoint(tmp_path, quantized=False)
     config = ModelConfig.from_dir(tmp_path)
     instance = model._Qwen35Model()
     weights = instance.load_weights(str(tmp_path), config)
     for options in (
-        {"media_inputs": True},
         {"export_hidden_state": True},
         {"feature_layers": (0,)},
     ):
@@ -205,11 +284,11 @@ def test_triangular_solve_matches_numpy_on_nearly_parallel_keys() -> None:
     assert np.abs(got - want).max() <= 1e-4 * np.abs(want).max()
 
 
-def test_the_prefill_engine_is_built_only_when_a_second_weight_copy_fits() -> None:
+def test_a_text_bundle_whose_second_weight_copy_does_not_fit_fails_to_build() -> None:
     gib = 1024**3
-    assert model._two_engines_fit(18 * gib, 121 * gib)  # 9B FP16 on a 128 GB unified-memory GPU
-    assert not model._two_engines_fit(54 * gib, 121 * gib)  # 27B FP16: the decode engine alone
-    assert model._two_engines_fit(54 * gib, 275 * gib)
-    assert not model._two_engines_fit(2 * gib, None)  # no device to ask: keep the single-engine layout
-    weights = {"w": np.zeros((4, 8), dtype=np.float16), "_rows": 4}
-    assert model._host_weight_bytes(weights) == 64
+    model._require_two_engines_fit(17 * gib, 121 * gib)  # 9B FP16 on a 128 GB unified-memory GPU
+    model._require_two_engines_fit(54 * gib, 275 * gib)
+    model._require_two_engines_fit(2 * gib, None)  # no device to ask: build both engines
+    # 27B FP16 on 128 GB: never fall back to a one-token-at-a-time prompt prefill.
+    with pytest.raises(ValueError, match="need about 108 GiB and the GPU has 121 GiB"):
+        model._require_two_engines_fit(54 * gib, 121 * gib)

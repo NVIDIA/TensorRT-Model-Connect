@@ -5,6 +5,8 @@
 
 #include "families/qwen3_omni/runtime/pipeline.h"
 
+#include "trtmc/internal/config.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -155,7 +157,7 @@ std::vector<float>
 Qwen3OmniTextPipeline::run_token_prefill(const std::vector<std::int32_t>& token_ids) {
     if (token_ids.empty() ||
         token_ids.size() > static_cast<std::size_t>(thinker_state_->max_length())) {
-        throw std::runtime_error("Qwen3-Omni Thinker prompt exceeds its prefill profile");
+        throw internal::ConfigError("Qwen3-Omni Thinker prompt exceeds its prefill profile");
     }
     // Execute long prompts in the engine's optimized token batch while keeping
     // its original profile and full KV capacity.

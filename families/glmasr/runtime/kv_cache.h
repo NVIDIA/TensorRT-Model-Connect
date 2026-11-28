@@ -47,6 +47,11 @@ class GlmAsrKvCache : public GlmAsrInferenceState {
     void bind_to(ITrtModule& module) override;
     void prepare_step(TensorMap& inputs, int32_t seq_len = 1) override;
     void advance(int32_t n_tokens = 1) override;
+    // Rejects a prompt longer than the cache with internal::ConfigError, the
+    // request-rejection type callers answer as a request error. The cache never
+    // drops rows: advance() throws once it is full, and the pipeline stops
+    // generating before that.
+    void set_prompt_length(int32_t prompt_length) override;
     int32_t position() const override { return position_; }
     int32_t max_length() const override { return max_length_; }
     int32_t preferred_cache_rows() const override;
@@ -104,10 +109,6 @@ class GlmAsrKvCache : public GlmAsrInferenceState {
     std::vector<DeviceTensor> cache_v_;   // [num_layers]
     std::vector<DeviceTensor> present_k_; // [num_layers], shape [1, kv_dim] (single step output)
     std::vector<DeviceTensor> present_v_; // [num_layers]
-    // Scratch for the cache-full shift in advance(): cudaMemcpyAsync forbids
-    // overlapping source/destination, so the shift stages through here one
-    // layer at a time instead of copying a cache buffer onto itself.
-    DeviceTensor shift_scratch_; // shape [max_length - 1, kv_dim]
     int32_t num_layers_{0};
     int32_t max_length_{0};
     int32_t kv_dim_{0};

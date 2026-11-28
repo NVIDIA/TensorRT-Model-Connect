@@ -54,10 +54,15 @@ def _serve_env(environment: Environment) -> dict[str, str]:
 
 
 def build_env(environment: Environment) -> dict[str, str]:
-    """Environment of bundle builds and checkpoint downloads (online, plus the environment's build_env)."""
+    """Environment of bundle builds and checkpoint downloads (online, plus the environment's build_env). The
+    runtime's build directory leads CMAKE_PREFIX_PATH: a family build that loads its own native library (BLIP's
+    FP32 kernels) finds the one the worker serves with, since the source-tree build installs no native package."""
     env = {**_serve_env(environment), **{key: str(value) for key, value in
                                          (environment.values.get("build_env") or {}).items()}}
     env.pop("HF_HUB_OFFLINE", None)
+    if environment.values.get("runtime_root"):
+        prefixes = [str(environment["runtime_root"]), *env.get("CMAKE_PREFIX_PATH", "").split(os.pathsep)]
+        env["CMAKE_PREFIX_PATH"] = os.pathsep.join(dict.fromkeys(prefix for prefix in prefixes if prefix))
     return env
 
 

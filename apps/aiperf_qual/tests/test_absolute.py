@@ -295,6 +295,12 @@ def test_forecasts_are_scored_on_the_point_or_median_quantile_forecast():
     assert gold_metrics.point_forecast({"values": [1.0, 2.0]}, 2) == [1.0, 2.0]
     quantiles = {"values": [0, 0, 1, 2, 9, 9], "shape": [1, 3, 2]}  # median row: [1, 2]
     assert gold_metrics.point_forecast(quantiles, 2) == [1.0, 2.0]
+    # the Task's [quantile, horizon, channel]: the 0.5 level's [horizon, channel] values
+    task = {"values": [0, 0, 7, 7, 1, 2, 9, 9], "shape": [4, 2, 1], "axes": ["quantile", "horizon", "channel"],
+            "quantile_levels": [0.1, 0.2, 0.5, 0.9]}
+    assert gold_metrics.point_forecast(task, 2) == [1.0, 2.0]
+    assert gold_metrics.point_forecast({**task, "quantile_levels": []}, 2) == [1.0, 2.0]  # the middle level
+    assert gold_metrics.point_forecast({**task, "shape": [4, 3, 1]}, 2) == []
     gold = {"values": [1.0, 4.0], "mean": [0.0], "std": [1.0]}
     units = gold_metrics.forecast_units([{"gold": gold}], {0: {"values": [1.0, 2.0]}})
     assert units == [(4.0, 2.0)] and gold_metrics.mse(units) == 2.0

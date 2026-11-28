@@ -1,0 +1,7 @@
+# Transformers reference for the E2E oracle and build-time chat-template rendering;
+# MiniCPM-V 4.6 needs transformers >= 5.7.0. The pins keep packages the repository
+# constrains inside those constraints when this file is resolved on its own.
+transformers==5.22.2
+tokenizers==0.23.3
+huggingface-hub==1.33.0
+numpy<2.5

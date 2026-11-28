@@ -4,6 +4,8 @@
  */
 #include "families/qwen3_8/runtime/dspark.h"
 
+#include "trtmc/internal/config.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -74,7 +76,7 @@ void Qwen38DSpark::reset(ITrtModule& target, std::size_t prompt_length, int32_t 
         prompt_length > static_cast<std::size_t>(config_.capacity) ||
         static_cast<std::size_t>(max_new_tokens) >
             static_cast<std::size_t>(config_.capacity) - prompt_length)
-        throw std::invalid_argument("Qwen3.8 DSpark prompt and generation exceed bundle capacity");
+        throw internal::ConfigError("Qwen3.8 DSpark prompt and generation exceed bundle capacity");
     require_tensor(target, "draft_features", DType::kFloat16,
                    {1, static_cast<int64_t>(feature_width_)}, false);
     seen_ = 0;
@@ -89,10 +91,9 @@ void Qwen38DSpark::observe(ITrtModule& target) {
     ++seen_;
 }
 
-std::vector<Qwen38DSparkProposal> Qwen38DSpark::propose(int32_t anchor,
-                                                        const Qwen38SamplingParams& sampling,
-                                                        const std::vector<int32_t>& history,
-                                                        int32_t budget, uint64_t& rng) {
+Qwen38DraftRound Qwen38DSpark::propose(int32_t anchor, const Qwen38SamplingParams& sampling,
+                                       const std::vector<int32_t>& history, int32_t budget,
+                                       uint64_t& rng) {
     if (anchor < 0 || anchor >= config_.vocab || seen_ <= 0 || seen_ >= config_.capacity ||
         budget <= 0)
         throw std::invalid_argument("Qwen3.8 DSpark invalid proposal state");

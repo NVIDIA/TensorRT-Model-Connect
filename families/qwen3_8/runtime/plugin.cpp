@@ -5,6 +5,7 @@
 
 #include "families/qwen3_8/runtime/chat_templates.h"
 #include "families/qwen3_8/runtime/dflash2.h"
+#include "families/qwen3_8/runtime/domino.h"
 #include "families/qwen3_8/runtime/dspark.h"
 #include "families/qwen3_8/runtime/hybrid_state.h"
 #include "families/qwen3_8/runtime/mtp_scheduler.h"
@@ -54,6 +55,8 @@ struct RuntimeConfig {
     std::int32_t prefill_chunk_len; // 0: no prefill_engine.plan, single-token prefill
     std::string kv_cache_quantization;
     int32_t tensor_parallel_size;
+    // "chunked": the bundle ships only prefill_engine.plan, which also decodes one row per call.
+    bool chunked;
 };
 
 template <typename T>
@@ -82,8 +85,9 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
                            (json.contains("kv_cache_quantization") ? 1U : 0U) +
                            (json.contains("tensor_parallel_size") ? 1U : 0U))
         throw std::runtime_error("qwen3_8 runtime.json has an unexpected field set");
-    if (require_value<std::string>(json, "decoder_engine_layout") != "single")
-        throw std::runtime_error("qwen3_8 requires decoder_engine_layout='single'");
+    const auto layout = require_value<std::string>(json, "decoder_engine_layout");
+    if (layout != "single" && layout != "chunked")
+        throw std::runtime_error("qwen3_8 requires decoder_engine_layout 'single' or 'chunked'");
 
     RuntimeConfig config{
         require_value<std::int32_t>(json, "hidden_size"),
@@ -112,6 +116,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
             : "none",
         json.contains("tensor_parallel_size") ? require_value<int32_t>(json, "tensor_parallel_size")
                                               : 1,
+        layout == "chunked",
     };
     const auto layer_types = require_value<std::vector<std::string>>(json, "layer_types");
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_attention_heads <= 0 ||
@@ -140,6 +145,11 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
           config.num_attention_heads % tp || config.num_key_value_heads % tp ||
           config.mamba_nheads % tp || config.d_inner % tp || config.conv_dim % tp)))
         throw std::runtime_error("Invalid Qwen native TP2 metadata");
+    // Speculative decoding and FP8 KV storage need the single-token decode engine.
+    if (config.chunked && (config.prefill_chunk_len < 2 || config.has_mtp || tp != 1 ||
+                           config.kv_cache_quantization != "none"))
+        throw std::runtime_error("qwen3_8 chunked layout requires a prefill engine, no MTP, TP1 "
+                                 "and an unquantized KV cache");
     return config;
 }
 
@@ -162,19 +172,35 @@ std::string chat_template(const BundleReader& bundle) {
 ITask* create_native(const FamilyContext& context, const RuntimeConfig& config, int rank,
                      const ModuleCreateOptions& options) {
     const bool parallel = config.tensor_parallel_size == 2;
+    if (config.chunked && (context.reader.find_section("native_visual.json") ||
+                           context.reader.find_section("native_dspark.json") ||
+                           context.reader.find_section("native_dflash2.json") ||
+                           context.reader.find_section("native_domino.json")))
+        throw std::runtime_error("qwen3_8 chunked bundles cannot carry media or draft companions");
     // Free the decoder plan's host copy once it is deserialized: the prefill and MTP plans are
     // read below, and an FP8 27B bundle's prefill plan is as large as the decoder plan (27 GiB
     // each), which does not fit twice next to the engines on 128 GB of unified memory.
-    auto decoder = [&] {
-        const auto plan = require_section(context.reader,
-                                          parallel ? "engine.rank" + std::to_string(rank) + ".plan"
-                                                   : "engine.plan");
-        return context.backend.create_module(plan.data(), plan.size(), options);
-    }();
-    if (!decoder || !decoder->ok())
-        throw std::runtime_error("Qwen native decoder failed to load");
-    decoder->set_timing_label("qwen3_8 decoder");
-    const cudaStream_t stream = decoder->stream();
+    std::unique_ptr<ITrtModule> decoder;
+    std::unique_ptr<ITrtModule> prefill_module;
+    if (config.chunked) {
+        prefill_module =
+            load_engine(context.backend, require_section(context.reader, "prefill_engine.plan"),
+                        "qwen3_8 prefill");
+    } else {
+        decoder = [&] {
+            const auto plan = require_section(
+                context.reader,
+                parallel ? "engine.rank" + std::to_string(rank) + ".plan" : "engine.plan");
+            return context.backend.create_module(plan.data(), plan.size(), options);
+        }();
+        if (!decoder || !decoder->ok())
+            throw std::runtime_error("Qwen native decoder failed to load");
+        decoder->set_timing_label("qwen3_8 decoder");
+    }
+    // The engine that owns the stream and the KV contract: the decoder, or the prefill engine
+    // of a chunked bundle.
+    ITrtModule& state_engine = decoder ? *decoder : *prefill_module;
+    const cudaStream_t stream = state_engine.stream();
     const std::int32_t kv_dim =
         config.num_key_value_heads / config.tensor_parallel_size * config.head_dim;
 
@@ -184,7 +210,7 @@ ITask* create_native(const FamilyContext& context, const RuntimeConfig& config, 
     // or malformed metadata entry must not allocate FP8 for an FP16 engine.
     for (int32_t i = 0; i < config.num_attention_layers; ++i) {
         for (const char* name : {"cache_k_", "cache_v_", "present_k_", "present_v_"}) {
-            if (decoder->tensor_dtype(std::string(name) + std::to_string(i)) != cache_dtype)
+            if (state_engine.tensor_dtype(std::string(name) + std::to_string(i)) != cache_dtype)
                 throw std::runtime_error("qwen3_8 engine KV dtype disagrees with runtime.json");
         }
     }
@@ -244,9 +270,10 @@ ITask* create_native(const FamilyContext& context, const RuntimeConfig& config, 
 
     std::unique_ptr<Qwen38PrefillRunner> prefill_runner;
     if (config.prefill_chunk_len > 0) {
-        auto prefill_module =
-            load_engine(context.backend, require_section(context.reader, "prefill_engine.plan"),
-                        "qwen3_8 prefill");
+        if (!prefill_module)
+            prefill_module =
+                load_engine(context.backend, require_section(context.reader, "prefill_engine.plan"),
+                            "qwen3_8 prefill");
         prefill_runner = std::make_unique<Qwen38PrefillRunner>(
             std::move(prefill_module), *state, config.prefill_chunk_len, config.hidden_size,
             config.vocab_size, stream);
@@ -300,7 +327,11 @@ ITask* create_native(const FamilyContext& context, const RuntimeConfig& config, 
         const auto layers = require_value<std::vector<int32_t>>(j, "feature_layers");
         auto sorted = layers;
         std::sort(sorted.begin(), sorted.end());
-        if (!j.is_object() || j.size() != 10 || require_value<int32_t>(j, "schema_version") != 1 ||
+        const auto schema = require_value<int32_t>(j, "schema_version");
+        const bool tree = schema == 2;
+        if (!j.is_object() || !(schema == 1 || tree) || j.size() != (tree ? 12U : 10U) ||
+            (tree && (require_value<int32_t>(j, "tree_top_k") != 4 ||
+                      require_value<int32_t>(j, "verify_tokens") != 32)) ||
             require_value<int32_t>(j, "hidden_size") != config.hidden_size ||
             require_value<int32_t>(j, "vocab_size") != config.vocab_size ||
             require_value<int32_t>(j, "max_cache_length") != config.max_cache_length ||
@@ -317,6 +348,7 @@ ITask* create_native(const FamilyContext& context, const RuntimeConfig& config, 
             require_value<int32_t>(j, "window"),
             require_value<int32_t>(j, "rank"),
             require_value<int32_t>(j, "top_k"),
+            tree,
         };
         auto draft =
             load_engine(context.backend, require_section(context.reader, "native_dflash2.plan"),
@@ -329,11 +361,46 @@ ITask* create_native(const FamilyContext& context, const RuntimeConfig& config, 
             require_section(context.reader, "native_dflash2_embeddings.bin"));
     }
 
+    if (context.reader.find_section("native_domino.json")) {
+        if (external_draft || config.has_mtp || config.precision != "fp16")
+            throw std::runtime_error(
+                "Qwen3.6 Domino requires FP16 without another speculative variant");
+        const auto j =
+            nlohmann::json::parse(require_text_section(context.reader, "native_domino.json"));
+        auto taps = require_value<std::vector<int32_t>>(j, "feature_layers");
+        std::sort(taps.begin(), taps.end());
+        if (!j.is_object() || j.size() != 11 || require_value<int32_t>(j, "schema_version") != 1 ||
+            require_value<int32_t>(j, "hidden_size") != config.hidden_size ||
+            require_value<int32_t>(j, "vocab_size") != config.vocab_size ||
+            require_value<int32_t>(j, "max_cache_length") != config.max_cache_length ||
+            require_value<int32_t>(j, "rows") != 16 || taps.empty() || taps.front() < 0 ||
+            taps.back() >= config.num_layers ||
+            std::adjacent_find(taps.begin(), taps.end()) != taps.end())
+            throw std::runtime_error("Invalid Qwen3.6 Domino metadata/target agreement");
+        Qwen38DominoConfig geometry{config.hidden_size,
+                                    config.vocab_size,
+                                    config.max_cache_length,
+                                    static_cast<int32_t>(taps.size()),
+                                    require_value<int32_t>(j, "mask_token_id"),
+                                    require_value<int32_t>(j, "pool"),
+                                    require_value<int32_t>(j, "rank"),
+                                    require_value<int32_t>(j, "state"),
+                                    require_value<int32_t>(j, "top_k")};
+        external_draft = std::make_unique<Qwen38Domino>(
+            geometry,
+            load_engine(context.backend, require_section(context.reader, "native_domino.plan"),
+                        "qwen3_8 Domino draft"),
+            load_engine(context.backend,
+                        require_section(context.reader, "native_domino_correction.plan"),
+                        "qwen3_8 Domino correction"),
+            require_section(context.reader, "native_domino_embeddings.bin"));
+    }
+
     RecurrentGenConfig generation;
     generation.vocab_size = config.vocab_size;
     generation.id_bos = config.bos_token_id;
     generation.id_eos_ids = config.eos_token_ids;
-    generation.has_position_input = decoder->has_input("position_id");
+    generation.has_position_input = decoder && decoder->has_input("position_id");
     generation.chat_template_format =
         qwen3_8_detect_chat_template_format(chat_template(context.reader));
 
@@ -366,10 +433,22 @@ ITask* create(const FamilyContext& context) {
                                  "-DTRTMC_ENABLE_EDGELLM=ON; rebuild and install Model Connect");
 #endif
     }
+    // A bundle with an unknown external draft must not silently run target-only.
+    for (const auto& section : context.reader.info().sections) {
+        const auto& name = section.name;
+        if (name.compare(0, 7, "native_") != 0 || name.size() < 12 ||
+            name.compare(name.size() - 5, 5, ".json") != 0)
+            continue;
+        if (name != "native_visual.json" && name != "native_dspark.json" &&
+            name != "native_dflash2.json" && name != "native_domino.json")
+            throw std::runtime_error("Unsupported Qwen native draft: " +
+                                     name.substr(0, name.size() - 5));
+    }
     const auto config = parse_runtime_config(context.reader);
     if (config.tensor_parallel_size == 2) {
         if (context.reader.find_section("native_dspark.json") ||
-            context.reader.find_section("native_dflash2.json"))
+            context.reader.find_section("native_dflash2.json") ||
+            context.reader.find_section("native_domino.json"))
             throw std::runtime_error("Qwen native TP2 does not map speculative companions");
         // The factory can be called again after a failed request. FamilyContext
         // borrows a reader used only during loading; retain its cheap metadata/path

@@ -36,7 +36,7 @@ if(TRTMC_BUILD_TESTS)
     image_preprocess_seam.cpp
   )
   target_include_directories(test_deformable_detr_preprocess_and_decode PRIVATE
-    ${PROJECT_SOURCE_DIR})
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include)
   add_test(NAME deformable_detr_preprocess_and_decode
     COMMAND test_deformable_detr_preprocess_and_decode)
 endif()

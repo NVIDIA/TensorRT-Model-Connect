@@ -162,6 +162,7 @@ def test_the_near_capacity_request_covers_the_text_generation_task_under_either_
 
     assert runner.near_capacity_applies(model("text_generation"), {"prompt": "x"})
     assert runner.near_capacity_applies(model("text_continuation"), {"prompt": "x"})
+    assert runner.near_capacity_applies(model("conditional_text_generation"), {"prompt": "x"})
     assert not runner.near_capacity_applies(model("text_continuation"), {"prompt": "x", "image": "i"})
     assert not runner.near_capacity_applies(model("vision_language_generation"), {"prompt": "x"})
 
@@ -417,6 +418,16 @@ def test_label_hit_and_query_hit_score_the_best_class_by_name():
     assert gold_metrics.query_hit("golf ball", zero_shot)[0] is True
     assert gold_metrics.query_hit("ball", zero_shot)[0] is True  # a suffix that is a whole word
     assert gold_metrics.query_hit("church", zero_shot)[0] is False
+
+
+def test_text_parity_bounds_the_caption_edit_distance_and_needs_a_native_caption():
+    gate = {"max_distance": 0.15}
+    native = {"text": "a cat sitting on a couch"}
+    assert gold_metrics.text_parity({"text": "A cat  sitting on a couch"}, native, gate)[0] is True
+    assert gold_metrics.text_parity({"text": "a cat sitting on a sofa"}, native, gate)[0] is False
+    assert gold_metrics.text_parity({"text": ""}, native, gate)[0] is False
+    assert gold_metrics.text_parity({"text": "a cat"}, {"text": " "}, gate)[0] is None
+    assert "text_parity" in gold_metrics.PARITY
 
 
 def test_depth_parity_applies_the_family_correlation_and_error_gate():

@@ -6,6 +6,7 @@ add_library(trtmc_model_lerobot_groot SHARED
   image.cpp
   pipeline.cpp
   plugin.cpp
+  request.cpp
   prompt.cpp
 )
 
@@ -35,6 +36,8 @@ set_target_properties(trtmc_model_lerobot_groot PROPERTIES
 install(TARGETS trtmc_model_lerobot_groot
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+include("${CMAKE_CURRENT_LIST_DIR}/edge_llm/Adapter.cmake")
 
 if(TRTMC_BUILD_TESTS)
   add_executable(trtmc_lerobot_groot_qualification

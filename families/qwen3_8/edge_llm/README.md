@@ -2,8 +2,9 @@
 
 This family owns checkpoint admission, build options, command mapping, bundle
 assets, runtime orchestration, and validation. Shared code contains no Edge
-selection. The optional SDK uses official Edge-LLM **0.11.0**, revision
-`95515c2f87fba8982db5a519f9022277667b3cc9`.
+selection. Edge-enabled builds use the **0.12.0** SDK by default. To build against
+**0.11.0** instead, set `TRTMC_EDGELLM_RELEASE=0.11.0` in a separate build
+directory. An installed runtime links one release, not both.
 
 A compatible installed Python wheel is preferred. Discovery checks the actual
 builder or ONNX exporter needed by the request, rather than accepting a version
@@ -11,7 +12,127 @@ string alone. Matching source-installed SDK Python is the fallback. Python
 package discovery does not replace the native CMake SDK dependency. Builds are
 native; cross compilation is not supported.
 
-## Executed Edge configurations
+## Opt in to Edge-LLM 0.12
+
+Follow the [SDK provisioning guide](../../../cmake/edge_llm/README.md) with
+`TRTMC_ENABLE_EDGELLM=ON`. Paired
+builds need `TRTMC_EDGELLM_ONNX=ON`. If the exporter uses its own Python
+environment, pass its absolute interpreter path with `--edge-builder-python`;
+this does not replace the linked SDK or change Model Connect's Transformers pin.
+
+| Build request | 0.12 mapping |
+| --- | --- |
+| Ordinary FP16, original dense 27B or supported prepared NVFP4 | Direct Edge build; no companion. Request the vision-language task explicitly for image input. |
+| Mixed NVFP4 + DSpark or DFlash2 | Select `dspark` for DSpark, or `dflash` (chain) / `dflash_tree` (tree) for DFlash2. Pass the matching unquantized draft. |
+| Original Qwen3.6-27B + Domino | Select `domino` for a block-16 chain or `domino_tree` for a 60-node tree. Both use the same draft and require greedy decoding. |
+| Original or signed INT4 Qwen3.8-27B + DFlash2 | Select `dflash` or `dflash_tree`. For signed INT4 with implicit zero points, the 0.12 base exporter is incompatible; MC warns and uses native TRT with the same target and draft. |
+
+Use `--execution-variant dflash_tree` for the 0.12 greedy DFlash2
+selector tree (top 4, verify 32). Unlike the chain, the native tree scores
+each depth's candidates conditioned on their actual predecessor. DFlash2
+chain results do not validate this separate profile.
+
+For the original Qwen3.6-27B Domino chain, both Edge and native matched the
+FP32 chat and raw reference tokens. On the raw request the released Edge
+runtime reproduced the result with five verification rounds; native accepted
+10 of 75 proposed tokens over five rounds. Tested separately, the 60-node
+Domino tree also matched the same-backend ordinary target and the independent
+FP32 tokens on both requests. Native accepted 10 draft tokens across five raw
+rounds (295 candidate nodes); the Edge runtime reported a 60-node, top-4 tree.
+The stock Edge runner reproduced the raw text over five verification rounds.
+Both Model Connect routes explicitly rejected a stochastic sampling request.
+
+The Domino mapping uses the published original target and draft. A calibrated
+Domino pair is not covered by these native or Edge results.
+
+The Model Connect package does not ship target or draft weights. Supply local
+checkpoints under their publishers' terms.
+
+For example, with the two checkpoints already present locally:
+
+```sh
+trtmc qwen3_8 build /models/Qwen3.6-27B --task text_generation \
+  --precision fp16 --max-sequence-length 256 --execution-variant domino_tree \
+  --companion draft=/models/qwen3.6-27B-domino -o domino-tree.bundle
+trtmc run domino-tree.bundle --prompt "The capital of France is" \
+  --temperature 0 --top-k 1 --top-p 1 --max-new-tokens 16
+```
+
+**Mapping is not qualification.** On the mixed 27B target, ordinary, DSpark
+and DFlash2 builds ran on both Edge and native TRT. All three chat cases passed.
+For the raw-text case, Edge had normalized edit distance 0.21875 against the
+0.15 limit on all three; replay with the stock Edge runtime produced the same
+text. Native DFlash2 matched the reference, while native ordinary and DSpark
+missed the raw-text gate. Ordinary image cases also missed the gate. Accuracy
+failures remain executable.
+
+On the uniform Inferact NVFP4 checkpoint, both 4096-token vision builds ran
+all four requests on SM120. Both matched the chat and raw FP32 reference token
+IDs. Single-image / ordered-image distances were 0.211 / 0.202 on Edge and
+0.492 / 0.469 on native, above the unchanged 0.15 limit. The independent FP32
+reference used the uniform target weights, not the mixed checkpoint. These
+image results are not an upstream-only attribution.
+
+On the original unquantized Qwen3.8-27B checkpoint, ordinary FP16 Edge and
+native builds both ran raw text, chat, one image, and two ordered images. Both
+text cases matched the independent FP32 reference token for token. The image
+cases did not meet the same 0.15 limit: one-image / two-image distances were
+0.484 / 0.287 on Edge and 0.290 / 0.333 on native. These visual routes remain
+available; this is not a visual accuracy qualification. The released Edge
+runtime emitted the same text as Model Connect for both image requests
+when run directly on the same engine.
+
+The original-checkpoint results use
+[Qwen3.6-27B at `1cda14dd7`](https://huggingface.co/Qwen/Qwen3.6-27B/tree/1cda14dd71a3f47115850eb790f416f165da1cb5) and
+[Qwen3.8-27B at `37561816e`](https://huggingface.co/Qwen/Qwen3.8-27B/tree/37561816e66b5b9153b1b64c10968c18c1e6f4a0).
+These model runs do not replace the registered premerge tests.
+
+For original Qwen3.6-27B ordinary FP16 on GB300, both backends matched the
+FP32 chat and raw tokens. Ordered images passed (normalized edit distance
+0.101 on Edge, 0.087 on native). For the single image, both backends returned
+identical token IDs but missed the 0.15 gate (0.357). The released Edge
+runner reproduced that text on the same engine. A separate HF FP16 run matched
+all 128 HF FP32 tokens; both Model Connect routes first differed at token index
+45 from both HF runs. This result does not qualify
+the single-image case or establish a TensorRT compiler defect.
+
+For the original Qwen3.8-27B target paired with the DFlash2 chain, omit
+`--quantization` or use `--quantization none`. Both Edge and native TRT built
+the pair on GB300 and matched the independent FP32 token IDs for chat and raw
+text. The Edge runtime selected DFlash decoding; native accepted 10 of 36
+proposals over six rounds on the raw request. The Edge verification count was
+not measured for this pair.
+
+For the signed INT4 target and DFlash2 chain, the standalone Edge
+exporter reproduced the packed-zero-point failure. On a GB300 the native
+fallback built and ran the original pair, with real draft proposals. Chat and
+raw output matched the independently decoded FP32 target token for token.
+This verifies native execution for those two requests, not Edge execution.
+
+### DFlash2 tree results on 0.12
+
+These are greedy, batch-1, TP1 chat and raw-text requests on GB300, using the
+same unquantized `z-lab/Qwen3.8-27B-DFlash2` draft. The independent target
+reference is specific to each checkpoint. A stock replay compares runtime
+paths; it is not a substitute for the independent reference.
+
+| Target | Edge route | Native TensorRT route |
+| --- | --- | --- |
+| `Qwen/Qwen3.8-27B` (original) | Exact FP32 tokens on both requests. Stock raw matched over four verification rounds. | Both requests matched FP32; 12 candidate tokens accepted in four raw rounds. |
+| `RadixArk/Qwen3.8-27B-NVFP4` (mixed) | Exact FP32 tokens on both requests. Stock raw matched over four verification rounds. | Chat exact; raw NED 0.21875 exceeds 0.15. Accepted 13 candidate tokens in three raw rounds. |
+| `RedHatAI/Qwen3.8-27B-INT4` (signed) | Not run: the same base exporter used by the chain fails on implicit zero points. | MC warned and selected native. Both requests matched FP32 exactly; 12 candidate tokens accepted in four raw rounds. |
+
+All five measured routes rejected stochastic decoding as required by this
+tree. On the original target, each tree also matched the ordinary target and
+chain on the same GPU for these requests. The ordinary models were separately
+compiled vision-capable bundles, not identical target engines.
+
+On the mixed target, the native tree and a separately compiled native ordinary
+target emitted identical raw tokens; the native chain matched FP32. The Edge
+chain and tree were measured on different GPUs. Neither comparison isolates a
+scheduler defect or establishes a speedup.
+
+## Previously executed Edge 0.11 configurations
 
 | Source checkpoint | Execution | Local build profile |
 | --- | --- | --- |
@@ -92,10 +213,9 @@ mapped interface, not additional locally executed model tests.
 
 DFlash2 uses Edge's public `dflash` mode. Paired builds invoke the official
 ONNX exporter and native engine builder for both engines. They include required
-embedding, selector/head, tokenizer, and prompt-template assets. Runtime
-verification uses size 8, drafting top-K 1/step 1, and DSpark scheduling off;
-the draft architecture selects the appropriate block semantics. DFlash2 DDTree
-is not supported. The mapped DSpark context range is 9–1024 tokens; DFlash2 is
+embedding, selector/head, tokenizer, and prompt-template assets. The `dflash` chain uses verification size 8 and drafting top-K 1.
+The **0.11 Edge runtime** does not support DFlash2 tree decoding. With the
+0.12 SDK, select `dflash_tree` for the greedy 32-node tree described above. The mapped DSpark context range is 9–1024 tokens; DFlash2 is
 9–4096, also bounded by source metadata.
 
 Ordinary builds map the official Python builder and native C++ runtime. TP2
@@ -139,8 +259,11 @@ do not qualify a full checkpoint or assert FP8 support on every GPU.
 An ordinary request does not enable speculative execution merely because its
 checkpoint contains draft weights. `--execution-variant mtp` maps to the native
 draft and verification graphs with three draft tokens and four verification
-positions. The ordinary native `--mtp-seq-len N` option keeps its requested count. That mapping and uniform projection loading have contract coverage,
-not full uniform-checkpoint MTP model qualification.
+positions. Without an execution variant, `--mtp-seq-len N` selects native MTP
+with the requested count; the ordinary Edge engine cannot verify draft tokens.
+Do not combine this option with an external draft. The mapping and uniform
+projection loading have contract coverage, not full uniform-checkpoint MTP
+model qualification.
 
 The existing chunked-prefill implementation remains available for compatible TP1
 text requests, including ordinary embedded-MTP requests. Explicit
@@ -223,8 +346,9 @@ Native DFlash2 uses an eight-row bidirectional draft with grouped dynamic
 convolution, a sliding attention window, and seven prediction rows. The inherited
 target LM head retains its exact quantization. A separate TensorRT selector uses
 the original predecessor/successor codebooks and FP32 conditional scoring over
-sixteen candidates. C++ proposal sampling and target verification preserve the
-requested sampling controls; rejected proposals never enter target state.
+sixteen candidates. The chain supports proposal sampling; the tree accepts only
+greedy decoding and scores children conditioned on their actual predecessor.
+On either path, rejected proposals never enter target state.
 
 The retained DFlash2 companion built natively at FP16/TP1/context-256 on SM120,
 using the already-validated mixed-NVFP4 target engine and identical target feature
@@ -318,7 +442,7 @@ results; no new calibration was performed. Broader workloads, contexts, and
 platforms remain unqualified. Unsupported requests fail explicitly rather than
 becoming ordinary text or a different parallelism.
 
-## Edge evidence and remaining limits
+## Edge 0.11 evidence and remaining limits
 
 All comparisons retain the owning NED **0.15** gate. Exact agreement with direct
 Edge is transport parity, not an independent quality result.
@@ -358,14 +482,14 @@ Tested source revisions:
 - DSpark: `b9a5dbdf03bc999c6c73c426b19c2d9041cea393`.
 - DFlash2: `50307d4c4cde6860d4eee73e2547cd786fe8e8a4`.
 
-Original-weight DFlash2 remains outside this adapter's current admission and
-has no executed result. Its initial admission decision used a 48 GiB device
+The 0.11 Edge adapter did not admit original-weight DFlash2 and has no
+executed result for that profile. See the 0.12 results above. Its initial admission decision used a 48 GiB device
 budget and roughly 57.6 GB of FP16 text/draft source weights, not an observed
 GPU OOM or measured engine allocation. Larger-memory devices are now available,
 so that historical budget is not a current hardware blocker or an intrinsic
 model restriction. The pinned ONNX builder rejects speculative TP greater than
 one; neither that constraint nor native integration controls qualify this
-currently unmapped profile.
+0.11 profile.
 
 The additional INT4 DFlash2 and uniform NVFP4/INT4-AWQ MTP mappings have not
 been validated with full prepared checkpoints. Their Edge mappings delegate to

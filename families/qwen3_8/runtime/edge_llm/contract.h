@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "trtmc/internal/config.h"
 #include "trtmc/task.h"
 
 #include <algorithm>
@@ -16,7 +17,11 @@
 
 namespace trtmc::qwen3_8::edge_llm {
 
+#ifdef TRTMC_QWEN38_EDGE_012
+inline constexpr const char* kRevision = "513dcd18291e587c80928911a480761352f3c2d8";
+#else
 inline constexpr const char* kRevision = "95515c2f87fba8982db5a519f9022277667b3cc9";
+#endif
 
 /// DSpark proposal length excludes the one additional verification token.
 inline bool valid_execution_variant(const std::string& variant, int block_size) {
@@ -58,7 +63,7 @@ inline void validate_capacity(int prompt_tokens, int input_limit, int capacity,
                               std::int64_t generated_tokens) {
     if (prompt_tokens <= 0 || prompt_tokens > input_limit || generated_tokens <= 0 ||
         generated_tokens > static_cast<std::int64_t>(capacity) - prompt_tokens)
-        throw std::invalid_argument("Qwen3.8 Edge prompt and generation exceed bundle capacity");
+        throw internal::ConfigError("Qwen3.8 Edge prompt and generation exceed bundle capacity");
 }
 
 /// Validate external normalized-float HWC images before multiplying dimensions or allocating.

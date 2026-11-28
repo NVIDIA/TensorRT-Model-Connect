@@ -22,6 +22,25 @@ when available; otherwise the installed SDK's Python tools are used. The C++
 SDK and plugin must match the executing TensorRT/CUDA installation. A Python
 wheel alone does not replace the native SDK.
 
+Edge-enabled Model Connect builds default to the 0.12.0 SDK. Choose the matching
+0.12 builder environment on the family command:
+
+```sh
+trtmc nemotron_omni build /path/to/Nemotron-Omni -o omni.bundle \
+  --task images_text_to_text --precision fp16 --quantization nvfp4 \
+  --max-sequence-length 4096 --edge-builder-python /path/to/edge-venv/bin/python
+```
+
+The selected interpreter must contain the 0.12.0 builder, its Transformers
+5.17.0 dependency, and the TensorRT version used by the installed C++ SDK.
+The interpreter may use the released wheel or a source installation. It is
+not necessary to replace Model Connect's own Transformers environment.
+For an audio or image/audio Edge build, install the official `builder` and
+`onnx` extras in that interpreter (for example,
+`python -m pip install 'tensorrt-edgellm[builder,onnx]==0.12.0'`).
+The matched native SDK must also provide `audio_build`. This flow does not
+quantize weights or require a new prepared checkpoint.
+
 Without a compatible SDK, the family builds native TensorRT graphs. Failed Edge
 preparation retains its diagnostic log, warns, and retries the unchanged native
 request once. Bundle-publication errors and inference errors do not silently
@@ -31,7 +50,7 @@ The native bundle contains language, image-patch, temporal-video-patch, visual
 encoder and acoustic encoder engines. Graph construction uses TensorRT Python;
 inference and preprocessing use the Model Connect C++ runtime, without ONNX or
 custom GPU kernels. The Edge bundle contains the official language/visual
-engines and their external checkpoint weights, so the original checkpoint
+engines, the acoustic engine when requested, and the external checkpoint weights, so the original checkpoint
 directory is not needed after publication. At runtime, Edge extracts these files
 into a temporary directory and removes it after the model is destroyed. Set
 `TMPDIR` to a disk-backed directory with space for the bundled engines and
@@ -43,10 +62,16 @@ RAM-backed `/tmp`.
 
 - Native: text, image, audio, real timestamped video, image/audio and audio/video
   inputs through the corresponding public Model Connect task interfaces.
-- Model Connect Edge 0.11.0 offload is limited to text/image tasks. Audio and
-  typed-video task builds select the complete native implementation directly,
-  before attempting Edge preparation; they do not wait for a command failure.
-- `--task audio_video_text_to_text` selects a native bundle with all six native
+- Edge 0.11.0 offloads text and image only. With the 0.12.0 SDK,
+  text and image use the direct builder. For `audio_text_to_text` or
+  `image_audio_text_to_text`, an ONNX-enabled SDK and matching Edge exporter
+  add an acoustic engine: only audio goes through the official ONNX export
+  and `audio_build`. Language and vision still use the direct builder. If
+  the SDK does not include that tool, these tasks select native.
+- Video and aligned audio/video select native before attempting Edge. The
+  adapter does not replace videos with still images or discard the audio.
+- `--task audio_video_text_to_text`
+  selects a native bundle with all six native
   task bindings. FP32 computation also selects native; FP16 is the exercised
   full-model profile. Source prepared quantization remains unchanged.
 - One request and one device; tensor/context parallelism and speculative modes
@@ -82,13 +107,12 @@ Mamba gating precision, their distances were approximately 0.445, 0.825 and
 0.517. Those accuracy-only failures remain runnable and recorded; they are not
 reclassified as passing descriptions.
 
-The owning E2E now uses human-reviewed factual questions for those three cases:
+The first revision of the owning E2E used factual questions for those three cases:
 vase colors in image order, road direction, and vase colors plus verbatim speech.
 Their golden answers were regenerated with the same pinned independent vLLM
 reference before executing Model Connect, and checked against the unchanged
-fixtures. Text, audio and audio/video questions and goldens are unchanged, as
-are all six modality routes, decoding settings and the 0.15 threshold. A replay
-using the corrected native decoder and retained media plans passes all six:
+fixtures. That revision left the text, audio and audio/video questions unchanged.
+A replay using the corrected native decoder and retained media plans passed all six:
 text/image/audio/video match exactly, image/audio has distance 0.0137, and
 audio/video 0.0566. This is scoped grounding/transcription evidence, not proof of
 free-form caption equivalence or a fresh full-builder run of every source change.
@@ -99,7 +123,7 @@ Transformers 5.2 dependency. The public Model Connect Edge build also succeeds,
 and both text and image tasks executed using an actual Edge-backed bundle.
 Text matched the original reference exactly; the original free-form image case
 exceeded the same 0.15 gate (approximately 0.735) and remains runnable. The revised
-factual image question has not been rerun through Edge. A separate prompt-only
+factual image question was not rerun through the 0.11 Edge adapter. A separate prompt-only
 diagnostic matched all six original native prompt token sequences against the
 saved independent reference, including media placeholder counts. That rules out
 prompt formation on those inputs, not numerical media-feature or decoder
@@ -115,7 +139,38 @@ The interpolation semantics and numerical gates remain unchanged pending
 model-owner confirmation of the authoritative contract. Original free-form
 outputs and their failures remain recorded alongside the revised factual tests.
 
-The direct official Edge builder completed language, visual and audio engines.
+On the 0.12 SDK, a public FP16/B1/TP1 build of the pinned NVFP4
+checkpoint at context 4096 produced language, visual and audio engines. On
+Blackwell SM103, text and the factual image prompt both matched the independent
+reference token for token. In the same run, the audio encoder failed to enqueue
+in TensorRT for every request containing audio. Real video frames encoded, but
+the Edge runtime rejected the number of media placeholders. These are command
+failures, not low accuracy scores. The family does not use this direct acoustic
+engine and leaves timestamped video on native TensorRT.
+
+The released 0.12 runner reproduced the video and acoustic command errors in
+fresh processes using those same engines; its image output matched Model
+Connect. Refitting the original acoustic plan with the checkpoint weights and
+calling TensorRT directly reproduced the enqueue error. Rebuilding only audio
+through the release ONNX exporter and `audio_build` gave exact audio and
+image/audio answers in the released runner using the same language and vision
+engines. Through the public Model Connect build and C++ runtime, an
+`image_audio_text_to_text` bundle using that same build flow then matched all
+independent text, image, audio, and image/audio reference token IDs (NED 0 on
+each). The consumer had no original checkpoint mounted. A separate text/image
+bundle also passed the seeded nucleus-sampling check.
+
+A separate, complete native TensorRT build ran all six tasks. Text,
+image, audio and video matched the independent token IDs. Image/audio passed
+(NED 0.0137); aligned audio/video generated a response but missed the 0.15
+gate (NED 0.1887) on the original free-form description and transcription prompt.
+A single-request replay and the unmodified native runtime on the same bundle
+returned the same tokens. [The updated native fixture](https://github.com/NVIDIA/TensorRT-Model-Connect/pull/2633)
+asks for the road direction and verbatim speech on two lines. It uses the same
+media, decoding settings and 0.15 gate. The earlier result does not score that
+new question; neither result measures the Edge acoustic engine.
+
+The **0.11** direct official Edge builder completed language, visual and audio engines.
 Against the independent provider-documented vLLM 0.20.0 reference, text matched
 exactly. The image command completed but exceeded the unchanged normalized
 edit-distance limit of 0.15. That accuracy-only failure remains runnable.

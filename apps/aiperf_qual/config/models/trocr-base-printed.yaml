@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A single-line printed-text OCR model with no prompt input: OCRBench's text-recognition crops, the image alone.
+absolute: [{name: ocrbench_text, request: {prompt: ""}}]  # the image alone: the request still carries the empty prompt
+
+reference:
+  adapter: families/trocr/reference/adapter.py  # a vision encoder-decoder: no chat template or image-text-to-text class
+# Perf times the first text-recognition crop: the catalog testcases are not a request the catalog payload can build
+# (an empty prompt, images under another key, or several images).
+performance: {suite: {from_benchmark: ocrbench-text}}

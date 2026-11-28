@@ -4,6 +4,7 @@
  */
 #include "families/molmo2/runtime/preprocess.h"
 #include "families/molmo2/runtime/tokenizer.h"
+#include "trtmc/internal/config.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
@@ -159,7 +160,7 @@ class Pipeline final : public ITextGeneration, public IVisionLanguageGeneration 
     void validate_length(std::size_t size, int generated) const {
         if (size == 0 ||
             size + static_cast<std::size_t>(generated) > static_cast<std::size_t>(max_length_))
-            throw std::invalid_argument(
+            throw internal::ConfigError(
                 "Molmo2 prompt plus max_new_tokens exceeds the bundle sequence limit");
     }
     std::size_t cache_capacity() const {

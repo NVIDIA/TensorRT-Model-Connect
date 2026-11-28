@@ -12,10 +12,14 @@ from .config import ModelConfig
 from .processing import validate_processing
 from .support import SUPPORTED_TASKS
 
+# Formats of `quantization.py`, kept here so this module imports without TensorRT.
+QUANTIZATIONS = ("fp8",)
+
 DEFAULT_CAPACITY = 2048
 
 
-def _engine(builder, network, precision: str, profiles, verbose: bool, label: str):
+def _engine(builder, network, precision: str, profiles, verbose: bool, label: str,
+            quantization=None):
     import tensorrt as trt
 
     config = builder.create_builder_config()
@@ -30,6 +34,8 @@ def _engine(builder, network, precision: str, profiles, verbose: bool, label: st
         config.add_optimization_profile(profile)
     if verbose:
         config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+    if quantization is not None:
+        quantization.configure(config)
     plan = builder.build_serialized_network(network, config)
     if plan is None:
         raise RuntimeError(f"Gemma 3n {label} engine build failed")
@@ -78,8 +84,11 @@ def build(request, writer):
             raise NotImplementedError(f"gemma3n does not support {name}")
     if request.dynamic_kv_cache:
         raise NotImplementedError("gemma3n does not support dynamic_kv_cache")
-    if request.quantization not in (None, "none"):
-        raise NotImplementedError("gemma3n builds the unquantized checkpoint only")
+    quantization = request.quantization or "none"
+    if quantization not in ("none", *QUANTIZATIONS):
+        raise ValueError(f"gemma3n quantization must be none or one of {', '.join(QUANTIZATIONS)}")
+    if quantization != "none" and precision != "bf16":
+        raise ValueError("gemma3n quantization builds a BF16 decoder; use --precision bf16")
 
     root = Path(request.model_dir)
     config = ModelConfig.from_dir(root)
@@ -98,6 +107,11 @@ def build(request, writer):
     from .vision_graph import IMAGE_SIZE, VisionGraph
 
     checkpoint = Checkpoint(root)
+    decoder_quantization = None
+    if quantization != "none":
+        from .quantization import decoder_quantization as recipe
+
+        decoder_quantization = recipe(config.text, checkpoint, quantization)
     logger = trt.Logger(trt.Logger.VERBOSE if request.verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     flags = 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
@@ -114,10 +128,10 @@ def build(request, writer):
 
     network = builder.create_network(flags)
     graph_builder = Builder(network, precision, checkpoint)
-    TextGraph(graph_builder, config, capacity).build()
+    TextGraph(graph_builder, config, capacity, decoder_quantization).build()
     decoder_plan = _engine(builder, network, precision, _decoder_profiles(config, capacity),
-                           request.verbose, "decoder")
-    del network, graph_builder
+                           request.verbose, "decoder", decoder_quantization)
+    del network, graph_builder, decoder_quantization
 
     writer.set_header(family="gemma3n", task=request.task, backend=request.backend)
     writer.add_bytes("vision.plan", memoryview(vision_plan))

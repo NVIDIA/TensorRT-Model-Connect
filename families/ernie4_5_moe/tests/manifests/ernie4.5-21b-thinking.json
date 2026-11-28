@@ -1,0 +1,22 @@
+{
+  "name": "ernie4.5-21b-thinking",
+  "hf_id": "baidu/ERNIE-4.5-21B-A3B-Thinking",
+  "hf_revision": "4341bb42644d5422859509fa25d41544c57181f8",
+  "bundle": "ernie4.5-21b-thinking.bundle",
+  "family": "ernie4_5_moe",
+  "task": "text_continuation",
+  "precision": "fp32",
+  "max_sequence_length": 128,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "ernie4.5-21b-thinking",
+      "premerge": true,
+      "max_new_tokens": 16,
+      "prompts": [
+        "def add(a, b):\n    return",
+        "中国的首都是"
+      ]
+    }
+  ]
+}

@@ -2,8 +2,8 @@
 title: Gemma4 with Edge-LLM
 ---
 
-Gemma uses the Edge-LLM SDK selected when Model Connect is built. The default
-is 0.11.0; opt in to 0.12.0 with `-DTRTMC_EDGELLM_RELEASE=0.12.0`. Standalone
+Gemma uses the Edge-LLM SDK selected when Model Connect is built. Enabling Edge
+selects 0.12.0 by default. Standalone
 builds can include the checkpoint's image or audio towers. Speculative builds
 are text-only and require the matching local draft checkpoint.
 

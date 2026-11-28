@@ -181,6 +181,18 @@ struct MasksStorage final : ResultStorage {
     std::vector<trtmc_mask_proposal_v1> proposals;
     trtmc_masks_view_v1 view{};
 };
+struct AlphaMatteStorage final : ResultStorage {
+    explicit AlphaMatteStorage(internal::AlphaMatteResult result) : value(std::move(result)) {
+        view = {matrix_result_view(value.alpha)};
+        valid_output(value.alpha.rows > 0 && value.alpha.columns > 0,
+                     "alpha matte must be nonempty");
+        for (const float alpha : value.alpha.values)
+            valid_output(std::isfinite(alpha) && alpha >= 0 && alpha <= 1,
+                         "invalid alpha opacity value");
+    }
+    internal::AlphaMatteResult value;
+    trtmc_alpha_matte_view_v1 view{};
+};
 struct DisparityStorage final : ResultStorage {
     explicit DisparityStorage(internal::DisparityResult result)
         : value(std::move(result)), view{matrix_result_view(value.disparity)} {}
@@ -528,6 +540,23 @@ TRTMC_PERCEPTION_RUN(exemplar_masks, IImageBoxExemplarsToInstanceMasks, MasksSto
                                             string_view(in.text_hint)},
                                            options);
                      })
+TRTMC_PERCEPTION_RUN(
+    matting, IImageTrimapToAlpha, AlphaMatteStorage, trtmc_image_trimap_request_v1, {
+        const auto image = image_input(in.image);
+        const auto states = checked_span(in.trimap.states, in.trimap.count);
+        require(in.trimap.height == image.height && in.trimap.width == image.width &&
+                    states.size() == image_area(image.height, image.width),
+                "trimap must align with original image");
+        const auto input = (internal::ImageTrimapToAlphaRequest{
+            image, {states, in.trimap.height, in.trimap.width}});
+        family.validate_request(input, options);
+        for (const auto state : states)
+            require(state <= TRTMC_TRIMAP_FOREGROUND, "invalid categorical trimap state");
+        auto result = family.run(input, options);
+        valid_output(result.alpha.rows == image.height && result.alpha.columns == image.width,
+                     "alpha matte must retain original image dimensions");
+        return result;
+    })
 TRTMC_PERCEPTION_RUN(stereo, IStereoImagesToDisparity, DisparityStorage,
                      trtmc_stereo_images_request_v1, {
                          auto left = image_input(in.left);
@@ -616,6 +645,8 @@ TRTMC_PERCEPTION_TABLE(text_masks_api, trtmc_image_text_to_instance_masks_api_v1
                        MasksStorage, trtmc_masks_view_v1)
 TRTMC_PERCEPTION_TABLE(exemplars_api, trtmc_image_box_exemplars_to_instance_masks_api_v1,
                        exemplar_masks, MasksStorage, trtmc_masks_view_v1)
+TRTMC_PERCEPTION_TABLE(matting_api, trtmc_image_trimap_to_alpha_api_v1, matting, AlphaMatteStorage,
+                       trtmc_alpha_matte_view_v1)
 TRTMC_PERCEPTION_TABLE(stereo_api, trtmc_stereo_images_to_disparity_api_v1, stereo,
                        DisparityStorage, trtmc_disparity_view_v1)
 TRTMC_PERCEPTION_TABLE(geometry_api, trtmc_image_to_metric_geometry_api_v1, geometry,
@@ -710,6 +741,7 @@ Span<const TaskBinding> perception_task_bindings() noexcept {
                                            B(IImageToMaskProposals, proposals_api),
                                            B(IImageTextToInstanceMasks, text_masks_api),
                                            B(IImageBoxExemplarsToInstanceMasks, exemplars_api),
+                                           B(IImageTrimapToAlpha, matting_api),
                                            B(IStereoImagesToDisparity, stereo_api),
                                            B(IImageToMetricGeometry, geometry_api),
                                            B(IImageToBoxes, detected_boxes_api),

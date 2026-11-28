@@ -83,14 +83,14 @@ def test_capacity_limits_name_gpu_architectures():
             capacity_limits("p", bad)
 
 
-def test_27b_profiles_declare_the_thor_capacity_limit_and_quantized_variants_do_not_inherit_it():
+def test_only_gemma_27b_declares_the_thor_capacity_limit():
     from trtmc_aiperf_qual.models import resolve_model
 
     environment = Environment({"repo": str(REPOSITORY)})
-    for profile in ("gemma-3-27b", "qwen36-27b", "qwen38-27b"):
-        limits = resolve_model(profile, environment)["capacity_limits"]
-        assert set(limits) == {"sm110"} and "#2189" in limits["sm110"]
-    for profile in ("qwen38-27b-fp8", "qwen38-27b-nvfp4"):
+    limits = resolve_model("gemma-3-27b", environment)["capacity_limits"]
+    assert set(limits) == {"sm110"} and "#2189" in limits["sm110"]
+    # The Qwen 27B FP16 bundles build a single prefill engine that also decodes, which fits Thor.
+    for profile in ("qwen36-27b", "qwen38-27b", "qwen38-27b-fp8", "qwen38-27b-nvfp4"):
         assert "capacity_limits" not in resolve_model(profile, environment)
 
 

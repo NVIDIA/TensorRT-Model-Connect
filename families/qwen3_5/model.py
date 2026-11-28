@@ -547,12 +547,11 @@ class _Qwen35Model:
         chunked delta rule and attention over the cache plus the chunk. Its
         logits come from the last row; present K/V cover all rows and the
         recurrent outputs hold the state after the last row. Decoding stays on
-        the one-token engine.
+        the one-token engine. With ``media_inputs`` every row takes its own
+        visual row, selector and MRoPE offsets.
         """
-        if prefill_rows is not None and (media_inputs or export_hidden_state or feature_layers):
-            raise NotImplementedError(
-                "Qwen3.5 prefill engines are text-only without MTP or draft features"
-            )
+        if prefill_rows is not None and (export_hidden_state or feature_layers):
+            raise NotImplementedError("Qwen3.5 prefill engines have no MTP or draft features")
         if prefill_rows is not None and not 1 <= prefill_rows <= PREFILL_MAX_TOKENS:
             raise ValueError(f"Qwen3.5 prefill_rows must be in 1..{PREFILL_MAX_TOKENS}")
         hidden = config.hidden_size
@@ -624,6 +623,7 @@ class _Qwen35Model:
         attention_mask = network.add_input(
             "attention_mask", trt.float32, (row_dim, -1 if prefill_rows else attention_window)
         )
+        profile = None
         if prefill_rows:
             max_rows = min(prefill_rows, max_cache_length)
             opt_rows = min(PREFILL_OPT_TOKENS, max_rows)
@@ -636,7 +636,6 @@ class _Qwen35Model:
                 (opt_rows, max_cache_length + opt_rows),
                 (max_rows, max_cache_length + max_rows),
             )
-            trt_config.add_optimization_profile(profile)
 
         # DeltaNet state inputs (conv + ssm per DeltaNet layer)
         conv_state_inputs = []
@@ -726,7 +725,25 @@ class _Qwen35Model:
         )
 
         rotary_position = position_id
-        if media_inputs:
+        if media_inputs and prefill_rows:
+            from .vision import add_mrope_prompt_rows
+            offsets = network.add_input("rotary_position_offsets", trt.int32, (-1, 3))
+            profile.set_shape("rotary_position_offsets", (1, 3), (opt_rows, 3), (max_rows, 3))
+            column = network.add_shuffle(position_id)
+            column.reshape_dims = (-1, 1)
+            coordinates = network.add_elementwise(
+                column.get_output(0), offsets, trt.ElementWiseOperation.SUM).get_output(0)
+            text = config.raw.get("text_config", config.raw)
+            rope = text.get("rope_parameters") or text.get("rope_scaling") or {}
+            cos_half_tensor, sin_half_tensor = add_mrope_prompt_rows(
+                network, cos_half_tensor, sin_half_tensor, coordinates,
+                rope, rotary_embedding_dim // 2, work_np_dtype,
+            )
+            # Row i of the per-row tables belongs to row i: positions relative to the first row.
+            first = network.add_slice(position_id, (0,), (1,), (1,)).get_output(0)
+            rotary_position = network.add_elementwise(
+                position_id, first, trt.ElementWiseOperation.SUB).get_output(0)
+        elif media_inputs:
             from .vision import add_mrope_rows
             offsets = network.add_input("rotary_position_offsets", trt.int32, (3,))
             coordinates = network.add_elementwise(position_id, offsets, trt.ElementWiseOperation.SUM).get_output(0)
@@ -742,10 +759,15 @@ class _Qwen35Model:
         gather = network.add_gather(embedding_table, token_id, 0)
         hidden_state = gather.get_output(0)
         if media_inputs:
-            visual = network.add_input("visual_embedding", work_trt_dtype, (1, hidden))
-            selector = network.add_input("use_visual_embedding", trt.int32, (1, 1))
+            visual = network.add_input("visual_embedding", work_trt_dtype, (row_dim, hidden))
+            selector = network.add_input("use_visual_embedding", trt.int32, (row_dim, 1))
+            if prefill_rows:
+                profile.set_shape("visual_embedding", (1, hidden), (opt_rows, hidden), (max_rows, hidden))
+                profile.set_shape("use_visual_embedding", (1, 1), (opt_rows, 1), (max_rows, 1))
             use_visual = network.add_cast(selector, trt.bool).get_output(0)
             hidden_state = network.add_select(use_visual, visual, hidden_state).get_output(0)
+        if profile is not None:
+            trt_config.add_optimization_profile(profile)
         hidden_state = broadcast_from_rank0(network, hidden_state, weights)
 
         if debug_layer_outputs:
@@ -2069,17 +2091,16 @@ def _add_deltanet_mixer_rows(
     conv_w = graph_ops.add_constant(
         network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"], dtype=dtype
     )
-    conv_columns, present_conv = deltanet_rows.add_short_conv_rows(
+    conv_rows, present_conv = deltanet_rows.add_short_conv_rows(
         network,
-        columns=shuffle(qkv, transpose=(1, 0)),
+        inputs=qkv,
         conv_state=conv_state_in,
         weight=conv_w,
         channels=conv_dim,
         kernel=d_conv,
     )
     conv_out = graph_ops.add_bias_sum(
-        network, shuffle(conv_columns, transpose=(1, 0)), conv_dim,
-        weights[f"{prefix}.conv1d_bias"], dtype=dtype,
+        network, conv_rows, conv_dim, weights[f"{prefix}.conv1d_bias"], dtype=dtype,
     )
     activated = graph_ops.add_activation(network, conv_out, "silu", dtype=dtype)
     rows = deltanet_rows.row_count(network, activated)
@@ -2193,6 +2214,54 @@ def _add_media_attention(network, q, k, v, mask, num_heads, kv_heads, head_dim, 
     return reshape(cast(context, work_dtype), (1, num_heads * head_dim))
 
 
+def _add_media_attention_rows(network, q, k, v, mask, num_heads, kv_heads, head_dim):
+    """Grouped attention of ``S`` media prompt rows over the cache plus their own rows (prefill).
+
+    The arithmetic of :func:`_add_media_attention` (compute-dtype Q pre-scale, FP32 scores and softmax,
+    FP32 context) for the per-row MRoPE tables of a prefill chunk. ``mask`` is ``[S, cache + S]`` and holds
+    the causal prefix of every row.
+    """
+    def reshape(tensor, shape):
+        layer = network.add_shuffle(tensor)
+        layer.reshape_dims = shape
+        return layer.get_output(0)
+
+    def transpose(tensor, order):
+        layer = network.add_shuffle(tensor)
+        layer.first_transpose = order
+        return layer.get_output(0)
+
+    def cast(tensor, dtype):
+        return tensor if tensor.dtype == dtype else network.add_cast(tensor, dtype).get_output(0)
+
+    work_dtype = q.dtype
+    groups = num_heads // kv_heads
+    scale = graph_ops.add_constant(network, (1, 1, 1), np.array([[[head_dim ** -0.5]]], np.float32))
+    queries = network.add_elementwise(reshape(q, (-1, num_heads, head_dim)), cast(scale, work_dtype),
+                                      trt.ElementWiseOperation.PROD).get_output(0)
+    # [S, H, D] -> [kv, g, S, D]; keys/values [W, kv, D] -> [kv, 1, W, D].
+    queries = transpose(reshape(queries, (-1, kv_heads, groups, head_dim)), (1, 2, 0, 3))
+    keys = transpose(reshape(k, (-1, kv_heads, 1, head_dim)), (1, 2, 0, 3))
+    values = transpose(reshape(v, (-1, kv_heads, 1, head_dim)), (1, 2, 0, 3))
+    scores = network.add_matrix_multiply(cast(queries, trt.float32), trt.MatrixOperation.NONE,
+                                         cast(keys, trt.float32), trt.MatrixOperation.TRANSPOSE).get_output(0)
+    # [S, W] -> [1, 1, S, W]: both sizes are runtime dimensions.
+    mask_shape = network.add_concatenation([
+        graph_ops.add_constant(network, (2,), np.ones(2, np.int64), dtype=np.int64),
+        network.add_shape(mask).get_output(0),
+    ]).get_output(0)
+    mask_4d = network.add_shuffle(cast(mask, trt.float32))
+    mask_4d.set_input(1, mask_shape)
+    scores = network.add_elementwise(scores, mask_4d.get_output(0), trt.ElementWiseOperation.SUM).get_output(0)
+    softmax = network.add_softmax(scores)
+    softmax.axes = 1 << 3
+    probabilities = cast(softmax.get_output(0), work_dtype)
+    context = network.add_matrix_multiply(cast(probabilities, trt.float32), trt.MatrixOperation.NONE,
+                                          cast(values, trt.float32), trt.MatrixOperation.NONE).get_output(0)
+    # [kv, g, S, D] -> [S, kv, g, D] -> [S, H * D]
+    return reshape(transpose(cast(context, work_dtype), (2, 0, 1, 3)), (-1, num_heads * head_dim))
+
+
 def _add_full_attention_layer(
     *,
     network: trt.INetworkDefinition,
@@ -2233,8 +2302,6 @@ def _add_full_attention_layer(
 
     Returns: {hidden, present_k, present_v}
     """
-    if sequence_length is None and media_attention:
-        raise NotImplementedError("Qwen3.5 media attention runs one row per launch")
     attention_window = max_cache_length + 1
     rows = -1 if sequence_length is None else sequence_length
     kv_rows = None if sequence_length is None else max_cache_length + sequence_length
@@ -2322,7 +2389,10 @@ def _add_full_attention_layer(
     all_v.axis = 0
 
     mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
-    if media_attention:
+    if media_attention and sequence_length is None:
+        context_flat = _add_media_attention_rows(network, q, all_k.get_output(0), all_v.get_output(0),
+                                                 attention_mask, num_heads, num_kv_heads, head_dim)
+    elif media_attention:
         context_flat = _add_media_attention(network, q, all_k.get_output(0), all_v.get_output(0),
                                             mask_4d, num_heads, num_kv_heads, head_dim, attention_window)
     else:
@@ -2460,25 +2530,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 _TWO_ENGINE_MEMORY_FRACTION = 0.8
 
 
-def _two_engines_fit(weight_bytes: int, gpu_bytes: int | None) -> bool:
-    """Whether the prefill engine, which carries its own copy of every weight, fits beside the decode engine.
+def _require_two_engines_fit(engine_bytes: int, gpu_bytes: int | None) -> None:
+    """Fail the build when the prefill engine does not fit beside the decode engine.
 
-    Without it, prompts run through the decode engine one token at a time (the bundle stays loadable). An
-    unknown GPU capacity keeps that single-engine layout, which every earlier bundle had.
+    ``engine_bytes`` is the serialized decode engine; the prefill engine carries the same weights. Prompts never
+    fall back to the decode engine one token at a time to save memory. An unknown GPU capacity builds both engines.
     """
-    if gpu_bytes is None:
-        print("Skipping the prefill engine: the GPU memory could not be queried", file=sys.stderr)
-        return False
-    if 2 * weight_bytes <= gpu_bytes * _TWO_ENGINE_MEMORY_FRACTION:
-        return True
-    print(f"Skipping the prefill engine: the decode and prefill engines need about {2 * weight_bytes / 1024**3:.0f} "
-          f"GiB of weights and the GPU has {gpu_bytes / 1024**3:.0f} GiB; prompts run through the decode engine",
-          file=sys.stderr)
-    return False
-
-
-def _host_weight_bytes(weights) -> int:
-    return sum(value.nbytes for value in weights.values() if isinstance(value, np.ndarray))
+    if gpu_bytes is None or 2 * engine_bytes <= gpu_bytes * _TWO_ENGINE_MEMORY_FRACTION:
+        return
+    raise ValueError(
+        f"qwen3_5: the decode and prefill engines need about {2 * engine_bytes / 1024**3:.0f} GiB "
+        f"and the GPU has {gpu_bytes / 1024**3:.0f} GiB; use a GPU with more memory or a smaller checkpoint")
 
 
 def _gpu_memory_bytes() -> int | None:
@@ -2613,14 +2675,11 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
         return
     if require_mtp:
         model._load_mtp_weights(readers, weights, config)
-    # Text-only bundles add an engine that prefills the prompt in multi-token chunks.
-    # TensorRT 11.4 cannot lower NVFP4 dynamic activation quantization over a
-    # runtime row count, so NVFP4 bundles keep the token loop.
-    nvfp4 = quantization == "nvfp4" or getattr(quant_ctx, "has_nvfp4_weights", False)
-    split = (not visual and not require_mtp and draft_config is None and not nvfp4
-             and _two_engines_fit(_host_weight_bytes(weights), _gpu_memory_bytes()))
+    # Single-GPU bundles without MTP or a draft add an engine that prefills the prompt in multi-token chunks,
+    # media rows included.
+    split = not require_mtp and draft_config is None
     # Stage the target before building the other engines; do not retain its serialized bytes.
-    writer.add_bytes("engine.plan", model.build_engine(
+    target = model.build_engine(
         config,
         weights,
         max_sequence_length,
@@ -2631,11 +2690,17 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
         quant_ctx=quant_ctx,
         export_hidden_state=require_mtp,
         feature_layers=() if draft_config is None else draft_config.feature_layers,
-    ))
+    )
+    target_bytes = target.nbytes
+    writer.add_bytes("engine.plan", target)
+    del target
     if split:
+        # Measured on the built target rather than estimated from host weights, whose storage differs from the
+        # engine's (FP32 host copies, quantized payloads held outside the weight dict).
+        _require_two_engines_fit(target_bytes, _gpu_memory_bytes())
         writer.add_bytes("prefill.plan", model.build_engine(
             config, weights, max_sequence_length, precision=precision,
-            verbose=bool(request.verbose), quant_ctx=quant_ctx,
+            verbose=bool(request.verbose), quant_ctx=quant_ctx, media_inputs=visual,
             prefill_rows=PREFILL_MAX_TOKENS,
         ))
     if require_mtp:

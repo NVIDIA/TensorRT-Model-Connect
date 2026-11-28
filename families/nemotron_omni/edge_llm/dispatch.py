@@ -22,9 +22,8 @@ def build(request, writer, native, capacity: int):
     compiled architectures; all other targets retain pure TensorRT construction.
     Inference never silently retries a failed Edge request on another backend.
     """
-    # Edge 0.11 typed video fails placeholder admission; acoustic execution can
-    # fail in TensorRT CASK6. Those task bundles must use the complete native
-    # implementation, not hide a command failure or substitute a text-only path.
+    # Release video placeholder admission fails for real timestamped inputs.
+    # Never disguise a video as images or drop audio from an aligned request.
     edge_tasks = {
         "text_generation",
         "vision_language_generation",
@@ -32,7 +31,7 @@ def build(request, writer, native, capacity: int):
         "images_text_to_text",
     }
     if (
-        request.task not in edge_tasks
+        request.task not in edge_tasks | builder.ACOUSTIC_TASKS
         or request.precision.lower() != "fp16"
         or sys.platform != "linux"
         or not builder.package_present()
@@ -50,7 +49,15 @@ def build(request, writer, native, capacity: int):
     ) as directory:
         try:
             target = builder.local_target()
-            files, marker = builder.prepare(request, target, Path(directory), log_path, capacity)
+            acoustic = request.task in builder.ACOUSTIC_TASKS
+            package = builder.installed_package(target, acoustic=acoustic)
+            eligible = not acoustic or (
+                package["version"] == "0.12.0" and package.get("onnx") is True
+            )
+            if eligible:
+                files, marker = builder.prepare(
+                    request, target, Path(directory), log_path, capacity, package
+                )
         except Exception as error:
             failure = error
             with log_path.open("a", encoding="utf-8") as log:
@@ -67,9 +74,11 @@ def build(request, writer, native, capacity: int):
             raise
         else:
             # Do not put publication inside the preparation try block.
-            builder.publish(request, writer, files, marker)
+            if eligible:
+                builder.publish(request, writer, files, marker)
+                log_path.unlink()
+                return
             log_path.unlink()
-            return
     try:
         native(request, writer)
     except Exception as error:

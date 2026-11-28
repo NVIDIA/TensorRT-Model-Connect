@@ -257,7 +257,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
     )
     prefix, rest = template.split("<image>")
     between, suffix = rest.split(sentinel)
-    for index, question in enumerate(case["questions"]):
+    for index, question in enumerate([case["prompt"], *case["questions"]]):
         text = processor.apply_chat_template(
             [dict(role="user", content=[dict(type="image"), dict(type="text", text=question)])],
             add_generation_prompt=True,
@@ -344,7 +344,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
     record_evidence(
         "thresholds", {"token_ids": "exact equality", "text": "exact equality", "pixel_atol": 2e-7}
     )
-    for sample_index, question in enumerate(case["questions"]):
+    for sample_index, question in enumerate([case["prompt"], *case["questions"]]):
         record_evidence("inputs", {"question": question})
         prompt = processor.apply_chat_template(
             [dict(role="user", content=[dict(type="image"), dict(type="text", text=question)])],

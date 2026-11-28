@@ -8,6 +8,8 @@
 // Host-side generation budget for the dense InternVL KV cache. Kept free of
 // CUDA and TensorRT so it can be tested on its own.
 
+#include "trtmc/internal/config.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <stdexcept>
@@ -25,7 +27,7 @@ inline int32_t generation_budget(int32_t prompt_tokens, int32_t requested_new_to
     if (cache_length <= 0)
         return requested_new_tokens;
     if (prompt_tokens >= cache_length) {
-        throw std::invalid_argument(
+        throw internal::ConfigError(
             "InternVL prompt needs " + std::to_string(prompt_tokens) +
             " tokens, which exceeds the bundle's KV cache length of " +
             std::to_string(cache_length) +

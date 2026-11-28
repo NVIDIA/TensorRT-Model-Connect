@@ -5,6 +5,7 @@
 #include "families/laya/runtime/record.h"
 
 #include "families/laya/runtime/unicode.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <cctype>
@@ -214,7 +215,7 @@ std::vector<Question> encode_record(const ITokenizer& tok, const Json& record, c
         if (ids.size() > max_len)
             ids.resize(max_len);
         if (encoded.markers.back() >= static_cast<std::int32_t>(max_len))
-            throw std::invalid_argument("question options exceed the Laya token budget");
+            throw internal::ConfigError("question options exceed the Laya token budget");
         result.push_back(std::move(encoded));
     }
     return result;

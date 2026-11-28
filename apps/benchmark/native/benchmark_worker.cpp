@@ -2896,10 +2896,25 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
             observe_video);
     }
     if (initial) {
-        // The frame count is fixed by the bundle; a stated one must be what it produced.
-        const auto expected = request.value("num_frames", std::int64_t{0});
+        // The frame count is fixed by the bundle; a stated one must be what it produced. So is the
+        // frame size of a Task that declares no height or width config (Stable Video Diffusion).
         const auto task = task_for_operation<trtmc::InitialImageTextToVideo>(model, task_id);
-        const auto config = sdk_config(request, task.config_fields(),
+        const auto fields = task.config_fields();
+        const auto declares = [&](std::string_view name) {
+            return std::any_of(fields.begin(), fields.end(),
+                               [&](const auto& field) { return field.name == name; });
+        };
+        const bool fixed_size = !declares("height") && !declares("width");
+        Json inputs = request;
+        std::vector<std::pair<std::string, std::int64_t>> expected{
+            {"num_frames", request.value("num_frames", std::int64_t{0})}};
+        if (fixed_size)
+            for (const char* name : {"height", "width"})
+                if (inputs.contains(name)) {
+                    expected.emplace_back(name, inputs.at(name).get<std::int64_t>());
+                    inputs.erase(name);
+                }
+        const auto config = sdk_config(inputs, fields,
                                        {"prompt", "image_path", "image_paths", "num_frames",
                                         "batch_size", "media_type", "_artifact_prefix"});
         return run(
@@ -2910,8 +2925,10 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
             },
             [&](const trtmc::VideoGenerationResult& result) {
                 auto output = observe_video(result);
-                if (expected > 0 && output.at("num_frames").get<std::int64_t>() != expected)
-                    throw std::runtime_error("generated video does not have the stated num_frames");
+                for (const auto& [name, value] : expected)
+                    if (value > 0 && output.at(name).get<std::int64_t>() != value)
+                        throw std::runtime_error("generated video does not have the stated " +
+                                                 name);
                 return output;
             });
     }
@@ -3991,7 +4008,21 @@ Json run_generate(const trtmc::Model& model, const Json& request, const Timing& 
     const std::string prompt = request.at("prompt").get<std::string>();
     if (request.contains("image_path")) {
         const auto task = task_for_operation<trtmc::ImagesTextToText>(model, task_id);
-        const auto config = sdk_config(request, task.config_fields(), {"prompt", "image_path"});
+        const auto fields = task.config_fields();
+        // An image-text runtime that always applies its own chat template declares no
+        // use_chat_template. The serving chat route states it as true, which such a runtime
+        // honours by construction; false asks for a raw prompt it cannot take.
+        const bool templated = std::none_of(fields.begin(), fields.end(), [](const auto& field) {
+            return field.name == "use_chat_template";
+        });
+        if (templated && request.contains("use_chat_template") &&
+            !request.at("use_chat_template").get<bool>())
+            throw std::invalid_argument(
+                "the selected image-text Task always applies its chat template; "
+                "use_chat_template false is not supported");
+        const auto config =
+            templated ? sdk_config(request, fields, {"prompt", "image_path", "use_chat_template"})
+                      : sdk_config(request, fields, {"prompt", "image_path"});
         const auto path = request.at("image_path").get<std::string>();
         std::optional<Image> cached;
         if (!timing.asset_loading_included)

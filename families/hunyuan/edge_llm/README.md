@@ -7,10 +7,10 @@ Model Connect wheel built for it, or use a matching standalone Model Connect
 builder and runner in an environment without the wheel. For standalone
 installations, `CMAKE_PREFIX_PATH` selects the SDK as usual.
 
-## Opt-in Edge 0.12 build
+## Edge 0.12 build
 
-The normal Model Connect installation remains native or uses the default 0.11
-SDK. For an MC installation built with the 0.12 SDK, keep the matching PyPI or
+Native-only installations do not include Edge. For an MC installation built
+with the default Edge 0.12 SDK, keep the matching PyPI or
 source-installed Edge builder in its own Python environment and pass it to
 the family build command:
 

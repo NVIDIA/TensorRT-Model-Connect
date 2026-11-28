@@ -120,7 +120,7 @@ double validate_canary_input_duration(int32_t num_samples, int32_t sample_rate,
         static_cast<double>(num_samples) / static_cast<double>(sample_rate);
     if (cfg.max_input_duration_seconds > 0.0F &&
         duration_seconds > static_cast<double>(cfg.max_input_duration_seconds) + 1.0e-6) {
-        throw std::invalid_argument("Canary input duration " + std::to_string(duration_seconds) +
+        throw internal::ConfigError("Canary input duration " + std::to_string(duration_seconds) +
                                     " seconds exceeds max_input_duration_seconds=" +
                                     std::to_string(cfg.max_input_duration_seconds));
     }
@@ -133,12 +133,12 @@ double resolve_canary_segment_duration(double input_duration_seconds, double mod
                                        ? static_cast<double>(cfg.segment_duration_seconds)
                                        : model_segment_seconds;
     if (segment_seconds <= 0.0 || segment_seconds > model_segment_seconds) {
-        throw std::invalid_argument(
+        throw internal::ConfigError(
             "Canary segment_duration_seconds must be > 0 and <= the bundle limit of " +
             std::to_string(model_segment_seconds) + " seconds");
     }
     if (cfg.segment_duration_seconds <= 0.0F && input_duration_seconds > model_segment_seconds) {
-        throw std::invalid_argument(
+        throw internal::ConfigError(
             "Canary input exceeds the bundle's single-segment limit of " +
             std::to_string(model_segment_seconds) +
             " seconds; set segment_duration_seconds to enable segmented decoding");

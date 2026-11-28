@@ -11,6 +11,8 @@
   "testcases": [
     {
       "name": "smolvlm2-500m-video-instruct-fp16",
+      "test_image": "data/test_img.jpeg",
+      "prompt": "Can you describe this image?",
       "premerge": false,
       "reference_precision": "fp32",
       "reference_backend": "hf_transformers",

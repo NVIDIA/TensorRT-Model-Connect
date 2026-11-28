@@ -1,0 +1,22 @@
+{
+  "name": "granite-speech-5.0-470m-turboctc",
+  "hf_id": "ibm-granite/granite-speech-5.0-470m-turboctc",
+  "hf_revision": "b8e0718e5b6d70b2e079add8a07c7689c95b89f1",
+  "bundle": "granite-speech-5.0-470m-turboctc.bundle",
+  "family": "granite_speech5",
+  "task": "speech_transcription",
+  "precision": "bf16",
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "granite-speech-5.0-470m-turboctc",
+      "premerge": true,
+      "test_input_audio": "data/maintainer-recording-16k-mono.wav"
+    },
+    {
+      "name": "granite-speech-5.0-470m-turboctc-librispeech",
+      "premerge": true,
+      "test_input_audio": "data/librispeech-test-clean-6930-75918-0003.wav"
+    }
+  ]
+}

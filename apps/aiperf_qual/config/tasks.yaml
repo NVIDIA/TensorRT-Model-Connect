@@ -66,6 +66,10 @@ benchmarks:
            gate: {margin: 1.5}, quantized_gate: {margin: 3.0}, sampled_gate: {margin: 3.0}}
   ocrbench: {suite: ocrbench, suite_definition: ocrbench-1000, metric: contains,
              gate: {margin: 2.0}, quantized_gate: {margin: 3.0}, sampled_gate: {margin: 3.0}}
+  # OCR models that read with their own fixed prompt (or none) cannot answer OCRBench's questions: its 300
+  # text-recognition crops, scored as OCRBench scores them; a smaller set, so a wider margin.
+  ocrbench_text: {suite: ocrbench-text, suite_definition: ocrbench-text-recognition-300, metric: contains,
+                  gate: {margin: 3.0}, quantized_gate: {margin: 4.0}}
   librispeech: {suite: librispeech-test-clean, suite_definition: librispeech-test-clean-500, metric: wer,
                 gate: {margin: 0.3, relative_margin: 0.05}}
   # Japanese has no word boundaries: the character error rate of FLEURS ja (models that state it).
@@ -132,8 +136,11 @@ benchmarks:
   token_score_parity: {suite: token-score-parity, suite_definition: uniref50-test-200, metric: vector_parity,
                        truncate_tokens: 254, gate: {field: logits, min_cosine: 0.999, max_relative_l2: 0.02}}
   # Relative monocular depth (Depth Anything) against the native map on 50 COCO images: the family's E2E gate.
+  # A quantized (NVFP4) candidate carries its weight error on every image: about twice the worst one measured on
+  # this suite (correlation 0.9946, relative error 0.0174), as the robot-model gates are derived.
   depth_parity: {suite: depth-parity, suite_definition: coco-val2017-depth-50, metric: depth_parity,
-                 gate: {min_correlation: 0.998, max_relative_error: 0.01}}
+                 gate: {min_correlation: 0.998, max_relative_error: 0.01},
+                 quantized_gate: {min_correlation: 0.989, max_relative_error: 0.035}}
   # Point-cloud semantic segmentation (PointNet): S3DIS Area 5 blocks, class mIoU of the per-point classes over the
   # corpus against the S3DIS annotation.
   s3dis_area5: {suite: s3dis-area5-miou, suite_definition: s3dis-area5-blocks-300, metric: point_miou,
@@ -193,6 +200,13 @@ benchmarks:
   speech_parity: {suite: speech-parity, suite_definition: librispeech-test-clean-speech-20, metric: audio_parity,
                   gate: {min_duration_ratio: 0.8, max_duration_ratio: 1.2, min_rms_ratio: 0.5, max_rms_ratio: 2.0,
                          max_log_spectral_distance: 3.0}}
+  # Captioners without a question input (BLIP, PaliGemma pt) have no OCRBench answer: their greedy captions of 200
+  # COCO images against the native model's (conversion parity). Greedy captions agree exactly or diverge after one
+  # flipped token, so the gate bounds the share of captions beyond an edit distance of 0.15: the native model's own
+  # BF16 and FP32 captions diverge on about 22% of these images, a caption and another image's on nearly all.
+  caption_parity: {suite: caption-parity, suite_definition: coco-val2017-caption-200, metric: text_parity,
+                   gate: {max_distance: 0.15, outliers: {max_fraction: 0.35, gate: {max_distance: 1.0}}},
+                   quantized_gate: {max_distance: 0.15, outliers: {max_fraction: 0.70, gate: {max_distance: 1.0}}}}
   # HumanEval and MBPP completions run against their unit tests (as nobody, with CPU, memory, and time limits);
   # prompts that leave fewer than 64 tokens to generate on the bundle are dropped for both sides.
   code: {suite: code, suite_definition: code-humaneval-mbpp-664, metric: code_pass, fit_prompt: true,
@@ -202,6 +216,7 @@ tasks:
   text_generation: &generate_text
     absolute: [mmlu]
     performance: {output_grader: parity_token_exact, output_grader_params: {min_prefix: 8, accept_equal_text: true}}
+  conditional_text_generation: *generate_text
   text_continuation: *generate_text  # the Task SDK name of the migrated decoder LMs (qwen3, #1558)
 
   vision_language_generation:
@@ -209,6 +224,11 @@ tasks:
     # (qwen3-vl-2b -26 vs -11 points, phi4-multimodal -19 vs -32) and TRTMC answers MMStar slowly (phi4-multimodal:
     # 29 min against 1 min for OCRBench). MMStar stays for profiles that state it.
     absolute: [ocrbench]
+    performance: {output_grader: parity_edit_distance, output_grader_params: {max_distance: 0.15}}
+  # The Task SDK name of the image-text models (gemma-3n, smolvlm): OCRBench as above, but their runtimes declare no
+  # enable_thinking config (a null removes the suite's field).
+  images_text_to_text:
+    absolute: [{name: ocrbench, request: {enable_thinking: null}}]
     performance: {output_grader: parity_edit_distance, output_grader_params: {max_distance: 0.15}}
   # Image, video and text to text (Cosmos3-Edge): OCRBench through the same bundle's image-text Task (the
   # image-video Task requires a video in every request); the video input is not scored.
@@ -297,14 +317,15 @@ tasks:
     # both sides (latent replay), which makes them comparable pixel by pixel: how much further TRTMC is
     # from the native fp32 render of the first 10 prompts than the native half-precision run.
     supplementary: [{check: replay_parity, suite: partiprompts-30, informational: true, video_samples: 3,
-                     latent_replay_families: [flux, pixart, qwen_image, z_image, wan_t2v],
+                     latent_replay_families: [flux, pixart, qwen_image, qwen_image2_1, z_image, chroma, wan_t2v],
                      parity_floor_samples: 10, max_psnr_gap_db: 3.0, max_ssim_gap: 0.05,
                      quantized_gap: {max_psnr_gap_db: 6.0, max_ssim_gap: 0.1},
                      fallback_min: {psnr_db: 19.0, ssim: 0.8}, min_pass_rate: 0.9},
                     # Text-to-image with caller latents when supported: GenEval-style (all 553 prompts over its six
                     # tags, OWLv2 detections and CLIP colors, exact counts), paired right/wrong per prompt, margin 5 points.
-                    {check: geneval, suite: geneval-full, only_families: [flux, pixart, qwen_image, z_image, stable_diffusion, chroma],
-                     latent_replay_families: [flux, pixart, qwen_image, z_image, stable_diffusion],
+                    {check: geneval, suite: geneval-full,
+                     only_families: [flux, pixart, qwen_image, z_image, stable_diffusion, chroma, qwen_image2_1],
+                     latent_replay_families: [flux, pixart, qwen_image, qwen_image2_1, z_image, stable_diffusion, chroma],
                      detector: google/owlv2-base-patch16-ensemble,
                      detector_revision: cfd3195ba4ea9592eec887ded089f4c08eff231d,
                      clip_model: openai/clip-vit-large-patch14, clip_revision: 32bd64288804d66eefd0ccbe215aa642df71cc41,
@@ -357,6 +378,7 @@ tasks:
     # The catalog testcases are a few values, not the models' context: Perf times the first ETTh1 window.
     performance: {suite: {from_benchmark: etth1-mse}, output_grader: parity_numeric}
   series_to_point_forecast: *forecast
+  series_to_quantile_forecast: *forecast  # Chronos-Bolt: scored on its median quantile
   # Tasks whose native reference is the family's own Transformers model (config/models: reference.adapter).
   audio_to_class_scores:
     absolute: [audioset]

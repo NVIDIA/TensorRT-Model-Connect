@@ -29,6 +29,7 @@
 #include "families/qwen3_8/runtime/native_visual.h"
 #include "families/qwen3_8/runtime/pipeline.h"
 #include "families/qwen3_8/runtime/recurrent_state.h"
+#include "trtmc/internal/config.h"
 #include "trtmc/runtime/trt_module.h"
 // TextGenerationConfig is part of the public Task API.
 // (already included transitively via recurrent_pipeline.h)
@@ -894,6 +895,22 @@ static void test_hybrid_pipeline() {
 
         check(result.token_ids.size() == 2, "hybrid: input + eos");
         check(result.token_ids[1] == 2, "hybrid: eos generated");
+
+        // With EOS out of reach the 4-row cache bounds the output: the prompt
+        // takes one row and each decoder step one more, so a one-token prompt
+        // yields L - P + 1 = 4 tokens instead of sliding the cache.
+        gen_cfg.max_new_tokens = 10;
+        gen_cfg.eos_token_id = 3;
+        result = pipeline.generate_ids({0}, gen_cfg);
+        check(result.token_ids.size() == 5, "hybrid: generation ends when the KV cache is full");
+
+        bool rejected = false;
+        try {
+            pipeline.generate_ids({0, 0, 0, 0, 0}, gen_cfg);
+        } catch (const trtmc::internal::ConfigError&) {
+            rejected = true;
+        }
+        check(rejected, "hybrid: a prompt longer than the KV cache is rejected as invalid");
     }
     cudaStreamDestroy(stream);
 }

@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "diarize", "help": "Label who speaks when in a 16 kHz WAV recording", "executor": "native",
+      "handler": "diarize",
+      "arguments": [
+        {"name": "bundle", "type": "path"},
+        {"name": "audio", "flags": ["--audio"], "type": "path", "required": true,
+         "help": "16 kHz PCM16 or float32 WAV; channels are averaged"},
+        {"name": "runtime_root", "flags": ["--runtime-root"], "type": "path"},
+        {"name": "threshold", "flags": ["--threshold"], "type": "float",
+         "help": "speaker activity threshold, strictly inside (0, 1); the family's default is 0.5"}
+      ]
+    }
+  ]
+}

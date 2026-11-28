@@ -4,6 +4,9 @@
  */
 #include "families/qwen3_8/runtime/dflash2.h"
 
+#include "families/qwen3_8/runtime/dflash2_tree.h"
+#include "trtmc/internal/config.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -103,12 +106,17 @@ Qwen38DFlash2::Qwen38DFlash2(Qwen38DFlash2Config config, std::unique_ptr<ITrtMod
     features_.resize(static_cast<std::size_t>(cap) * feature_width_);
 }
 
+void Qwen38DFlash2::validate_sampling(const Qwen38SamplingParams& sampling) const {
+    if (config_.tree && !qwen38_greedy_distribution(sampling))
+        throw std::invalid_argument("Qwen3.8 DFlash2 DDTree supports greedy decoding only");
+}
+
 void Qwen38DFlash2::reset(ITrtModule& target, std::size_t prompt_length, int32_t max_new_tokens) {
     if (prompt_length == 0 || max_new_tokens < 0 ||
         prompt_length > static_cast<std::size_t>(config_.capacity) ||
         static_cast<std::size_t>(max_new_tokens) >
             static_cast<std::size_t>(config_.capacity) - prompt_length)
-        throw std::invalid_argument("Qwen3.8 DFlash2 prompt and generation exceed bundle capacity");
+        throw internal::ConfigError("Qwen3.8 DFlash2 prompt and generation exceed bundle capacity");
     require_tensor(target, "draft_features", DType::kFloat16,
                    {1, static_cast<int64_t>(feature_width_)}, false);
     seen_ = 0;
@@ -123,10 +131,9 @@ void Qwen38DFlash2::observe(ITrtModule& target) {
     ++seen_;
 }
 
-std::vector<Qwen38DraftProposal> Qwen38DFlash2::propose(int32_t anchor,
-                                                        const Qwen38SamplingParams& sampling,
-                                                        const std::vector<int32_t>& /*history*/,
-                                                        int32_t budget, uint64_t& rng) {
+Qwen38DraftRound Qwen38DFlash2::propose(int32_t anchor, const Qwen38SamplingParams& sampling,
+                                        const std::vector<int32_t>& /*history*/, int32_t budget,
+                                        uint64_t& rng) {
     if (anchor < 0 || anchor >= config_.vocab || seen_ <= 0 || seen_ >= config_.capacity ||
         budget <= 0)
         throw std::invalid_argument("Qwen3.8 DFlash2 invalid proposal state");
@@ -164,10 +171,7 @@ std::vector<Qwen38DraftProposal> Qwen38DFlash2::propose(int32_t anchor,
     download(ids.data(), *draft_, "candidate_ids", ids.size() * sizeof(int32_t));
     download(unary.data(), *draft_, "unary_values", unary.size() * sizeof(float));
     download(projected.data(), *draft_, "projected_hidden", projected.size() * sizeof(uint16_t));
-    std::vector<Qwen38DraftProposal> proposals;
-    int32_t previous = anchor;
-    for (int32_t row = 0; row < std::min(7, budget); ++row) {
-        std::vector<int32_t> candidates(ids.begin() + row * k, ids.begin() + (row + 1) * k);
+    auto select = [&](int32_t row, int32_t previous, std::vector<int32_t>& candidates) {
         // Check before the selector's GPU gathers to avoid out-of-range reads.
         auto unique = candidates;
         std::sort(unique.begin(), unique.end());
@@ -183,6 +187,17 @@ std::vector<Qwen38DraftProposal> Qwen38DFlash2::propose(int32_t anchor,
         selector_->sync();
         std::vector<float> scores(k);
         download(scores.data(), *selector_, "selector_scores", scores.size() * sizeof(float));
+        return scores;
+    };
+    if (config_.tree) {
+        validate_sampling(sampling);
+        return qwen38_dflash2_tree(anchor, ids, select);
+    }
+    std::vector<Qwen38DraftProposal> proposals;
+    int32_t previous = anchor;
+    for (int32_t row = 0; row < std::min(7, budget); ++row) {
+        std::vector<int32_t> candidates(ids.begin() + row * k, ids.begin() + (row + 1) * k);
+        const auto scores = select(row, previous, candidates);
         auto probabilities = qwen38_dflash2_probabilities(scores, candidates, v, sampling);
         previous = qwen38_draw_probabilities(probabilities, rng);
         proposals.push_back({previous, std::move(probabilities)});

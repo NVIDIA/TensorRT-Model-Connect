@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "trtmc/internal/config.h"
 #include "trtmc/task.h"
 
 #include <algorithm>
@@ -56,7 +57,7 @@ inline void validate_capacity(int prompt_tokens, int input_limit, int capacity,
                               std::int64_t generated_tokens) {
     if (prompt_tokens <= 0 || prompt_tokens > input_limit || generated_tokens <= 0 ||
         generated_tokens > static_cast<std::int64_t>(capacity) - prompt_tokens)
-        throw std::invalid_argument("Phi4 Edge prompt and generation exceed bundle capacity");
+        throw internal::ConfigError("Phi4 Edge prompt and generation exceed bundle capacity");
 }
 
 /// Validate external normalized-float HWC images before multiplying dimensions or allocating.

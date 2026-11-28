@@ -9,6 +9,7 @@
 
 #include "families/internvl/runtime/image_preprocessor.h"
 #include "families/internvl/runtime/internvl_generation_budget.h"
+#include "trtmc/internal/config.h"
 
 #include <cstdint>
 #include <iostream>
@@ -104,6 +105,13 @@ void test_generation_budget_respects_the_cache() {
         rejected = std::string(error.what()).find("KV cache") != std::string::npos;
     }
     check(rejected, "a prompt the KV cache cannot hold is rejected");
+    bool request_error = false;
+    try {
+        generation_budget(4096, 1, 4096);
+    } catch (const trtmc::internal::ConfigError&) {
+        request_error = true;
+    }
+    check(request_error, "the server answers the rejection as an invalid request");
 }
 
 int main() {

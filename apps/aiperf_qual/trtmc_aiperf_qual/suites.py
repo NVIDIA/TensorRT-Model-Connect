@@ -336,10 +336,11 @@ def _hf_rows(name: str, meta: Any, revision: str, source: Mapping[str, Any],
     if meta.streaming:
         table = list(table)
     candidates = range(len(table))
-    if source.get("where"):  # rows whose columns equal the given values (read before any media is decoded)
+    if source.get("where"):  # rows whose columns equal the given values, or one of a list's (read before any media)
         columns = {name: (table[name] if not meta.streaming else [row[name] for row in table]) for name in source["where"]}
+        accepted = {name: value if isinstance(value, list) else [value] for name, value in source["where"].items()}
         candidates = [index for index in candidates
-                      if all(columns[name][index] == value for name, value in source["where"].items())]
+                      if all(columns[name][index] in values for name, values in accepted.items())]
     # A stratified selection reads its field (the label column) before any media are decoded.
     field = selection.get("field") if selection.get("method") in ("stratified", "seeded") else None
     column = (label_column if field == "label" else field) if field else None
@@ -521,14 +522,48 @@ def _square_crop(path: Path, cache: Path) -> Path:
     return target
 
 
+def _image_bytes(image_file: Any) -> bytes:
+    """An image field's bytes: a path, or inline ``$file`` bytes as a Hugging Face image column decodes."""
+    return (base64.b64decode(image_file["$file"]["b64"]) if isinstance(image_file, Mapping)
+            else Path(image_file).read_bytes())
+
+
+def _shorter_side(image_file: Any) -> int:
+    from PIL import Image
+
+    with Image.open(io.BytesIO(_image_bytes(image_file))) as image:
+        return min(image.size)
+
+
+def _letterbox(image_file: Any, cache: Path, width: int, height: int) -> Path:
+    """The image scaled to fit ``width`` x ``height`` with its aspect ratio kept, centered on white padding
+    (cached by content and size), for a model that reads an image only at its built size: both sides get the
+    same pixels, and no text is cut as a cover crop would cut it."""
+    from PIL import Image
+
+    data = _image_bytes(image_file)
+    digest = hashlib.sha256(data).hexdigest()[:24]
+    target = cache / "trtmc-derived" / f"{digest}-letterbox-{width}x{height}.png"
+    if not target.is_file():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(io.BytesIO(data)) as image:
+            rgb = image.convert("RGB")
+            scale = min(width / rgb.width, height / rgb.height)
+            size = (min(width, max(1, round(rgb.width * scale))), min(height, max(1, round(rgb.height * scale))))
+            canvas = Image.new("RGB", (width, height), (255, 255, 255))
+            canvas.paste(rgb.resize(size, Image.Resampling.BICUBIC),
+                         ((width - size[0]) // 2, (height - size[1]) // 2))
+            canvas.save(target)
+    return target
+
+
 def _cover_crop(image_file: Any, cache: Path, width: int, height: int) -> Path:
     """The image (a path, or inline ``$file`` bytes as a Hugging Face image column decodes) scaled to cover
     ``width`` x ``height`` and center-cropped to it (cached by content and size), for a model that takes a
     conditioning image only at its built size: both sides get the same pixels."""
     from PIL import Image
 
-    data = (base64.b64decode(image_file["$file"]["b64"]) if isinstance(image_file, Mapping)
-            else Path(image_file).read_bytes())
+    data = _image_bytes(image_file)
     digest = hashlib.sha256(data).hexdigest()[:24]
     target = cache / "trtmc-derived" / f"{digest}-{width}x{height}.png"
     if not target.is_file():
@@ -587,16 +622,22 @@ MODEL_DEFAULT_FIELDS = ("num_steps", "num_inference_steps", "num_sampling_steps"
                         "num_frames", "video_num_frames")
 
 
-def unstated_defaults(request: Mapping[str, Any], operation: str | None = None) -> list[str]:
+def unstated_defaults(request: Mapping[str, Any], operation: str | None = None,
+                      stated: Mapping[str, Any] | None = None) -> list[str]:
     """Unresolved controls and fields required by the image/video request contract.
 
-    Text, speech and tensor operations do not inherit image-generation requirements.
+    Text, speech and tensor operations do not inherit image-generation requirements. ``stated`` is the profile's
+    configuration request (config/models ``request``): a control it sets to null is one the model takes on neither
+    side (Qwen-Image 2.1 has no guidance_scale), so no request states it and none is required to.
     """
+    absent = {field for field, value in (stated or {}).items() if value is None}
     problems = [field for field in MODEL_DEFAULT_FIELDS if request.get(field) in (-1, -1.0)]
     if operation == "generate_image":
-        required = ["num_steps", "guidance_scale", "height", "width"]
+        required = [field for field in ("num_steps", "guidance_scale", "height", "width") if field not in absent]
         if request.get("media_type") == "video":
             required.append("num_frames")
+        if all(request.get(name) not in (None, "") for name in ("min_guidance_scale", "max_guidance_scale")):
+            required.remove("guidance_scale")  # a per-frame guidance range (Stable Video Diffusion) states it
         problems += [field for field in required if request.get(field) in (None, "") and field not in problems]
         problems += [field for field in ("num_steps", "height", "width", "num_frames")
                      if field in request and (not isinstance(request[field], (int, float))
@@ -785,6 +826,10 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
     # (for example a generation's size, steps, and seed around a dataset prompt).
     base = (_catalog_testcase_records({"profile": definition["base_profile"]}, environment)[0]["request"]
             if definition.get("base_profile") else {})
+    # min_image_side ({record field: pixels}, a profile's own): images shorter on a side than its processor can
+    # encode are dropped for both sides before the selection.
+    for field, side in (definition.get("min_image_side") or {}).items():
+        records = [record for record in records if _shorter_side(record[field]) >= int(side)]
     samples = []
     chosen = select(records, selection)
     if environment.values.get("smoke"):  # one logical problem (``smoke_samples`` requests, default 1)
@@ -792,8 +837,17 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
     for record in chosen:
         for field in source.get("square_crop", []):  # only the selected images
             record = {**record, field: str(_square_crop(Path(record[field]), Path(environment["hf_datasets_cache"])))}
+        # letterbox ({record field: [width, height]}, a profile's own): an image the bundle reads only at its
+        # built size, fitted into it on both sides.
+        for field, (width, height) in (definition.get("letterbox") or {}).items():
+            record = {**record, field: str(_letterbox(record[field], Path(environment["hf_datasets_cache"]),
+                                                      int(width), int(height)))}
         request = {**base, **(record.get("request") or {})}
-        request.update(definition.get("request") or {})
+        for field, value in (definition.get("request") or {}).items():
+            if value is None:  # a control the model takes on neither side (a null in config/models ``request``)
+                request.pop(field, None)
+            else:
+                request[field] = value
         for source_field, request_field in (definition.get("fields") or {}).items():
             request[request_field] = record[source_field] if source_field in record else _field(record, source_field)
         for field in definition.get("fit_to_request", []):  # an image at the request's width x height

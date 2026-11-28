@@ -5,6 +5,8 @@
 
 #include "families/cosmos3/runtime/conditioning.h"
 
+#include "trtmc/internal/config.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -104,7 +106,7 @@ PromptInputs prepare_prompt_inputs(const ITokenizer& tokenizer, const std::strin
     ids.push_back(kEosTokenId);
     ids.push_back(kStartOfGenerationTokenId);
     if (ids.empty() || ids.size() > static_cast<std::size_t>(kTextTokens)) {
-        throw std::invalid_argument("Cosmos3 prompt exceeds the fixed 4096-token profile");
+        throw internal::ConfigError("Cosmos3 prompt exceeds the fixed 4096-token profile");
     }
     result.real_text_tokens = static_cast<int32_t>(ids.size());
     result.input_ids.assign(kTextTokens, kPadTokenId);

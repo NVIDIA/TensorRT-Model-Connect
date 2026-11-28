@@ -480,6 +480,35 @@ class ExistingPreprocessed final : public trtmc::IPoseHypothesisRefinement {
             throw std::invalid_argument("old preprocessed crops changed shape");
     }
 };
+class MattingFixture final : public IModel, public IImageTrimapToAlpha {
+  public:
+    explicit MattingFixture(std::string mode) : mode_(std::move(mode)) {}
+    const char* task() const noexcept override { return mode_.c_str(); }
+    std::vector<TaskInstance> task_bindings() override {
+        return {bind<IImageTrimapToAlpha>(*this)};
+    }
+    void validate_request(const ImageTrimapToAlphaRequest&, ConfigView config) const override {
+        validate_config({}, config);
+        if (mode_ == "matting_reject_profile")
+            throw std::invalid_argument("fixture rejects image profile");
+    }
+    AlphaMatteResult run(const ImageTrimapToAlphaRequest& input, ConfigView config) override {
+        validate_request(input, config);
+        AlphaMatteResult result;
+        result.alpha.rows = input.image.height;
+        result.alpha.columns = input.image.width;
+        for (const auto state : input.trimap.states)
+            result.alpha.values.push_back(state == 1 ? 0.375F : state / 2.0F);
+        if (mode_ == "matting_bad_shape")
+            ++result.alpha.rows;
+        if (mode_ == "matting_bad_value")
+            result.alpha.values[0] = 2;
+        return result;
+    }
+
+  private:
+    std::string mode_;
+};
 } // namespace
 extern "C" int trtmc_test_boxes_batch_calls() {
     return boxes_batch_calls.load();
@@ -491,6 +520,8 @@ extern "C" int trtmc_test_boxes_batch_items() {
     return boxes_batch_items.load();
 }
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.reader.info().task.rfind("matting_", 0) == 0)
+        return new MattingFixture(context.reader.info().task);
     if (context.reader.info().task == trtmc::IPoseHypothesisRefinement::kTask)
         return new ExistingPreprocessed;
     return new PerceptionModel(context.reader.info().task);

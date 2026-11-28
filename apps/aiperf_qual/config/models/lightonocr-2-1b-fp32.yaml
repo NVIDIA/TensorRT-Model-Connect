@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A page OCR model with no question input: OCRBench's text-recognition crops, the image alone (an empty prompt).
+# Its processor rounds each side up to the 14-pixel patch and merges 2x2 patches: a crop 14 pixels or less on a
+# side has no merged patch, and neither the native model nor the bundle can encode it (one of the 300 crops,
+# 51x13). It is dropped for both sides.
+absolute: [{name: ocrbench_text, request: {prompt: ""}, min_image_side: {image: 15}}]
+reference:
+  # The image-text-to-text auto class loads this checkpoint without its vision weights; the family's official
+  # reference loads it with LightOnOcrForConditionalGeneration and the slow (Pillow) image processor.
+  adapter: families/lighton_ocr/reference/adapter.py
+  options: {processor_kwargs: {use_fast: false}}
+# Perf times the first text-recognition crop: the catalog testcases are not a request the catalog payload can build
+# (an empty prompt, images under another key, or several images).
+performance: {suite: {from_benchmark: ocrbench-text}}

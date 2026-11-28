@@ -3,8 +3,7 @@ title: Llama with Edge-LLM
 ---
 
 Llama owns its optional Edge-LLM builder and C++ runtime adapter. Edge-enabled
-builds default to 0.11.0 during migration. To use the 0.12.0 adapter, select
-that SDK when [building Model Connect](../getting-started/source-build.md)
+builds default to 0.12.0. Enable that SDK when [building Model Connect](../getting-started/source-build.md)
 and pass `--edge-builder-python /absolute/path/to/python` to the family build
 command. This selects the matching Python builder, installed from PyPI or from
 source.

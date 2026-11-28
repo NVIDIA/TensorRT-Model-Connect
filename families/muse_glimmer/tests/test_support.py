@@ -76,6 +76,7 @@ def request_and_route(tmp_path, monkeypatch):
     monkeypatch.setattr(dispatch.sys, "platform", "linux")
     monkeypatch.setattr(builder, "package_present", lambda: True)
     monkeypatch.setattr(builder, "local_target", lambda: target)
+    monkeypatch.setattr(builder, "installed_package", lambda _: {"version": "0.11.0"})
     return request, target
 
 
@@ -83,6 +84,24 @@ def test_documented_mixed_checkpoint_is_candidate(request_and_route):
     request, _ = request_and_route
     assert dispatch.candidate(request, raw_config())
     assert builder.request_weight_format(request, raw_config()) == "nvfp4"
+    # Same text topology, but original floating weights must not be relabeled
+    # as NVFP4 or require the prepared checkpoint's quantization sidecar.
+    source = request.model_dir
+    (source / "hf_quant_config.json").unlink()
+    original = raw_config()
+    original.pop("quantization_config")
+    original["dtype"] = "bfloat16"
+    weights = {"model.language_model.embed_tokens.weight": "first.safetensors",
+               "lm_head.weight": "last.safetensors"}
+    index = source / "model.safetensors.index.json"
+    index.write_text(json.dumps({"weight_map": weights}))
+    assert builder.request_weight_format(replace(request,quantization=None), original) == "floating"
+    with pytest.raises(ValueError, match="does not match"):
+        builder.request_weight_format(request, original)
+    index.write_text(json.dumps({"weight_map": {**weights,"lm_head.weight_scale_inv":"last.safetensors"}}))
+    with pytest.raises(ValueError, match="undeclared packed"):
+        builder.request_weight_format(replace(request,quantization=None), original)
+
 
 
 @pytest.mark.parametrize(
@@ -111,7 +130,7 @@ def test_edge_failure_retries_unchanged_native_once(request_and_route, monkeypat
     def failed(*args):
         raise RuntimeError("upstream builder error")
 
-    monkeypatch.setitem(dispatch.EDGE_DISPATCH, ("linux", "x86_64", 120, "nvfp4"), failed)
+    monkeypatch.setattr(builder, "prepare", failed)
     dispatch.build(request, writer, lambda r, w: calls.append((r, w)))
     assert calls == [(request, writer)]
     assert "Retrying native once" in caplog.text
@@ -119,9 +138,7 @@ def test_edge_failure_retries_unchanged_native_once(request_and_route, monkeypat
 
 def test_publication_failure_does_not_retry_native(request_and_route, monkeypatch):
     request, _ = request_and_route
-    monkeypatch.setitem(
-        dispatch.EDGE_DISPATCH, ("linux", "x86_64", 120, "nvfp4"), lambda *args: ({}, {})
-    )
+    monkeypatch.setattr(builder, "prepare", lambda *args: ({}, {}))
     monkeypatch.setattr(builder, "publish", lambda *args: (_ for _ in ()).throw(OSError("publish")))
     with pytest.raises(OSError, match="publish"):
         dispatch.build(request, object(), lambda *args: pytest.fail("must not retry"))
@@ -135,7 +152,7 @@ def test_compatible_wheel_selected_and_sdk_python_is_fallback(monkeypatch):
         return SimpleNamespace(stdout=json.dumps(["0.11.0", "11.1.0.106"]))
 
     monkeypatch.setattr(builder.subprocess, "run", probe)
-    package = {"python": "/sdk/python"}
+    package = {"python": "/sdk/python", "version": "0.11.0"}
     assert (
         builder.exporter_python(package, {"tensorrt_version": "11.1.0.106"})
         == builder.sys.executable
@@ -144,8 +161,9 @@ def test_compatible_wheel_selected_and_sdk_python_is_fallback(monkeypatch):
     assert builder.exporter_python(package, {"tensorrt_version": "11.0.0.0"}) == package["python"]
 
 
+@pytest.mark.parametrize("release", ["0.11.0", "0.12.0"])
 def test_prepare_maps_to_wheel_exporter_and_native_onnx_builder(
-    request_and_route, tmp_path, monkeypatch
+    request_and_route, tmp_path, monkeypatch, release
 ):
     request, target = request_and_route
     prefix = tmp_path / "prefix"
@@ -158,14 +176,16 @@ def test_prepare_maps_to_wheel_exporter_and_native_onnx_builder(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("x")
     package = {name: str(path) for name, path in paths.items()}
+    package.update(version=release, release_revision=builder.RELEASE_012)
+    module = "tensorrt_edgellm.onnx.cli" if release == "0.12.0" else "tensorrt_edgellm.scripts.export"
     monkeypatch.setattr(builder, "installed_package", lambda target: package)
-    monkeypatch.setattr(builder, "exporter_python", lambda package, target: package["python"])
+    monkeypatch.setattr(builder, "exporter_python", lambda package, target, requested: package["python"])
     seen = []
 
     def run(command, **kwargs):
         seen.append((command, kwargs.get("env")))
-        if "tensorrt_edgellm.scripts.export" in command:
-            out = Path(command[command.index("tensorrt_edgellm.scripts.export") + 2]) / "llm"
+        if module in command:
+            out = Path(command[command.index(module) + 2]) / "llm"
             out.mkdir(parents=True)
         else:
             out = Path(next(x.split("=", 1)[1] for x in command if x.startswith("--engineDir=")))
@@ -186,9 +206,11 @@ def test_prepare_maps_to_wheel_exporter_and_native_onnx_builder(
     staging.mkdir()
     log = tmp_path / "build.log"
     files, marker = builder.prepare(request, raw_config(), target, staging, log)
-    assert seen[0][0][2:4] == ["-m", "tensorrt_edgellm.scripts.export"]
+    assert seen[0][0][2:4] == ["-m", module]
     assert seen[1][0][0] == package["onnx_builder"]
     assert seen[1][1]["EDGELLM_PLUGIN_PATH"] == package["plugin"]
+    if release == "0.12.0":
+        assert marker["edge_release"] == release and marker["builder_flow"] == "onnx"
     assert marker["weight_format"] == "nvfp4"
     assert "edge_llm/engine/llm.engine" in files
 
@@ -208,6 +230,8 @@ def test_prepare_maps_to_wheel_exporter_and_native_onnx_builder(
         draft.mkdir()
         policy = {"block_size": 16, "mask_token_id": 201818,
                   "target_layer_ids": [1, 13, 25, 37, 49]}
+        if version == 2:
+            policy.update(selector_top_k=16, selector_rank=256)
         draft_config = {"architectures": [architecture], "num_hidden_layers": 5,
                         "hidden_size": 6656, "intermediate_size": 19968,
                         "num_attention_heads": 32, "num_key_value_heads": 8,
@@ -222,8 +246,8 @@ def test_prepare_maps_to_wheel_exporter_and_native_onnx_builder(
 
         def run_pair(command, **kwargs):
             paired_commands.append(command)
-            if "tensorrt_edgellm.scripts.export" in command:
-                output = Path(command[command.index("tensorrt_edgellm.scripts.export") + 2])
+            if module in command:
+                output = Path(command[command.index(module) + 2])
                 output.mkdir()
                 assert command[-2:] == ["--dflash-draft-dir", str(draft)]
             else:
@@ -257,6 +281,23 @@ def test_prepare_maps_to_wheel_exporter_and_native_onnx_builder(
         assert "edge_llm/engine/spec_base.engine" in pair_files
         assert "edge_llm/engine/spec_draft.engine" in pair_files
         assert "edge_llm/engine/llm.engine" not in pair_files
+        tree_request = replace(paired_request, execution_variant="dflash_tree")
+        paired_commands.clear()
+        tree_destination = tmp_path / f"tree-{version}"
+        tree_destination.mkdir()
+        if release != "0.12.0" or version != 2:
+            reason = "0.12.0 Edge SDK" if release != "0.12.0" else "V2 selector"
+            with pytest.raises(ValueError, match=reason):
+                builder.prepare(tree_request, raw_config(), target, tree_destination, log)
+            assert not paired_commands
+        else:
+            _, tree_marker = builder.prepare(tree_request, raw_config(), target, tree_destination, log)
+            assert tree_marker["execution_variant"] == "dflash_tree"
+            assert (tree_marker["dflash_top_k"], tree_marker["dflash_verify"]) == (4, 32)
+            assert len(paired_commands) == 4
+            base, draft_build = paired_commands[1], paired_commands[3]
+            assert base[base.index("--maxSpecVerifyTokens") + 1] == "32"
+            assert draft_build[draft_build.index("--maxSpecDraftTokens") + 1] == "16"
         if version == 2:
             assert "edge_llm/engine/dflash2_selector.safetensors" in pair_files
             include_selector = False
@@ -295,7 +336,11 @@ def test_native_bundle_header_has_one_owner(request_and_route, monkeypatch):
     for name in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja"):
         (request.model_dir / name).write_text("fixture")
     monkeypatch.setattr(builder, "package_present", lambda: False)
-    monkeypatch.setattr(native_model, "Checkpoint", lambda path: nullcontext(object()))
+    def reader(path, *, source_format):
+        assert path == request.model_dir and source_format == "nvfp4"
+        return nullcontext(object())
+
+    monkeypatch.setattr(native_model, "Checkpoint", reader)
     calls = []
 
     def engine(config, weights, capacity, **kwargs):
@@ -327,7 +372,8 @@ def test_native_bundle_header_has_one_owner(request_and_route, monkeypatch):
 
 @pytest.mark.parametrize("prefix", ["", "model.", "language_model.", "model.language_model."])
 @pytest.mark.parametrize("gate", ["gate_proj", "output_gate_proj"])
-def test_native_checkpoint_uses_canonical_tensor_names(tmp_path, prefix, gate):
+@pytest.mark.parametrize("source_format", ["nvfp4", "floating"])
+def test_native_checkpoint_uses_canonical_tensor_names(tmp_path, prefix, gate, source_format):
     torch = pytest.importorskip("torch")
     from safetensors.torch import save_file
     from families.muse_glimmer.checkpoint import Checkpoint
@@ -335,11 +381,12 @@ def test_native_checkpoint_uses_canonical_tensor_names(tmp_path, prefix, gate):
     name = f"{prefix}layers.0.self_attn.{gate}.weight"
     value = torch.arange(4, dtype=torch.float32).reshape(2, 2)
     save_file({name: value}, tmp_path / "weights.safetensors")
-    (tmp_path / "hf_quant_config.json").write_text(json.dumps(quant_config()))
+    if source_format == "nvfp4":
+        (tmp_path / "hf_quant_config.json").write_text(json.dumps(quant_config()))
     weight_map = {name: "weights.safetensors"}
     index = tmp_path / "model.safetensors.index.json"
     index.write_text(json.dumps({"weight_map": weight_map}))
-    with Checkpoint(tmp_path) as checkpoint:
+    with Checkpoint(tmp_path, source_format=source_format) as checkpoint:
         for requested in ("layers.0.self_attn.gate_proj.weight", name):
             assert torch.equal(checkpoint.tensor(requested), value)
         projection = checkpoint.projection(f"{prefix}layers.0.self_attn.{gate}", 2, 2)
@@ -349,4 +396,32 @@ def test_native_checkpoint_uses_canonical_tensor_names(tmp_path, prefix, gate):
     weight_map[duplicate] = "weights.safetensors"
     index.write_text(json.dumps({"weight_map": weight_map}))
     with pytest.raises(ValueError, match="Duplicate canonical Muse tensor"):
-        Checkpoint(tmp_path)
+        Checkpoint(tmp_path, source_format=source_format)
+
+def test_sdk_is_paired_with_active_runner(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from families.muse_glimmer.edge_llm import builder
+
+    native = tmp_path / "wheel"
+    runner = native / "bin/trtmc"
+    runner.parent.mkdir(parents=True)
+    runner.touch()
+    standalone = tmp_path / "source"
+    relative = "share/trtmc/edge-llm.json"
+    outside = standalone / relative
+    outside.parent.mkdir(parents=True)
+    outside.write_text("{}")
+    monkeypatch.setattr(builder, "cmake_prefixes", lambda: [standalone])
+    monkeypatch.setattr(builder, "distribution", lambda _: SimpleNamespace(locate_file=lambda _: native))
+    assert not builder.package_present()
+    assert builder._sdk_prefixes() == [native]
+
+    inside = native / relative
+    inside.parent.mkdir(parents=True)
+    inside.symlink_to(native / "missing")
+    assert builder.package_present() and builder._sdk_prefixes() == [native]
+    inside.unlink()
+    inside.write_text("{}")
+    assert builder.package_present() and builder._sdk_prefixes() == [native]
+    runner.unlink()
+    assert builder.package_present() and builder._sdk_prefixes() == [standalone]

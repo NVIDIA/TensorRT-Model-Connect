@@ -16,6 +16,7 @@
 #include "families/qwen_image/runtime/qwen_image_resample.h"
 #include "families/qwen_image/runtime/qwen_image_scheduler.h"
 #include "families/qwen_image/runtime/qwen_image_vision_layout.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1091,7 +1092,7 @@ QwenImagePipeline::EncodedPrompt QwenImagePipeline::encode_text_with_image_condi
             " requires more");
     }
     if (raw_token_count > max_seq_len) {
-        throw std::runtime_error(
+        throw internal::ConfigError(
             "QwenImagePipeline::encode_text_with_image_conditioning: tokenized prompt has " +
             std::to_string(raw_token_count) +
             " tokens, exceeding text max_seq_len=" + std::to_string(max_seq_len));
@@ -1107,7 +1108,7 @@ QwenImagePipeline::EncodedPrompt QwenImagePipeline::encode_text_with_image_condi
     std::vector<float> image_mask(static_cast<std::size_t>(max_seq_len), 0.0F);
     if (image_start + static_cast<std::size_t>(image_feature_tokens) >
         static_cast<std::size_t>(max_seq_len)) {
-        throw std::runtime_error(
+        throw internal::ConfigError(
             "QwenImagePipeline::encode_text_with_image_conditioning: image features exceed "
             "text max_seq_len");
     }

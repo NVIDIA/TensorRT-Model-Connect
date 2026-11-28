@@ -108,12 +108,12 @@ ChromaPipeline::ChromaPipeline(const ModuleLoader& loader, T5Tokenizer tokenizer
     fields_ = {
         {"negative_prompt", ConfigKind::String, internal::ConfigValue{kEmpty},
          "Classifier-free guidance negative prompt (used when guidance_scale > 1)"},
-        {"num_inference_steps", ConfigKind::I64, internal::ConfigValue{config_.default_steps},
+        {"num_steps", ConfigKind::I64, internal::ConfigValue{config_.default_steps},
          "Flow-matching Euler steps, 1 to 1000"},
         {"guidance_scale", ConfigKind::F64, internal::ConfigValue{config_.default_guidance},
          "Classifier-free guidance scale; values <= 1 run the prompt only"},
         {"seed", ConfigKind::I64, internal::ConfigValue{std::int64_t{0}},
-         "Noise seed, 0 to 4294967295; not combined with initial latents"},
+         "Noise seed, 0 to 4294967295; unused when initial latents are given"},
         {"height", ConfigKind::I64, internal::ConfigValue{std::int64_t{config_.height}},
          "Image height; fixed by the bundle"},
         {"width", ConfigKind::I64, internal::ConfigValue{std::int64_t{config_.width}},
@@ -125,15 +125,15 @@ std::vector<internal::TaskInstance> ChromaPipeline::task_bindings() {
     return {internal::bind<internal::ITextToImage>(*this, {fields_.data(), fields_.size()})};
 }
 
-ChromaPipeline::Settings ChromaPipeline::resolve(internal::ConfigView config, bool replay) const {
+ChromaPipeline::Settings ChromaPipeline::resolve(internal::ConfigView config) const {
     const Span<const ConfigField> fields{fields_.data(), fields_.size()};
     internal::validate_config(fields, config);
     Settings settings;
     settings.negative_prompt =
         std::string(*internal::config_get<std::string_view>(config, fields, "negative_prompt"));
-    const auto steps = *internal::config_get<std::int64_t>(config, fields, "num_inference_steps");
+    const auto steps = *internal::config_get<std::int64_t>(config, fields, "num_steps");
     if (steps < 1 || steps > kMaxSteps)
-        throw ConfigError("Chroma num_inference_steps must be in [1, 1000]");
+        throw ConfigError("Chroma num_steps must be in [1, 1000]");
     settings.steps = static_cast<std::int32_t>(steps);
     const auto guidance = *internal::config_get<double>(config, fields, "guidance_scale");
     if (!std::isfinite(guidance) || guidance < 0.0 || guidance > 100.0)
@@ -142,8 +142,6 @@ ChromaPipeline::Settings ChromaPipeline::resolve(internal::ConfigView config, bo
     const auto seed = *internal::config_get<std::int64_t>(config, fields, "seed");
     if (seed < 0 || seed > std::numeric_limits<std::uint32_t>::max())
         throw ConfigError("Chroma seed must be in [0, 4294967295]");
-    if (replay && internal::config_provided(config, "seed"))
-        throw ConfigError("Chroma seed cannot be combined with initial latents");
     settings.seed = static_cast<std::uint32_t>(seed);
     if (*internal::config_get<std::int64_t>(config, fields, "height") != config_.height ||
         *internal::config_get<std::int64_t>(config, fields, "width") != config_.width)
@@ -208,7 +206,7 @@ internal::ImageResult ChromaPipeline::run(const internal::TextToImageRequest& re
     std::lock_guard<std::mutex> lock(mutex_);
     const auto begin = std::chrono::steady_clock::now();
     const bool replay = !request.initial_latents.empty();
-    const auto settings = resolve(config, replay);
+    const auto settings = resolve(config);
     const auto shape = config_.latent_shape();
     std::vector<float> latents;
     if (replay) {

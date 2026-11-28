@@ -6,6 +6,7 @@
 #include "families/minimax_music3/runtime/pipeline.h"
 
 #include "families/minimax_music3/runtime/prompt_format.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <cmath>
@@ -409,7 +410,7 @@ MinimaxMusic3TextToMusicPipeline::tokenize_prompt(const std::string& caption,
     const auto assembled = minimax_music3::assemble_prompt(caption, lyrics);
     auto ids = tokenizer_->encode(assembled);
     if (static_cast<int32_t>(ids.size()) > minimax_music3::kMaxPromptTokens)
-        throw std::runtime_error("MiniMax-Music3 prompt is longer than the checkpoint's budget");
+        throw internal::ConfigError("MiniMax-Music3 prompt is longer than the checkpoint's budget");
 
     report_stage_count("prompt_tokens", ids.size());
     if (std::getenv("TRTMC_MM3_DEBUG") != nullptr) {

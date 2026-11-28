@@ -592,6 +592,20 @@ def audio_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] 
     return match, reason
 
 
+def text_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                gate: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """Generated text (a caption) against the native text: the character edit distance over the longer text
+    (case and whitespace folded, the plugins' ``parity_edit_distance``) at most ``max_distance``. An empty native
+    text is no evidence."""
+    from trtmc_aiperf_plugins.accuracy import normalized_edit_distance
+
+    mine, theirs = _text(candidate), _text(native)
+    if not theirs.strip():
+        return None, "no native text"
+    distance = normalized_edit_distance(mine, theirs)
+    return distance <= float(gate.get("max_distance", 0.0)), f"edit distance {distance:.3f}: {mine[:80]!r} vs {theirs[:80]!r}"
+
+
 @lru_cache(maxsize=None)
 def _family_checker(entrypoint: str) -> Callable:
     module, separator, name = entrypoint.partition(":")
@@ -616,7 +630,7 @@ PARITY: dict[str, Callable[..., tuple[bool | None, str]]] = {"family_parity": fa
                                                       "geometry_parity": geometry_parity,
                                                       "action_parity": action_parity, "disparity_parity": disparity_parity,
                                                       "audio_parity": audio_parity, "structure_parity": structure_parity,
-                                                      "pose_parity": pose_parity}
+                                                      "pose_parity": pose_parity, "text_parity": text_parity}
 # Parity metrics that read the output files the servers write (their artifacts are kept).
 ARTIFACT_METRICS = {"geometry_parity", "disparity_parity", "structure_parity"}
 
@@ -774,11 +788,18 @@ def mean_percent(units: Sequence[float]) -> float:
 
 def point_forecast(observation: Mapping[str, Any] | None, length: int) -> list[float]:
     """The point forecast of an output with ``length`` values: the values themselves, or the median
-    row of a quantile forecast ([1, quantiles, horizon], e.g. Chronos-Bolt's nine)."""
+    quantile of a quantile forecast: the ``series_to_quantile_forecast`` Task's [quantile, horizon, channel]
+    (the 0.5 level, else the middle one), or a pipeline's [1, quantiles, horizon] (e.g. Chronos-Bolt's nine)."""
     values = [float(value) for value in (observation or {}).get("values") or []]
     if len(values) == length:
         return values
     shape = (observation or {}).get("shape") or []
+    if list((observation or {}).get("axes") or []) == ["quantile", "horizon", "channel"]:
+        if len(shape) != 3 or shape[1] * shape[2] != length or len(values) != shape[0] * length:
+            return []
+        levels = [float(level) for level in (observation or {}).get("quantile_levels") or []]
+        middle = levels.index(0.5) if 0.5 in levels else shape[0] // 2
+        return values[middle * length:(middle + 1) * length]
     if len(shape) == 3 and len(values) == shape[1] * shape[2] and shape[2] == length:
         middle = shape[1] // 2
         return values[middle * length:(middle + 1) * length]

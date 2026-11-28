@@ -6,6 +6,7 @@
 
 #include "families/qwen3_5/runtime/native_visual.h"
 #include "families/qwen3_5/runtime/plugin_helpers.h"
+#include "trtmc/internal/config.h"
 #include "trtmc/internal/language.h"
 #include "trtmc/internal/model.h"
 
@@ -365,7 +366,7 @@ class NativeMediaTask final : public ITextGeneration,
                                 visual_tokens +=
                                     static_cast<std::size_t>(group.height) * group.width;
                             if (visual_tokens > static_cast<std::size_t>(input_limit_))
-                                throw std::invalid_argument(
+                                throw internal::ConfigError(
                                     "Qwen native media exceeds visual input capacity");
                             item.text += native_visual_text(groups);
                             for (auto& group : groups)
@@ -388,7 +389,7 @@ class NativeMediaTask final : public ITextGeneration,
             cfg.max_new_tokens = default_max_new_tokens();
         const auto ids = tokenizer_->encode(prompt);
         if (ids.size() > static_cast<std::size_t>(input_limit_))
-            throw std::invalid_argument("Qwen native prompt exceeds input capacity");
+            throw internal::ConfigError("Qwen native prompt exceeds input capacity");
         const auto prepared = native_media_prompt(ids, groups, hidden_, dtype_, image_token_,
                                                   video_token_, start_token_, end_token_);
         const auto output = decoder_->generate_media_ids(ids, prepared, cfg);

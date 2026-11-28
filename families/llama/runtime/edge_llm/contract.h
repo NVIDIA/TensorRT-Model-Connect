@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "trtmc/internal/config.h"
 #include "trtmc/task.h"
 
 #include <cmath>
@@ -53,7 +54,7 @@ inline void validate_capacity(int prompt_tokens, int input_limit, int capacity,
                               std::int64_t generated_tokens) {
     if (prompt_tokens <= 0 || prompt_tokens > input_limit || generated_tokens <= 0 ||
         generated_tokens > static_cast<std::int64_t>(capacity) - prompt_tokens)
-        throw std::invalid_argument("Llama3 Edge prompt and generation exceed bundle capacity");
+        throw internal::ConfigError("Llama3 Edge prompt and generation exceed bundle capacity");
 }
 
 } // namespace trtmc::llama::edge_llm

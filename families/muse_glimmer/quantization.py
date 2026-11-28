@@ -44,7 +44,7 @@ def weight_tensor(network, projection: Projection, keep_alive, output_dtype):
 
     p = projection
     if p.algorithm == "dense":
-        w = constant(network, p.weight.astype(np.float32), keep_alive)
+        w = constant(network, p.weight.astype(np.float32, copy=False), keep_alive)
         return network.add_cast(w, output_dtype).get_output(0)
     if p.block_scales is None:
         raise ValueError("Muse packed projection requires block scales")

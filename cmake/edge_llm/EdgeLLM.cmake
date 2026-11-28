@@ -2,17 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Optional native dependency provisioning. Model builds never acquire dependencies.
-option(TRTMC_ENABLE_EDGELLM "Install the pinned native Edge-LLM SDK and builder" OFF)
+option(TRTMC_ENABLE_EDGELLM "Install the pinned native Edge-LLM SDK" OFF)
+# Pick the release before validating optional components. Native-only builds
+# leave the release unset and never provision an SDK.
+if(TRTMC_ENABLE_EDGELLM AND NOT DEFINED TRTMC_EDGELLM_RELEASE)
+  set(TRTMC_EDGELLM_RELEASE "0.12.0")
+endif()
 if(TRTMC_EDGELLM_POLICY_SDK AND (NOT TRTMC_ENABLE_EDGELLM OR NOT TRTMC_EDGELLM_RELEASE STREQUAL "0.12.0"))
   message(FATAL_ERROR "TRTMC_EDGELLM_POLICY_SDK requires TRTMC_ENABLE_EDGELLM=ON and TRTMC_EDGELLM_RELEASE=0.12.0")
 endif()
 if(NOT TRTMC_ENABLE_EDGELLM)
   return()
-endif()
-# Temporary migration switch. Keep unported family adapters on the established
-# SDK by default. One Model Connect build links exactly one Edge release.
-if(NOT DEFINED TRTMC_EDGELLM_RELEASE)
-  set(TRTMC_EDGELLM_RELEASE "0.11.0")
 endif()
 # A Conan toolchain may provide a normal variable rather than a cache entry.
 set(TRTMC_EDGELLM_RELEASE "${TRTMC_EDGELLM_RELEASE}" CACHE STRING "Edge-LLM SDK release for this build" FORCE)

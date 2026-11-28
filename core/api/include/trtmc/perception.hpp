@@ -121,6 +121,15 @@ struct RgbdMeshMaskToObjectPoseRequest {
 
 using SemanticSegmentationResult = detail::ViewResult<trtmc_semantic_segmentation_view_v1>;
 using MasksResult = detail::ViewResult<trtmc_masks_view_v1>;
+struct ImageTrimapView {
+    Span<const uint8_t> states;
+    uint32_t height{0}, width{0};
+};
+struct ImageTrimapToAlphaRequest {
+    ImageInput image;
+    ImageTrimapView trimap;
+};
+using AlphaMatteResult = detail::ViewResult<trtmc_alpha_matte_view_v1>;
 using DisparityResult = detail::ViewResult<trtmc_disparity_view_v1>;
 using MetricGeometryResult = detail::ViewResult<trtmc_metric_geometry_view_v1>;
 using GroundedBoxesResult = detail::ViewResult<trtmc_grounded_boxes_view_v1>;
@@ -141,6 +150,12 @@ struct PerceptionRequest {
     std::vector<trtmc_point_prompt_v1> points;
     std::vector<trtmc_box_exemplar_v1> exemplars;
 };
+inline auto perception_request(const ImageTrimapToAlphaRequest& input) {
+    return PerceptionRequest<trtmc_image_trimap_request_v1>(
+        {input.image.wire,
+         {input.trimap.states.data(), input.trimap.states.size(), input.trimap.height,
+          input.trimap.width}});
+}
 inline auto perception_request(const ImageToSemanticSegmentationRequest& input) {
     return PerceptionRequest<trtmc_perception_image_request_v1>({input.image.wire});
 }
@@ -337,6 +352,8 @@ TRTMC_PERCEPTION_WRAPPER(ImageTextToPoints, TRTMC_TASK_IMAGE_TEXT_TO_POINTS,
                          trtmc_image_text_to_points_api_v1, GroundedPointsResult)
 TRTMC_PERCEPTION_WRAPPER(RgbdMeshMaskToObjectPose, TRTMC_TASK_RGBD_MESH_MASK_TO_OBJECT_POSE,
                          trtmc_rgbd_mesh_mask_to_object_pose_api_v1, ObjectPoseResult)
+TRTMC_PERCEPTION_WRAPPER(ImageTrimapToAlpha, TRTMC_TASK_IMAGE_TRIMAP_TO_ALPHA,
+                         trtmc_image_trimap_to_alpha_api_v1, AlphaMatteResult)
 #undef TRTMC_PERCEPTION_WRAPPER
 
 class PoseHypothesesCropsToRefinedPoses {

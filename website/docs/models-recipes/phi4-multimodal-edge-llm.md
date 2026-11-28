@@ -8,7 +8,7 @@ An installed Model Connect wheel uses its own native Edge SDK, not a
 different SDK on `CMAKE_PREFIX_PATH`. To switch releases, use a matching
 wheel or a standalone Model Connect builder and runner together.
 
-## Opt-in Edge 0.12
+## Edge 0.12
 
 Build MC with `TRTMC_ENABLE_EDGELLM=ON` and `TRTMC_EDGELLM_RELEASE=0.12.0`;
 this selects a matching native SDK at build time rather than switching ABI at
@@ -31,7 +31,7 @@ builder does not offer a Phi4 audio component; this owner does not expose
 audio-conditioned generation. See the [family-owned recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/phi4_multimodal/edge_llm/README.md)
 for the exact scope of the results.
 
-## Default Edge 0.11: historical profiles
+## Explicit Edge 0.11: historical profiles
 
 The `phi4_multimodal` family owns the optional Edge-LLM 0.11 complete-network
 offload for `microsoft/Phi-4-multimodal-instruct`. Build and runtime selection
@@ -39,8 +39,9 @@ remain inside the family; no global execution-mode switch is required.
 
 ## Setup and use
 
-Install Model Connect with its optional native Edge SDK and expose that SDK's
-prefix through `CMAKE_PREFIX_PATH`. A compatible Edge 0.11 Python wheel can
+In a separate build directory, configure Model Connect with
+`-DTRTMC_ENABLE_EDGELLM=ON -DTRTMC_EDGELLM_RELEASE=0.11.0`. Build and install
+that runtime and expose its SDK prefix through `CMAKE_PREFIX_PATH`. A compatible Edge 0.11 Python wheel can
 supply the builder/export tools; the native C++ SDK is still required.
 Build on the target GPU rather than cross-compiling.
 

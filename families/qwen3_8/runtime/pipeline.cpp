@@ -6,6 +6,7 @@
 #include "families/qwen3_8/runtime/pipeline.h"
 
 #include "families/qwen3_8/runtime/chat_templates.h"
+#include "trtmc/internal/config.h"
 
 #include <algorithm>
 #include <chrono>
@@ -25,6 +26,18 @@ inline double elapsed_ms(TimePoint start, TimePoint end) {
 
 namespace trtmc {
 
+namespace {
+
+// The next decode step would store one more K/V row. A full cache ends the
+// generation, as max_new_tokens does, instead of dropping the prompt's rows.
+// A state without a length limit (max_length() < 0) never fills.
+bool kv_cache_full(const Qwen38InferenceState& state) {
+    const int32_t max_length = state.max_length();
+    return max_length >= 0 && state.position() >= max_length;
+}
+
+} // namespace
+
 RecurrentPipeline::RecurrentPipeline(std::unique_ptr<ITrtModule> decoder,
                                      std::unique_ptr<Qwen38InferenceState> state,
                                      RecurrentGenConfig config, cudaStream_t stream,
@@ -38,12 +51,15 @@ RecurrentPipeline::RecurrentPipeline(std::unique_ptr<ITrtModule> decoder,
       name_(name), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
       sampler_(std::move(sampler)), mtp_scheduler_(std::move(mtp_scheduler)),
       prefill_runner_(std::move(prefill_runner)), external_draft_(std::move(external_draft)) {
-    if (!decoder_ || !decoder_->ok())
+    // Without a decoder module the prefill engine also decodes, one row per call; speculative
+    // decoding needs the decoder's single-token outputs.
+    if (decoder_ ? !decoder_->ok() : (!prefill_runner_ || mtp_scheduler_ || external_draft_))
         throw std::runtime_error(std::string(name_) + ": invalid decoder module");
     // Inspect declared inputs rather than optional Edge metadata. Older text
     // bundles remain loadable and never receive media-only bindings.
     int media_bindings = 0;
-    for (const auto& input : decoder_->input_info()) {
+    const auto decoder_inputs = decoder_ ? decoder_->input_info() : std::vector<TensorInfo>{};
+    for (const auto& input : decoder_inputs) {
         if (input.name == "visual_embedding") {
             if (input.shape.size() != 2 || input.shape[0] != 1 || input.shape[1] <= 0 ||
                 input.shape[1] > INT32_MAX ||
@@ -202,8 +218,19 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
     if (mtp_scheduler_)
         return generate_from_ids_speculative(input_ids, max_new_tokens, params, *active_sampler);
 
+    // The KV cache never drops rows: a prompt it cannot hold is rejected before
+    // prefill, and generation stops once the cache is full.
+    if (const int32_t capacity = state_->max_length();
+        capacity >= 0 && input_ids.size() > static_cast<std::size_t>(capacity)) {
+        throw internal::ConfigError("qwen3_8 prompt has " + std::to_string(input_ids.size()) +
+                                    " tokens but the KV cache holds " + std::to_string(capacity) +
+                                    "; rebuild the bundle with a larger --max-sequence-length or "
+                                    "shorten the prompt");
+    }
+
     state_->reset();
-    state_->bind_to(*decoder_);
+    if (decoder_)
+        state_->bind_to(*decoder_);
 
     prof_prepare_ms_ = prof_forward_ms_ = prof_logits_copy_ms_ = prof_advance_ms_ = 0;
     prof_steps_ = 0;
@@ -212,10 +239,16 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
 
     // ── Prefill phase ──
     auto t_prefill_start = SteadyClock::now();
-    // Multi-token engine first; whatever it could not take (prompt longer than
-    // the KV cache) goes through the single-token decoder, which shifts the
-    // cache as it fills.
+    // Multi-token engine first; whatever it could not take goes through the
+    // single-token decoder. Longer prompts were rejected above, so the cache
+    // holds the whole prompt either way.
     std::size_t consumed = prefill_chunks(input_ids, logits, nullptr);
+    if (!decoder_ && consumed < input_ids.size())
+        throw std::invalid_argument(std::string(name_) + ": the prompt (" +
+                                    std::to_string(input_ids.size()) +
+                                    " tokens) exceeds the KV cache of a bundle without a "
+                                    "decode engine (" +
+                                    std::to_string(state_->max_length()) + " tokens)");
     for (; consumed < input_ids.size(); ++consumed)
         run_step(input_ids[consumed], logits);
     auto t_prefill_end = SteadyClock::now();
@@ -231,6 +264,8 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
         Qwen38SampleResult result = active_sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
         if (result.is_eos || step + 1 == max_new_tokens)
+            break;
+        if (kv_cache_full(*state_))
             break;
         run_step(result.token_id, logits);
         ++decode_steps;
@@ -450,6 +485,7 @@ std::vector<int32_t>
 RecurrentPipeline::generate_external_draft(const std::vector<int32_t>& input_ids,
                                            int32_t max_new_tokens,
                                            const Qwen38SamplingParams& params) {
+    external_draft_->validate_sampling(params);
     external_draft_->reset(*decoder_, input_ids.size(), max_new_tokens);
     state_->reset();
     state_->bind_to(*decoder_);
@@ -475,8 +511,31 @@ RecurrentPipeline::generate_external_draft(const std::vector<int32_t>& input_ids
     while (!ended()) {
         const int32_t remaining =
             max_new_tokens - static_cast<int32_t>(output.size() - input_ids.size());
-        auto proposals = external_draft_->propose(output.back(), params, output, remaining, rng);
+        auto round = external_draft_->propose(output.back(), params, output, remaining, rng);
         ++rounds;
+        if (const auto* tree = std::get_if<Qwen38VerifyTree>(&round)) {
+            if (tree->empty() || tree->front().parent != -1 || tree->front().token != output.back())
+                throw std::runtime_error(
+                    "Qwen3.8 speculative tree does not begin at the confirmed anchor");
+            proposed += static_cast<int32_t>(tree->size()) - 1;
+            int32_t parent = 0;
+            while (!ended()) {
+                run_step(output.back(), logits);
+                external_draft_->observe(*decoder_);
+                const int32_t token = qwen38_draw_probabilities(distribution(), rng);
+                output.push_back(token);
+                const auto child =
+                    std::find_if(tree->begin() + 1, tree->end(), [&](const auto& node) {
+                        return node.parent == parent && node.token == token;
+                    });
+                if (child == tree->end())
+                    break;
+                ++accepted_count;
+                parent = static_cast<int32_t>(child - tree->begin());
+            }
+            continue;
+        }
+        const auto& proposals = std::get<std::vector<Qwen38DraftProposal>>(round);
         proposed += static_cast<int32_t>(proposals.size());
         bool rejected = false;
         for (const auto& proposal : proposals) {
@@ -511,6 +570,13 @@ RecurrentPipeline::generate_external_draft(const std::vector<int32_t>& input_ids
 
 void RecurrentPipeline::run_step(int32_t token_id, std::vector<float>& logits,
                                  std::vector<float>* hidden_state_out) {
+    if (!decoder_) {
+        // Only plain decoding runs without a decoder (the constructor rejects speculative modes).
+        if (hidden_state_out != nullptr)
+            throw std::logic_error(std::string(name_) + ": no decoder hidden state to return");
+        prefill_runner_->run_chunk(&token_id, 1, logits);
+        return;
+    }
     auto t0 = SteadyClock::now();
 
     TensorMap inputs;

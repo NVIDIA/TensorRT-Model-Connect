@@ -250,7 +250,9 @@ implementation, not the quantization, and its benchmark keeps the unquantized ma
 The Diffusers adapter ties a T5-style text encoder's `encoder.embed_tokens` back to `shared` when loading
 left it zero (Transformers 5.2 does not tie it for `UMT5EncoderModel`, Wan). A timed request that leaves
 `num_steps`, guidance, CFG, or frames at -1 is an error until `config/models` states them, since TRTMC and
-Diffusers apply different defaults.
+Diffusers apply different defaults. A null under `request` names a control the model takes on neither side
+(Qwen-Image 2.1 has no `guidance_scale`): every request built on the catalog request drops it, and none is
+required to state it.
 
 ## Setup
 
@@ -333,9 +335,14 @@ file to change:
 |---|---|---|
 | `config/tasks.yaml` | the profile's Task has no defaults (no entry, no exclusion to write) | every machine |
 | `config/exclusions.yaml` | the qualification cannot qualify the profile as cataloged | every machine |
+| `config/models` | an image-generation request leaves a size, step or guidance control to the pipeline's default, so each side would choose its own; state it under `request` in `config/models/<profile>.yaml` | every machine |
 | `environment` | not in the machine's `models.include`, or in its `models.exclude` | one machine |
 | `config/platforms/<platform>.yaml` | what the hardware cannot run | one kind of hardware |
 | `environment` | a checkpoint above the machine's `models.max_checkpoint_gib` | one machine |
+
+A family that adds a profile the qualification cannot run yet does not change this application: the
+`config/tasks.yaml` and `config/models` rows leave the profile out on their own, and `plan` shows it with its
+reason.
 
 The scope is every ready catalog profile (L0 smoke and regression variants aside). `run-all`, `plan`, `assign`
 and `matrix` take the machine's list; `--profile` (names or glob patterns, in the order given) replaces its

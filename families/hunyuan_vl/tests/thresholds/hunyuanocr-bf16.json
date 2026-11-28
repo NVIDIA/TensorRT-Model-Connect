@@ -1,0 +1,6 @@
+{
+  "threshold_overrides": {
+    "bf16_departure_max_logit_gap": 1.0,
+    "bf16_min_stable_requests": 3
+  }
+}

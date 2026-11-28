@@ -27,17 +27,22 @@ The following paths contain byte-identical copies of an original photograph
 provided by the project maintainer who took the photograph and authorized its
 inclusion and redistribution in this repository under the Apache License 2.0:
 
+- `families/blip2/tests/data/test_img.jpeg`
+- `families/clipseg/tests/data/test_img.jpeg`
 - `families/chinese_clip/tests/data/test_img.jpeg`
 - `families/idefics3/tests/data/test_img.jpeg`
 - `families/detr/tests/data/test_img.jpeg`
+- `families/dinov2_with_registers/tests/data/test_img.jpeg`
+- `families/vitmatte/tests/data/test_img.jpeg`
 - `families/vjepa2/tests/data/test_img.jpeg`
-
 - `families/layoutlmv3/tests/data/test_img.jpeg`
 - `families/dinov3/tests/data/test_img.jpeg`
+- `families/dpt/tests/data/test_img.jpeg`
 - `families/gemma3n/tests/data/test_img.jpeg`
 - `families/internvl/tests/data/test_img.jpeg`
 - `families/lance/tests/data/test_img.jpeg`
 - `families/locateanything/tests/data/test_img.jpeg`
+- `families/minicpmv4_6/tests/data/test_img.jpeg`
 - `families/moge/tests/data/test_img.jpeg`
 - `families/molmo2/tests/data/test_img.jpeg`
 - `families/oneformer/tests/data/test_img.jpeg`
@@ -51,6 +56,7 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 - `families/sam3/tests/data/test_img.jpeg`
 - `families/segformer/tests/data/test_img.jpeg`
 - `families/smolvlm/tests/data/test_img.jpeg`
+- `families/stable_video_diffusion/tests/data/test_img.jpeg`
 - `families/timm_densenet/tests/data/test_img.jpeg`
 - `families/timm_efficientnet/tests/data/test_img.jpeg`
 - `families/timm_inception/tests/data/test_img.jpeg`
@@ -60,6 +66,8 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 - `families/timm_resnet/tests/data/test_img.jpeg`
 - `families/timm_vgg/tests/data/test_img.jpeg`
 - `families/timm_vit/tests/data/test_img.jpeg`
+- `families/videomae/tests/data/test_img.jpeg` (the E2E cuts a 16-frame
+  camera pan of 224x224 crops from it)
 
 `families/gemma3n/tests/data/test_img_car.jpeg` is a byte-identical copy of
 `families/timm_resnet/tests/data/test_img_car.jpeg`, a crop of the same
@@ -75,6 +83,7 @@ and saved losslessly as PNG (its pixels equal Pillow's decode of the
 
 Byte-identical copies of that PNG are stored at:
 
+- `families/mask2former/tests/data/test_img.png`
 - `families/minicpmv4_7/tests/data/test_img.png`
 
 `families/timm_resnet/tests/data/test_img_car.jpeg` is a crop of the same
@@ -96,6 +105,9 @@ distributed under the Apache License 2.0 with the rest of the project:
   single-line GLM-OCR E2E cases
 - `families/lighton_ocr/tests/data/invoice.png` — synthetic invoice with
   invented data rendered by the family-owned `generate_fixture.py`
+- `families/minicpmv4_6/tests/data/orc_test_img.jpeg` — byte-identical copy of
+  `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the input of the text-reading
+  E2E cases
 - `families/phi4_multimodal/tests/data/dynamic-hd/synthetic-*.png` (7 images) —
   synthetic test patterns written by the checked-in
   `families/phi4_multimodal/tests/data/dynamic-hd/generate.py` for Dynamic-HD
@@ -112,6 +124,11 @@ distributed under the Apache License 2.0 with the rest of the project:
   `printed_tall.png` — printed text lines written by the checked-in
   `families/trocr/tests/data/generate.py` with Pillow's built-in default font,
   Aileron Regular (https://dotcolon.net/fonts/aileron, CC0 1.0 Universal)
+- `families/vitpose/tests/data/person.png` — a 480 x 640 photograph-style image
+  of a person in a yoga pose, generated for the ViTPose E2E with
+  `black-forest-labs/FLUX.2-klein-4B` (Apache-2.0) at revision
+  `e7b7dc27f91deacad38e78976d1f2b499d76a294` (seed 0, 4 steps); it depicts no
+  real person
 - `families/minicpm_ocr/tests/data/minicpm_ocr_page.png` — the decoded pixels of
   `families/deepseek_ocr/tests/data/orc_test_img.jpeg` saved losslessly as PNG, so
   the native loader and the reference processor read identical pixels
@@ -174,6 +191,13 @@ content in all three model families:
 `probe_02_clean_16k_mono_no_resample.wav` and is distributed under the same
 terms.
 
+Byte-identical copies of `probe_02_clean_16k_mono_no_resample.wav` are also
+stored at:
+
+- `families/granite_speech5/tests/data/maintainer-recording-16k-mono.wav`
+- `families/nemotron3_diarization/tests/data/maintainer-recording-16k-mono.wav`
+- `families/voxtral/tests/data/probe_02_clean_16k_mono_no_resample.wav`
+
 The PersonaPlex fixture contains the same maintainer-owned spoken recording,
 converted to mono 24 kHz float32 for official-reference regression tests:
 
@@ -210,11 +234,14 @@ distributes as FLAC in SLR12 under the Creative Commons Attribution 4.0
 International license:
 
 - `families/glmasr/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/granite_speech5/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/higgs_audio_v2_tokenizer/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/hubert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/mimi/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/nemotron3_diarization/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/qwen3_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/vibevoice_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/voxtral/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/wav2vec2_bert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/wavlm/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav`
@@ -325,7 +352,7 @@ episode 1262 frame 40 and episode 1267 frame 80 in `physical-intelligence/libero
 revision `a4336d589d589045d1c56423ffdf3b88a0e19b1f`. That dataset is distributed
 under CC-BY-4.0. Each `observation.json` records the source. The `*.processed.png`
 files are those same frames after LeRobot's evaluation crop and resize.
-`noise_seed0.f32` is a `torch.randn` draw, `reference/*.f32` are LeRobot
+`noise_seed0.f32` is a `torch.randn` draw, `reference/ep*.f32` are LeRobot
 `lerobot[groot]==0.6.1` outputs, and `tokenizer_golden.json` holds instructions
 written for this test with the token ids LeRobot's preprocessor produced for them;
 none of these contains third-party content beyond the frames above.
@@ -337,6 +364,14 @@ none of these contains third-party content beyond the frames above.
 - `noise_seed0.f32`: little-endian float32 flow noise, 40 x 132
 - `reference/ep*_f*.{fp32,bf16}.f32`, `reference/ep1272_f000.alternate.{fp32,bf16}.f32`: little-endian float32 actions, 16 x 7
 - `tokenizer_golden.json`: test instructions and expected prompt token ids
+
+The Isaac LIBERO-10 fixture `reference/isaac_libero10_ep1272_f000.fp32.f32`
+contains 16 × 7 generated float32 actions, not weights. It reuses the episode
+1272 frame 0 observation and flow noise above with the independent
+[Isaac GR00T policy](https://github.com/NVIDIA/Isaac-GR00T/tree/23ace64f17aa5015259b8609d371eb61a357c776)
+and the pinned [LIBERO-10 checkpoint](https://huggingface.co/nvidia/GR00T-N1.7-LIBERO/tree/658540327860f93dd2cb9c1ed3e3b10fb792a0eb/libero_10).
+The family records the inputs and reference method in
+`families/lerobot_groot/tests/isaac-fixture-source.json`.
 
 ## FoundationPose external model artifacts
 

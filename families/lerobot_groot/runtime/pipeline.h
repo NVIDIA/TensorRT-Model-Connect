@@ -58,13 +58,6 @@ class Pipeline final : public internal::IModel, public internal::IImagesStateTex
         internal::ConfigView config) override;
 
   private:
-    struct Options {
-        bool has_seed{false};
-        std::uint64_t seed{0};
-        std::vector<float> noise; // Empty unless supplied explicitly.
-    };
-    Options parse_options(internal::ConfigView config) const;
-    std::vector<float> initial_noise(const Options& options);
     std::vector<float> pack_pixels(const internal::ImagesStateTextObservation& observation) const;
     std::vector<float> normalized_state(Span<const float> state) const;
     Prompt prompt(std::string_view text) const;

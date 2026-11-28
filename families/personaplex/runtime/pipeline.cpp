@@ -950,10 +950,12 @@ AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
     auto delay_state = make_delay_cache_state(config_.delays, num_cb);
     if (config_.system_prompt_offset > 0) {
         if (config_.system_prompt_cache.size() != delay_state.cache.size() ||
-            config_.system_prompt_provided.size() != delay_state.provided.size() ||
-            config_.system_prompt_offset - 1 + num_frames > temporal_state_->max_length())
+            config_.system_prompt_provided.size() != delay_state.provided.size())
             throw std::invalid_argument(
-                "PersonaPlex prompt and audio exceed the bundle context or cache geometry");
+                "PersonaPlex system prompt cache does not match the bundle cache geometry");
+        // Too much audio for the context is the request's fault, not the bundle's.
+        if (config_.system_prompt_offset - 1 + num_frames > temporal_state_->max_length())
+            throw internal::ConfigError("PersonaPlex prompt and audio exceed the bundle context");
         delay_state.cache = config_.system_prompt_cache;
         delay_state.provided = config_.system_prompt_provided;
     }

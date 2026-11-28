@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any, Callable
 
 
 _ID = re.compile(r"[a-z][a-z0-9_]*\Z")
+_TRUE = frozenset({"1", "ON", "YES", "TRUE"})
 
 
 @dataclass(frozen=True)
@@ -205,13 +207,23 @@ def resolve_model(model: str, revision: str | None = None) -> Path:
         raise ValueError(f"model path is not a directory: {local}")
     from huggingface_hub import snapshot_download
 
+    # Offline, read the cache only: since huggingface_hub 1.33 a commit-hash revision skips the cache
+    # lookup and lists the Hub tree unless the call itself is local-only, which offline mode refuses.
+    local_only = {"local_files_only": True} if _hub_offline() else {}
     return Path(
         snapshot_download(
             repo_id=model,
             revision=revision,
             ignore_patterns=["*flax_model*", "*tf_model*"],
+            **local_only,
         )
     )
+
+
+def _hub_offline() -> bool:
+    """Whether Hugging Face Hub's offline switch is on, read as huggingface_hub reads it."""
+    value = os.environ.get("HF_HUB_OFFLINE") or os.environ.get("TRANSFORMERS_OFFLINE") or ""
+    return value.upper() in _TRUE
 
 
 def _family_directories() -> list[Path]:

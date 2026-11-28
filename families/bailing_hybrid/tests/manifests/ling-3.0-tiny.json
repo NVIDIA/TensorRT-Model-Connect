@@ -1,0 +1,24 @@
+{
+  "name": "ling-3.0-tiny",
+  "hf_id": "inclusionAI/Ling-3.0-tiny",
+  "hf_revision": "9a98e35fe1c9ee255f78dd64771c7ae15a799481",
+  "bundle": "ling-3.0-tiny.bundle",
+  "family": "bailing_hybrid",
+  "task": "text_continuation",
+  "precision": "fp32",
+  "max_sequence_length": 128,
+  "tensor_parallel_size": 1,
+  "reference_environment": "isolated",
+  "testcases": [
+    {
+      "name": "ling-3.0-tiny",
+      "premerge": true,
+      "max_new_tokens": 16,
+      "prompts": [
+        "The capital of Germany is",
+        "def add(a, b):\n    return"
+      ],
+      "runtime_timeout_s": 3600
+    }
+  ]
+}

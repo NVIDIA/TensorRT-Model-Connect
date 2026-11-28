@@ -6,7 +6,11 @@
 
 #include "families/muse_glimmer/runtime/edge_llm/contract.h"
 
+#ifdef TRTMC_MUSE_GLIMMER_EDGE_012
+#include <tensorrt_edgellm/runtime/llmRuntimeUtils.h>
+#else
 #include <edgellm/cpp/runtime/llmRuntimeUtils.h>
+#endif
 
 namespace trtmc::muse_glimmer::edge_llm {
 

@@ -7,6 +7,10 @@
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
+#ifdef TRTMC_GROOT_EDGE_012
+#include "families/lerobot_groot/runtime/edge_llm/adapter.h"
+#endif
+
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -26,7 +30,7 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
 RuntimeConfig parse_config(const std::vector<char>& data) {
     const auto json = nlohmann::json::parse(data.begin(), data.end());
     const auto precision = json.at("precision").get<std::string>();
-    if (precision != "bf16" && precision != "fp32")
+    if (precision != "bf16" && precision != "fp16" && precision != "fp32")
         throw std::runtime_error("lerobot_groot runtime.json has an unsupported precision");
     RuntimeConfig config;
     config.cameras = json.at("cameras").get<std::vector<std::string>>();
@@ -71,6 +75,14 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     if (task != trtmc::internal::IImagesStateTextToActionChunk::kTask)
         throw std::runtime_error("lerobot_groot bundle declares an unsupported task: " + task);
 
+    if (context.reader.find_section("edge_llm.json")) {
+#ifdef TRTMC_GROOT_EDGE_012
+        return trtmc::lerobot_groot::edge_llm::create(context.reader);
+#else
+        throw std::runtime_error(
+            "This GR00T Edge bundle needs a runtime built with the Edge 0.12 GR00T add-on");
+#endif
+    }
     auto config = trtmc::lerobot_groot::parse_config(
         trtmc::lerobot_groot::require_section(context.reader, "runtime.json"));
     const auto vocabulary = trtmc::lerobot_groot::require_section(context.reader, "tokenizer.json");

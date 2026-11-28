@@ -10,6 +10,7 @@
 namespace trtmc {
 struct Qwen38DFlash2Config {
     int32_t hidden, vocab, capacity, feature_count, mask_token, window, rank, top_k;
+    bool tree{false};
 };
 // DFlash2 proposals use temperature on selector top-16, not target top-p/min-p
 // or repetition filters. Target verification retains all requested filters.
@@ -20,12 +21,13 @@ class Qwen38DFlash2 final : public Qwen38ExternalDraft {
   public:
     Qwen38DFlash2(Qwen38DFlash2Config config, std::unique_ptr<ITrtModule> draft,
                   std::unique_ptr<ITrtModule> selector, std::vector<char> embeddings);
+    void validate_sampling(const Qwen38SamplingParams& sampling) const override;
     void reset(ITrtModule& target, std::size_t prompt_length, int32_t max_new_tokens) override;
     void observe(ITrtModule& target) override;
-    std::vector<Qwen38DraftProposal> propose(int32_t anchor, const Qwen38SamplingParams& sampling,
-                                             const std::vector<int32_t>& history, int32_t budget,
-                                             uint64_t& rng) override;
-    const char* name() const override { return "DFlash2"; }
+    Qwen38DraftRound propose(int32_t anchor, const Qwen38SamplingParams& sampling,
+                             const std::vector<int32_t>& history, int32_t budget,
+                             uint64_t& rng) override;
+    const char* name() const override { return config_.tree ? "DFlash2 DDTree" : "DFlash2"; }
 
   private:
     Qwen38DFlash2Config config_;

@@ -186,22 +186,25 @@ def _native_prefill_chunk_len(request, capacity, *, visual=False, external_draft
 _TWO_ENGINE_MEMORY_FRACTION = 0.8
 
 
-def _fit_prefill_engine(request, chunk: int, weight_bytes: int, gpu_bytes: int | None) -> int:
-    """Drop the default prefill engine when a second copy of the weights does not fit on the GPU.
+def _decoder_engine_layout(chunk: int, weight_bytes: int, gpu_bytes: int | None, *, has_mtp: bool) -> str:
+    """Which decoder engines a single-GPU bundle ships.
 
-    The prefill engine carries its own copy of every weight. A 27B FP16 checkpoint needs about 108 GB
-    for both engines, more than a 128 GB unified-memory GPU leaves after the runtime; prompts then run
-    through the decode engine one token at a time. An explicit prefill_chunk_len is always kept.
+    ``"single"``: ``engine.plan`` decodes and, when ``chunk`` >= 2, ``prefill_engine.plan`` takes the prompt
+    ``chunk`` rows per call. Each engine carries its own copy of the weights: a 27B FP16 checkpoint needs about
+    108 GB for both, more than a 128 GB unified-memory GPU leaves after the runtime. Such a bundle is
+    ``"chunked"``: it ships only ``prefill_engine.plan``, which also decodes, one row per call, so a prompt
+    still reads the weights once per chunk instead of once per token. MTP verification reads the decode
+    engine's hidden states, so an MTP bundle keeps both engines.
     """
-    if chunk == 0 or request.prefill_chunk_len is not None or gpu_bytes is None:
-        return chunk
+    if chunk < 2 or has_mtp or gpu_bytes is None:
+        return "single"
     needed = 2 * weight_bytes
     if needed <= gpu_bytes * _TWO_ENGINE_MEMORY_FRACTION:
-        return chunk
-    print(f"Skipping the prefill engine: the decode and prefill engines need about {needed / 1024**3:.0f} GiB "
-          f"of weights and the GPU has {gpu_bytes / 1024**3:.0f} GiB; prompts run through the decode engine",
-          file=sys.stderr)
-    return 0
+        return "single"
+    print(f"Building the prefill engine only: the decode and prefill engines need about "
+          f"{needed / 1024**3:.0f} GiB of weights and the GPU has {gpu_bytes / 1024**3:.0f} GiB; "
+          "the prefill engine also decodes", file=sys.stderr)
+    return "chunked"
 
 
 def _gpu_memory_bytes() -> int | None:
@@ -216,7 +219,7 @@ def _gpu_memory_bytes() -> int | None:
 
 
 def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path | None = None,
-                  draft_variant: str = "dspark") -> None:
+                  draft_variant: str = "dspark", paired_fp8_kv: bool = False) -> None:
     """Build the requested family-native topology without precision or task downgrade."""
     if request.dynamic_kv_cache:
         raise NotImplementedError("qwen3_8 does not support dynamic_kv_cache")
@@ -236,14 +239,14 @@ def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path
         raise NotImplementedError("qwen3_8 requires max_batch_size=1")
     if request.tensor_parallel_size not in (1, 2) or request.context_parallel_size != 1:
         raise NotImplementedError("qwen3_8 native supports TP1/TP2 and CP1")
-    if request.quantization not in {None, "none", "nvfp4", "fp8", "int4_awq"}:
+    if request.quantization not in {None, "none", "nvfp4", "fp8", "int4_awq", "int4_gptq"}:
         raise NotImplementedError(
             f"qwen3_8 does not support quantization={request.quantization!r}")
 
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     quantization = _native_quantization(request.quantization, model_dir, config.raw)
-    quantized = quantization in {"nvfp4", "fp8", "int4_awq"}
+    quantized = quantization in {"nvfp4", "fp8", "int4_awq", "int4_gptq"}
     text_config = config.raw.get("text_config", config.raw)
     if (
         not isinstance(text_config, dict)
@@ -283,10 +286,18 @@ def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path
             from . import draft as draft_implementation
             draft_config = draft_implementation.DraftConfig.from_dict(draft_raw, text_config)
             maximum = 1024
-        elif draft_variant == "dflash":
+        elif draft_variant in {"dflash", "dflash_tree"}:
             from . import dflash2 as draft_implementation
             draft_config = draft_implementation.DFlash2Config.from_dict(draft_raw, text_config)
             maximum = 4096
+        elif draft_variant in {"domino", "domino_tree"}:
+            from . import domino as draft_implementation
+            if quantized:
+                raise ValueError("Qwen3.6 Domino requires the original target checkpoint")
+            draft_config = draft_implementation.DominoConfig.from_dict(draft_raw, text_config)
+            maximum = 2048
+            if max_sequence_length < draft_config.query_rows:
+                raise ValueError("Qwen3.6 Domino requires its complete block of 16")
         else:
             raise ValueError("Unknown Qwen3.8 native external draft variant")
         if not 8 < max_sequence_length <= min(maximum, draft_raw.get("max_position_embeddings", maximum)):
@@ -310,16 +321,20 @@ def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path
         if quantization == "nvfp4":
             from .quantization import calibrate_qwen3_8_nvfp4
             quant_ctx = calibrate_qwen3_8_nvfp4(model_dir, config, graph_ops, readers=readers)
-        elif quantization == "int4_awq":
-            from .quantization import load_qwen3_8_awq
-            quant_ctx = load_qwen3_8_awq(model_dir, config, graph_ops, readers=readers)
+        elif quantization in {"int4_awq", "int4_gptq"}:
+            from .config import compressed_int4_fp8_kv
+            from .quantization import load_qwen3_8_group_int4
+            compressed = quantization == "int4_gptq"
+            if compressed and (draft_dir is None or draft_variant not in {"dflash", "dflash_tree"} or not compressed_int4_fp8_kv(config.raw)):
+                raise ValueError("Qwen3.8 compressed INT4 requires its prepared group-128 DFlash2 target")
+            quant_ctx = load_qwen3_8_group_int4(model_dir, config, graph_ops, readers=readers, compressed=compressed)
         else:
             from .quantization import calibrate_qwen3_8_fp8
             quant_ctx = calibrate_qwen3_8_fp8(model_dir, config, graph_ops, readers=readers)
 
     weights = model.load_weights(
         str(model_dir), config, precision=precision,
-        quant_ctx=quant_ctx, readers=readers)
+        quant_ctx=quant_ctx, readers=readers, paired_fp8_kv=paired_fp8_kv)
     # A 27B checkpoint's host weights plus TensorRT's device copy exceed a 128 GB unified-memory GPU.
     spill_if_large(weights, request.output_path)
     # Embedded draft weights alone do not request speculative execution.
@@ -330,33 +345,39 @@ def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path
         fp8_cache=bool(weights.get("_fp8_kv_cache", False)),
         prepared_mtp=has_mtp and _owned(quant_ctx, "mtp_layer.fc"),
     )
+    layout = "single"
     if request.tensor_parallel_size == 1 and quant_ctx is None:  # host bytes size an unquantized engine only
-        prefill_chunk_len = _fit_prefill_engine(
-            request, prefill_chunk_len, host_weight_bytes(weights), _gpu_memory_bytes())
+        layout = _decoder_engine_layout(
+            prefill_chunk_len, host_weight_bytes(weights), _gpu_memory_bytes(), has_mtp=has_mtp)
     if request.tensor_parallel_size == 2:
         _build_tensor_parallel(request, writer, model_dir, config, model, weights,
                                max_sequence_length, visual_config, visual_metadata, readers)
         return
-    # Every plan embeds the full weight set: write each one to the bundle as soon as it is built, so a
-    # 27B build never holds two serialized plans (plus the host weights) in memory at once.
+    # Every plan embeds the full weight set: TensorRT streams the target and prefill plans straight into the
+    # bundle, so a 27B build never holds a serialized plan in host memory next to the builder's own copies.
     _publish_native_header(request, writer)
-    writer.add_bytes("engine.plan", model.build_engine(
-        config,
-        weights,
-        max_sequence_length,
-        precision=precision,
-        quant_ctx=quant_ctx,
-        verbose=bool(request.verbose),
-        debug_layer_outputs=False,
-        **({"target_feature_layers": draft_config.feature_layers} if draft_config else {}),
-        **({"media_inputs": True} if visual else {}),
-    ))
+    if layout == "single":
+        with writer.open_section("engine.plan") as section:
+            model.build_engine(
+                config,
+                weights,
+                max_sequence_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                verbose=bool(request.verbose),
+                debug_layer_outputs=False,
+                plan_stream=section,
+                **({"target_feature_layers": draft_config.feature_layers} if draft_config else {}),
+                **({"media_inputs": True} if visual else {}),
+            )
 
     if prefill_chunk_len >= 2:
-        writer.add_bytes("prefill_engine.plan", model.build_engine_prefill(
-            config, weights, max_sequence_length, prefill_chunk_len,
-            precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
-        ))
+        with writer.open_section("prefill_engine.plan") as section:
+            model.build_engine_prefill(
+                config, weights, max_sequence_length, prefill_chunk_len,
+                precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose),
+                plan_stream=section,
+            )
     else:
         prefill_chunk_len = 0
 
@@ -402,7 +423,7 @@ def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path
             model,
             precision=precision,
             max_cache_length=max_sequence_length,
-            decoder_engine_layout="single",
+            decoder_engine_layout=layout,
             has_mtp=has_mtp,
             mtp_num_draft_tokens=(mtp_seq_len - 1) if has_mtp else 0,
             prefill_chunk_len=prefill_chunk_len,
@@ -413,18 +434,27 @@ def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path
         import numpy as np
 
         draft_weights = draft_implementation.load_draft_weights(Path(draft_dir), draft_config)
-        prefix = "native_dspark" if draft_variant == "dspark" else "native_dflash2"
+        prefix = {"dspark": "native_dspark", "dflash": "native_dflash2", "dflash_tree": "native_dflash2",
+                  "domino": "native_domino", "domino_tree": "native_domino"}[draft_variant]
+        metadata = {
+            "schema_version": 1, "hidden_size": draft_config.hidden,
+            "vocab_size": draft_config.vocab, "max_cache_length": max_sequence_length,
+            "feature_layers": list(draft_config.feature_layers),
+        }
         writer.add_bytes(f"{prefix}.plan", draft_implementation.build_draft_engine(
             draft_config, draft_weights, weights.get("w_lm_head"), max_sequence_length,
             quant_ctx=quant_ctx, verbose=bool(request.verbose),
         ))
-        metadata = {
-            "schema_version": 1, "hidden_size": draft_config.hidden,
-            "vocab_size": draft_config.vocab, "max_cache_length": max_sequence_length,
-            "feature_layers": list(draft_config.feature_layers), "rows": draft_config.query_rows,
-            "mask_token_id": draft_config.mask_token,
-        }
-        if draft_variant == "dspark":
+        metadata.update(rows=draft_config.query_rows, mask_token_id=draft_config.mask_token)
+        if draft_variant in {"domino", "domino_tree"}:
+            h = draft_config.hidden
+            writer.add_bytes(f"{prefix}_correction.plan", draft_implementation.build_correction_engine(
+                draft_weights["prefix_gru.weight_ih_l0"], draft_weights["prefix_gru.weight_hh_l0"],
+                draft_weights["embed_proj.0.weight"][:, h:], draft_config.pool_size,
+                verbose=bool(request.verbose)))
+            metadata.update(pool=draft_config.pool_size, rank=draft_config.rank, state=draft_config.state,
+                            top_k=4 if draft_variant == "domino_tree" else 1)
+        elif draft_variant == "dspark":
             writer.add_bytes(f"{prefix}_heads.plan", draft_implementation.build_markov_engine(
                 draft_config, draft_weights, verbose=bool(request.verbose)))
             metadata.update(sample_from_anchor=draft_config.sample_from_anchor,
@@ -434,6 +464,8 @@ def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path
                 draft_config, draft_weights, verbose=bool(request.verbose)))
             metadata.update(window=draft_config.window, rank=draft_config.selector_rank,
                             top_k=draft_config.selector_top_k)
+            if draft_variant == "dflash_tree":
+                metadata.update(schema_version=2, tree_top_k=4, verify_tokens=32)
         # Host-resident lookup avoids another vocabulary-sized GPU table/engine.
         writer.add_bytes(f"{prefix}_embeddings.bin",
                          np.asarray(weights["embedding"], dtype=np.float16).tobytes())

@@ -8,7 +8,9 @@ add_library(trtmc_model_qwen3_8 SHARED
   kv_cache.cpp
   mtp_scheduler.cpp
   dspark.cpp
+  domino.cpp
   dflash2.cpp
+  dflash2_tree.cpp
   pipeline.cpp
   native_visual.cpp
   native_media.cpp
@@ -68,7 +70,9 @@ if(TRTMC_BUILD_TESTS)
     kv_cache.cpp
     mtp_scheduler.cpp
     dspark.cpp
+    domino.cpp
     dflash2.cpp
+    dflash2_tree.cpp
     pipeline.cpp
     prefill_runner.cpp
     native_visual.cpp
@@ -100,3 +104,20 @@ if(TRTMC_BUILD_TESTS)
 endif()
 
 include(edge_llm/Adapter.cmake)
+
+if(TRTMC_BUILD_TESTS)
+  # CPU-backed KV-cache test: CUDA calls are served from host memory, and an
+  # overlapping copy fails the test.
+  add_executable(test_qwen3_8_kv_cache
+    ${PROJECT_SOURCE_DIR}/families/qwen3_8/tests/cpp/test_kv_cache.cpp
+    kv_cache.cpp
+    ${PROJECT_SOURCE_DIR}/core/runtime/primitives/device_tensor.cpp
+  )
+  target_include_directories(test_qwen3_8_kv_cache PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_qwen3_8_kv_cache SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_compile_options(test_qwen3_8_kv_cache PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME qwen3_8_kv_cache COMMAND test_qwen3_8_kv_cache)
+endif()

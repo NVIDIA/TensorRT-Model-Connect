@@ -4,6 +4,7 @@
  */
 #include "families/laya/runtime/record.h"
 #include "families/laya/runtime/routing.h"
+#include "trtmc/internal/config.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
@@ -72,7 +73,7 @@ class Pipeline final : public IStructuredDecision {
                 options = std::max(options, rows[i].options.size());
             }
             if (options > max_options_)
-                throw std::invalid_argument("question exceeds bundle option capacity");
+                throw internal::ConfigError("question exceeds bundle option capacity");
             std::vector<std::int32_t> ids(count * sequence,
                                           config_.at("pad_token_id").get<std::int32_t>());
             std::vector<std::int32_t> attention(count * sequence, 0), markers(count * options, 0),

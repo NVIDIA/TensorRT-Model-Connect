@@ -1,0 +1,67 @@
+{
+  "name": "groot-n17-isaac-libero10-fp16",
+  "bundle": "groot-n17-isaac-libero10-fp16.bundle",
+  "family": "lerobot_groot",
+  "task": "images_state_text_to_action_chunk",
+  "precision": "fp16",
+  "tensor_parallel_size": 1,
+  "source_revision": "658540327860f93dd2cb9c1ed3e3b10fb792a0eb",
+  "checkpoint_subdir": "isaac-libero10",
+  "external_files": [
+    {
+      "path": "isaac-libero10/config.json",
+      "url": "https://huggingface.co/nvidia/GR00T-N1.7-LIBERO/resolve/658540327860f93dd2cb9c1ed3e3b10fb792a0eb/libero_10/config.json"
+    },
+    {
+      "path": "isaac-libero10/embodiment_id.json",
+      "url": "https://huggingface.co/nvidia/GR00T-N1.7-LIBERO/resolve/658540327860f93dd2cb9c1ed3e3b10fb792a0eb/libero_10/embodiment_id.json"
+    },
+    {
+      "path": "isaac-libero10/model.safetensors.index.json",
+      "url": "https://huggingface.co/nvidia/GR00T-N1.7-LIBERO/resolve/658540327860f93dd2cb9c1ed3e3b10fb792a0eb/libero_10/model.safetensors.index.json"
+    },
+    {
+      "path": "isaac-libero10/processor_config.json",
+      "url": "https://huggingface.co/nvidia/GR00T-N1.7-LIBERO/resolve/658540327860f93dd2cb9c1ed3e3b10fb792a0eb/libero_10/processor_config.json"
+    },
+    {
+      "path": "isaac-libero10/statistics.json",
+      "url": "https://huggingface.co/nvidia/GR00T-N1.7-LIBERO/resolve/658540327860f93dd2cb9c1ed3e3b10fb792a0eb/libero_10/statistics.json"
+    },
+    {
+      "path": "isaac-libero10/model-00001-of-00002.safetensors",
+      "url": "https://huggingface.co/nvidia/GR00T-N1.7-LIBERO/resolve/658540327860f93dd2cb9c1ed3e3b10fb792a0eb/libero_10/model-00001-of-00002.safetensors"
+    },
+    {
+      "path": "isaac-libero10/model-00002-of-00002.safetensors",
+      "url": "https://huggingface.co/nvidia/GR00T-N1.7-LIBERO/resolve/658540327860f93dd2cb9c1ed3e3b10fb792a0eb/libero_10/model-00002-of-00002.safetensors"
+    },
+    {
+      "path": "isaac-libero10/tokenizer/tokenizer.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/tokenizer.json"
+    },
+    {
+      "path": "isaac-libero10/tokenizer/tokenizer_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/tokenizer_config.json"
+    },
+    {
+      "path": "isaac-libero10/tokenizer/preprocessor_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/preprocessor_config.json"
+    }
+  ],
+  "testcases": [
+    {
+      "name": "groot-n17-isaac-libero10-fp16-ep1272-f000",
+      "premerge": true,
+      "cameras": [
+        "image",
+        "wrist_image"
+      ],
+      "inputs": {
+        "frame": "data/recorded_observation/ep1272_f000",
+        "noise": "data/noise_seed0.f32",
+        "reference_fp32": "data/reference/isaac_libero10_ep1272_f000.fp32.f32"
+      }
+    }
+  ]
+}

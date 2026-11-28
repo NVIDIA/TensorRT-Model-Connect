@@ -9,10 +9,16 @@
 exclude:
   - profile: deberta-v3-base*
     reason: TRTMC frames the text with [CLS] and [SEP]; the checkpoint's tokenizer.json adds neither, so the generic encode reference returns two rows fewer
+  - profile: groot-n17-isaac-libero10-fp16
+    reason: the live GR00T reference serves LeRobot's LIBERO-spatial policy, not Isaac's LIBERO-10 checkpoint and processors; the family E2E compares actions against a recorded Isaac FP32 reference
   - profile: gte-base-en-v1_5*
     reason: the generic embed reference mean-pools and L2-normalizes; GTE pools the CLS token without normalizing, and its catalog testcase has no prompt
   - profile: nomic-embed-text-v1_5*
     reason: the generic embed reference sends unprefixed text; nomic-embed needs a query or document role, and its catalog testcase has no prompt
+  - profile: minicpm-v-4.7-35b-a3b
+    reason: the native reference needs Transformers 5.22 for MiniCPM-V 4.7 (the family pins it) while the qualification's reference environment has an older one; it needs its own adapter and environment
+  - profile: hunyuanocr-*
+    reason: the native reference needs Transformers 5.22 for HunyuanOCR (the family pins it) while the qualification's reference environment has an older one, and its testcases state no prompt; it needs its own adapter, environment and OCR scheme
   - profile: nemotron-omni-nvfp4-text-image
     reason: the native reference cannot load the checkpoint, which needs its own modeling code and is ModelOpt mixed FP8/NVFP4 (Transformers has no modelopt quantizer); the family's independent reference is a pinned vLLM snapshot, and AIPerf has no vLLM native backend
   - profile: pi05-openpi-*

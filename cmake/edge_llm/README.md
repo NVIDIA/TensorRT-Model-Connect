@@ -5,11 +5,15 @@ nor builds it. Enable it once while installing Model Connect; ordinary model
 builds only use the installed package and never fetch or install dependencies.
 Cross compilation is rejected. Configure and build on the inference GPU host.
 
-## Opt in to Edge-LLM 0.12.0
+## Default SDK for Edge-enabled builds: 0.12.0
 
-When Edge is enabled the default release is still **0.11.0** during the family
-migration. A build links **one** release; an engine from a different release
+In a fresh build directory, enabling Edge selects **0.12.0** unless a release is explicitly requested.
+A build links **one** release; an engine from a different release
 is not interchangeable. Native-only builds do not provision either SDK.
+
+An existing build directory keeps its cached SDK release, including an old
+0.11.0 default. To upgrade, configure a new Edge-enabled build directory and
+rebuild Model Connect there. This leaves intentional 0.11.0 builds unchanged.
 
 For 0.12, point CMake at a native installation exporting
 `TensorRTEdgeLLMConfig.cmake`, or let CMake build the official pinned GitHub
@@ -62,11 +66,11 @@ It discovers the native receipt via `CMAKE_PREFIX_PATH` or inside the installed
 MC wheel. Neither installing the Python tools nor selecting the CMake release
 by itself enables an unported family or validates a model.
 
-## Default release: Edge-LLM 0.11.0
+## Explicit legacy build: Edge-LLM 0.11.0
 
 ```bash
 cmake -S . -B build \
-  -DTRTMC_ENABLE_EDGELLM=ON \
+  -DTRTMC_ENABLE_EDGELLM=ON -DTRTMC_EDGELLM_RELEASE=0.11.0 \
   -DTRTMC_EDGELLM_CUDA_ARCHITECTURE=80 \
   -DTRTMC_EDGELLM_TRT_ROOT="$TRT_ROOT" \
   -DCUDAToolkit_ROOT="$CUDA_ROOT" \

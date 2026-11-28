@@ -29,10 +29,6 @@ models:
       reason: "does not fit the 128 GB unified memory"
     - profile: gpt-oss-20b
       reason: "does not fit the 128 GB unified memory"
-    - profile: qwen36-27b
-      reason: "27B bf16: the TRTMC build does not fit the 128 GB unified memory (TensorRT cannot allocate a 53.8 GB buffer next to the resident weights)"
-    - profile: qwen38-27b
-      reason: "27B bf16: the TRTMC build does not fit the 128 GB unified memory (TensorRT cannot allocate a 53.8 GB buffer next to the resident weights)"
     - profile: gemma-3-27b
       reason: "27B bf16: the TRTMC build does not fit the 128 GB unified memory (TensorRT cannot allocate a 53.8 GB buffer next to the resident weights)"
 

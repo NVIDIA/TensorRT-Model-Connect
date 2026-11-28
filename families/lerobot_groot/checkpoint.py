@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import ml_dtypes  # noqa: F401  (registers bfloat16 with NumPy; checkpoints trained in bf16 store it)
@@ -35,18 +36,32 @@ def embedding_key(weights: dict[str, np.ndarray]) -> str:
 
 def load_checkpoint(model_dir: str | Path) -> dict[str, np.ndarray]:
     """Load inference weights as contiguous float32 under their canonical names."""
-    path = Path(model_dir) / "model.safetensors"
-    if not path.is_file():
-        raise FileNotFoundError(f"LeRobot GR00T checkpoint not found: {path}")
+    root = Path(model_dir)
+    index = root / "model.safetensors.index.json"
+    manifests: dict[str, set[str] | None] = {}
+    if index.is_file():
+        mapping = json.loads(index.read_text(encoding="utf-8"))["weight_map"]
+        for key, shard in mapping.items():
+            if not isinstance(shard, str) or Path(shard).name != shard or not shard.endswith(".safetensors"):
+                raise ValueError(f"Invalid GR00T checkpoint shard: {shard!r}")
+            manifests.setdefault(shard, set()).add(key)
+    else:
+        manifests["model.safetensors"] = None
     weights: dict[str, np.ndarray] = {}
-    with safe_open(str(path), framework="numpy") as reader:
-        for name in reader.keys():
-            key = canonical_name(name)
-            if key in _UNUSED:
-                continue
-            if key in weights:
-                raise ValueError(f"LeRobot GR00T checkpoint names {key} twice")
-            weights[key] = np.ascontiguousarray(reader.get_tensor(name), dtype=np.float32)
+    for shard, expected in manifests.items():
+        path = root / shard
+        if not path.is_file():
+            raise FileNotFoundError(f"LeRobot GR00T checkpoint not found: {path}")
+        with safe_open(str(path), framework="numpy") as reader:
+            if expected is not None and set(reader.keys()) != expected:
+                raise ValueError(f"GR00T checkpoint index does not match {shard}")
+            for name in reader.keys():
+                key = canonical_name(name)
+                if key in _UNUSED:
+                    continue
+                if key in weights:
+                    raise ValueError(f"LeRobot GR00T checkpoint names {key} twice")
+                weights[key] = np.ascontiguousarray(reader.get_tensor(name), dtype=np.float32)
     embedding_key(weights)
     return weights
 

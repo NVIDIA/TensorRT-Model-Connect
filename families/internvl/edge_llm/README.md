@@ -9,9 +9,8 @@ installations, `CMAKE_PREFIX_PATH` selects the SDK as usual.
 
 The family owns configuration admission, builder argument mapping, bundle
 composition, runtime orchestration, and validation. Edge owns complete visual
-and language networks. Select the official Edge SDK when building Model Connect. The default remains
-0.11.0; opt in to 0.12.0 with `TRTMC_EDGELLM_RELEASE=0.12.0` and
-`TRTMC_ENABLE_EDGELLM=ON`. The native SDK must match the executing worker.
+and language networks. Select the official Edge SDK when building Model Connect.
+`TRTMC_ENABLE_EDGELLM=ON` selects 0.12.0 by default. The native SDK must match the executing worker.
 Use `--edge-builder-python /absolute/path/to/python` on `trtmc internvl build`
 to select compatible wheel- or source-installed tools without changing MC's
 Python dependencies. A build does not install anything or cross-compile.

@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The bundle generates 1024 x 1024 only, which ChromaPipeline also defaults to; stated so neither side falls
+# back to a default.
+request: {height: 1024, width: 1024}

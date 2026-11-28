@@ -1,0 +1,15 @@
+{
+  "repository": "NVIDIA/Isaac-GR00T",
+  "revision": "23ace64f17aa5015259b8609d371eb61a357c776",
+  "model": "nvidia/GR00T-N1.7-LIBERO",
+  "subfolder": "libero_10",
+  "checkpoint_revision": "658540327860f93dd2cb9c1ed3e3b10fb792a0eb",
+  "reference_dtype": "float32",
+  "transformers": "4.57.3",
+  "checkpoint_tensors": 1031,
+  "input_frame": "data/recorded_observation/ep1272_f000",
+  "explicit_flow_noise": "data/noise_seed0.f32",
+  "robot_actions": "data/reference/isaac_libero10_ep1272_f000.fp32.f32",
+  "method": "Independent Isaac GR00T action head with the checkpoint Qwen3 backbone hidden state before final RMSNorm. Same recorded frames, state, instruction and fixed initial noise; four denoising steps, first sixteen unnormalized seven-coordinate robot actions.",
+  "quality_gate": "Edge 0.12.0 GR00T robot action contract: cosine >= 0.999 and maximum absolute error <= 0.03. Retain family mean absolute error and latency checks."
+}

@@ -104,6 +104,8 @@ void engine_only(const char* bundle, const char* camera_path, const char* lidar_
             "engine-only measurement requires a BEVFusion feature-to-map bundle");
     const auto plan = reader.read_section("engine.plan");
     Logger logger;
+    // TensorRT returns an unusable non-null runtime when CUDA cannot initialize.
+    checked(cudaFree(nullptr));
     std::unique_ptr<nvinfer1::IRuntime> runtime(nvinfer1::createInferRuntime(logger));
     require(runtime != nullptr, "failed to create TensorRT runtime");
     std::unique_ptr<nvinfer1::ICudaEngine> engine(

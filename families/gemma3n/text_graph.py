@@ -60,12 +60,15 @@ def _erfinv(value: float) -> float:
 
 
 class TextGraph:
-    def __init__(self, builder: Builder, config, capacity: int):
+    def __init__(self, builder: Builder, config, capacity: int, quantization=None):
         self.b = builder
         self.config = config
         self.t = config.text
         self.capacity = capacity
         self.owners = self.t.kv_owners()
+        # A ``quantization.DecoderQuantization`` routes the projections it lists
+        # through FP8 / NVFP4 matmuls; None builds the unquantized decoder.
+        self.quantization = quantization
 
     def name(self, suffix: str) -> str:
         return f"{_TEXT}.{suffix}"
@@ -103,6 +106,14 @@ class TextGraph:
 
     def linear(self, value, weight: str, shape=None):
         return self.b.linear(value, self.name(weight), shape)
+
+    def project(self, value, projection: str, shape):
+        """A decoder projection, quantized when the quantization recipe lists it."""
+        if self.quantization is not None:
+            quantized = self.quantization.matmul(self.b, value, self.name(projection), shape)
+            if quantized is not None:
+                return quantized
+        return self.linear(value, f"{projection}.weight", shape)
 
     def rope(self, value, heads, cos, sin):
         """Rotate-half RoPE on ``[T, heads, head_dim]``."""
@@ -201,15 +212,15 @@ class TextGraph:
         heads, kv_heads, dim = t.num_heads, t.num_kv_heads, t.head_dim
         kind = t.layer_types[layer]
         cos, sin = rope[kind]
-        query = self.linear(normed, f"{prefix}.q_proj.weight", (heads * dim, t.hidden_size))
+        query = self.project(normed, f"{prefix}.q_proj", (heads * dim, t.hidden_size))
         query = self.norm(b.reshape(query, (0, heads, dim)), f"{prefix}.q_norm")
         query = self.rope(query, heads, cos, sin)
         owner = self.owners[layer]
         if owner == layer:
-            key = self.linear(normed, f"{prefix}.k_proj.weight", (kv_heads * dim, t.hidden_size))
+            key = self.project(normed, f"{prefix}.k_proj", (kv_heads * dim, t.hidden_size))
             key = self.norm(b.reshape(key, (0, kv_heads, dim)), f"{prefix}.k_norm")
             key = b.reshape(self.rope(key, kv_heads, cos, sin), (0, kv_heads * dim))
-            value = self.linear(normed, f"{prefix}.v_proj.weight", (kv_heads * dim, t.hidden_size))
+            value = self.project(normed, f"{prefix}.v_proj", (kv_heads * dim, t.hidden_size))
             value = b.reshape(self.norm(b.reshape(value, (0, kv_heads, dim)), None),
                               (0, kv_heads * dim))
             combined = []
@@ -233,13 +244,13 @@ class TextGraph:
         softmax.axes = 1 << 3
         context = b.matmul(b.cast(softmax.get_output(0), b.dtype), v)
         context = b.reshape(b.transpose(context, (2, 0, 1, 3)), (0, heads * dim))
-        return self.linear(context, f"{prefix}.o_proj.weight", (t.hidden_size, heads * dim))
+        return self.project(context, f"{prefix}.o_proj", (t.hidden_size, heads * dim))
 
     def mlp(self, layer, value):
         b, t = self.b, self.t
         prefix = f"layers.{layer}.mlp"
         width = t.intermediate_sizes[layer]
-        gate = self.linear(value, f"{prefix}.gate_proj.weight", (width, t.hidden_size))
+        gate = self.project(value, f"{prefix}.gate_proj", (width, t.hidden_size))
         sparsity = t.activation_sparsity[layer]
         if sparsity > 0.0:
             # Gaussian top-k: keep what exceeds mean + std * quantile(sparsity).
@@ -250,8 +261,8 @@ class TextGraph:
             multiplier = b.cast(b.scalar(sparsity_multiplier(sparsity), 2, b.dtype), trt.float32)
             cutoff = b.add(mean, b.mul(std, multiplier))
             gate = b.cast(b.activation(b.sub(x, cutoff), trt.ActivationType.RELU), b.dtype)
-        up = self.linear(value, f"{prefix}.up_proj.weight", (width, t.hidden_size))
-        return self.linear(b.mul(b.gelu_tanh(gate), up), f"{prefix}.down_proj.weight",
+        up = self.project(value, f"{prefix}.up_proj", (width, t.hidden_size))
+        return self.project(b.mul(b.gelu_tanh(gate), up), f"{prefix}.down_proj",
                            (t.hidden_size, width))
 
     def decoder_layer(self, layer, streams, per_layer, positions, rope, masks, kv):

@@ -131,6 +131,9 @@ class ResolvedCase:
     sources: Mapping[str, str]
     bundle_is_explicit: bool = False
     selected_task: str | None = None
+    # Set when the testcase is not a request trtmc-bench can build (a family test that prepares its own inputs):
+    # the case still names the bundle to prepare, and it cannot execute.
+    request_error: str | None = None
 
     @property
     def effective_task(self) -> str:
@@ -150,9 +153,12 @@ class ResolvedCase:
             "runtime_root": str(self.runtime_root) if self.runtime_root else "",
             "measurement": self.measurement.to_json(),
             "sources": dict(self.sources),
+            **({"request_error": self.request_error} if self.request_error else {}),
         }
 
     def worker_request(self) -> dict[str, Any]:
+        if self.request_error:
+            raise BenchmarkError(f"testcase {self.testcase_name!r} has no request: {self.request_error}")
         if self.runtime_root is None:
             raise BenchmarkError("runtime_root must be explicit before execution")
         model_root = self.model.manifest_path.parent.parent

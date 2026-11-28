@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "families/qwen3_5_moe/runtime/edge_llm/contract.h"
+#include "trtmc/internal/config.h"
 
 #include <functional>
 #include <iostream>
@@ -75,6 +76,13 @@ int main() {
     }
     edge::validate_capacity(5, 1024, 1024, 1019);
     rejects([] { edge::validate_capacity(5, 1024, 1024, 1020); });
+    bool request_error = false;
+    try {
+        edge::validate_capacity(5, 1024, 1024, 1020);
+    } catch (const trtmc::internal::ConfigError&) {
+        request_error = true;
+    }
+    check(request_error, "The server answers a capacity overflow as an invalid request");
     rejects([] { edge::validate_capacity(1024, 512, 2048, 1); });
     rejects([] { edge::validate_capacity(0, 1024, 1024, 1); });
     rejects([] { edge::validate_capacity(5, 1024, 1024, 0); });

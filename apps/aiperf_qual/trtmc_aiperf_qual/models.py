@@ -44,6 +44,9 @@ PRECISION_NAME_PARTS = set(PRECISION_RANK) | {"awq"}
 # take seconds per request, and three runs still give the confidence interval.
 LARGE_CHECKPOINT_BYTES = 16 * 2**30
 LARGE_MODEL_MEASUREMENT = {"settle_s": 0, "warmup": 1, "requests": 3, "runs": 5}
+# A benchmark entry's image limits, which go into its suite definition (and the Perf suite taken from it):
+# ``min_image_side`` drops images its processor cannot encode, ``letterbox`` fits images into a fixed built size.
+SUITE_IMAGE_OPTIONS = ("min_image_side", "letterbox")
 
 
 def checkpoint_bytes(hf_id: str, revision: str | None) -> int | None:
@@ -99,7 +102,8 @@ def _reference_backend(operation: str, task: str) -> str:
 
 def _suite(reference: str | Mapping[str, Any], profile: str, catalog_request: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """A suite definition; ``catalog_request`` (config/models ``request``) states controls the catalog request
-    leaves to each side's default, in every suite built on that request (the suite's own request wins)."""
+    leaves to each side's default, in every suite built on that request (the suite's own request wins). A null
+    there removes the control from every such request: the model takes it on neither side."""
     if isinstance(reference, Mapping):
         suite = dict(reference)
         if (suite.get("source") or {}).get("kind") == "catalog_testcase" and not suite["source"].get("profile"):
@@ -213,10 +217,7 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     entries = {entry.name: entry for entry in catalog_profiles(repository)}
     if profile not in entries:
         raise ConfigError(f"{profile} is not a ready catalog profile")
-    _import_repository(repository)
-    from trtmc_benchmark.catalog import ManifestCatalog
-
-    catalog_model = ManifestCatalog(repository / "families").resolve(profile)
+    catalog_model = entries[profile].model  # what ManifestCatalog.resolve returns, without reading every manifest again
     manifest = json.loads(Path(catalog_model.manifest_path).read_text())
     tasks = yaml.safe_load((root / "tasks.yaml").read_text())
     if catalog_model.task not in tasks["tasks"]:
@@ -274,8 +275,14 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
                                   "profile's own configuration states its suite")
             suite = _suite(item["suite_definition"], profile, config.get("request"))
             if item.get("request"):  # a null removes the suite's field (a Task that declares no such config)
-                request = {**suite.get("request", {}), **item.pop("request")}
-                suite = {**suite, "request": {key: value for key, value in request.items() if value is not None}}
+                own = item.pop("request")
+                request = {**suite.get("request", {}), **own}
+                # config/models' nulls stay: building the suite removes them from the catalog request too.
+                suite = {**suite, "request": {key: value for key, value in request.items()
+                                              if value is not None or key not in own}}
+            for option in SUITE_IMAGE_OPTIONS:  # the profile's own image limits on a shared suite
+                if item.get(option):
+                    suite = {**suite, option: item.pop(option)}
             item["suite_definition"] = suite
     supplementary = [dict(item) for item in config.get("supplementary", [])]
     if config.get("accuracy_source") not in (None, "none"):

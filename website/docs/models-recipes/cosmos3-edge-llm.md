@@ -12,7 +12,7 @@ The `cosmos3_edge` family implements text, image, video and mixed image/video
 reasoning for `nvidia/Cosmos3-Edge`. It is distinct from Cosmos3 Diffusers
 image/video generation and does not produce trajectories or policy actions.
 
-The family owns optional Edge-LLM offload (default 0.11; build-time opt-in 0.12) and a native TensorRT Python-graph /
+The family owns optional Edge-LLM offload (0.12 by default; 0.11 by explicit build-time selection) and a native TensorRT Python-graph /
 Model Connect C++ fallback without ONNX. Compatible wheel-installed Python tools
 and source-installed tools use the same native SDK discovery contract.
 
@@ -29,7 +29,7 @@ A compatible optional Edge SDK enables FP16 offload. Without one, or if Edge
 preparation fails, the original request falls back to native construction with
 a warning for a failed preparation. FP32 selects the pure TensorRT native graph.
 
-## 0.12 opt-in: tested scope
+## 0.12: tested scope
 
 On the original checkpoint (FP16, batch 1, capacity 1024, SM80), Edge and native
 both matched the independent HF FP32 token IDs on the two chat prompts and one

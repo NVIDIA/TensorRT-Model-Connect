@@ -4,6 +4,8 @@
  */
 #include "families/clef/runtime/record.h"
 
+#include "trtmc/internal/config.h"
+
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -113,7 +115,7 @@ Record encode_record(const ITokenizer& tokenizer, const Json& document, std::int
         "\n<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nJOINT SCHEMA DECISIONS:");
     const auto fixed = result.input_ids.size() + schema.size() + suffix.size();
     if (fixed > static_cast<std::size_t>(max_length))
-        throw std::invalid_argument("schema exceeds maximum input length before state");
+        throw internal::ConfigError("schema exceeds maximum input length before state");
     auto state_size = std::min(state.size(), static_cast<std::size_t>(max_length) - fixed);
     if (max_state_tokens >= 0)
         state_size = std::min(state_size, static_cast<std::size_t>(max_state_tokens));
