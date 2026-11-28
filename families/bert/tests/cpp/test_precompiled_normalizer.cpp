@@ -95,6 +95,18 @@ int main(int argc, char** argv) {
     check(*create(identity), "AA", {3, 4, 4});
     check(*create(identity), u8"ＡＢ ＡＢ", {3, 0, 3, 0});
     check(*create(identity), "AB", {3, 4, 5});
+    auto close_scores = identity;
+    close_scores["model"]["vocab"] = nlohmann::json::array({
+        {"<unk>", -10.0},
+        {"<s>", 0.0},
+        {"</s>", 0.0},
+        {u8"▁", 0.0},
+        {"a", -0.1},
+        {"aa", -0.200000001},
+    });
+    check(*create(close_scores), "aa", {3, 4, 4});
+    close_scores["model"]["vocab"][5][1] = -0.2;
+    check(*create(close_scores), "aa", {3, 5});
 
     auto added = fixture;
     added["pre_tokenizer"] = {

@@ -20,6 +20,17 @@ This family builds BERT encoders as one TensorRT engine for the `encoding` and
 Batch is 1. The manifests build fp16, bf16 (`bge-small-en-v1.5`) and fp32 with
 tensor parallelism (`bert-base-uncased`, 4 GPUs).
 
+## Unigram score precision
+
+Vocabulary scores, unknown-token penalties and accumulated path scores use
+double precision, matching the reference tokenizer. Float rounding can select
+different token IDs when competing paths have close scores. Exact ties retain
+the existing strict winner comparison.
+
+Rebuild the family runtime after this change. Host score elements grow from
+32 to 64 bits; process memory and latency have not been measured. Tokenizer
+validation does not qualify checkpoint embeddings, model quality or performance.
+
 ## Quantization
 
 `--precision fp16 --quantization fp8` quantizes the original checkpoint at build
